@@ -1,0 +1,6 @@
+2026-07-19:13:38:29,575 INFO     [psi4.driver.task_planner:259] PLANNING Atomic:  keywords={'D_CONVERGENCE': 1e-09, 'E_CONVERGENCE': 1e-09, 'MAXITER': 200, 'REFERENCE': 'UKS', 'function_kwargs': {}}
+2026-07-19:13:38:29,577 INFO     [psi4.driver.driver:531] Compute energy(): method=b3lyp, basis=def2-svpd, molecule=default, nre=0.0
+2026-07-19:13:38:32,78 INFO     [psi4.driver.driver:534] Return energy(): -0.5013141188705883
+2026-07-19:13:38:32,93 INFO     [psi4.driver.task_planner:259] PLANNING Atomic:  keywords={'D_CONVERGENCE': 1e-09, 'E_CONVERGENCE': 1e-09, 'MAXITER': 200, 'REFERENCE': 'UKS', 'function_kwargs': {}}
+2026-07-19:13:38:32,94 INFO     [psi4.driver.driver:531] Compute energy(): method=b3lyp, basis=def2-svpd, molecule=default, nre=0.0
+2026-07-19:13:38:32,624 INFO     [psi4.driver.driver:534] Return energy(): -75.00924018194253

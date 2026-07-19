@@ -23,6 +23,9 @@ cue = [
     "cuequivariance-ops-torch-cu12",
 ]
 
+[project.scripts]
+rsfff-train = "rsfff.train.train:main"
+
 [tool.setuptools]
 package-dir = { "rsfff" = "src" }
-packages = ["rsfff", "rsfff.features"]
+packages = ["rsfff", "rsfff.features", "rsfff.mlip", "rsfff.train"]

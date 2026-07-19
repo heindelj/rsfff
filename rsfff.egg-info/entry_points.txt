@@ -1,0 +1,2 @@
+[console_scripts]
+rsfff-train = rsfff.train.train:main

@@ -1,0 +1,14 @@
+{
+  "basis": "def2-svpd",
+  "energies": {
+    "H": -0.5013141188705883,
+    "O": -75.00924018194253
+  },
+  "method": "b3lyp",
+  "multiplicities": {
+    "H": 2,
+    "O": 3
+  },
+  "reference": "uks/rks (unrestricted for open-shell atoms)",
+  "units": "Hartree"
+}

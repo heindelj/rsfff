@@ -1,0 +1,35 @@
+run_name: h2o_energy
+device: auto            # cuda > mps > cpu
+dtype: float32
+checkpoint_root: checkpoints
+
+data:
+  path: data/labels/h2o.extxyz
+  reference_energies: data/atomic_references.json
+  holdout_fraction: 0.1
+  seed: 0
+
+# SOAP/ACE equivariant featurizer hyperparameters.
+features:
+  cutoff: 5.0
+  n_max: 6
+  l_max: 4
+  selected_lambdas: [0, 2]   # featurizer requires lambda=2; the energy head uses only invariants
+  backend: e3nn
+  density_channels: 8
+
+# MLP energy head hyperparameters.
+mlip:
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+
+train:
+  epochs: 100
+  batch_size: 32
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  grad_clip: 5.0
+  energy_weight: 1.0
+  force_weight: 1.0
+  eval_every: 10
