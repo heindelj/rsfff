@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: rsfff
+Version: 0.1.0
+Summary: Reactive/short-range fluctuation force field toolkit: GPU-native SOAP/ACE equivariant features and models.
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Requires-Dist: pyyaml
+Requires-Dist: torch
+Requires-Dist: e3nn
+Requires-Dist: torch-cluster
+Requires-Dist: ase
+Provides-Extra: cue
+Requires-Dist: cuequivariance>=0.10; extra == "cue"
+Requires-Dist: cuequivariance-torch>=0.10; extra == "cue"
+Requires-Dist: cuequivariance-ops-torch-cu12; extra == "cue"

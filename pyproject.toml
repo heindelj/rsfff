@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rsfff"
+version = "0.1.0"
+description = "Reactive/short-range fluctuation force field toolkit: GPU-native SOAP/ACE equivariant features and models."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "torch",
+    "e3nn",
+    "torch-cluster",
+    "ase",
+]
+
+[project.optional-dependencies]
+cue = [
+    "cuequivariance>=0.10",
+    "cuequivariance-torch>=0.10",
+    "cuequivariance-ops-torch-cu12",
+]
+
+[tool.setuptools]
+package-dir = { "rsfff" = "src" }
+packages = ["rsfff", "rsfff.features"]

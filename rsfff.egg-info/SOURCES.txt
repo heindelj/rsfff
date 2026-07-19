@@ -1,0 +1,11 @@
+pyproject.toml
+rsfff.egg-info/PKG-INFO
+rsfff.egg-info/SOURCES.txt
+rsfff.egg-info/dependency_links.txt
+rsfff.egg-info/requires.txt
+rsfff.egg-info/top_level.txt
+src/__init__.py
+src/features/__init__.py
+src/features/equivariant_backend.py
+src/features/features_native.py
+src/features/weighted_bispectrum.py

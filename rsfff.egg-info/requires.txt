@@ -1,0 +1,11 @@
+numpy
+pyyaml
+torch
+e3nn
+torch-cluster
+ase
+
+[cue]
+cuequivariance>=0.10
+cuequivariance-torch>=0.10
+cuequivariance-ops-torch-cu12
