@@ -22,7 +22,6 @@ from .features import (
     BesselBasis,
     DensityExpansion,
     FlatLambdaSOAPFeaturizer,
-    GeometryCache,
     LambdaFeatures,
     SoapAceFeatures,
     bispectrum,
@@ -43,7 +42,6 @@ __all__ = [
     "DensityExpansion",
     "SoapAceFeatures",
     "FlatLambdaSOAPFeaturizer",
-    "GeometryCache",
     "LambdaFeatures",
     # functional
     "power_spectrum",
