@@ -1,0 +1,35 @@
+1
+Properties=species:S:1:pos:R:3 name=H energy=-0.5013141188705885 charge=0 multiplicity=2 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+H        0.00000000       0.00000000       0.00000000
+1
+Properties=species:S:1:pos:R:3 name=H+ energy=0.0 charge=1 multiplicity=1 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+H        0.00000000       0.00000000       0.00000000
+1
+Properties=species:S:1:pos:R:3 name=O energy=-75.00924018194257 charge=0 multiplicity=3 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+O        0.00000000       0.00000000       0.00000000
+1
+Properties=species:S:1:pos:R:3 name=O- energy=-75.07271313087159 charge=-1 multiplicity=2 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+O        0.00000000       0.00000000       0.00000000
+2
+Properties=species:S:1:pos:R:3 name=OH energy=-75.6828416082103 charge=0 multiplicity=2 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+O        0.00000000       0.00000000      -0.00414084
+H        0.00000000       0.00000000       0.97414084
+2
+Properties=species:S:1:pos:R:3 name=OH- energy=-75.75258863655756 charge=-1 multiplicity=1 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+O        0.00000000       0.00000000       0.00117422
+H        0.00000000       0.00000000       0.96882578
+3
+Properties=species:S:1:pos:R:3 name=H2O energy=-76.38041820441097 charge=0 multiplicity=1 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+O        0.00000000       0.00000000       0.11577667
+H        0.00000000       0.76689145      -0.46843834
+H        0.00000000      -0.76689145      -0.46843834
+3
+Properties=species:S:1:pos:R:3 name=H2O+ energy=-75.9083886301506 charge=1 multiplicity=2 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+O        0.00000000       0.00000000       0.11577667
+H        0.00000000       0.76689145      -0.46843834
+H        0.00000000      -0.76689145      -0.46843834
+3
+Properties=species:S:1:pos:R:3 name=H2O- energy=-76.31684193906096 charge=-1 multiplicity=2 method=b3lyp basis=def2-svpd units=atomic pbc="F F F"
+O        0.00000000       0.00000000       0.11577667
+H        0.00000000       0.76689145      -0.46843834
+H        0.00000000      -0.76689145      -0.46843834

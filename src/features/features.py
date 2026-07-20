@@ -97,6 +97,43 @@ class DensityExpansion(nn.Module):
         self.backend = _resolve_backend(backend)
         self.radial = BesselBasis(n_max, cutoff)
 
+    def edge_expansion(
+        self,
+        positions: torch.Tensor,     # (N, 3)
+        edge_index: torch.Tensor,    # (2, E)  rows are [center, neighbor]
+    ) -> torch.Tensor:
+        """Per-edge radial x angular expansion ``RY``: (E, n_max, sph_dim).
+
+        The q-independent, geometry-only part of the density; cached across charge-SCF
+        iterations (it carries the autograd graph to ``positions``).
+        """
+        i, j = edge_index[0], edge_index[1]
+        r_vec = positions[j] - positions[i]
+        r = r_vec.norm(dim=-1)
+        R = self.radial(r) * cosine_cutoff(r, self.cutoff).unsqueeze(-1)   # (E, n_max)
+        Y = self.backend.spherical_harmonics(r_vec, self.l_max, normalize=True)  # (E, sph_dim)
+        return R.unsqueeze(-1) * Y.unsqueeze(-2)                           # (E, n_max, sph_dim)
+
+    def scatter_weighted(
+        self,
+        RY: torch.Tensor,            # (E, n_max, sph_dim) from edge_expansion
+        edge_index: torch.Tensor,    # (2, E)
+        atom_weights: torch.Tensor,  # (N, Kw) per-atom channel weights
+        num_atoms: int,
+    ) -> torch.Tensor:
+        """Weighted density ``A[i,k,n,lm] = sum_{j~i} w_k(j) RY[ij,n,lm]``: (N, Kw, n_max, sph).
+
+        Generalizes the species one-hot scatter of :meth:`forward`: with
+        ``atom_weights = one_hot(species_idx)`` this reproduces it exactly; with
+        learned weights of a charge-aware embedding the density becomes charge-aware.
+        The weights are invariant scalars, so equivariance is untouched.
+        """
+        i, j = edge_index[0], edge_index[1]
+        k_w = atom_weights.shape[1]
+        contrib = atom_weights[j][:, :, None, None] * RY[:, None]  # (E, Kw, n_max, sph)
+        A = RY.new_zeros(num_atoms, k_w, self.n_max, self.sph_dim)
+        return A.index_add_(0, i, contrib)
+
     def forward(
         self,
         positions: torch.Tensor,     # (N, 3)
@@ -104,15 +141,8 @@ class DensityExpansion(nn.Module):
         edge_index: torch.Tensor,    # (2, E)  rows are [center, neighbor]
         num_atoms: int,
     ) -> torch.Tensor:
+        RY = self.edge_expansion(positions, edge_index)                    # (E, n_max, sph_dim)
         i, j = edge_index[0], edge_index[1]
-        r_vec = positions[j] - positions[i]
-        r = r_vec.norm(dim=-1)
-
-        R = self.radial(r) * cosine_cutoff(r, self.cutoff).unsqueeze(-1)   # (E, n_max)
-        Y = self.backend.spherical_harmonics(r_vec, self.l_max, normalize=True)  # (E, sph_dim)
-
-        RY = R.unsqueeze(-1) * Y.unsqueeze(-2)                             # (E, n_max, sph_dim)
-
         z_j = species_idx[j]
         flat_idx = i * self.n_species + z_j
         A_flat = positions.new_zeros(num_atoms * self.n_species, self.n_max, self.sph_dim)
@@ -417,6 +447,29 @@ class LambdaFeatures:
     edge_index: torch.Tensor | None = None
 
 
+@dataclass
+class GeometryCache:
+    """The q-independent part of featurization, computed once per batch.
+
+    Built by :meth:`FlatLambdaSOAPFeaturizer.precompute_geometry` and consumed by
+    :meth:`FlatLambdaSOAPFeaturizer.features_from_weights` on every charge-SCF
+    iteration. ``RY`` carries the autograd graph to ``positions`` (make positions
+    require grad *before* precomputing when forces are needed).
+
+    `edge_index`:  (2, E)             radius_graph neighbor list
+    `RY`:          (E, n_max, sph)    per-edge radial x angular expansion
+    `species_idx`: (N,)               species index per atom
+    `batch_idx`:   (N,)               molecule id per atom
+    `num_atoms`:   N
+    """
+
+    edge_index: torch.Tensor
+    RY: torch.Tensor
+    species_idx: torch.Tensor
+    batch_idx: torch.Tensor
+    num_atoms: int
+
+
 class FlatLambdaSOAPFeaturizer(nn.Module):
     """Vectorized equivariant lambda-SOAP featurizer over a flat ragged batch.
 
@@ -436,6 +489,7 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         backend: "EquivariantBackend | str" = "e3nn",
         bispectrum=None,
         density_channels: int | None = None,
+        charge_channels: int | None = None,
     ) -> None:
         super().__init__()
         cleaned = tuple(sorted({int(z) for z in neighbor_types}))
@@ -447,6 +501,16 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         self.n_species = len(cleaned)
         self.selected_lambdas = tuple(sorted({int(v) for v in selected_lambdas}))
         self.backend = _resolve_backend(backend)
+        # Charge-aware mode: the density's channel axis is Kw learned neighbor-weight
+        # channels (from `features_from_weights`) instead of the species one-hot, so
+        # the raw channel count below becomes charge_channels * n_max. The plain
+        # species-scatter `forward` is unavailable in this mode.
+        self.charge_channels = int(charge_channels) if charge_channels else None
+        if self.charge_channels is not None and bispectrum is not None:
+            raise NotImplementedError(
+                "the weighted bispectrum is species-indexed and does not support "
+                "continuous charge-aware atom weights yet"
+            )
 
         # Vectorized atomic-number -> species-index lookup (no per-atom Python loop).
         lut = torch.full((max(cleaned) + 1,), -1, dtype=torch.long)
@@ -464,7 +528,7 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         # with the element count. A single equivariant linear map on the channel axis
         # (mixing (Z, n) channels, leaving the m components untouched) projects C -> Kc
         # before the power spectrum / bispectrum, so the feature width scales as Kc^2.
-        raw_channels = self.n_species * self.n_max
+        raw_channels = (self.charge_channels or self.n_species) * self.n_max
         self.density_channels = int(density_channels) if density_channels else None
         n_channels = self.density_channels or raw_channels
         if self.density_channels is not None:
@@ -542,6 +606,11 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
     # the dense readout in `pf_model`, which is where fusion actually helps.
     @torch.compiler.disable
     def forward(self, batch: "Batch") -> LambdaFeatures:
+        if self.charge_channels is not None:
+            raise RuntimeError(
+                "featurizer was built with charge_channels: the species-scatter "
+                "forward is unavailable; use precompute_geometry + features_from_weights"
+            )
         positions = batch.positions
         species_idx = self._species_lut[batch.atomic_numbers]
         edge_index = self._build_edges(positions, batch.batch_idx)
@@ -549,7 +618,59 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         # as the center i and [1] as the neighbor j. The graph is symmetric so either
         # orientation yields the same density.
         A = self.density(positions, species_idx, edge_index, int(positions.shape[0]))
-        # Optional learnable channel compression: (N, n_species, n_max, L2) -> (N, Kc, 1, L2)
+        return self._features_from_density(A, species_idx, batch.batch_idx, edge_index)
+
+    @torch.compiler.disable
+    def precompute_geometry(self, batch: "Batch") -> GeometryCache:
+        """Run the q-independent featurization (edges, radial x angular expansion).
+
+        Call once per batch (after ``positions.requires_grad_()`` when forces are
+        needed); every charge-SCF iteration then only pays the cheap weighted
+        scatter + power spectrum in :meth:`features_from_weights`.
+        """
+        positions = batch.positions
+        species_idx = self._species_lut[batch.atomic_numbers]
+        edge_index = self._build_edges(positions, batch.batch_idx)
+        RY = self.density.edge_expansion(positions, edge_index)
+        return GeometryCache(
+            edge_index=edge_index,
+            RY=RY,
+            species_idx=species_idx,
+            batch_idx=batch.batch_idx,
+            num_atoms=int(positions.shape[0]),
+        )
+
+    @torch.compiler.disable
+    def features_from_weights(
+        self, cache: GeometryCache, atom_weights: torch.Tensor
+    ) -> LambdaFeatures:
+        """Charge-aware features from cached geometry and per-atom channel weights.
+
+        ``atom_weights``: (N, Kw) with ``Kw == charge_channels`` (or ``n_species``
+        when the featurizer was built without charge_channels -- with the species
+        one-hot this reproduces :meth:`forward` exactly).
+        """
+        expected = self.charge_channels or self.n_species
+        if atom_weights.shape != (cache.num_atoms, expected):
+            raise ValueError(
+                f"atom_weights must be ({cache.num_atoms}, {expected}), "
+                f"got {tuple(atom_weights.shape)}"
+            )
+        A = self.density.scatter_weighted(
+            cache.RY, cache.edge_index, atom_weights, cache.num_atoms
+        )
+        return self._features_from_density(
+            A, cache.species_idx, cache.batch_idx, cache.edge_index
+        )
+
+    def _features_from_density(
+        self,
+        A: torch.Tensor,             # (N, C_axis, n_max, sph)
+        species_idx: torch.Tensor,
+        batch_idx: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> LambdaFeatures:
+        # Optional learnable channel compression: (N, C, n_max, L2) -> (N, Kc, 1, L2)
         # before the O(Kc^2) power spectrum / bispectrum.
         if self.density_channels is not None:
             n_atoms, _, _, l2 = A.shape
@@ -580,7 +701,7 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
             inv_feats=inv,
             equiv_feats=equiv,
             species_idx=species_idx,
-            batch_idx=batch.batch_idx,
+            batch_idx=batch_idx,
             vec_feats=vec,
             edge_index=edge_index,
         )
