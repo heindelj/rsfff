@@ -16,11 +16,12 @@ When an ion pair dissociates (e.g., $\mathrm{Na}^+ + \mathrm{Cl}^- \longrightarr
 4. **Rigorous Energy Decomposition Analysis (EDA) Integration:** Classical and polarizable long-range force fields require well-defined unperturbed monomer reference states to compute induction and electrostatics without unphysical short-range catastrophe.
 
 ### The Diabatic Latent-Mixing + Split-Charge Solution
-This document details a rigorous mathematical architecture and testing protocol for a **Latent-Space Diabatic Range-Separated MLIP**. By conditioning short-range atomic features on explicit reference molecular/atomic diabatic states via a Many-Body Expansion (MBE) and blending them directly in latent space, we preserve the formal identity (valence, spin, and baseline response) of chemical fragments.
+This document details a rigorous mathematical architecture and testing protocol for a **Latent-Space Diabatic Range-Separated MLIP**. By conditioning short-range atomic features on explicit reference molecular/atomic diabatic states—frozen monomer features corrected by a state-decorated atomic cluster expansion (ACE)—and blending them directly in latent space, we preserve the formal identity (valence, spin, and baseline response) of chemical fragments.
 
-Three design decisions define the architecture:
+Four design decisions define the architecture:
 
-- **State mixing occurs in latent space, locally per reactive center, prior to property prediction.** A single downstream network maps the blended representation to short-range atomic energies (capturing non-linear resonance stabilization) and effective response tensors. Gating is factorized over reactive centers, guaranteeing size extensivity.
+- **A permanently frozen monomer stack anchors all asymptotics.** Fragment reference features, 1-body energies, and baseline response parameters are trained once on isolated fragments and frozen; every interaction effect enters as a state-decorated atomic cluster expansion (ACE) correction that vanishes *identically* at fragment isolation, with prediction heads constructed (via a subtraction trick) to be exactly zero there for any network weights. Dissociation limits, ionization-energy differences, and the gate's Coulomb bias are thereby consistent by construction, not by regularization.
+- **State mixing occurs in latent space, locally per reactive center, prior to property prediction.** A single downstream network maps the blended representation to short-range atomic energies (capturing non-linear resonance stabilization, automatically confined to short range) and effective response tensors. Gating is factorized over reactive centers, guaranteeing size extensivity.
 - **Charge conservation is structural, not constrained.** The long-range polarizable solve uses **Split-Charge Equilibration (SQE)**: atomic charges are parameterized as diabatic baseline charges plus antisymmetric transfers along an explicit **channel graph**. Total fragment charge is conserved identically for any channel values—no Lagrange multipliers. Every channel compliance is multiplied by a smooth pairwise switching function vanishing at the short-range cutoff, so inter-fragment charge transfer is structurally zero beyond $r_{\text{SR}}$ and asymptotic charges are exactly integer.
 - **Charge-transfer physics is learned, and exists even among ground states.** Per-channel compliance (inverse bond hardness) is predicted by a network head from the blended latent features. Inter-fragment channels exist between *all* fragment pairs in short-range contact—not only those merged by an active diabat—so neighboring closed-shell molecules (e.g., two ground-state waters) exchange small amounts of charge that couple automatically into the global polarization solve. This is a deliberate mechanism for capturing **many-body charge transfer**: ambient compliances are small (trained against EDA charge-transfer energies), while channels between fragments merged by an active diabat become soft, enabling the large transfers of genuine bond formation. The formal diabatic charges enter only as baselines; deviations are governed by the learned compliance landscape, the electrostatic environment, and the gating weights.
 
@@ -43,8 +44,8 @@ where $\mathbf{h}_i^{\text{final}}$ represents the smoothly blended atomic laten
          ▼                                               ▼
 ┌─────────────────────────────────┐     ┌─────────────────────────────────┐
 │  Short-Range MLIP (per Diabat)  │     │   Zeroth-Order Coulomb Estimate │
-│  • Reference Atomic Embeddings  │     │  • Asymptotic Energy Ẽ^(K)(r)   │
-│  • Many-Body Expansion (MBE)    │     │  • Long-Range Coordinate Bias   │
+│  • Frozen Monomer Features      │     │  • Asymptotic Energy Ẽ^(K)(r)   │
+│  • State-Decorated ACE Δh^(K)   │     │  • Long-Range Coordinate Bias   │
 └────────────────┬────────────────┘     └────────────────┬────────────────┘
                  │                                       │
                  └───────────────────┬───────────────────┘
@@ -54,17 +55,18 @@ where $\mathbf{h}_i^{\text{final}}$ represents the smoothly blended atomic laten
                     [ LOCAL Attention Gating per Reactive Center ]
                                      │
                                      ▼
-              Blended Latent Features: h_i^final = ∑_{K_R} c_{K_R} h_i^{(K_R)}
+        Blended Latents: h_i^final = h_{i,0}^final + Δh_i^final  (∑_{K_R} c_{K_R} · each)
                                      │
          ┌───────────────────────────┴───────────────────────────┐
          ▼                                                       ▼
 ┌──────────────────────────────────────────┐     ┌──────────────────────────────────────────┐
-│       Short-Range Energy Network         │     │   Effective Response, EEM & Channel      │
-│  • 1-Body Self-Energies                  │     │   Parameter Heads                        │
-│  • Short-Range EDA (Pauli/Penetration)   │     │  • Tensorial Electronegativity χ_i^final │
-│  • Non-Linear Resonance Stabilization    │     │  • Response Tensors α_{i,eff}^final      │
-└─────────────────────┬────────────────────┘     │  • Channel Compliance s_ij (→ κ_ij)      │
-                      │                          └────────────────────┬─────────────────────┘
+│   Short-Range Energy (Frozen Baseline    │     │   Effective Response, EEM & Channel      │
+│   + Isolation-Exact Correction)          │     │   Parameter Heads (same structure)       │
+│  • 1-Body Baseline ∑ c_K E_1^(K) (frozen)│     │  • χ_i^final = ∑ c_K χ_{i,0}^(K) + Δχ_i  │
+│  • ΔE via Subtraction Trick (≡0 at       │     │  • α_eff^final = ∑ c_K α_{i,0}^(K) + Δα_i│
+│    isolation): Pauli/Penetration,        │     │  • Channel Compliance s_ij (→ κ_ij)      │
+│    Non-Linear Resonance Stabilization    │     └────────────────────┬─────────────────────┘
+└─────────────────────┬────────────────────┘                          │
                       │                                               ▼
                       │                          [ Channel Graph Assembly (all short-range
                       │                            contacts) & Pairwise Switch S(r_ij) ]
@@ -82,15 +84,27 @@ where $\mathbf{h}_i^{\text{final}}$ represents the smoothly blended atomic laten
                           Total Energy E_total & Analytical Forces
 ```
 
-### 2.1 Reference Embeddings & The Many-Body Expansion (MBE)
+### 2.1 Hierarchical Featurization: Frozen Monomer Stack + State-Decorated ACE Correction
+
+The featurization is a strict hierarchy: **atomic reference embeddings → frozen state-aware intra-fragment features → a state-decorated atomic cluster expansion (ACE) correction over frozen inputs → blended final features.** The division is not merely organizational—the frozen monomer stack carries the model's asymptotic guarantees by construction, while the correction layer carries all interaction physics and vanishes identically at fragment isolation.
+
 For a given diabatic configuration $K$, every atom $i$ is assigned to a specific chemical fragment $F_a^{(K)}$ with a formal charge $Q_a^{(K)}$ and spin multiplicity $2S_a^{(K)} + 1$.
 
-1. **Initial Reference Embeddings:** Instead of a single generic element embedding $\mathbf{z}_Z$, each atom is initialized with a reference embedding conditioned on its formal diabatic fragment state:
-   $$\mathbf{h}_{i,0}^{(K)} = \mathcal{E}\left(Z_i,\ \text{FragmentType}(i \in F_a^{(K)}),\ Q_a^{(K)},\ S_a^{(K)}\right)$$
+1. **Atomic Reference Embeddings:** Instead of a single generic element embedding $\mathbf{z}_Z$, each atom is initialized with a reference embedding conditioned on its formal diabatic fragment state:
+   $$\mathbf{e}_i^{(K)} = \mathcal{E}\left(Z_i,\ \text{FragmentType}(i \in F_a^{(K)}),\ Q_a^{(K)},\ S_a^{(K)}\right)$$
 
-2. **MBE Latent Modification:** As fragments interact at short range, their internal electronic structure deforms. We model this via a localized Many-Body Expansion over the atomic features:
-   $$\mathbf{h}_i^{(K)} = \mathbf{h}_{i,0}^{(K)} + \sum_{j \neq i} \Delta\mathbf{h}_{ij}^{(2)}\left(\mathbf{h}_{i,0}^{(K)}, \mathbf{h}_{j,0}^{(K)}, \mathbf{r}_{ij}\right) + \sum_{j,k \neq i} \Delta\mathbf{h}_{ijk}^{(3)}\left(\mathbf{h}_{i,0}^{(K)}, \mathbf{h}_{j,0}^{(K)}, \mathbf{h}_{k,0}^{(K)}, \mathbf{r}_{ij}, \mathbf{r}_{ik}, \theta_{jik}\right)$$
-   In practice, $\Delta\mathbf{h}^{(2)}$ and $\Delta\mathbf{h}^{(3)}$ are parameterized by localized equivariant message-passing layers or ACE basis functions strictly truncated at a short-range cutoff $r_{\text{SR}}$ (typically $4.5$–$5.0\ \text{Å}$).
+2. **Frozen Intra-Fragment (Monomer) Features:** A state-aware intra-fragment network, message-passing only *within* the fragment's covalent graph, maps the reference embeddings and internal geometry to monomer features:
+   $$\mathbf{h}_{i,0}^{(K)} = \mathcal{F}_{\text{mono}}\left(\{\mathbf{e}_j^{(K)}, \mathbf{r}_j\}_{j \in F_a^{(K)}}\right)$$
+   $\mathcal{F}_{\text{mono}}$ is trained in Phase 1 on isolated (including distorted) fragments against rich auxiliary targets—energies, multipoles, response tensors—so that the frozen representation exposes the physically relevant directions downstream layers will need, then **frozen permanently**. All subsequent training phases treat $\mathbf{h}_{i,0}^{(K)}$ as fixed inputs. (If additional flexibility proves necessary, a small learned linear adapter of the frozen features may be trained in Phase 2; the monomer network itself is never revisited.)
+
+3. **State-Decorated ACE Correction (the "Molecular Cluster Expansion"):** As fragments interact at short range, their internal electronic structure deforms. This is modeled as an additive, atom-centered correction:
+   $$\mathbf{h}_i^{(K)} = \mathbf{h}_{i,0}^{(K)} + \Delta\mathbf{h}_i^{(K)}, \qquad \Delta\mathbf{h}_i^{(K)} = \text{ACE}_\nu\!\left(\left\{\mathbf{h}_{j,0}^{(K)},\ \mathbf{r}_{ij}\right\}_{r_{ij} < r_{\text{SR}}}\right)$$
+   Concretely, the atomic density basis (radial functions × spherical harmonics over neighbors within $r_{\text{SR}}$, typically $4.5$–$5.0\ \text{Å}$) is decorated with channel weights derived from each neighbor's *frozen diabatic features* $\mathbf{h}_{j,0}^{(K)}$ rather than bare element identity; density products then deliver body-ordered ($\nu$-truncated) corrections at linear cost. Design commitments:
+   - **Not a fragment-enumerated MBE.** A literal fragment-level many-body expansion requires $\mathcal{O}(S^2)$ dimer and $\mathcal{O}(S^3)$ trimer scan families as the fragment-state library of size $S$ grows, and tabulated terms cannot generalize to unsampled state combinations. The state-decorated ACE achieves genuine body-ordered structure (truncatable order, per-order attribution) with a *shared* parameterization: learned state embeddings interpolate across fragment-state pairs never explicitly sampled.
+   - **Cross-diabat amortization.** The geometric density basis is state-independent and built once per configuration; evaluating $M$ active diabats costs one basis construction plus $M$ cheap channel contractions, not $M$ full feature passes.
+   - **Exact receptive field.** A single-shot ACE (at most one message-passing layer) keeps the receptive field at exactly $r_{\text{SR}}$; deep message passing would grow it to $L \cdot r_{\text{SR}}$, silently violating the range separation and the frozen-feature asymptotics.
+   - **The isolation zero.** Because every basis function carries the $r_{\text{SR}}$ cutoff, $\Delta\mathbf{h}_i^{(K)} \equiv 0$ *identically* for an isolated fragment—an exact architectural property, not a trained one. This zero anchors the monomer-preservation guarantees of Section 2.3.
+   - **Low body order suffices.** The slowly-converging many-body physics (polarization, cooperative charge transfer) is carried by the global SQE solve and the ambient channels (Section 2.4); the ACE correction represents only the residual short-range physics (Pauli, penetration, short-range CT stabilization), whose body-order expansion converges rapidly. $\nu = 3$ is a defensible design point, not a compromise.
 
 ### 2.2 Local Diabatic Gating & Size-Extensive Latent Mixing
 
@@ -102,7 +116,7 @@ For a given diabatic configuration $K$, every atom $i$ is assigned to a specific
 
 2. **Local Logits with Local Coulomb Bias:** For each state $K_R$ of center $R$, pool only over the atoms of that center and subtract the *local* zeroth-order asymptotic estimate:
    $$z_{K_R} = \text{MLP}_{\text{gate}}\left(\sum_{i \in R} \mathbf{W}_{\text{pool}}\, \mathbf{h}_i^{(K_R)}\right) - \beta\, \tilde{E}^{(K_R)}(r), \qquad \tilde{E}^{(K_R)}(r) = E_{\text{monomer}}^{(K_R)} + \sum_{a < b \,\in R} \frac{Q_a^{(K_R)} Q_b^{(K_R)}}{r_{ab}}$$
-   The zeroth-order bias is what gives the gate long-range geometric awareness beyond $r_{\text{SR}}$ (where MBE features are frozen), guaranteeing Harpoon crossings are triggered at the correct asymptotic separations. Optionally, a small set of explicit long-range scalars (inter-fragment separations $r_{K_R}$, field estimates at fragment centroids) may be appended to the pooled features so that the learned component of the logit retains geometric sensitivity beyond $r_{\text{SR}}$ rather than delegating the entire crossing shape to $\beta\tilde{E}$.
+   The zeroth-order bias is what gives the gate long-range geometric awareness beyond $r_{\text{SR}}$ (where the ACE correction vanishes identically and diabatic features reduce to frozen monomer features), guaranteeing Harpoon crossings are triggered at the correct asymptotic separations. Optionally, a small set of explicit long-range scalars (inter-fragment separations $r_{K_R}$, field estimates at fragment centroids) may be appended to the pooled features so that the learned component of the logit retains geometric sensitivity beyond $r_{\text{SR}}$ rather than delegating the entire crossing shape to $\beta\tilde{E}$.
 
 3. **Local Validity-Weighted Softmax:** Mixing coefficients are computed independently per center:
    $$c_{K_R} = \frac{\Omega_{K_R} \exp\left(z_{K_R} / \tau\right)}{\sum_{J_R} \Omega_{J_R} \exp\left(z_{J_R} / \tau\right)}$$
@@ -112,25 +126,29 @@ For a given diabatic configuration $K$, every atom $i$ is assigned to a specific
 
 5. **Global Spin Bookkeeping.** A global spin (or charge) constraint acts as a filter on the *product* space: local states whose fragment spin assignments cannot participate in any spin-valid global product are pruned from their local active spaces before gating. This uses the diabatic spin labels purely combinatorially; no explicit spin dynamics are modeled.
 
-6. **Latent Feature Blending:** All active local diabatic representations are collapsed into a single physical representation per atom:
-   $$\mathbf{h}_i^{\text{final}} = \sum_{K_R} c_{K_R} \mathbf{h}_i^{(K_R)} \quad (i \in R)$$
-   *Why Latent Mixing?* Taking linear combinations of features rather than late energies grants downstream networks the expressivity to learn **non-linear resonance stabilization**. At avoided crossings ($c_1 \approx c_2 \approx 0.5$), the network maps the blended latent vector to an adiabatic ground-state energy that drops below the linear average of isolated diabatic curves, mimicking off-diagonal Hamiltonian coupling without solving a matrix equation.
+6. **Latent Feature Blending:** All active local diabatic representations are collapsed into a single physical representation per atom, with the baseline and correction components tracked separately for the heads of Section 2.3:
+   $$\mathbf{h}_{i,0}^{\text{final}} = \sum_{K_R} c_{K_R} \mathbf{h}_{i,0}^{(K_R)}, \qquad \Delta\mathbf{h}_i^{\text{final}} = \sum_{K_R} c_{K_R} \Delta\mathbf{h}_i^{(K_R)}, \qquad \mathbf{h}_i^{\text{final}} = \mathbf{h}_{i,0}^{\text{final}} + \Delta\mathbf{h}_i^{\text{final}} \quad (i \in R)$$
+   *Why Latent Mixing?* Taking linear combinations of features rather than late energies grants downstream networks the expressivity to learn **non-linear resonance stabilization**. At avoided crossings ($c_1 \approx c_2 \approx 0.5$), the network maps the blended latent vector to an adiabatic ground-state energy that drops below the linear average of isolated diabatic curves, mimicking off-diagonal Hamiltonian coupling without solving a matrix equation. Crucially, this nonlinearity is *automatically confined to short range*: beyond $r_{\text{SR}}$, $\Delta\mathbf{h} \equiv 0$ and the head constructions of Section 2.3 make the energy exactly linear in $c$—the physically correct limit, since coupling matrix elements vanish with overlap. (At an exactly degenerate long-range seam, linear blending yields the average of the two states—but at degeneracy the average *is* the minimum, and the Coulomb bias breaks degeneracy elsewhere, so this is benign.)
    *Interpretation of the weights.* The $c_{K_R}$ live on the probability simplex (softmax is its natural unconstrained parameterization), and the gate is best understood as **amortized inference** of a variational mixing solution: a future self-consistent (MCSCF-like) extension would define $E_{\text{total}}(\{c\})$ and minimize over the simplex directly—at much greater cost—while the gating network learns to emit the minimizer in a single pass. To keep that door open, training includes evaluations at perturbed mixing coefficients (Section 4.3, Phase 3) so that $E(\{c\})$ has physically sensible curvature off the gate's output manifold, not merely correct values on it. Note that $c_{K_R}$ blend *representations*, and the nonlinear energy head deliberately blurs the distinction between a classical ensemble and a coherent superposition; $c = 0.5$ should not be read as a literal state population.
 
-### 2.3 Unified Property Prediction Heads
-From the single blended feature vector $\mathbf{h}_i^{\text{final}}$, downstream neural network heads predict all physical quantities entering the energy:
+### 2.3 Property Prediction: Frozen Monomer Baselines + Isolation-Exact Correction Heads
 
-1. **Short-Range Atomic Energies:**
-   $$E_{i,\text{SR}} = \text{MLP}_E\left(\mathbf{h}_i^{\text{final}}\right)$$
-   This absorbs 1-body self-energies (shifting automatically as $\mathbf{h}_i^{\text{final}}$ interpolates between valence states) along with short-range EDA components (Pauli repulsion, charge penetration).
+Freezing monomer *features* alone is an incomplete freeze: if shared prediction heads were trained in Phases 2–3, the model's output for an isolated monomer would drift even with fixed inputs, silently invalidating Phase-1 calibration. This matters quantitatively—dissociation limits are differences of large monomer energies, and the Harpoon crossing position shifts by $\sim 1\ \text{Å}$ per $0.1\ \text{eV}$ of $IE - EA$ error—and it would desynchronize the gate (whose Coulomb bias uses the frozen $E_{\text{monomer}}^{(K)}$) from the energy head's actual asymptote. Monomer preservation is therefore enforced **architecturally**, not by regularization: every predicted quantity is a frozen, $c$-linear 1-body baseline plus a correction that vanishes *identically* at fragment isolation.
 
-2. **Tensorial Electronegativity & Effective Response Tensors:**
-   $$\boldsymbol{\chi}_i^{\text{final}} = \boldsymbol{\chi}_{i,0} + \text{MLP}_{\chi}\left(\mathbf{h}_i^{\text{final}}\right), \qquad \boldsymbol{\alpha}_{i,\text{eff}}^{\text{final}} = \boldsymbol{\alpha}_{i,0} + \text{MLP}_{\alpha}\left(\mathbf{h}_i^{\text{final}}\right)$$
-   $\boldsymbol{\chi}_i^{\text{final}}$ is the tensorial electronegativity operator generating multipoles within the charge-equilibration framework; $\boldsymbol{\alpha}_{i,\text{eff}}^{\text{final}}$ supplies atomic hardness/polarizability.
+1. **Frozen 1-Body Baseline (Blended Linearly):** The Phase-1 monomer stack includes frozen heads for the 1-body energy $E_1^{(K)}(i)$ (a function of intra-fragment geometry, covering distorted monomers), baseline electronegativity $\boldsymbol{\chi}_{i,0}^{(K)}$, polarizability $\boldsymbol{\alpha}_{i,0}^{(K)}$, and the baseline charge distributions entering $q^{(0)}$. Baselines blend linearly with the mixing weights—exactly the weighted 1-body energies of the diabats:
+   $$E_{i,\text{SR}}^{\text{base}} = \sum_{K_R} c_{K_R} E_1^{(K_R)}(i), \qquad \boldsymbol{\chi}_{i}^{\text{base}} = \sum_{K_R} c_{K_R}\, \boldsymbol{\chi}_{i,0}^{(K_R)}, \qquad \boldsymbol{\alpha}_{i}^{\text{base}} = \sum_{K_R} c_{K_R}\, \boldsymbol{\alpha}_{i,0}^{(K_R)}$$
+
+2. **Isolation-Exact Correction Heads (the Subtraction Trick):** Corrections take the blended baseline and correction features as *separate* inputs, and subtract the head's own value at zero correction:
+   $$\Delta E_{i,\text{SR}} = \text{MLP}_{\Delta E}\!\left(\left[\mathbf{h}_{i,0}^{\text{final}},\ \Delta\mathbf{h}_i^{\text{final}}\right]\right) - \text{MLP}_{\Delta E}\!\left(\left[\mathbf{h}_{i,0}^{\text{final}},\ \mathbf{0}\right]\right)$$
+   and identically for $\Delta\boldsymbol{\chi}_i$ and $\Delta\boldsymbol{\alpha}_i$. Because $\Delta\mathbf{h} \equiv 0$ for an isolated fragment (Section 2.1), the correction is **exactly zero at isolation for any network weights**—full nonlinear expressivity at short range, machine-precision monomer preservation at long range. The subtracted term is constant per fragment-state and cacheable, so the overhead is negligible. This construction *replaces* the earlier soft training constraint "$\Delta\boldsymbol{\alpha}, \Delta\boldsymbol{\chi} \to 0$ as $r \to r_{\text{SR}}$" with an exact architectural property, and simultaneously guarantees exact linearity of the energy in $c$ beyond $r_{\text{SR}}$ (Section 2.2.6). The final quantities are
+   $$E_{i,\text{SR}} = E_{i,\text{SR}}^{\text{base}} + \Delta E_{i,\text{SR}}, \qquad \boldsymbol{\chi}_i^{\text{final}} = \boldsymbol{\chi}_i^{\text{base}} + \Delta\boldsymbol{\chi}_i, \qquad \boldsymbol{\alpha}_{i,\text{eff}}^{\text{final}} = \boldsymbol{\alpha}_i^{\text{base}} + \Delta\boldsymbol{\alpha}_i$$
+   The correction $\Delta E_{i,\text{SR}}$ carries the short-range EDA components (Pauli repulsion, charge penetration) and the non-linear resonance stabilization at avoided crossings; the baseline carries all 1-body physics.
 
 3. **Channel Compliance (Learned Bond Hardness):** For every edge $(i,j)$ of the channel graph (Section 2.4), a pair head predicts a raw **compliance** (inverse hardness):
    $$s_{ij}^{\text{raw}} = \text{softplus}\!\left(\text{MLP}_{s}\left(\mathbf{h}_i^{\text{final}}, \mathbf{h}_j^{\text{final}}, e(r_{ij})\right)\right) \geq 0$$
-   where $e(r_{ij})$ is a radial basis expansion. Predicting compliance $s = 1/\kappa$ rather than hardness $\kappa$ is deliberate: channel closure corresponds to $s \to 0$ (a bounded, well-conditioned limit) rather than $\kappa \to \infty$, and the pairwise switching function acts multiplicatively on $s$ (Section 2.4.3). Because the inputs are the *blended* features, the learned compliance is implicitly conditioned on the local mixing weights $c_{K_R}$—e.g., a channel between two fragments softens as a diabat merging them gains weight—without any explicit $c$-dependence in the head. Between ordinary ground-state fragments the head yields small but nonzero ambient compliances, the mechanism for many-body charge transfer (Section 2.4.3).
+   where $e(r_{ij})$ is a radial basis expansion. Predicting compliance $s = 1/\kappa$ rather than hardness $\kappa$ is deliberate: channel closure corresponds to $s \to 0$ (a bounded, well-conditioned limit) rather than $\kappa \to \infty$, and the pairwise switching function acts multiplicatively on $s$ (Section 2.4.3). No subtraction trick is needed here—the switch $S(r_{ij})$ already enforces exact shutdown of inter-fragment channels at $r_{\text{SR}}$, and intra-fragment compliances are legitimately monomer properties trained in Phase 1 and frozen with the rest of the monomer stack. Because the inputs are the *blended* features, the learned compliance is implicitly conditioned on the local mixing weights $c_{K_R}$—e.g., a channel between two fragments softens as a diabat merging them gains weight—without any explicit $c$-dependence in the head. Between ordinary ground-state fragments the head yields small but nonzero ambient compliances, the mechanism for many-body charge transfer (Section 2.4.3).
+
+4. **What Trains When:** "Freeze the monomer stack" means, operationally: $\mathcal{F}_{\text{mono}}$, $E_1^{(K)}$, $\boldsymbol{\chi}_{i,0}^{(K)}$, $\boldsymbol{\alpha}_{i,0}^{(K)}$, intra-fragment compliances, and the $q^{(0)}$ charge distributions are all fixed after Phase 1. Phases 2–3 train only the ACE decoration weights, the correction heads $\text{MLP}_{\Delta E}, \text{MLP}_{\Delta\chi}, \text{MLP}_{\Delta\alpha}$, the inter-fragment compliance head $\text{MLP}_s$, and the gate. Light monomer replay in Phase 2 remains useful purely for conditioning the correction heads near the $\Delta\mathbf{h} \to 0$ boundary (where gradients are small); it carries no correctness burden.
 
 ### 2.4 Split-Charge Equilibration: Structural Charge Conservation & Learned Charge Transfer
 
@@ -190,14 +208,20 @@ At the minimizer, each transfer scales with its compliance: for fixed electrosta
    │     • Calculate polynomial bump envelopes Ω_{K_R}(r_{K_R}) for all candidate states.
    │     • Prune states where Ω_{K_R} < ε (guaranteed zero force/energy noise).
    ▼
-[Step 4] Short-Range MBE & Local Attention Gating
-   │     • For active K_R, initialize reference embeddings h_{i,0}^{(K_R)}.
-   │     • Execute MBE message passing to get diabatic features h_i^{(K_R)}.
+[Step 4] Frozen Monomer Features, ACE Correction & Local Attention Gating
+   │     • For active K_R, evaluate frozen monomer features h_{i,0}^{(K_R)}
+   │       (frozen intra-fragment network on reference embeddings).
+   │     • Build the state-independent ACE density basis once; contract per diabat
+   │       with state-decoration weights to get corrections Δh_i^{(K_R)}
+   │       (Δh ≡ 0 identically for isolated fragments).
    │     • Per center: predict logits z_{K_R} (incl. Coulomb bias -βẼ) and weights c_{K_R}.
    ▼
 [Step 5] Latent Feature Blending & Property Prediction
-   │     • Blend atomic latents: h_i^final = ∑_{K_R} c_{K_R} h_i^{(K_R)}.
-   │     • Predict E_{i,SR}, χ_i^final, α_{i,eff}^final.
+   │     • Blend baseline and correction latents separately:
+   │       h_{i,0}^final = ∑ c_{K_R} h_{i,0}^{(K_R)},  Δh_i^final = ∑ c_{K_R} Δh_i^{(K_R)}.
+   │     • Evaluate frozen 1-body baselines ∑ c_{K_R} E_1^{(K_R)}, ∑ c_{K_R} χ_{i,0}^{(K_R)},
+   │       ∑ c_{K_R} α_{i,0}^{(K_R)}; add subtraction-trick corrections ΔE, Δχ, Δα
+   │       (exactly zero at isolation for any weights).
    │     • Assemble channel graph: intra-fragment bonds + one inter-fragment channel
    │       for every fragment pair in short-range contact (distance-based; no diabat
    │       condition).
@@ -238,7 +262,7 @@ The Na–Cl channel exists whenever the pair is within the switching range and c
 Training data must be generated using high-level electronic structure methods coupled with Energy Decomposition Analysis. **A single diabatization convention must be fixed across all phases** (e.g., ALMO-based fragment states throughout, or constrained DFT throughout); mixing conventions bakes inconsistencies into precisely the 3–6 Å hand-off window between the short-range network and the long-range solve.
 
 1. **Scan Generation:** 1D and 2D potential energy surface scans across inter-fragment separations $r \in [1.5\ \text{Å}, 15.0\ \text{Å}]$, explicitly including distorted monomer geometries.
-2. **Diabatic Reference Curves:** We will use ALMO-EDA to get the diabatic reference curves.
+2. **Diabatic Reference Curves:** Constrained DFT or CASSCF/NEVPT2 energies forcing specific charge and spin distributions to isolate diabatic reference curves $E_{\text{QM}}^{(K)}(r)$; the merged-pair diabat is referenced to the adiabatic ground state in the strongly bound region where it dominates.
 3. **EDA Partitioning:** Decompose QM interaction energies into long-range and short-range targets:
    $$E_{\text{target,LR}} = E_{\text{elstat}} + E_{\text{pol}} + E_{\text{disp}} + E_{\text{ct}}, \qquad E_{\text{target,SR}} = E_{\text{1-body}} + E_{\text{Pauli}} + E_{\text{pen}}$$
    The EDA polarization/CT split (well-defined in ALMO-EDA, where polarization is intra-fragment relaxation by construction) maps directly onto the channel structure, and **the fitting must respect that map**: when fitting $E_{\text{pol}}$, all inter-fragment compliances are clamped to zero, so polarization is carried entirely by $\boldsymbol{\alpha}_{\text{eff}}$ and intra-fragment channels; $E_{\text{ct}}$ is then fit with inter-fragment channels released, training the ambient compliances against the CT energy and the QM inter-fragment charge flow (e.g., ALMO CT charge). This assignment prevents double counting between induction and charge transfer and gives each channel class an unambiguous physical target. Because inter-fragment CT couples back into the multipole distribution, the released-channel fit is run with the (already-fit) polarization parameters frozen.
@@ -247,29 +271,42 @@ Training data must be generated using high-level electronic structure methods co
 ### 4.3 Step-by-Step Training Strategy
 
 ```
-[Phase 1: Monomer Reference Training]
-  └─► Train h_{i,0}^{(K)}, baseline electronegativities χ_{i,0}, static polarizabilities α_{i,0},
-      and per-fragment-type baseline charge distributions (for q^(0) construction)
+[Phase 1: Monomer Reference Training (the Frozen Stack)]
+  └─► Train the intra-fragment featurization F_mono, 1-body energy heads E_1^(K)
+      (over distorted monomer geometries), baseline electronegativities χ_{i,0}^(K),
+      static polarizabilities α_{i,0}^(K), intra-fragment channel compliances, and
+      per-fragment-type baseline charge distributions (for q^(0) construction)
       on isolated gas-phase fragments.
-  └─► Target: monomer multipoles, static response tensors, isolated formation energies.
+  └─► Target: monomer energies AND rich auxiliary targets — multipoles, static
+      response tensors, formation energies — so the frozen features expose the
+      directions downstream correction layers will need.
+  └─► FREEZE the entire monomer stack permanently. All asymptotic guarantees
+      (dissociation limits, IE−EA differences, Harpoon crossing position, gate/energy
+      consistency of E_monomer^(K)) now rest on this validated, immutable component.
 
-[Phase 2: Short-Range MBE, Response & Channel Training (Fixed Diabats)]
-  └─► Freeze monomer parameters. Train MBE layers Δh^(2), Δh^(3), MLP_E, MLP_χ, MLP_α,
-      and the compliance head MLP_s on isolated diabatic states (c_K ∈ {0,1}).
+[Phase 2: ACE Correction, Response & Channel Training (Fixed Diabats)]
+  └─► Train ONLY: ACE state-decoration weights, correction heads MLP_ΔE, MLP_Δχ,
+      MLP_Δα (subtraction-trick form — exactly zero at isolation for any weights),
+      and the inter-fragment compliance head MLP_s, on isolated diabatic states
+      (c_K ∈ {0,1}). Optionally a small linear adapter of the frozen features.
   └─► Two-stage channel fit respecting the EDA pol/CT split (§4.2): (a) fit E_pol with
       inter-fragment compliances clamped to zero (intra-fragment channels + α_eff only);
       (b) release inter-fragment channels and fit ambient compliances to E_ct and QM
       inter-fragment charge flow, with polarization parameters frozen.
   └─► Merged-pair diabats: inter-fragment (sub-fragment) compliances trained against
       the large CT/covalency of the bound state along dissociation scans.
-  └─► No closure constraint or dead-zone regularization on s^raw is needed: the pairwise
-      switch S(r_ij) enforces exact channel shutdown at r_SR by construction.
-  └─► Constraint: Δα_{i,eff}^(K) → 0 and Δχ_i^(K) → 0 smoothly as inter-fragment
-      distance r → r_SR.
+  └─► No closure constraints or dead-zone regularization needed anywhere: the ACE
+      cutoff makes Δh ≡ 0 at isolation, the subtraction trick makes ΔE, Δχ, Δα ≡ 0
+      there, and the pairwise switch S(r_ij) shuts inter-fragment channels at r_SR —
+      all by construction. Light monomer replay is retained purely to condition the
+      correction heads near the Δh → 0 boundary; it carries no correctness burden.
 
 [Phase 3: Latent Mixing & Avoided Crossing Training]
   └─► Activate all diabatic states and local gating. Train MLP_gate, Coulomb scaling β,
-      and temperature τ across dissociation trajectories.
+      and temperature τ across dissociation trajectories; fine-tune the ACE decoration
+      weights and correction heads at mixed c (this is where non-linear resonance
+      stabilization is learned). The monomer stack remains frozen — the subtraction
+      trick guarantees monomer predictions are untouched by any of this fine-tuning.
   └─► Target: total adiabatic ground-state QM energy E_total, QM charges/dipoles μ(r),
       and analytical QM forces across the avoided crossing AND across the channel-closure
       window (r ≈ 3–5 Å for NaCl), where gating, blending, and SQE interact.
@@ -280,7 +317,7 @@ Training data must be generated using high-level electronic structure methods co
 
 ### 4.4 Evaluation Metrics & Quantitative Verification
 
-The model must be evaluated against seven strict pass/fail quantitative criteria:
+The model must be evaluated against eight strict pass/fail quantitative criteria:
 
 #### 1. Asymptotic Tail & Multipole Verification (The $-1/r$ vs $-1/r^6$ Test)
 Plot the predicted interaction energy $\Delta E(r)$ for $r \in [8.0\ \text{Å}, 15.0\ \text{Å}]$ on a log-log scale against analytical asymptotics.
@@ -315,11 +352,16 @@ Verify the ground-state inter-fragment channels on hydrogen-bonded water cluster
 * **Cooperativity:** for linear water chains and cyclic clusters $(\mathrm{H}_2\mathrm{O})_{n}$, $n = 2$–$6$, reproduce the non-additive enhancement of per-molecule dipole moments and total CT with chain length—the signature that channel flow couples correctly into the polarization solve. Pass: cluster dipoles within $3\%$ of QM.
 * **Locality:** confirm that per-molecule charges in a large cluster are unchanged (to solve tolerance) when a molecule beyond $r_{\text{SR}}$ of its contact network is displaced—ambient CT must remain strictly short-ranged through the switch.
 
+#### 7. Monomer Preservation Audit (New)
+After Phases 2–3 are complete, re-run the full Phase-1 monomer validation suite (energies, multipoles, response tensors for every fragment state in the library) through the *final* model with each fragment isolated.
+* **Pass Criterion:** predictions identical to the frozen Phase-1 model to machine precision. This is guaranteed architecturally (Δh ≡ 0 at isolation; subtraction-trick heads exactly zero there); the audit verifies the implementation honors the guarantee, and in particular that dissociation limits and the gate's E_monomer^(K) bias remain synchronized with the energy head's actual asymptotes.
+
+
 ---
 
 ## 5. Summary & Roadmap
 
-By elevating the MLIP from an atom-centered monolithic feature space to a **diabatic, range-separated latent mixing architecture with split-charge equilibration**, we bridge the gap between machine-learned quantum accuracy and classical empirical valence bond physics.
+By elevating the MLIP from an atom-centered monolithic feature space to a **diabatic, range-separated latent mixing architecture with a frozen monomer stack, state-decorated ACE corrections, and split-charge equilibration**, we bridge the gap between machine-learned quantum accuracy and classical empirical valence bond physics. The featurization hierarchy—frozen state-aware monomer features, corrected by a body-ordered cluster expansion that vanishes identically at isolation, blended per reactive center—makes monomer preservation, long-range linearity in the mixing weights, and dissociation asymptotics architectural properties rather than trained behaviors.
 
 Local, per-reactive-center attention gating makes state mixing size-extensive and $\mathcal{O}(N_c)$, while a zeroth-order Coulomb bias guarantees rigorous Harpoon crossing behavior at asymptotic separations. Replacing constraint-based EEM with SQE turns charge conservation into a property of the coordinate system: charge flows only along an explicit short-range channel network, with **learned compliances** supplying the charge-transfer physics—from small ambient flows between ground-state neighbors that capture cooperative many-body polarization, to soft channels enabling bond formation when a merging diabat gains weight—and an explicit **$C^2$ pairwise switching function** enforcing exact, structural channel shutdown at the short-range cutoff. Formal diabatic charges are demoted from constraints to baselines; what was previously imposed is now learned.
 
