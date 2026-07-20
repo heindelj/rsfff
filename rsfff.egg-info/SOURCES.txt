@@ -11,9 +11,8 @@ src/features/equivariant_backend.py
 src/features/features.py
 src/features/weighted_bispectrum.py
 src/mlip/__init__.py
-src/mlip/charge_embedding.py
-src/mlip/charge_model.py
-src/mlip/charge_scf.py
+src/mlip/eem.py
+src/mlip/eem_model.py
 src/mlip/heads.py
 src/mlip/model.py
 src/mlip/response_heads.py
@@ -22,11 +21,9 @@ src/train/config.py
 src/train/data.py
 src/train/loss.py
 src/train/train.py
-src/train/train_charge.py
+src/train/train_eem.py
 tests/test_data.py
-tests/test_featurizer_charge.py
+tests/test_eem.py
 tests/test_free_atom.py
 tests/test_heads.py
-tests/test_implicit_diff.py
 tests/test_invariance.py
-tests/test_scf.py

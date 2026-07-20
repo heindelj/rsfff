@@ -11,10 +11,15 @@ autograd of the predicted energy w.r.t. positions.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
-import torch
+# macOS: torch's bundled libomp + conda's llvm-openmp abort with OMP Error #15
+# unless this is set before the first OpenMP runtime initializes.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import torch  # noqa: E402
 
 from ..mlip import build_model
 from .config import Config, load_config

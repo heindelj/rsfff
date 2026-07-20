@@ -1,9 +1,13 @@
 """Machine-learned interatomic potential (MLIP) models and heads."""
 
-from .charge_embedding import AtomWeightNet, ChargeEmbedding, ElementChargeEnergy
-from .charge_model import ChargeAwareModel, ChargeAwareOutput, build_charge_model
-from .charge_scf import RaggedIndex, ScfInfo, attach_charges, solve_charges
-from .heads import AtomicEnergyHead, ChargeEnergyHead, mlp
+from .eem import (
+    atomic_dipoles,
+    charge_flow_polarizability,
+    eem_charges,
+    eem_energy,
+)
+from .eem_model import EEMOutput, EEMParameterHeads, MLIPEEMModel, build_eem_model
+from .heads import AtomicEnergyHead, mlp
 from .model import EnergyModel, build_model
 from .response_heads import (
     AtomicAlphaHead,
@@ -15,21 +19,18 @@ from .response_heads import (
 
 __all__ = [
     "AtomicEnergyHead",
-    "ChargeEnergyHead",
     "mlp",
     "EnergyModel",
     "build_model",
-    # charge-aware model
-    "ChargeAwareModel",
-    "ChargeAwareOutput",
-    "build_charge_model",
-    "ChargeEmbedding",
-    "AtomWeightNet",
-    "ElementChargeEnergy",
-    "RaggedIndex",
-    "ScfInfo",
-    "solve_charges",
-    "attach_charges",
+    # EEM
+    "eem_charges",
+    "atomic_dipoles",
+    "eem_energy",
+    "charge_flow_polarizability",
+    "EEMParameterHeads",
+    "MLIPEEMModel",
+    "EEMOutput",
+    "build_eem_model",
     # response heads
     "AtomicAlphaHead",
     "AtomicVectorHead",

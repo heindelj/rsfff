@@ -1,18 +1,21 @@
-"""Shared fixtures for the charge-aware model tests.
+"""Shared fixtures for the MLIP+EEM model tests.
 
-Everything runs on CPU in float64: the implicit-differentiation gradient checks
-need ~1e-12 SCF residuals, and the batched ``linalg.solve``/``eigvalsh`` used by
-the KKT solver have CPU/CUDA kernels only.
+Everything runs on CPU in float64 so analytic identities (constraint, stationarity,
+alpha cross-checks) hold to near machine precision.
 """
 
 from __future__ import annotations
 
+import os
 import types
 
-import pytest
-import torch
+# macOS: avoid the duplicate-libomp abort (torch + conda MKL); must precede torch.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
-from rsfff.mlip import build_charge_model
+import pytest  # noqa: E402
+import torch  # noqa: E402
+
+from rsfff.mlip import build_eem_model
 from rsfff.train.data import Batch
 
 DATA_H2O = "data/labels/h2o.extxyz"
@@ -30,47 +33,47 @@ def _float64_cpu():
 
 def features_cfg(**over):
     base = dict(
-        cutoff=5.0, n_max=3, l_max=2, selected_lambdas=(0, 2),
+        cutoff=5.0, n_max=3, l_max=2, selected_lambdas=(0, 1, 2),
         backend="e3nn", density_channels=4,
     )
     base.update(over)
     return types.SimpleNamespace(**base)
 
 
-def charge_cfg(**over):
+def mlip_cfg(**over):
+    base = dict(emb_dim=8, hidden=24, depth=1)
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+def eem_cfg(**over):
     base = dict(
-        emb_dim=8, q_hidden=8, weight_hidden=16, charge_channels=3,
-        hidden=24, depth=1, alpha_hidden=24, alpha_depth=1, alpha_equiv_channels=6,
-        alpha_positive_isotropic=True, dipole_head=False, eta_init=0.5,
-        scf_max_iter=40, scf_tol=1e-12, scf_damping=0.0,
-        attach_steps=1, hessian_in_graph=True,
+        emb_dim=8, hidden=24, depth=1, equiv_channels=6,
+        eta_init=0.5, eta_floor=0.05, psd_floor=1e-4,
     )
     base.update(over)
     return types.SimpleNamespace(**base)
 
 
-def make_model(features=None, charge=None, *, randomize=True, seed=1):
-    """Small ChargeAwareModel over H/O with (optionally) randomized readouts.
+def make_model(features=None, mlip=None, eem=None, *, randomize=True, seed=1):
+    """Small MLIPEEMModel over H/O with (optionally) randomized readouts.
 
-    The zero-initialized readouts make E independent of q beyond the hardness
-    parabola; the perturbation makes every q-pathway (embedding -> heads,
-    embedding -> density weights) active so the tests exercise real coupling.
+    Zero-init readouts leave chi environment-independent and chivec = 0; the
+    perturbation activates every parameter pathway (chi/eta environment
+    dependence, chivec, alpha anisotropy) so tests exercise real coupling.
     """
-    model = build_charge_model(
+    model = build_eem_model(
         features or features_cfg(),
-        charge or charge_cfg(),
+        mlip or mlip_cfg(),
+        eem or eem_cfg(),
         [1, 8],
         torch.tensor([-0.5013, -75.0093]),
     )
     if randomize:
         g = torch.Generator().manual_seed(seed)
         with torch.no_grad():
-            for module in (
-                model.energy_head, model.charge_embedding, model.weight_net,
-                model.alpha_head, model.element_energy,
-            ):
-                for p in module.parameters():
-                    p.add_(0.05 * torch.randn(p.shape, generator=g))
+            for p in model.parameters():
+                p.add_(0.05 * torch.randn(p.shape, generator=g))
     return model
 
 

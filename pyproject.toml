@@ -25,7 +25,7 @@ cue = [
 
 [project.scripts]
 rsfff-train = "rsfff.train.train:main"
-rsfff-train-charge = "rsfff.train.train_charge:main"
+rsfff-train-eem = "rsfff.train.train_eem:main"
 
 [tool.setuptools]
 package-dir = { "rsfff" = "src" }

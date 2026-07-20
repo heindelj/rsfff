@@ -64,24 +64,3 @@ class AtomicEnergyHead(nn.Module):
         emb = self.species_emb(species_idx)                      # (N, emb_dim)
         x = torch.cat((inv_feats, emb), dim=-1)                  # (N, p0 + emb_dim)
         return self.mlp(x).squeeze(-1)                           # (N,)
-
-
-class ChargeEnergyHead(nn.Module):
-    """Per-atom scalar energy from invariants + an externally supplied embedding.
-
-    Same construction as :class:`AtomicEnergyHead` but without its own species
-    table: the conditioning vector ``emb`` is passed in -- here the charge-aware
-    embedding ``z_i = f(element_i, q_i)``, which makes the readout a smooth
-    function of the atomic charge. Zero-initialized so the model starts at the
-    per-species E0 + element-charge-parabola baseline.
-    """
-
-    def __init__(self, p0: int, emb_dim: int, *, hidden: int = 64, depth: int = 2) -> None:
-        super().__init__()
-        self.mlp = mlp(p0 + emb_dim, hidden, depth, 1)
-        with torch.no_grad():
-            self.mlp[-1].weight.zero_()
-            self.mlp[-1].bias.zero_()
-
-    def forward(self, inv_feats: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
-        return self.mlp(torch.cat((inv_feats, emb), dim=-1)).squeeze(-1)  # (N,)

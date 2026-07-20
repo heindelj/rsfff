@@ -42,27 +42,16 @@ class DataConfig:
 
 
 @dataclass
-class ChargeConfig:
-    """Charge-aware model: embedding, density weights, heads, and the SCF."""
+class EEMConfig:
+    """EEM parameter-function heads (chi, eta, chivec, alpha) on the features."""
 
-    emb_dim: int = 16               # charge-aware embedding width
-    q_hidden: int = 16              # hidden width of the q FiLM encoder
-    weight_hidden: int = 32         # hidden width of the density-weight net
-    charge_channels: int = 4        # Kw: density channels from w(z_j)
-    hidden: int = 64                # energy head MLP
+    emb_dim: int = 16               # species embedding width for the parameter heads
+    hidden: int = 64                # parameter-head MLP width
     depth: int = 2
-    alpha_hidden: int = 64          # response heads (alpha / atomic dipole)
-    alpha_depth: int = 2
-    alpha_equiv_channels: int = 32
-    alpha_positive_isotropic: bool = True
-    dipole_head: bool = False       # atomic dipole head (needs lambda=1 features)
+    equiv_channels: int = 32        # channel reduction of the chivec / alpha heads
     eta_init: float = 0.5           # initial per-element hardness, Ha/e^2
-    scf_max_iter: int = 30
-    scf_tol: float = 1.0e-9
-    scf_damping: float = 0.0
-    attach_steps: int = 1           # 2 for exact 2nd-order training grads (alpha, dmu/dR)
-    hessian_in_graph: bool = True
-    freeze_charges: bool = False    # ablation: pin q at Q/n, skip the SCF
+    eta_floor: float = 0.05         # hard lower bound on eta (keeps charges bounded)
+    psd_floor: float = 1.0e-4       # minimum eigenvalue of the atomic alphas
 
 
 @dataclass
@@ -78,7 +67,6 @@ class TrainConfig:
     dmu_dr_weight: float = 0.0
     dmu_dr_every: int = 1           # apply the (expensive) dmu/dR term every k steps
     alpha_weight: float = 0.0
-    alpha_consistency_weight: float = 0.0
     iso_weight: float = 0.0         # isolated-species integer-charge anchors
     q_l2_weight: float = 0.0
     eval_every: int = 10
@@ -92,7 +80,7 @@ class Config:
     checkpoint_root: str = "checkpoints"
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     mlip: MLIPConfig = field(default_factory=MLIPConfig)
-    charge: ChargeConfig = field(default_factory=ChargeConfig)
+    eem: EEMConfig = field(default_factory=EEMConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
@@ -102,7 +90,7 @@ def load_config(path) -> Config:
 
     feat = raw.get("features", {}) or {}
     mlip = raw.get("mlip", {}) or {}
-    charge = raw.get("charge", {}) or {}
+    eem = raw.get("eem", {}) or {}
     data = raw.get("data", {}) or {}
     train = raw.get("train", {}) or {}
 
@@ -131,29 +119,14 @@ def load_config(path) -> Config:
         holdout_fraction=float(data.get("holdout_fraction", DataConfig.holdout_fraction)),
         seed=int(data.get("seed", DataConfig.seed)),
     )
-    charge_cfg = ChargeConfig(
-        emb_dim=int(charge.get("emb_dim", ChargeConfig.emb_dim)),
-        q_hidden=int(charge.get("q_hidden", ChargeConfig.q_hidden)),
-        weight_hidden=int(charge.get("weight_hidden", ChargeConfig.weight_hidden)),
-        charge_channels=int(charge.get("charge_channels", ChargeConfig.charge_channels)),
-        hidden=int(charge.get("hidden", ChargeConfig.hidden)),
-        depth=int(charge.get("depth", ChargeConfig.depth)),
-        alpha_hidden=int(charge.get("alpha_hidden", ChargeConfig.alpha_hidden)),
-        alpha_depth=int(charge.get("alpha_depth", ChargeConfig.alpha_depth)),
-        alpha_equiv_channels=int(
-            charge.get("alpha_equiv_channels", ChargeConfig.alpha_equiv_channels)
-        ),
-        alpha_positive_isotropic=bool(
-            charge.get("alpha_positive_isotropic", ChargeConfig.alpha_positive_isotropic)
-        ),
-        dipole_head=bool(charge.get("dipole_head", ChargeConfig.dipole_head)),
-        eta_init=float(charge.get("eta_init", ChargeConfig.eta_init)),
-        scf_max_iter=int(charge.get("scf_max_iter", ChargeConfig.scf_max_iter)),
-        scf_tol=float(charge.get("scf_tol", ChargeConfig.scf_tol)),
-        scf_damping=float(charge.get("scf_damping", ChargeConfig.scf_damping)),
-        attach_steps=int(charge.get("attach_steps", ChargeConfig.attach_steps)),
-        hessian_in_graph=bool(charge.get("hessian_in_graph", ChargeConfig.hessian_in_graph)),
-        freeze_charges=bool(charge.get("freeze_charges", ChargeConfig.freeze_charges)),
+    eem_cfg = EEMConfig(
+        emb_dim=int(eem.get("emb_dim", EEMConfig.emb_dim)),
+        hidden=int(eem.get("hidden", EEMConfig.hidden)),
+        depth=int(eem.get("depth", EEMConfig.depth)),
+        equiv_channels=int(eem.get("equiv_channels", EEMConfig.equiv_channels)),
+        eta_init=float(eem.get("eta_init", EEMConfig.eta_init)),
+        eta_floor=float(eem.get("eta_floor", EEMConfig.eta_floor)),
+        psd_floor=float(eem.get("psd_floor", EEMConfig.psd_floor)),
     )
     train_cfg = TrainConfig(
         epochs=int(train.get("epochs", TrainConfig.epochs)),
@@ -167,9 +140,6 @@ def load_config(path) -> Config:
         dmu_dr_weight=float(train.get("dmu_dr_weight", TrainConfig.dmu_dr_weight)),
         dmu_dr_every=int(train.get("dmu_dr_every", TrainConfig.dmu_dr_every)),
         alpha_weight=float(train.get("alpha_weight", TrainConfig.alpha_weight)),
-        alpha_consistency_weight=float(
-            train.get("alpha_consistency_weight", TrainConfig.alpha_consistency_weight)
-        ),
         iso_weight=float(train.get("iso_weight", TrainConfig.iso_weight)),
         q_l2_weight=float(train.get("q_l2_weight", TrainConfig.q_l2_weight)),
         eval_every=int(train.get("eval_every", TrainConfig.eval_every)),
@@ -181,7 +151,7 @@ def load_config(path) -> Config:
         checkpoint_root=str(raw.get("checkpoint_root", "checkpoints")),
         features=features_cfg,
         mlip=mlip_cfg,
-        charge=charge_cfg,
+        eem=eem_cfg,
         data=data_cfg,
         train=train_cfg,
     )
