@@ -13,3 +13,6 @@ Provides-Extra: cue
 Requires-Dist: cuequivariance>=0.10; extra == "cue"
 Requires-Dist: cuequivariance-torch>=0.10; extra == "cue"
 Requires-Dist: cuequivariance-ops-torch-cu12; extra == "cue"
+Provides-Extra: qc
+Requires-Dist: pyscf>=2.14; extra == "qc"
+Requires-Dist: geometric; extra == "qc"

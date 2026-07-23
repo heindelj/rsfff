@@ -16,6 +16,12 @@ src/mlip/eem_model.py
 src/mlip/heads.py
 src/mlip/model.py
 src/mlip/response_heads.py
+src/qcgen/__init__.py
+src/qcgen/backend.py
+src/qcgen/compute.py
+src/qcgen/extxyz.py
+src/qcgen/pipeline.py
+src/qcgen/wigner.py
 src/train/__init__.py
 src/train/config.py
 src/train/data.py

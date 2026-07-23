@@ -22,6 +22,14 @@ cue = [
     "cuequivariance-torch>=0.10",
     "cuequivariance-ops-torch-cu12",
 ]
+# Local (CPU) quantum-chemistry backend for rsfff.qcgen. On Colab the GPU stack
+# (gpu4pyscf-cuda12x etc.) is installed from the notebook instead. Note: VV10
+# (needed by wB97M-V) is built into pyscf; pyscf-dispersion is intentionally not
+# pinned here (D3/D4 only, and its current release is broken against new numpy).
+qc = [
+    "pyscf>=2.14",
+    "geometric",
+]
 
 [project.scripts]
 rsfff-train = "rsfff.train.train:main"
@@ -29,4 +37,4 @@ rsfff-train-eem = "rsfff.train.train_eem:main"
 
 [tool.setuptools]
 package-dir = { "rsfff" = "src" }
-packages = ["rsfff", "rsfff.features", "rsfff.mlip", "rsfff.train"]
+packages = ["rsfff", "rsfff.features", "rsfff.mlip", "rsfff.train", "rsfff.qcgen"]

@@ -9,3 +9,7 @@ ase
 cuequivariance>=0.10
 cuequivariance-torch>=0.10
 cuequivariance-ops-torch-cu12
+
+[qc]
+pyscf>=2.14
+geometric
