@@ -1,0 +1,9 @@
+{
+  "name": "h2o",
+  "charge": 0,
+  "mult": 1,
+  "spin": 0,
+  "xc": "wB97M-V",
+  "basis": "def2-svpd",
+  "opt_energy": -76.34715367580075
+}
