@@ -34,20 +34,51 @@ states:
   # (a lattice or solvated species), never as an isolated atomic reference.
 
   # --- molecular fragment states -----------------------------------------------------------
+  # `dissociation` lists competing diabats for pulling one O-H apart (Phase-2 mixture machinery,
+  # §2.2/§2.4). Each channel partitions the atoms into smaller library states and names the bond
+  # whose length is the reaction coordinate. Channels here are chosen so every product is an
+  # already-anchored state (an atomic reference or a trained monomer), so the large-separation
+  # limit is exact: H+ contributes E=0, O-/H are atomic references, OH-/H2O are trained monomers.
   h2o:
     charge: 0
     multiplicity: 1
     elements: [O, H, H]
     bonds: [[0, 1], [0, 2]]
+    dissociation:
+      - name: proton_loss           # O-H1 heterolysis: H1 leaves as a proton
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: oh-, atoms: [0, 2]}   # O0, H2 -> oh-'s canonical [O, H]
+          - {state: h+,  atoms: [1]}
 
   h3o+:
     charge: +1
     multiplicity: 1
     elements: [O, H, H, H]
     bonds: [[0, 1], [0, 2], [0, 3]]
+    dissociation:
+      - name: proton_loss           # O-H1 heterolysis: H1 leaves as a proton
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: h2o, atoms: [0, 2, 3]}   # O0, H2, H3 -> h2o's canonical [O, H, H]
+          - {state: h+,  atoms: [1]}
 
   oh-:
     charge: -1
     multiplicity: 1
+    elements: [O, H]
+    bonds: [[0, 1]]
+    dissociation:
+      - name: homolysis             # O-H homolysis: H leaves neutral, charge stays on O
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o-, atoms: [0]}
+          - {state: h,  atoms: [1]}
+
+  # Neutral OH radical (X 2Pi). A trained monomer once data/labels/oh.extxyz is included in a
+  # training config; it also anchors the radical channel H2O -> OH + H (not wired in yet).
+  oh:
+    charge: 0
+    multiplicity: 2
     elements: [O, H]
     bonds: [[0, 1]]

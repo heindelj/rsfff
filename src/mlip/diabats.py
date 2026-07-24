@@ -31,6 +31,28 @@ DEFAULT_LIBRARY_PATH = "data/diabatic_states.yaml"
 
 
 @dataclass(frozen=True)
+class DissociationChannel:
+    """A way one parent state can fall apart into smaller library states.
+
+    A channel is a *partition* of the parent's atoms into sub-states (each a key in the same
+    library), plus the parent bond whose length drives the channel's validity envelope. It is
+    the object the mixture machinery enumerates as a competing diabat: the bound parent versus
+    this dissociated partition (docs/mixture_of_diabatic_embeddings.md §2.2, §2.4.1).
+
+    name                  : label for diagnostics
+    fragments             : tuple of ``(sub_state_key, parent_atom_indices)`` where the indices
+                            are into the parent's ``elements`` and ordered to match the sub-state's
+                            own canonical ``elements``
+    order_parameter_bond  : the parent bond ``(a, b)`` whose length is the reaction coordinate for
+                            the validity envelopes (typically the bond being broken)
+    """
+
+    name: str
+    fragments: tuple[tuple[str, tuple[int, ...]], ...]
+    order_parameter_bond: tuple[int, int]
+
+
+@dataclass(frozen=True)
 class FragmentState:
     """One formal diabatic state of a chemical fragment.
 
@@ -39,6 +61,7 @@ class FragmentState:
     multiplicity  : spin multiplicity 2S_a + 1
     elements      : canonical atom ordering, as element symbols
     bonds         : channel graph, as index pairs into ``elements``
+    dissociation  : competing dissociated diabats (empty for a state that is only ever a product)
     """
 
     key: str
@@ -46,6 +69,7 @@ class FragmentState:
     multiplicity: int
     elements: tuple[str, ...]
     bonds: tuple[tuple[int, int], ...]
+    dissociation: tuple[DissociationChannel, ...] = ()
 
     @property
     def n_atoms(self) -> int:
@@ -102,6 +126,26 @@ class DiabaticStateLibrary:
                     raise ValueError(f"{path}: state {key!r} has a self-bond at atom {a}")
             if len({frozenset(b) for b in bonds}) != len(bonds):
                 raise ValueError(f"{path}: state {key!r} lists a duplicate bond")
+            channels = []
+            for ch in spec.get("dissociation", ()) or ():
+                frags = tuple(
+                    (str(f["state"]), tuple(int(i) for i in f["atoms"]))
+                    for f in ch["fragments"]
+                )
+                covered = [i for _, atoms in frags for i in atoms]
+                if sorted(covered) != list(range(len(elements))):
+                    raise ValueError(
+                        f"{path}: dissociation {ch.get('name', '?')!r} of {key!r} must partition "
+                        f"all {len(elements)} atoms exactly once, got {sorted(covered)}"
+                    )
+                ob = tuple(int(i) for i in ch["order_parameter_bond"])
+                channels.append(
+                    DissociationChannel(
+                        name=str(ch.get("name", "dissoc")),
+                        fragments=frags,
+                        order_parameter_bond=(ob[0], ob[1]),
+                    )
+                )
             states.append(
                 FragmentState(
                     key=str(key),
@@ -109,6 +153,7 @@ class DiabaticStateLibrary:
                     multiplicity=int(spec["multiplicity"]),
                     elements=elements,
                     bonds=bonds,
+                    dissociation=tuple(channels),
                 )
             )
         return cls(states)
@@ -144,12 +189,19 @@ class FragmentAssignment:
     ``fragments`` is a list of ``(FragmentState, atom_indices)`` where ``atom_indices`` are
     frame-local and ordered to match the state's canonical ``elements``.
 
+    ``inter_bonds`` are channels that cross fragment boundaries (the bonds broken by a
+    dissociation, in frame-local atom indices); they belong to no single fragment and carry the
+    switching function (§2.4.3). A plain one-fragment assignment has none. ``order_bond`` is the
+    reaction-coordinate bond (frame-local) whose length drives the validity envelopes, or None.
+
     The array properties are the form the model consumes; all indices stay frame-local and are
     re-offset when frames are concatenated into a ragged batch.
     """
 
     n_atoms: int
     fragments: list[tuple[FragmentState, np.ndarray]]
+    inter_bonds: tuple[tuple[int, int], ...] = ()
+    order_bond: tuple[int, int] | None = None
 
     @property
     def n_fragments(self) -> int:
@@ -168,23 +220,41 @@ class FragmentAssignment:
 
     @property
     def bond_index(self) -> np.ndarray:
-        """``(2, n_bonds)`` -- the channel graph in frame-local atom indices."""
+        """``(2, n_bonds)`` -- the channel graph in frame-local atom indices.
+
+        Intra-fragment channels first (in fragment order), then the inter-fragment channels;
+        ``bond_is_inter`` marks the split.
+        """
         cols = [
             (atoms[a], atoms[b])
             for state, atoms in self.fragments
             for a, b in state.bonds
         ]
+        cols += [(a, b) for a, b in self.inter_bonds]
         if not cols:
             return np.zeros((2, 0), dtype=np.int64)
         return np.asarray(cols, dtype=np.int64).T
 
     @property
+    def bond_is_inter(self) -> np.ndarray:
+        """``(n_bonds,)`` bool -- True for inter-fragment channels (which carry the switch)."""
+        n_intra = sum(state.n_bonds for state, _ in self.fragments)
+        out = np.zeros(n_intra + len(self.inter_bonds), dtype=bool)
+        out[n_intra:] = True
+        return out
+
+    @property
     def bond_fragment(self) -> np.ndarray:
-        """``(n_bonds,)`` -- which fragment each channel belongs to."""
-        return np.asarray(
-            [a for a, (state, _) in enumerate(self.fragments) for _ in state.bonds],
-            dtype=np.int64,
-        )
+        """``(n_bonds,)`` -- fragment id each intra channel belongs to; -1 for inter channels."""
+        intra = [a for a, (state, _) in enumerate(self.fragments) for _ in state.bonds]
+        return np.asarray(intra + [-1] * len(self.inter_bonds), dtype=np.int64)
+
+    def order_parameter(self, positions: np.ndarray) -> float:
+        """Length of the reaction-coordinate bond (Angstrom); NaN if this diabat has none."""
+        if self.order_bond is None:
+            return float("nan")
+        a, b = self.order_bond
+        return float(np.linalg.norm(np.asarray(positions)[a] - np.asarray(positions)[b]))
 
     @property
     def fragment_charge(self) -> np.ndarray:
@@ -241,3 +311,86 @@ def assign_from_headers(
     return FragmentAssignment(
         n_atoms=len(got), fragments=[(state, np.arange(len(got), dtype=np.int64))]
     )
+
+
+def _dissociated_assignment(
+    library: DiabaticStateLibrary,
+    parent: FragmentState,
+    symbols: tuple[str, ...],
+    channel: DissociationChannel,
+) -> FragmentAssignment:
+    """Build the :class:`FragmentAssignment` for one dissociation channel of ``parent``.
+
+    Each sub-state's element sequence is validated against the library (as in
+    :func:`assign_from_headers`), its own ``bonds`` become intra-fragment channels, and the
+    parent bonds crossing the partition become inter-fragment channels carrying the switch.
+    """
+    n = len(symbols)
+    atom_to_frag = np.full(n, -1, dtype=np.int64)
+    fragments: list[tuple[FragmentState, np.ndarray]] = []
+    for f_idx, (sub_key, atoms) in enumerate(channel.fragments):
+        sub = library[sub_key]
+        got = tuple(symbols[i] for i in atoms)
+        if got != sub.elements:
+            raise ValueError(
+                f"dissociation {channel.name!r} of {parent.key!r}: fragment atoms {atoms} are "
+                f"{got}, but sub-state {sub.key!r} is defined for {sub.elements}"
+            )
+        fragments.append((sub, np.asarray(atoms, dtype=np.int64)))
+        atom_to_frag[list(atoms)] = f_idx
+
+    # Parent bonds whose two atoms land in different fragments are the broken (inter) channels.
+    inter = tuple(
+        (a, b) for a, b in parent.bonds if atom_to_frag[a] != atom_to_frag[b]
+    )
+    return FragmentAssignment(
+        n_atoms=n, fragments=fragments, inter_bonds=inter,
+        order_bond=channel.order_parameter_bond,
+    )
+
+
+def enumerate_diabats(
+    library: DiabaticStateLibrary,
+    symbols: Sequence[str],
+    *,
+    config_type: str,
+    charge: float | None = None,
+    multiplicity: int | None = None,
+) -> list[FragmentAssignment]:
+    """The active space of a frame: the bound parent state plus each dissociated diabat.
+
+    Element ``[0]`` is always the bound assignment (identical to :func:`assign_from_headers`);
+    the rest are the parent's declared dissociation channels. Every assignment is tagged with the
+    same reaction-coordinate bond so their validity envelopes read a common order parameter. A
+    parent with no ``dissociation`` block yields a single (bound) diabat -- the Phase-1 behavior.
+    """
+    bound = assign_from_headers(
+        library, symbols, config_type=config_type, charge=charge, multiplicity=multiplicity,
+    )
+    parent = library[config_type]
+    symbols = tuple(str(s) for s in symbols)
+    if parent.dissociation:
+        # All diabats of one reactive center share the reaction coordinate; this demo declares a
+        # single channel per state, so the bound state inherits that channel's order bond.
+        bound.order_bond = parent.dissociation[0].order_parameter_bond
+    return [bound] + [
+        _dissociated_assignment(library, parent, symbols, channel)
+        for channel in parent.dissociation
+    ]
+
+
+def finest_common_refinement(assignments: Sequence[FragmentAssignment]) -> np.ndarray:
+    """Meet of the active partitions: ``fragment_idx`` on the finest common refinement.
+
+    Two atoms share a block iff they share a fragment in *every* active assignment
+    (docs/mixture_of_diabatic_embeddings.md §2.4.1). The SQE solve of the mixture runs on this
+    partition, so that inter-fragment channels of any active diabat are resolved consistently.
+    """
+    if not assignments:
+        raise ValueError("no assignments to refine")
+    n = assignments[0].n_atoms
+    if any(a.n_atoms != n for a in assignments):
+        raise ValueError("assignments cover different atom counts")
+    labels = np.stack([a.fragment_idx for a in assignments], axis=1)  # (n, n_assign)
+    _, inv = np.unique(labels, axis=0, return_inverse=True)
+    return inv.astype(np.int64).reshape(n)

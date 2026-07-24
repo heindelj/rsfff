@@ -48,8 +48,7 @@ BASIS = "def2-svpd"
 N_SAMPLES = 500
 TEMPERATURE = 500.0  # Kelvin
 
-# Charge for each species (multiplicity is 1 for all -- every species has an
-# even number of electrons, so the rhf reference is valid throughout).
+# Charge for each species.
 CHARGES = {
     "h2o": 0,
     "ch4": 0,
@@ -61,7 +60,23 @@ CHARGES = {
     "hso4-": -1,
     "oh-": -1,
     "so42-": -2,
+    "oh": 0,          # neutral OH radical (open-shell doublet)
 }
+
+# Spin multiplicity (2S+1). Defaults to 1 (closed-shell, rhf/rks) for any species not listed;
+# open-shell species use an unrestricted reference (uhf -> uks for the b3lyp KS-DFT method).
+MULTIPLICITIES = {
+    "oh": 2,          # OH radical: X 2Pi
+}
+
+
+def mult_for(name):
+    return MULTIPLICITIES.get(name, 1)
+
+
+def reference_for(mult):
+    """Psi4 reference keyword; for a KS-DFT method 'uhf'->UKS and 'rhf'->RKS."""
+    return "uhf" if mult > 1 else "rhf"
 
 
 # ---------------------------------------------------------------------------
@@ -171,14 +186,17 @@ def write_frame(fh, symbols, coords, data, meta):
 # ---------------------------------------------------------------------------
 # Reference-data labeling (validated against Psi4 1.11 analytical engines)
 # ---------------------------------------------------------------------------
-def compute_reference_data(natoms, method=METHOD, basis=BASIS, field_step=1e-3):
+def compute_reference_data(natoms, method=METHOD, basis=BASIS, field_step=1e-3,
+                           reference="rhf"):
     """Label the currently active molecule with all requested properties.
 
     Returns energy (Hartree), forces (Hartree/Bohr), dipole (e*a0), quadrupole
     (e*a0^2), polarizability (a0^3), and dipole derivatives (e), all in atomic
-    units. The active molecule must already carry the correct charge and be
-    fixed in a definite Cartesian frame (no_com/no_reorient) so that forces and
-    coordinates share an orientation.
+    units. The active molecule must already carry the correct charge/multiplicity
+    and be fixed in a definite Cartesian frame (no_com/no_reorient) so that forces
+    and coordinates share an orientation. ``reference`` selects the SCF reference
+    (``uhf`` for open-shell species, verified to drive the same property engines
+    -- CPHF polarizability and finite-field dipole derivatives -- under UKS).
 
     Design notes (Psi4 1.11):
       * ``properties(ref_wfn=...)`` cannot seed an SCF, so orbital reuse across
@@ -194,7 +212,7 @@ def compute_reference_data(natoms, method=METHOD, basis=BASIS, field_step=1e-3):
     psi4.set_options(
         {
             "basis": basis,
-            "reference": "rhf",
+            "reference": reference,
             "e_convergence": 1e-9,
             "d_convergence": 1e-9,
             "perturb_h": False,
@@ -267,6 +285,8 @@ def process(name):
         return
 
     charge = charge_for(name)
+    mult = mult_for(name)
+    reference = reference_for(mult)
     symbols, coords = read_xyz(xyz_path)
 
     # Open a flushed, human-monitorable progress log for this molecule.
@@ -274,7 +294,8 @@ def process(name):
     _progress_fh = open(progress_path, "w", buffering=1)
     t_start = time.time()
     try:
-        log(f"=== {name}  (charge={charge:+d}, mult=1, {len(symbols)} atoms) ===")
+        log(f"=== {name}  (charge={charge:+d}, mult={mult}, ref={reference}, "
+            f"{len(symbols)} atoms) ===")
         log(f"progress log: {progress_path}")
 
         psi4.core.clean()
@@ -283,14 +304,14 @@ def process(name):
         psi4.set_options(
             {
                 "basis": BASIS,
-                "reference": "rhf",
+                "reference": reference,
                 "e_convergence": 1e-8,
                 "d_convergence": 1e-8,
             }
         )
 
         # 1. Optimize the reference geometry.
-        build_geometry(symbols, coords, charge)
+        build_geometry(symbols, coords, charge, mult=mult)
         log(f"[{name}] optimizing at {METHOD}/{BASIS} ...")
         psi4.optimize(METHOD)
 
@@ -314,10 +335,14 @@ def process(name):
         with open(out_path, "w", buffering=1) as fh:
             for idx, geom in enumerate(geometries):
                 psi4.core.clean()
-                build_geometry(opt_symbols, geom, charge, fix_frame=True)
+                # build_geometry is inside the try: a rare Wigner sample can trip psi4's
+                # point-group detection ("Unrecognized point group bits") even under
+                # `symmetry c1`, and one bad geometry must not abort the whole run.
                 try:
+                    build_geometry(opt_symbols, geom, charge, mult=mult, fix_frame=True)
                     data = compute_reference_data(
-                        len(opt_symbols), method=METHOD, basis=BASIS
+                        len(opt_symbols), method=METHOD, basis=BASIS,
+                        reference=reference,
                     )
                 except Exception as exc:  # noqa: BLE001
                     log(f"[{name}] sample {idx}: FAILED ({exc})")
@@ -326,7 +351,7 @@ def process(name):
                     "name": name,
                     "index": idx,
                     "charge": charge,
-                    "mult": 1,
+                    "mult": mult,
                 }
                 write_frame(fh, opt_symbols, geom, data, meta)
                 fh.flush()
