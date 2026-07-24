@@ -16,3 +16,5 @@ Requires-Dist: cuequivariance-ops-torch-cu12; extra == "cue"
 Provides-Extra: qc
 Requires-Dist: pyscf>=2.14; extra == "qc"
 Requires-Dist: geometric; extra == "qc"
+Requires-Dist: pyscf-properties; extra == "qc"
+Requires-Dist: joblib>=1.3; extra == "qc"

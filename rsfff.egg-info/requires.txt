@@ -13,3 +13,5 @@ cuequivariance-ops-torch-cu12
 [qc]
 pyscf>=2.14
 geometric
+pyscf-properties
+joblib>=1.3

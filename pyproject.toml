@@ -29,6 +29,11 @@ cue = [
 qc = [
     "pyscf>=2.14",
     "geometric",
+    # Analytic CPHF polarizability for the CPU backend (rhf/rks/uhf/uks). The GPU
+    # backend uses gpu4pyscf.properties instead.
+    "pyscf-properties",
+    # Parallel label stage (loky backend; safe to drive from a Jupyter kernel).
+    "joblib>=1.3",
 ]
 
 [project.scripts]

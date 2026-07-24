@@ -87,17 +87,23 @@ def frame_header(data, meta):
     """Build the extended-XYZ comment line for one labeled frame.
 
     ``data`` holds the computed properties (energy, forces, dipole, quadrupole,
-    polarizability, dipole_derivatives); ``meta`` holds bookkeeping keys
-    (charge, mult, method, basis, name, index, temperature). Key order matches
-    the existing ``data/labels/*.extxyz`` schema exactly.
+    polarizability, and optionally dipole_derivatives); ``meta`` holds
+    bookkeeping keys (charge, mult, method, basis, name, index, temperature).
+    Key order matches the existing ``data/labels/*.extxyz`` schema.
+
+    ``dipole_derivatives`` is emitted only when present in ``data`` -- it is
+    expensive and off by default (see ``compute.compute_reference_data``).
     """
-    return (
+    head = (
         "Properties=species:S:1:pos:R:3:forces:R:3 "
         f'energy={data["energy"]:.12e} '
         f'dipole="{fmt(data["dipole"])}" '
         f'quadrupole="{fmt(data["quadrupole"])}" '
         f'polarizability="{fmt(data["polarizability"])}" '
-        f'dipole_derivatives="{fmt(data["dipole_derivatives"])}" '
+    )
+    if "dipole_derivatives" in data:
+        head += f'dipole_derivatives="{fmt(data["dipole_derivatives"])}" '
+    return head + (
         f'charge={meta["charge"]} multiplicity={meta["mult"]} '
         f'method={meta["method"]} basis={meta["basis"]} '
         f'config_type={meta["name"]} sample_index={meta["index"]} '

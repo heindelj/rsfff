@@ -29,7 +29,7 @@ from __future__ import annotations
 import numpy as np
 from pyscf.data import nist
 
-from .backend import as_backend_array, make_mf, make_mol, to_numpy
+from .backend import HAVE_GPU, as_backend_array, make_mf, make_mol, to_numpy
 
 _BOHR = nist.BOHR  # Angstrom per Bohr
 
@@ -187,38 +187,123 @@ def _hessian_to_freqs(hessian, masses_amu):
 
 
 # ---------------------------------------------------------------------------
-# Stage 4: full property labeling of one structure
+# Analytic (CPSCF) response: polarizability and dipole derivatives
 # ---------------------------------------------------------------------------
-def compute_reference_data(symbols, coords, charge, spin, xc, basis,
-                           field_step=1e-3, disp_step=1e-3):
-    """Label one geometry with energy/forces/dipole/quadrupole/polarizability/APT.
+_warned = set()
 
-    ``field_step`` (a.u. field) drives the polarizability; ``disp_step`` (Bohr)
-    drives the dipole-derivative (APT) finite differences. Returns a dict of
-    host numpy arrays in atomic units matching the extxyz schema.
+
+def _warn_once(msg):
+    if msg not in _warned:
+        _warned.add(msg)
+        print(f"[qcgen] {msg}", flush=True)
+
+
+def _polarizability_cpscf(mf, mol, spin):
+    """Static dipole polarizability (a0^3) from coupled-perturbed SCF.
+
+    Uses the backend's validated CPHF response: ``gpu4pyscf.properties`` on GPU,
+    ``pyscf.prop.polarizability`` (the pyscf-properties extension) on CPU.
+    Costs 3 CPHF solves instead of 6 field-perturbed SCF runs.
     """
-    mol = make_mol(symbols, coords, charge, spin, basis)
-    mf, energy, dm0 = _run_scf(mol, xc, spin)
+    if HAVE_GPU:  # pragma: no cover - GPU-only path
+        from gpu4pyscf.properties import polarizability as gpu_pol
 
-    forces = -to_numpy(mf.nuc_grad_method().kernel())
-    dipole = _dipole(mf, mol)
-    quadrupole = _quadrupole(mf, mol)
+        return np.asarray(to_numpy(gpu_pol.eval_polarizability(mf)))
 
-    # Polarizability: central difference of the dipole under +/- field.
-    polarizability = np.zeros((3, 3))
+    if int(spin) == 0:
+        from pyscf.prop.polarizability.rks import Polarizability
+    else:
+        from pyscf.prop.polarizability.uks import Polarizability
+    return np.asarray(Polarizability(mf).polarizability())
+
+
+def _apt_cpscf(mf, mol, spin):
+    """Dipole derivatives dmu/dR (a.u.) from nuclear coupled-perturbed SCF.
+
+    No library exposes the atomic polar tensor directly (gpu4pyscf's IR module
+    builds it internally but returns only intensities), so it is assembled here
+    from the same CPSCF first-order orbitals the Hessian uses:
+
+        dmu_x/dR_{a,y} = -4 <r_x . dm1_y>  -  <d(r_x)/dR_a . dm0>  +  Z_a delta_xy
+
+    The three terms are the density response, the derivative of the dipole
+    integrals w.r.t. the basis functions riding on atom ``a``, and the nuclear
+    contribution. Contractions run on the host; only ``solve_mo1`` is on-backend.
+    Costs 3N CPSCF solves instead of 6N displaced SCF runs.
+
+    Returns ``(natm, 3, 3)`` indexed ``[atom, dR, dmu]``.
+    """
+    if int(spin) != 0:
+        # The 4x prefactor below assumes doubly-occupied orbitals; the
+        # open-shell generalization is not implemented, so use numerical APTs.
+        raise NotImplementedError("CPSCF APT is implemented for closed shell only")
+
+    hessobj = mf.Hessian()
+    h1ao = hessobj.make_h1(mf.mo_coeff, mf.mo_occ)
+    mo1, _ = hessobj.solve_mo1(mf.mo_energy, mf.mo_coeff, mf.mo_occ, h1ao)
+
+    mo_coeff = to_numpy(mf.mo_coeff)
+    mo_occ = to_numpy(mf.mo_occ)
+    mocc = mo_coeff[:, mo_occ > 0]
+    dm0 = to_numpy(mf.make_rdm1())
+
+    nao, natm = mol.nao, mol.natm
+    r_ao = mol.intor("int1e_r")  # <u| r |v>, (3, nao, nao)
+    # d/dR of the dipole integrals, non-zero only for AOs centred on the atom.
+    drdx = -mol.intor("int1e_irp").reshape(3, 3, nao, nao)
+    aoslices = mol.aoslice_by_atom()
+
+    apt = np.zeros((3, 3, natm))  # [dmu, dR, atom]
+    for ia in range(natm):
+        p0, p1 = aoslices[ia][2], aoslices[ia][3]
+        h11 = np.zeros((3, 3, nao, nao))
+        h11[:, :, :, p0:p1] += drdx[:, :, :, p0:p1]
+        h11[:, :, p0:p1, :] += drdx[:, :, :, p0:p1].transpose(0, 1, 3, 2)
+
+        # Backend convention differs: pyscf's solve_mo1 already returns the
+        # first-order orbitals in the AO basis (it applies mo_coeff internally),
+        # while gpu4pyscf returns them in the MO basis. Both come back shaped
+        # (3, nao, nocc) whenever nao == nmo, so this cannot be inferred from
+        # the array itself -- transform only on the GPU path.
+        m1 = to_numpy(mo1[ia])
+        if HAVE_GPU:  # pragma: no cover - GPU-only path
+            m1 = np.einsum("up,ypi->yui", mo_coeff, m1, optimize=True)
+        # dm1 is the density response; the factor 4 below supplies double
+        # occupancy (x2) and the complex-conjugate term (x2).
+        dm1 = np.einsum("yui,vi->yuv", m1, mocc, optimize=True)
+
+        t = -np.einsum("xuv,yuv->xy", r_ao, dm1, optimize=True) * 4.0
+        t -= np.einsum("xyuv,vu->xy", h11, dm0, optimize=True)
+        t += mol.atom_charge(ia) * np.eye(3)
+        apt[:, :, ia] = t
+
+    # [dmu, dR, atom] -> [atom, dR, dmu]
+    return apt.transpose(2, 1, 0)
+
+
+# ---------------------------------------------------------------------------
+# Numerical (finite-difference) response -- fallback and cross-check
+# ---------------------------------------------------------------------------
+def _polarizability_fd(mol, xc, spin, dm0, field_step):
+    """Polarizability by central difference of the dipole under +/- field."""
+    alpha = np.zeros((3, 3))
     for axis in range(3):
         f = np.zeros(3)
         f[axis] = field_step
         mu_p = _dipole_with_field(mol, xc, spin, +f, dm0=dm0)
         mu_m = _dipole_with_field(mol, xc, spin, -f, dm0=dm0)
-        polarizability[:, axis] = (mu_p - mu_m) / (2.0 * field_step)
-    polarizability = 0.5 * (polarizability + polarizability.T)
+        alpha[:, axis] = (mu_p - mu_m) / (2.0 * field_step)
+    return 0.5 * (alpha + alpha.T)
 
-    # Dipole derivatives (APT): central difference of the dipole under +/-
-    # displacement of each nuclear Cartesian. Index [atom, dR, dmu].
-    natm = len(symbols)
+
+def _apt_fd(mol, xc, spin, dm0, disp_step):
+    """Dipole derivatives by central difference under nuclear displacement.
+
+    Returns ``(natm, 3, 3)`` indexed ``[atom, dR, dmu]``.
+    """
+    natm = mol.natm
     base = mol.atom_coords()  # Bohr
-    dipole_derivatives = np.zeros((natm, 3, 3))
+    apt = np.zeros((natm, 3, 3))
     for a in range(natm):
         for c in range(3):
             mus = []
@@ -228,13 +313,71 @@ def compute_reference_data(symbols, coords, charge, spin, xc, basis,
                 m2 = mol.set_geom_(disp, unit="Bohr", inplace=False)
                 mf2, _, _ = _run_scf(m2, xc, spin, dm0=dm0)
                 mus.append(_dipole(mf2, m2))
-            dipole_derivatives[a, c, :] = (mus[0] - mus[1]) / (2.0 * disp_step)
+            apt[a, c, :] = (mus[0] - mus[1]) / (2.0 * disp_step)
+    return apt
 
-    return {
+
+# ---------------------------------------------------------------------------
+# Stage 4: full property labeling of one structure
+# ---------------------------------------------------------------------------
+def compute_reference_data(symbols, coords, charge, spin, xc, basis,
+                           response="cpscf", with_dipole_derivatives=False,
+                           field_step=1e-3, disp_step=1e-3):
+    """Label one geometry with energy/forces/dipole/quadrupole/polarizability.
+
+    ``with_dipole_derivatives`` (default ``False``) adds the atomic polar tensor
+    dmu/dR. It is off by default because it dominates the cost of this routine:
+    even analytically it needs a Hessian object plus 3N coupled-perturbed solves
+    (and 6N SCF runs numerically), versus 3 solves for everything else. When
+    ``False`` the ``dipole_derivatives`` key is absent from the result and from
+    the extxyz header.
+
+    ``response`` selects how the polarizability and dipole derivatives are
+    obtained:
+
+      * ``"cpscf"`` (default) -- analytic coupled-perturbed SCF. Costs
+        ``3 + 3N`` linear solves on top of one SCF, versus ``6 + 6N`` full SCF
+        runs, and carries no finite-difference truncation error. Falls back
+        automatically where unsupported (e.g. UKS + non-local correlation).
+      * ``"finite-difference"`` -- numerical differentiation, using
+        ``field_step`` (a.u. field) and ``disp_step`` (Bohr). Always available;
+        useful as an independent cross-check.
+
+    The returned dict reports which path ran under ``response_method``. All
+    values are host numpy arrays in atomic units matching the extxyz schema.
+    """
+    mol = make_mol(symbols, coords, charge, spin, basis)
+    mf, energy, dm0 = _run_scf(mol, xc, spin)
+
+    forces = -to_numpy(mf.nuc_grad_method().kernel())
+    dipole = _dipole(mf, mol)
+    quadrupole = _quadrupole(mf, mol)
+
+    used = response
+    if response == "cpscf":
+        try:
+            polarizability = _polarizability_cpscf(mf, mol, spin)
+            if with_dipole_derivatives:
+                dipole_derivatives = _apt_cpscf(mf, mol, spin)
+        except (NotImplementedError, ImportError, AttributeError) as exc:
+            # e.g. UKS + non-local correlation, or a backend without an analytic
+            # response path. Numerical differentiation always works.
+            used = "finite-difference"
+            _warn_once(f"CPSCF response unavailable ({type(exc).__name__}: {exc});"
+                       " falling back to finite difference")
+    if used != "cpscf":
+        polarizability = _polarizability_fd(mol, xc, spin, dm0, field_step)
+        if with_dipole_derivatives:
+            dipole_derivatives = _apt_fd(mol, xc, spin, dm0, disp_step)
+
+    data = {
         "energy": energy,
         "forces": forces,
         "dipole": dipole,
         "quadrupole": quadrupole,
         "polarizability": polarizability,
-        "dipole_derivatives": dipole_derivatives,
+        "response_method": used,
     }
+    if with_dipole_derivatives:
+        data["dipole_derivatives"] = dipole_derivatives
+    return data

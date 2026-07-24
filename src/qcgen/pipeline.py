@@ -107,6 +107,19 @@ class PipelineConfig:
     n_samples: int = 500
     seed: int = 0
     verbose: bool = True
+    # How polarizability / dipole derivatives are obtained during labeling:
+    # "cpscf" (analytic, default) or "finite-difference" (numerical cross-check).
+    response: str = "cpscf"
+    # Dipole derivatives (atomic polar tensors) dominate labeling cost -- even
+    # analytically they need a Hessian object plus 3N coupled-perturbed solves,
+    # versus 3 for everything else -- so they are off by default. Turning this on
+    # adds a dipole_derivatives entry to the extxyz header.
+    with_dipole_derivatives: bool = False
+    # Worker processes for the label stage, which is embarrassingly parallel over
+    # sampled structures. ``None`` auto-selects: 1 on the GPU backend (a single
+    # device, so processes would only contend), otherwise cpu_count-1. Each
+    # worker is pinned to one thread to avoid oversubscription.
+    n_workers: "int | None" = None
 
     def __post_init__(self):
         self.root = Path(self.root)
@@ -263,42 +276,126 @@ def _do_wigner(cfg, name):
     )
 
 
+def resolve_workers(cfg):
+    """Number of label-stage worker processes to use.
+
+    ``cfg.n_workers=None`` auto-selects. The GPU backend is pinned to 1: there is
+    a single device, so extra processes would contend for it rather than help.
+    """
+    from .backend import HAVE_GPU
+
+    if HAVE_GPU:
+        return 1
+    if cfg.n_workers is not None:
+        return max(1, int(cfg.n_workers))
+    return max(1, (os.cpu_count() or 1) - 1)
+
+
+def _parallel_results(tasks, n_workers):
+    """Yield ``_label_one`` results in task order, across ``n_workers`` processes.
+
+    Uses joblib's loky backend rather than raw ``multiprocessing``: loky is safe
+    to call from a Jupyter kernel (plain ``spawn`` re-imports ``__main__``, which
+    re-executes a caller's module-level code), and ``return_as="generator"``
+    preserves order while letting us stream frames to disk as they finish.
+
+    Each worker is pinned to one thread -- we parallelize over frames, so
+    per-SCF threading inside a worker would oversubscribe the machine.
+    """
+    from joblib import Parallel, delayed, parallel_config
+
+    # inner_max_num_threads=1 caps BLAS/OpenMP inside each worker. Staying inside
+    # the context while yielding keeps that configuration active for the whole
+    # consumption of the generator.
+    with parallel_config(backend="loky", inner_max_num_threads=1):
+        runner = Parallel(n_jobs=n_workers, return_as="generator")
+        yield from runner(delayed(_label_one)(t) for t in tasks)
+
+
+def _label_one(task):
+    """Label a single structure. Module-level so it is picklable by ``spawn``.
+
+    Returns ``(index, data, traceback_or_None)``; failures are returned rather
+    than raised so one bad frame cannot kill the pool.
+    """
+    (idx, symbols, coords, charge, spin, xc, basis, response, with_dd) = task
+    try:
+        data = compute.compute_reference_data(
+            symbols, coords, charge, spin, xc, basis,
+            response=response, with_dipole_derivatives=with_dd,
+        )
+        return idx, data, None
+    except Exception:  # noqa: BLE001
+        return idx, None, traceback.format_exc()
+
+
 def _do_label(cfg, name):
     charge, mult = charge_mult_for(name)
     spin = mult - 1
     symbols, frames = extxyz.read_geoms(cfg.dir(WIGNER) / f"{name}.extxyz")
     out_path = cfg.dir(LABELED) / f"{name}.extxyz"
     tmp_path = out_path.with_suffix(".extxyz.partial")
+    n_workers = resolve_workers(cfg)
+    n_frames = len(frames)
+
+    if n_workers > 1:
+        try:
+            import joblib  # noqa: F401
+        except ImportError:
+            _log(cfg, "    joblib not installed -- labeling serially"
+                      " (pip install joblib to parallelize)")
+            n_workers = 1
+
+    tasks = [
+        (i, symbols, frames[i], charge, spin, cfg.xc, cfg.basis,
+         cfg.response, cfg.with_dipole_derivatives)
+        for i in range(n_frames)
+    ]
+    _log(cfg, f"    {name}: labeling {n_frames} frames on {n_workers} worker(s)")
+
     n_ok, n_bad = 0, 0
     with open(tmp_path, "w", buffering=1) as fh:
-        for idx, coords in enumerate(frames):
-            # Isolate per-frame failures (e.g. a distorted geometry that fails
-            # to converge) so one bad sample cannot discard the whole species.
-            try:
-                data = compute.compute_reference_data(
-                    symbols, coords, charge, spin, cfg.xc, cfg.basis
-                )
-            except Exception:  # noqa: BLE001
-                n_bad += 1
-                err = cfg.dir(FAILED) / f"{name}.frame{idx}.error.log"
-                err.write_text(traceback.format_exc())
-                continue
-            meta = {
-                "name": name, "index": idx, "charge": charge, "mult": mult,
-                "method": cfg.xc, "basis": cfg.basis,
-                "temperature": cfg.temperature,
-            }
-            extxyz.write_frame(fh, symbols, coords, data, meta)
-            fh.flush()
-            os.fsync(fh.fileno())
-            n_ok += 1
-            if cfg.verbose and (idx + 1) % 25 == 0:
-                _log(cfg, f"    {name}: labeled {idx + 1}/{len(frames)}")
+        if n_workers > 1:
+            results = _parallel_results(tasks, n_workers)
+        else:
+            results = (_label_one(t) for t in tasks)
+        n_ok, n_bad = _consume_labels(
+            cfg, fh, name, symbols, frames, results, charge, mult, n_frames
+        )
+
     if n_ok == 0:
         os.remove(tmp_path)
-        raise RuntimeError(f"{name}: all {len(frames)} frames failed to label")
+        raise RuntimeError(f"{name}: all {n_frames} frames failed to label")
     _log(cfg, f"    {name}: {n_ok} labeled, {n_bad} skipped")
     os.replace(tmp_path, out_path)  # atomic: only a complete file appears
+
+
+def _consume_labels(cfg, fh, name, symbols, frames, results, charge, mult,
+                    n_frames):
+    """Stream ordered label results to ``fh``; returns ``(n_ok, n_bad)``.
+
+    Per-frame failures are logged to ``_failed/`` and skipped, so one
+    non-converging distorted geometry cannot discard the whole species.
+    """
+    n_ok, n_bad, seen = 0, 0, 0
+    for idx, data, err in results:
+        seen += 1
+        if err is not None:
+            n_bad += 1
+            (cfg.dir(FAILED) / f"{name}.frame{idx}.error.log").write_text(err)
+            continue
+        meta = {
+            "name": name, "index": idx, "charge": charge, "mult": mult,
+            "method": cfg.xc, "basis": cfg.basis,
+            "temperature": cfg.temperature,
+        }
+        extxyz.write_frame(fh, symbols, frames[idx], data, meta)
+        fh.flush()
+        os.fsync(fh.fileno())
+        n_ok += 1
+        if cfg.verbose and seen % 25 == 0:
+            _log(cfg, f"    {name}: labeled {seen}/{n_frames}")
+    return n_ok, n_bad
 
 
 # Stage descriptors (used by the notebook: run_stage(STAGE_*, cfg)).
