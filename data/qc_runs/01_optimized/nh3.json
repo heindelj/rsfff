@@ -1,0 +1,9 @@
+{
+  "name": "nh3",
+  "charge": 0,
+  "mult": 1,
+  "spin": 0,
+  "xc": "wB97M-V",
+  "basis": "def2-svpd",
+  "opt_energy": -56.48686223714181
+}

@@ -1,0 +1,9 @@
+{
+  "name": "h3o+",
+  "charge": 1,
+  "mult": 1,
+  "spin": 0,
+  "xc": "wB97M-V",
+  "basis": "def2-svpd",
+  "opt_energy": -76.61561616511429
+}

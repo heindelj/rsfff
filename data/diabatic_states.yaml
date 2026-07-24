@@ -1,0 +1,53 @@
+# Diabatic fragment-state library.
+#
+# Each entry is one formal diabatic state of a chemical fragment: its element ordering, formal
+# charge Q_a, spin multiplicity 2S_a+1, and -- critically -- its **channel graph** (the covalent
+# bonds along which split charge may flow, docs/mixture_of_diabatic_embeddings.md §2.4.3).
+#
+# The bond graph is a property of the *diabatic state*, not of the geometry. A stretched O-H in a
+# distorted H3O+ frame keeps its channel because the H3O+ diabat says the bond is there; a
+# hydrogen that merely drifts to bonding distance acquires no channel unless a diabat places it
+# in the fragment. Nothing in the code infers bonds from distances.
+#
+# `elements` is the canonical atom ordering; `bonds` index into it. Keys match the `config_type`
+# header written by scripts/generate_dataset.py (lookup is case-insensitive).
+#
+# Phase 1 covers only the labeled monomers. Phase 2/3 grow this file with radical states,
+# merged-pair diabats (e.g. the bound NaCl of §4.1), and validity envelopes.
+
+states:
+  # --- atomic reference states -------------------------------------------------------------
+  # The states from which all molecular features are built (§2.1): each carries a formal charge
+  # and spin, no bonds (a lone atom has no channel), and an isolated-atom QC anchor in
+  # data/atomic_reference_states.json. A single atom has an all-zero SOAP density, so every
+  # prediction head reduces to a function of its reference embedding alone -- these states are
+  # what pin that limit. Multiplicities are the atomic ground terms; see
+  # scripts/atomic_reference_states.py.
+  h+:   {charge: +1, multiplicity: 1, elements: [H], bonds: []}
+  h:    {charge:  0, multiplicity: 2, elements: [H], bonds: []}
+  h-:   {charge: -1, multiplicity: 1, elements: [H], bonds: []}
+  o+:   {charge: +1, multiplicity: 4, elements: [O], bonds: []}
+  o:    {charge:  0, multiplicity: 3, elements: [O], bonds: []}
+  o-:   {charge: -1, multiplicity: 2, elements: [O], bonds: []}
+  # No o2-: the free O(2-) ion does not bind its second electron in the gas phase, so there is
+  # no reference state to anchor it to. Doubly-reduced oxygen enters as part of a fragment
+  # (a lattice or solvated species), never as an isolated atomic reference.
+
+  # --- molecular fragment states -----------------------------------------------------------
+  h2o:
+    charge: 0
+    multiplicity: 1
+    elements: [O, H, H]
+    bonds: [[0, 1], [0, 2]]
+
+  h3o+:
+    charge: +1
+    multiplicity: 1
+    elements: [O, H, H, H]
+    bonds: [[0, 1], [0, 2], [0, 3]]
+
+  oh-:
+    charge: -1
+    multiplicity: 1
+    elements: [O, H]
+    bonds: [[0, 1]]

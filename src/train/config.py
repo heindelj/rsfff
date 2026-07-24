@@ -37,6 +37,8 @@ class DataConfig:
     path: str | list[str] = "data/labels/h2o.extxyz"
     reference_energies: str = "data/atomic_references.json"
     isolated_species: str | None = None   # extxyz of integer-charge anchor systems
+    diabatic_states: str | None = None    # YAML fragment-state library (channel graphs)
+    atomic_reference_states: str | None = None  # isolated-atom E/alpha grid at integer charge
     holdout_fraction: float = 0.1
     seed: int = 0
 
@@ -55,6 +57,29 @@ class EEMConfig:
 
 
 @dataclass
+class MonomerConfig:
+    """Phase-1 monomer stack: reference embedding, state-decorated density, 1-body heads."""
+
+    emb_dim: int = 32               # reference-embedding width (also the head conditioning slot)
+    weight_channels: int = 8        # Kw learned density channels; feature width ~ (Kw*n_max)^2
+    hidden: int = 64                # head MLP width
+    depth: int = 2
+    equiv_channels: int = 32        # channel reduction of the chivec / alpha heads
+
+
+@dataclass
+class SQEConfig:
+    """Split-charge equilibration: channel compliance head and on-site hardness."""
+
+    s_init: float = 0.5             # initial channel compliance (e^2/Ha)
+    s_floor: float = 0.0            # lower bound on compliance; 0 keeps closure exact
+    n_radial: int = 8               # Bessel functions in the pair compliance head
+    eta_init: float = 0.5           # fallback per-element hardness when no IP/EA is available
+    eta_floor: float = 0.05         # keeps the charge problem strongly convex
+    psd_floor: float = 1.0e-4       # minimum eigenvalue of the atomic alphas
+
+
+@dataclass
 class TrainConfig:
     epochs: int = 200
     batch_size: int = 32
@@ -68,6 +93,10 @@ class TrainConfig:
     dmu_dr_every: int = 1           # apply the (expensive) dmu/dR term every k steps
     alpha_weight: float = 0.0
     iso_weight: float = 0.0         # isolated-species integer-charge anchors
+    atomic_ref_weight: float = 0.0  # isolated-atom energy anchors at integer charge
+    free_alpha_weight: float = 0.0  # isolated-atom polarizability anchors
+    unbound_weight: float = 0.0     # relative weight of anion states that are unbound at this
+                                    # level of theory (H-, O2-); 0 drops them from the anchors
     q_l2_weight: float = 0.0
     eval_every: int = 10
 
@@ -81,8 +110,21 @@ class Config:
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     mlip: MLIPConfig = field(default_factory=MLIPConfig)
     eem: EEMConfig = field(default_factory=EEMConfig)
+    monomer: MonomerConfig = field(default_factory=MonomerConfig)
+    sqe: SQEConfig = field(default_factory=SQEConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+
+
+def _from_block(cls, block: dict):
+    """Build a config dataclass from a YAML block, keeping each field's declared type."""
+    kwargs = {}
+    for name, f in cls.__dataclass_fields__.items():
+        if name not in block:
+            continue
+        value = block[name]
+        kwargs[name] = f.type(value) if f.type in (int, float, str, bool) else value
+    return cls(**kwargs)
 
 
 def load_config(path) -> Config:
@@ -116,6 +158,13 @@ def load_config(path) -> Config:
         isolated_species=(
             str(data["isolated_species"]) if data.get("isolated_species") else None
         ),
+        diabatic_states=(
+            str(data["diabatic_states"]) if data.get("diabatic_states") else None
+        ),
+        atomic_reference_states=(
+            str(data["atomic_reference_states"])
+            if data.get("atomic_reference_states") else None
+        ),
         holdout_fraction=float(data.get("holdout_fraction", DataConfig.holdout_fraction)),
         seed=int(data.get("seed", DataConfig.seed)),
     )
@@ -128,6 +177,8 @@ def load_config(path) -> Config:
         eta_floor=float(eem.get("eta_floor", EEMConfig.eta_floor)),
         psd_floor=float(eem.get("psd_floor", EEMConfig.psd_floor)),
     )
+    monomer_cfg = _from_block(MonomerConfig, raw.get("monomer", {}) or {})
+    sqe_cfg = _from_block(SQEConfig, raw.get("sqe", {}) or {})
     train_cfg = TrainConfig(
         epochs=int(train.get("epochs", TrainConfig.epochs)),
         batch_size=int(train.get("batch_size", TrainConfig.batch_size)),
@@ -141,6 +192,13 @@ def load_config(path) -> Config:
         dmu_dr_every=int(train.get("dmu_dr_every", TrainConfig.dmu_dr_every)),
         alpha_weight=float(train.get("alpha_weight", TrainConfig.alpha_weight)),
         iso_weight=float(train.get("iso_weight", TrainConfig.iso_weight)),
+        atomic_ref_weight=float(
+            train.get("atomic_ref_weight", TrainConfig.atomic_ref_weight)
+        ),
+        free_alpha_weight=float(
+            train.get("free_alpha_weight", TrainConfig.free_alpha_weight)
+        ),
+        unbound_weight=float(train.get("unbound_weight", TrainConfig.unbound_weight)),
         q_l2_weight=float(train.get("q_l2_weight", TrainConfig.q_l2_weight)),
         eval_every=int(train.get("eval_every", TrainConfig.eval_every)),
     )
@@ -152,6 +210,8 @@ def load_config(path) -> Config:
         features=features_cfg,
         mlip=mlip_cfg,
         eem=eem_cfg,
+        monomer=monomer_cfg,
+        sqe=sqe_cfg,
         data=data_cfg,
         train=train_cfg,
     )

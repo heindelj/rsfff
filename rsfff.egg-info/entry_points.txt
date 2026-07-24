@@ -1,3 +1,4 @@
 [console_scripts]
 rsfff-train = rsfff.train.train:main
 rsfff-train-eem = rsfff.train.train_eem:main
+rsfff-train-monomer = rsfff.train.train_monomer:main

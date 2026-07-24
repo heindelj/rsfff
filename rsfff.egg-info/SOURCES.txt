@@ -11,11 +11,15 @@ src/features/equivariant_backend.py
 src/features/features.py
 src/features/weighted_bispectrum.py
 src/mlip/__init__.py
+src/mlip/diabats.py
 src/mlip/eem.py
 src/mlip/eem_model.py
 src/mlip/heads.py
 src/mlip/model.py
+src/mlip/monomer.py
+src/mlip/reference_states.py
 src/mlip/response_heads.py
+src/mlip/sqe.py
 src/qcgen/__init__.py
 src/qcgen/backend.py
 src/qcgen/compute.py
@@ -28,6 +32,7 @@ src/train/data.py
 src/train/loss.py
 src/train/train.py
 src/train/train_eem.py
+src/train/train_monomer.py
 tests/test_data.py
 tests/test_eem.py
 tests/test_free_atom.py

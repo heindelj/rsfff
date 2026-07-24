@@ -1,0 +1,9 @@
+{
+  "name": "h2so4",
+  "charge": 0,
+  "mult": 1,
+  "spin": 0,
+  "xc": "wB97M-V",
+  "basis": "def2-svpd",
+  "opt_energy": -699.8018568932863
+}

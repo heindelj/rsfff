@@ -1,0 +1,2000 @@
+2
+config_type=oh- sample_index=0 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1047675261
+H        -0.0000000000      -0.0000000000      -0.8514750134
+2
+config_type=oh- sample_index=1 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1058021229
+H         0.0000000000       0.0000000000      -0.8680282418
+2
+config_type=oh- sample_index=2 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1027022558
+H        -0.0000000000      -0.0000000000      -0.8184313283
+2
+config_type=oh- sample_index=3 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1048511096
+H        -0.0000000000      -0.0000000000      -0.8528123235
+2
+config_type=oh- sample_index=4 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1074214780
+H         0.0000000000       0.0000000000      -0.8939374214
+2
+config_type=oh- sample_index=5 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038210878
+H        -0.0000000000      -0.0000000000      -0.8363322935
+2
+config_type=oh- sample_index=6 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1000395653
+H        -0.0000000000      -0.0000000000      -0.7758291037
+2
+config_type=oh- sample_index=7 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1014717495
+H        -0.0000000000      -0.0000000000      -0.7987436077
+2
+config_type=oh- sample_index=8 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1080958641
+H         0.0000000000       0.0000000000      -0.9047273905
+2
+config_type=oh- sample_index=9 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1103497032
+H         0.0000000000       0.0000000000      -0.9407881174
+2
+config_type=oh- sample_index=10 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1077730048
+H         0.0000000000       0.0000000000      -0.8995617415
+2
+config_type=oh- sample_index=11 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1051062091
+H        -0.0000000000      -0.0000000000      -0.8568938364
+2
+config_type=oh- sample_index=12 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1146015233
+H         0.0000000000       0.0000000000      -1.0088159222
+2
+config_type=oh- sample_index=13 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1061499650
+H         0.0000000000       0.0000000000      -0.8735936070
+2
+config_type=oh- sample_index=14 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1102714147
+H         0.0000000000       0.0000000000      -0.9395355254
+2
+config_type=oh- sample_index=15 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1082103530
+H         0.0000000000       0.0000000000      -0.9065591765
+2
+config_type=oh- sample_index=16 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1074559449
+H         0.0000000000       0.0000000000      -0.8944888815
+2
+config_type=oh- sample_index=17 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1065412305
+H         0.0000000000       0.0000000000      -0.8798537339
+2
+config_type=oh- sample_index=18 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1036203139
+H        -0.0000000000      -0.0000000000      -0.8331199737
+2
+config_type=oh- sample_index=19 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1010888145
+H        -0.0000000000      -0.0000000000      -0.7926167673
+2
+config_type=oh- sample_index=20 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1057877970
+H         0.0000000000       0.0000000000      -0.8677990319
+2
+config_type=oh- sample_index=21 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0997889226
+H        -0.0000000000      -0.0000000000      -0.7718188994
+2
+config_type=oh- sample_index=22 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1079412151
+H         0.0000000000       0.0000000000      -0.9022530542
+2
+config_type=oh- sample_index=23 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038615551
+H        -0.0000000000      -0.0000000000      -0.8369797579
+2
+config_type=oh- sample_index=24 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1016467434
+H        -0.0000000000      -0.0000000000      -0.8015434564
+2
+config_type=oh- sample_index=25 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1048947984
+H        -0.0000000000      -0.0000000000      -0.8535113306
+2
+config_type=oh- sample_index=26 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1082554224
+H         0.0000000000       0.0000000000      -0.9072802735
+2
+config_type=oh- sample_index=27 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1089705779
+H         0.0000000000       0.0000000000      -0.9187225402
+2
+config_type=oh- sample_index=28 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071087194
+H         0.0000000000       0.0000000000      -0.8889333803
+2
+config_type=oh- sample_index=29 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1043884734
+H        -0.0000000000      -0.0000000000      -0.8454102875
+2
+config_type=oh- sample_index=30 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1093232592
+H         0.0000000000       0.0000000000      -0.9243653320
+2
+config_type=oh- sample_index=31 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1061113792
+H         0.0000000000       0.0000000000      -0.8729762460
+2
+config_type=oh- sample_index=32 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1059109461
+H         0.0000000000       0.0000000000      -0.8697693779
+2
+config_type=oh- sample_index=33 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1031018218
+H        -0.0000000000      -0.0000000000      -0.8248242593
+2
+config_type=oh- sample_index=34 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1044106874
+H        -0.0000000000      -0.0000000000      -0.8457657034
+2
+config_type=oh- sample_index=35 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038460558
+H        -0.0000000000      -0.0000000000      -0.8367317733
+2
+config_type=oh- sample_index=36 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1078956073
+H         0.0000000000       0.0000000000      -0.9015233433
+2
+config_type=oh- sample_index=37 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1057921266
+H         0.0000000000       0.0000000000      -0.8678683028
+2
+config_type=oh- sample_index=38 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1021262315
+H        -0.0000000000      -0.0000000000      -0.8092151170
+2
+config_type=oh- sample_index=39 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0992794483
+H        -0.0000000000      -0.0000000000      -0.7636674684
+2
+config_type=oh- sample_index=40 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1103241992
+H         0.0000000000       0.0000000000      -0.9403800607
+2
+config_type=oh- sample_index=41 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0991972190
+H        -0.0000000000      -0.0000000000      -0.7623518244
+2
+config_type=oh- sample_index=42 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0998715349
+H        -0.0000000000      -0.0000000000      -0.7731406693
+2
+config_type=oh- sample_index=43 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1021369214
+H        -0.0000000000      -0.0000000000      -0.8093861525
+2
+config_type=oh- sample_index=44 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1042108724
+H        -0.0000000000      -0.0000000000      -0.8425687259
+2
+config_type=oh- sample_index=45 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1065316911
+H         0.0000000000       0.0000000000      -0.8797011066
+2
+config_type=oh- sample_index=46 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0994215374
+H        -0.0000000000      -0.0000000000      -0.7659408497
+2
+config_type=oh- sample_index=47 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0974062436
+H        -0.0000000000      -0.0000000000      -0.7336967729
+2
+config_type=oh- sample_index=48 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0980427408
+H        -0.0000000000      -0.0000000000      -0.7438805311
+2
+config_type=oh- sample_index=49 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0999950101
+H        -0.0000000000      -0.0000000000      -0.7751162356
+2
+config_type=oh- sample_index=50 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038379996
+H        -0.0000000000      -0.0000000000      -0.8366028772
+2
+config_type=oh- sample_index=51 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1101205706
+H         0.0000000000       0.0000000000      -0.9371220673
+2
+config_type=oh- sample_index=52 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1052899078
+H         0.0000000000       0.0000000000      -0.8598329580
+2
+config_type=oh- sample_index=53 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1026378440
+H        -0.0000000000      -0.0000000000      -0.8174007582
+2
+config_type=oh- sample_index=54 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1104417529
+H         0.0000000000       0.0000000000      -0.9422608841
+2
+config_type=oh- sample_index=55 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1036865564
+H        -0.0000000000      -0.0000000000      -0.8341798317
+2
+config_type=oh- sample_index=56 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1035471510
+H        -0.0000000000      -0.0000000000      -0.8319493896
+2
+config_type=oh- sample_index=57 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1024790731
+H        -0.0000000000      -0.0000000000      -0.8148604730
+2
+config_type=oh- sample_index=58 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1100234623
+H         0.0000000000       0.0000000000      -0.9355683643
+2
+config_type=oh- sample_index=59 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1079272026
+H         0.0000000000       0.0000000000      -0.9020288583
+2
+config_type=oh- sample_index=60 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1070232882
+H         0.0000000000       0.0000000000      -0.8875665074
+2
+config_type=oh- sample_index=61 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1099660173
+H         0.0000000000       0.0000000000      -0.9346492613
+2
+config_type=oh- sample_index=62 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0982925952
+H        -0.0000000000      -0.0000000000      -0.7478781242
+2
+config_type=oh- sample_index=63 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1072619413
+H         0.0000000000       0.0000000000      -0.8913848831
+2
+config_type=oh- sample_index=64 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1039520016
+H        -0.0000000000      -0.0000000000      -0.8384268731
+2
+config_type=oh- sample_index=65 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1063095910
+H         0.0000000000       0.0000000000      -0.8761475729
+2
+config_type=oh- sample_index=66 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0989181442
+H        -0.0000000000      -0.0000000000      -0.7578867136
+2
+config_type=oh- sample_index=67 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0999739148
+H        -0.0000000000      -0.0000000000      -0.7747787175
+2
+config_type=oh- sample_index=68 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1027306252
+H        -0.0000000000      -0.0000000000      -0.8188852300
+2
+config_type=oh- sample_index=69 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1141139049
+H         0.0000000000       0.0000000000      -1.0010141791
+2
+config_type=oh- sample_index=70 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1050632620
+H        -0.0000000000      -0.0000000000      -0.8562066952
+2
+config_type=oh- sample_index=71 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1025286553
+H        -0.0000000000      -0.0000000000      -0.8156537727
+2
+config_type=oh- sample_index=72 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1012435086
+H        -0.0000000000      -0.0000000000      -0.7950918247
+2
+config_type=oh- sample_index=73 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1077514674
+H         0.0000000000       0.0000000000      -0.8992171488
+2
+config_type=oh- sample_index=74 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0979609775
+H        -0.0000000000      -0.0000000000      -0.7425723431
+2
+config_type=oh- sample_index=75 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1105704360
+H         0.0000000000       0.0000000000      -0.9443197733
+2
+config_type=oh- sample_index=76 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1079265022
+H         0.0000000000       0.0000000000      -0.9020176520
+2
+config_type=oh- sample_index=77 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1015200253
+H        -0.0000000000      -0.0000000000      -0.7995160064
+2
+config_type=oh- sample_index=78 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1050751970
+H        -0.0000000000      -0.0000000000      -0.8563976516
+2
+config_type=oh- sample_index=79 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0972371744
+H        -0.0000000000      -0.0000000000      -0.7309917177
+2
+config_type=oh- sample_index=80 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1045155772
+H        -0.0000000000      -0.0000000000      -0.8474439088
+2
+config_type=oh- sample_index=81 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1078128086
+H         0.0000000000       0.0000000000      -0.9001985899
+2
+config_type=oh- sample_index=82 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1067870577
+H         0.0000000000       0.0000000000      -0.8837868922
+2
+config_type=oh- sample_index=83 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1096504007
+H         0.0000000000       0.0000000000      -0.9295994937
+2
+config_type=oh- sample_index=84 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1103988928
+H         0.0000000000       0.0000000000      -0.9415751359
+2
+config_type=oh- sample_index=85 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1027424269
+H        -0.0000000000      -0.0000000000      -0.8190740531
+2
+config_type=oh- sample_index=86 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1029400316
+H        -0.0000000000      -0.0000000000      -0.8222356669
+2
+config_type=oh- sample_index=87 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1000774494
+H        -0.0000000000      -0.0000000000      -0.7764352383
+2
+config_type=oh- sample_index=88 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1082999889
+H         0.0000000000       0.0000000000      -0.9079933228
+2
+config_type=oh- sample_index=89 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0984942717
+H        -0.0000000000      -0.0000000000      -0.7511048855
+2
+config_type=oh- sample_index=90 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064252155
+H         0.0000000000       0.0000000000      -0.8779975305
+2
+config_type=oh- sample_index=91 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0989545171
+H        -0.0000000000      -0.0000000000      -0.7584686686
+2
+config_type=oh- sample_index=92 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1070086445
+H         0.0000000000       0.0000000000      -0.8873322128
+2
+config_type=oh- sample_index=93 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1082232573
+H         0.0000000000       0.0000000000      -0.9067656424
+2
+config_type=oh- sample_index=94 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1042697387
+H        -0.0000000000      -0.0000000000      -0.8435105688
+2
+config_type=oh- sample_index=95 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1011331954
+H        -0.0000000000      -0.0000000000      -0.7933268468
+2
+config_type=oh- sample_index=96 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1046259631
+H        -0.0000000000      -0.0000000000      -0.8492100492
+2
+config_type=oh- sample_index=97 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1076215455
+H         0.0000000000       0.0000000000      -0.8971384399
+2
+config_type=oh- sample_index=98 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1106538535
+H         0.0000000000       0.0000000000      -0.9456544280
+2
+config_type=oh- sample_index=99 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1108958171
+H         0.0000000000       0.0000000000      -0.9495257707
+2
+config_type=oh- sample_index=100 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1032549547
+H        -0.0000000000      -0.0000000000      -0.8272743389
+2
+config_type=oh- sample_index=101 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1013006828
+H        -0.0000000000      -0.0000000000      -0.7960065931
+2
+config_type=oh- sample_index=102 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1059312884
+H         0.0000000000       0.0000000000      -0.8700948494
+2
+config_type=oh- sample_index=103 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1095830637
+H         0.0000000000       0.0000000000      -0.9285221228
+2
+config_type=oh- sample_index=104 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1017688398
+H        -0.0000000000      -0.0000000000      -0.8034969614
+2
+config_type=oh- sample_index=105 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1104097822
+H         0.0000000000       0.0000000000      -0.9417493627
+2
+config_type=oh- sample_index=106 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1081333135
+H         0.0000000000       0.0000000000      -0.9053265679
+2
+config_type=oh- sample_index=107 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1027801201
+H        -0.0000000000      -0.0000000000      -0.8196771325
+2
+config_type=oh- sample_index=108 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1143010191
+H         0.0000000000       0.0000000000      -1.0040079471
+2
+config_type=oh- sample_index=109 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1037216767
+H        -0.0000000000      -0.0000000000      -0.8347417471
+2
+config_type=oh- sample_index=110 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1076059445
+H         0.0000000000       0.0000000000      -0.8968888278
+2
+config_type=oh- sample_index=111 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1048335360
+H        -0.0000000000      -0.0000000000      -0.8525311508
+2
+config_type=oh- sample_index=112 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1055757972
+H         0.0000000000       0.0000000000      -0.8644071003
+2
+config_type=oh- sample_index=113 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1044610247
+H        -0.0000000000      -0.0000000000      -0.8465710854
+2
+config_type=oh- sample_index=114 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1024865798
+H        -0.0000000000      -0.0000000000      -0.8149805791
+2
+config_type=oh- sample_index=115 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1083150922
+H         0.0000000000       0.0000000000      -0.9082349722
+2
+config_type=oh- sample_index=116 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0995701599
+H        -0.0000000000      -0.0000000000      -0.7683187627
+2
+config_type=oh- sample_index=117 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1023584893
+H        -0.0000000000      -0.0000000000      -0.8129311694
+2
+config_type=oh- sample_index=118 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1018864480
+H        -0.0000000000      -0.0000000000      -0.8053786552
+2
+config_type=oh- sample_index=119 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1005978668
+H        -0.0000000000      -0.0000000000      -0.7847617555
+2
+config_type=oh- sample_index=120 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1021117348
+H        -0.0000000000      -0.0000000000      -0.8089831753
+2
+config_type=oh- sample_index=121 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1018850595
+H        -0.0000000000      -0.0000000000      -0.8053564405
+2
+config_type=oh- sample_index=122 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1049687058
+H        -0.0000000000      -0.0000000000      -0.8546938258
+2
+config_type=oh- sample_index=123 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1109971506
+H         0.0000000000       0.0000000000      -0.9511470753
+2
+config_type=oh- sample_index=124 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1058139210
+H         0.0000000000       0.0000000000      -0.8682170074
+2
+config_type=oh- sample_index=125 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1083598126
+H         0.0000000000       0.0000000000      -0.9089504834
+2
+config_type=oh- sample_index=126 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1109809713
+H         0.0000000000       0.0000000000      -0.9508882122
+2
+config_type=oh- sample_index=127 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1042349596
+H        -0.0000000000      -0.0000000000      -0.8429541132
+2
+config_type=oh- sample_index=128 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1075534136
+H         0.0000000000       0.0000000000      -0.8960483501
+2
+config_type=oh- sample_index=129 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1094042592
+H         0.0000000000       0.0000000000      -0.9256613065
+2
+config_type=oh- sample_index=130 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1094572125
+H         0.0000000000       0.0000000000      -0.9265085419
+2
+config_type=oh- sample_index=131 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1041949766
+H        -0.0000000000      -0.0000000000      -0.8423143975
+2
+config_type=oh- sample_index=132 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038328172
+H        -0.0000000000      -0.0000000000      -0.8365199593
+2
+config_type=oh- sample_index=133 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0999655024
+H        -0.0000000000      -0.0000000000      -0.7746441216
+2
+config_type=oh- sample_index=134 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1053278694
+H         0.0000000000       0.0000000000      -0.8604403323
+2
+config_type=oh- sample_index=135 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1010915175
+H        -0.0000000000      -0.0000000000      -0.7926600136
+2
+config_type=oh- sample_index=136 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0996452650
+H        -0.0000000000      -0.0000000000      -0.7695204224
+2
+config_type=oh- sample_index=137 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1006568458
+H        -0.0000000000      -0.0000000000      -0.7857054016
+2
+config_type=oh- sample_index=138 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1147631245
+H         0.0000000000       0.0000000000      -1.0114014910
+2
+config_type=oh- sample_index=139 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1003417818
+H        -0.0000000000      -0.0000000000      -0.7806644749
+2
+config_type=oh- sample_index=140 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1039092656
+H        -0.0000000000      -0.0000000000      -0.8377431099
+2
+config_type=oh- sample_index=141 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1035715973
+H        -0.0000000000      -0.0000000000      -0.8323405231
+2
+config_type=oh- sample_index=142 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1037824367
+H        -0.0000000000      -0.0000000000      -0.8357138877
+2
+config_type=oh- sample_index=143 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1037361721
+H        -0.0000000000      -0.0000000000      -0.8349736686
+2
+config_type=oh- sample_index=144 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1039903439
+H        -0.0000000000      -0.0000000000      -0.8390403384
+2
+config_type=oh- sample_index=145 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1067122213
+H         0.0000000000       0.0000000000      -0.8825895340
+2
+config_type=oh- sample_index=146 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1129025939
+H         0.0000000000       0.0000000000      -0.9816335780
+2
+config_type=oh- sample_index=147 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1057090695
+H         0.0000000000       0.0000000000      -0.8665394157
+2
+config_type=oh- sample_index=148 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1084971136
+H         0.0000000000       0.0000000000      -0.9111472568
+2
+config_type=oh- sample_index=149 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009377389
+H        -0.0000000000      -0.0000000000      -0.7901996030
+2
+config_type=oh- sample_index=150 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064307482
+H         0.0000000000       0.0000000000      -0.8780860505
+2
+config_type=oh- sample_index=151 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1049370793
+H        -0.0000000000      -0.0000000000      -0.8541878111
+2
+config_type=oh- sample_index=152 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1086811894
+H         0.0000000000       0.0000000000      -0.9140924129
+2
+config_type=oh- sample_index=153 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1073209740
+H         0.0000000000       0.0000000000      -0.8923293891
+2
+config_type=oh- sample_index=154 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1053183129
+H         0.0000000000       0.0000000000      -0.8602874311
+2
+config_type=oh- sample_index=155 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1112322961
+H         0.0000000000       0.0000000000      -0.9549093300
+2
+config_type=oh- sample_index=156 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1040654969
+H        -0.0000000000      -0.0000000000      -0.8402427627
+2
+config_type=oh- sample_index=157 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1056976637
+H         0.0000000000       0.0000000000      -0.8663569264
+2
+config_type=oh- sample_index=158 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1100298899
+H         0.0000000000       0.0000000000      -0.9356712036
+2
+config_type=oh- sample_index=159 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1148952562
+H         0.0000000000       0.0000000000      -1.0135155578
+2
+config_type=oh- sample_index=160 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1032133466
+H        -0.0000000000      -0.0000000000      -0.8266086221
+2
+config_type=oh- sample_index=161 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064661297
+H         0.0000000000       0.0000000000      -0.8786521435
+2
+config_type=oh- sample_index=162 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1073987627
+H         0.0000000000       0.0000000000      -0.8935739830
+2
+config_type=oh- sample_index=163 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1062196362
+H         0.0000000000       0.0000000000      -0.8747083240
+2
+config_type=oh- sample_index=164 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0979831891
+H        -0.0000000000      -0.0000000000      -0.7429277219
+2
+config_type=oh- sample_index=165 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1054718679
+H         0.0000000000       0.0000000000      -0.8627442628
+2
+config_type=oh- sample_index=166 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1049244639
+H        -0.0000000000      -0.0000000000      -0.8539859697
+2
+config_type=oh- sample_index=167 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1112391083
+H         0.0000000000       0.0000000000      -0.9550183228
+2
+config_type=oh- sample_index=168 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0986618728
+H        -0.0000000000      -0.0000000000      -0.7537864509
+2
+config_type=oh- sample_index=169 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1015904952
+H        -0.0000000000      -0.0000000000      -0.8006435018
+2
+config_type=oh- sample_index=170 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009908201
+H        -0.0000000000      -0.0000000000      -0.7910488867
+2
+config_type=oh- sample_index=171 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1050807420
+H        -0.0000000000      -0.0000000000      -0.8564863696
+2
+config_type=oh- sample_index=172 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1015938385
+H        -0.0000000000      -0.0000000000      -0.8006969936
+2
+config_type=oh- sample_index=173 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1037835626
+H        -0.0000000000      -0.0000000000      -0.8357319014
+2
+config_type=oh- sample_index=174 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1028115341
+H        -0.0000000000      -0.0000000000      -0.8201797464
+2
+config_type=oh- sample_index=175 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1058827290
+H         0.0000000000       0.0000000000      -0.8693179143
+2
+config_type=oh- sample_index=176 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1111862020
+H         0.0000000000       0.0000000000      -0.9541718398
+2
+config_type=oh- sample_index=177 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1011436231
+H        -0.0000000000      -0.0000000000      -0.7934936879
+2
+config_type=oh- sample_index=178 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1130363121
+H         0.0000000000       0.0000000000      -0.9837730284
+2
+config_type=oh- sample_index=179 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1062348121
+H         0.0000000000       0.0000000000      -0.8749511342
+2
+config_type=oh- sample_index=180 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1060927081
+H         0.0000000000       0.0000000000      -0.8726775140
+2
+config_type=oh- sample_index=181 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1094566469
+H         0.0000000000       0.0000000000      -0.9264994935
+2
+config_type=oh- sample_index=182 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1028117987
+H        -0.0000000000      -0.0000000000      -0.8201839800
+2
+config_type=oh- sample_index=183 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1060758840
+H         0.0000000000       0.0000000000      -0.8724083335
+2
+config_type=oh- sample_index=184 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1070250260
+H         0.0000000000       0.0000000000      -0.8875943114
+2
+config_type=oh- sample_index=185 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1031861025
+H        -0.0000000000      -0.0000000000      -0.8261727243
+2
+config_type=oh- sample_index=186 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071843704
+H         0.0000000000       0.0000000000      -0.8901437725
+2
+config_type=oh- sample_index=187 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0996985722
+H        -0.0000000000      -0.0000000000      -0.7703733210
+2
+config_type=oh- sample_index=188 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038617758
+H        -0.0000000000      -0.0000000000      -0.8369832886
+2
+config_type=oh- sample_index=189 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071753578
+H         0.0000000000       0.0000000000      -0.8899995740
+2
+config_type=oh- sample_index=190 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1130736510
+H         0.0000000000       0.0000000000      -0.9843704390
+2
+config_type=oh- sample_index=191 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1105195648
+H         0.0000000000       0.0000000000      -0.9435058496
+2
+config_type=oh- sample_index=192 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009109852
+H        -0.0000000000      -0.0000000000      -0.7897715521
+2
+config_type=oh- sample_index=193 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1054750904
+H         0.0000000000       0.0000000000      -0.8627958221
+2
+config_type=oh- sample_index=194 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064081111
+H         0.0000000000       0.0000000000      -0.8777238653
+2
+config_type=oh- sample_index=195 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0986782742
+H        -0.0000000000      -0.0000000000      -0.7540488688
+2
+config_type=oh- sample_index=196 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1104188319
+H         0.0000000000       0.0000000000      -0.9418941548
+2
+config_type=oh- sample_index=197 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1076220631
+H         0.0000000000       0.0000000000      -0.8971467202
+2
+config_type=oh- sample_index=198 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071683545
+H         0.0000000000       0.0000000000      -0.8898875236
+2
+config_type=oh- sample_index=199 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1029192804
+H        -0.0000000000      -0.0000000000      -0.8219036543
+2
+config_type=oh- sample_index=200 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1079345563
+H         0.0000000000       0.0000000000      -0.9021465145
+2
+config_type=oh- sample_index=201 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1077334539
+H         0.0000000000       0.0000000000      -0.8989289386
+2
+config_type=oh- sample_index=202 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1117129057
+H         0.0000000000       0.0000000000      -0.9625989348
+2
+config_type=oh- sample_index=203 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1023454257
+H        -0.0000000000      -0.0000000000      -0.8127221562
+2
+config_type=oh- sample_index=204 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1020372960
+H        -0.0000000000      -0.0000000000      -0.8077921768
+2
+config_type=oh- sample_index=205 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071835586
+H         0.0000000000       0.0000000000      -0.8901307851
+2
+config_type=oh- sample_index=206 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1046166122
+H        -0.0000000000      -0.0000000000      -0.8490604376
+2
+config_type=oh- sample_index=207 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1104589457
+H         0.0000000000       0.0000000000      -0.9425359628
+2
+config_type=oh- sample_index=208 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071652466
+H         0.0000000000       0.0000000000      -0.8898377987
+2
+config_type=oh- sample_index=209 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0997428276
+H        -0.0000000000      -0.0000000000      -0.7710813935
+2
+config_type=oh- sample_index=210 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1047273978
+H        -0.0000000000      -0.0000000000      -0.8508329721
+2
+config_type=oh- sample_index=211 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0960014011
+H        -0.0000000000      -0.0000000000      -0.7112197277
+2
+config_type=oh- sample_index=212 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1084307482
+H         0.0000000000       0.0000000000      -0.9100854324
+2
+config_type=oh- sample_index=213 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1029435683
+H        -0.0000000000      -0.0000000000      -0.8222922533
+2
+config_type=oh- sample_index=214 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1060565276
+H         0.0000000000       0.0000000000      -0.8720986368
+2
+config_type=oh- sample_index=215 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1030016173
+H        -0.0000000000      -0.0000000000      -0.8232210192
+2
+config_type=oh- sample_index=216 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1053009715
+H         0.0000000000       0.0000000000      -0.8600099742
+2
+config_type=oh- sample_index=217 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1075239154
+H         0.0000000000       0.0000000000      -0.8955763877
+2
+config_type=oh- sample_index=218 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1087534601
+H         0.0000000000       0.0000000000      -0.9152487219
+2
+config_type=oh- sample_index=219 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0929691639
+H        -0.0000000000      -0.0000000000      -0.6627048719
+2
+config_type=oh- sample_index=220 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1055823921
+H         0.0000000000       0.0000000000      -0.8645126165
+2
+config_type=oh- sample_index=221 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1133641483
+H         0.0000000000       0.0000000000      -0.9890183045
+2
+config_type=oh- sample_index=222 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1078746293
+H         0.0000000000       0.0000000000      -0.9011877012
+2
+config_type=oh- sample_index=223 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1025513124
+H        -0.0000000000      -0.0000000000      -0.8160162804
+2
+config_type=oh- sample_index=224 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1072783839
+H         0.0000000000       0.0000000000      -0.8916479592
+2
+config_type=oh- sample_index=225 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0998130677
+H        -0.0000000000      -0.0000000000      -0.7722052131
+2
+config_type=oh- sample_index=226 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1012497816
+H        -0.0000000000      -0.0000000000      -0.7951921901
+2
+config_type=oh- sample_index=227 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1058833136
+H         0.0000000000       0.0000000000      -0.8693272669
+2
+config_type=oh- sample_index=228 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071668629
+H         0.0000000000       0.0000000000      -0.8898636580
+2
+config_type=oh- sample_index=229 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1093039297
+H         0.0000000000       0.0000000000      -0.9240560652
+2
+config_type=oh- sample_index=230 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1080807418
+H         0.0000000000       0.0000000000      -0.9044854373
+2
+config_type=oh- sample_index=231 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1111832131
+H         0.0000000000       0.0000000000      -0.9541240183
+2
+config_type=oh- sample_index=232 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1004392383
+H        -0.0000000000      -0.0000000000      -0.7822237481
+2
+config_type=oh- sample_index=233 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0988891412
+H        -0.0000000000      -0.0000000000      -0.7574226759
+2
+config_type=oh- sample_index=234 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1103124523
+H         0.0000000000       0.0000000000      -0.9401921152
+2
+config_type=oh- sample_index=235 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1100136916
+H         0.0000000000       0.0000000000      -0.9354120358
+2
+config_type=oh- sample_index=236 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1123684188
+H         0.0000000000       0.0000000000      -0.9730869416
+2
+config_type=oh- sample_index=237 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1091396254
+H         0.0000000000       0.0000000000      -0.9214272479
+2
+config_type=oh- sample_index=238 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1177366153
+H         0.0000000000       0.0000000000      -1.0589764236
+2
+config_type=oh- sample_index=239 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1098555778
+H         0.0000000000       0.0000000000      -0.9328822648
+2
+config_type=oh- sample_index=240 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1000679933
+H        -0.0000000000      -0.0000000000      -0.7762839438
+2
+config_type=oh- sample_index=241 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1066590910
+H         0.0000000000       0.0000000000      -0.8817394649
+2
+config_type=oh- sample_index=242 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1018429046
+H        -0.0000000000      -0.0000000000      -0.8046819752
+2
+config_type=oh- sample_index=243 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1072340870
+H         0.0000000000       0.0000000000      -0.8909392224
+2
+config_type=oh- sample_index=244 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0982071285
+H        -0.0000000000      -0.0000000000      -0.7465106836
+2
+config_type=oh- sample_index=245 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1044726469
+H        -0.0000000000      -0.0000000000      -0.8467570375
+2
+config_type=oh- sample_index=246 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1068048689
+H         0.0000000000       0.0000000000      -0.8840718660
+2
+config_type=oh- sample_index=247 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0950301017
+H        -0.0000000000      -0.0000000000      -0.6956792384
+2
+config_type=oh- sample_index=248 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1065740205
+H         0.0000000000       0.0000000000      -0.8803783639
+2
+config_type=oh- sample_index=249 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1101723525
+H         0.0000000000       0.0000000000      -0.9379505609
+2
+config_type=oh- sample_index=250 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1044618449
+H        -0.0000000000      -0.0000000000      -0.8465842076
+2
+config_type=oh- sample_index=251 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1054278656
+H         0.0000000000       0.0000000000      -0.8620402409
+2
+config_type=oh- sample_index=252 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009932691
+H        -0.0000000000      -0.0000000000      -0.7910880694
+2
+config_type=oh- sample_index=253 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1089702110
+H         0.0000000000       0.0000000000      -0.9187166689
+2
+config_type=oh- sample_index=254 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1020430037
+H        -0.0000000000      -0.0000000000      -0.8078834978
+2
+config_type=oh- sample_index=255 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1018502709
+H        -0.0000000000      -0.0000000000      -0.8047998328
+2
+config_type=oh- sample_index=256 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1079512171
+H         0.0000000000       0.0000000000      -0.9024130823
+2
+config_type=oh- sample_index=257 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1046169972
+H        -0.0000000000      -0.0000000000      -0.8490665970
+2
+config_type=oh- sample_index=258 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1086055353
+H         0.0000000000       0.0000000000      -0.9128819704
+2
+config_type=oh- sample_index=259 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0958591751
+H        -0.0000000000      -0.0000000000      -0.7089441555
+2
+config_type=oh- sample_index=260 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1080974866
+H         0.0000000000       0.0000000000      -0.9047533486
+2
+config_type=oh- sample_index=261 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1070900551
+H         0.0000000000       0.0000000000      -0.8886347577
+2
+config_type=oh- sample_index=262 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1095488487
+H         0.0000000000       0.0000000000      -0.9279746927
+2
+config_type=oh- sample_index=263 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1066608916
+H         0.0000000000       0.0000000000      -0.8817682747
+2
+config_type=oh- sample_index=264 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1052956133
+H         0.0000000000       0.0000000000      -0.8599242447
+2
+config_type=oh- sample_index=265 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1021911813
+H        -0.0000000000      -0.0000000000      -0.8102542933
+2
+config_type=oh- sample_index=266 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1077216921
+H         0.0000000000       0.0000000000      -0.8987407530
+2
+config_type=oh- sample_index=267 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1060174772
+H         0.0000000000       0.0000000000      -0.8714738427
+2
+config_type=oh- sample_index=268 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1109558828
+H         0.0000000000       0.0000000000      -0.9504868028
+2
+config_type=oh- sample_index=269 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1085920940
+H         0.0000000000       0.0000000000      -0.9126669150
+2
+config_type=oh- sample_index=270 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0942139988
+H        -0.0000000000      -0.0000000000      -0.6826218452
+2
+config_type=oh- sample_index=271 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1010939113
+H        -0.0000000000      -0.0000000000      -0.7926983138
+2
+config_type=oh- sample_index=272 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1084076006
+H         0.0000000000       0.0000000000      -0.9097150770
+2
+config_type=oh- sample_index=273 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1106385153
+H         0.0000000000       0.0000000000      -0.9454090221
+2
+config_type=oh- sample_index=274 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1091866880
+H         0.0000000000       0.0000000000      -0.9221802338
+2
+config_type=oh- sample_index=275 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1053590724
+H         0.0000000000       0.0000000000      -0.8609395703
+2
+config_type=oh- sample_index=276 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1051326852
+H        -0.0000000000      -0.0000000000      -0.8573174458
+2
+config_type=oh- sample_index=277 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1082588787
+H         0.0000000000       0.0000000000      -0.9073355730
+2
+config_type=oh- sample_index=278 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1104345823
+H         0.0000000000       0.0000000000      -0.9421461574
+2
+config_type=oh- sample_index=279 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0995645563
+H        -0.0000000000      -0.0000000000      -0.7682291074
+2
+config_type=oh- sample_index=280 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1034595884
+H        -0.0000000000      -0.0000000000      -0.8305484146
+2
+config_type=oh- sample_index=281 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1067750379
+H         0.0000000000       0.0000000000      -0.8835945795
+2
+config_type=oh- sample_index=282 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1061574668
+H         0.0000000000       0.0000000000      -0.8737136333
+2
+config_type=oh- sample_index=283 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1073968448
+H         0.0000000000       0.0000000000      -0.8935432979
+2
+config_type=oh- sample_index=284 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1170532991
+H         0.0000000000       0.0000000000      -1.0480435760
+2
+config_type=oh- sample_index=285 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1048079269
+H        -0.0000000000      -0.0000000000      -0.8521214127
+2
+config_type=oh- sample_index=286 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1095677336
+H         0.0000000000       0.0000000000      -0.9282768468
+2
+config_type=oh- sample_index=287 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1092954361
+H         0.0000000000       0.0000000000      -0.9239201708
+2
+config_type=oh- sample_index=288 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1078411712
+H         0.0000000000       0.0000000000      -0.9006523817
+2
+config_type=oh- sample_index=289 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1023335791
+H        -0.0000000000      -0.0000000000      -0.8125326154
+2
+config_type=oh- sample_index=290 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1099689421
+H         0.0000000000       0.0000000000      -0.9346960573
+2
+config_type=oh- sample_index=291 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1110272759
+H         0.0000000000       0.0000000000      -0.9516290701
+2
+config_type=oh- sample_index=292 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1027045453
+H        -0.0000000000      -0.0000000000      -0.8184679597
+2
+config_type=oh- sample_index=293 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1022450317
+H        -0.0000000000      -0.0000000000      -0.8111158833
+2
+config_type=oh- sample_index=294 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1091198812
+H         0.0000000000       0.0000000000      -0.9211113462
+2
+config_type=oh- sample_index=295 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1030153412
+H        -0.0000000000      -0.0000000000      -0.8234405969
+2
+config_type=oh- sample_index=296 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064422480
+H         0.0000000000       0.0000000000      -0.8782700452
+2
+config_type=oh- sample_index=297 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1040630610
+H        -0.0000000000      -0.0000000000      -0.8402037888
+2
+config_type=oh- sample_index=298 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1103318021
+H         0.0000000000       0.0000000000      -0.9405017052
+2
+config_type=oh- sample_index=299 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1019299377
+H        -0.0000000000      -0.0000000000      -0.8060744776
+2
+config_type=oh- sample_index=300 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1004438020
+H        -0.0000000000      -0.0000000000      -0.7822967661
+2
+config_type=oh- sample_index=301 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1027156958
+H        -0.0000000000      -0.0000000000      -0.8186463635
+2
+config_type=oh- sample_index=302 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1030316233
+H        -0.0000000000      -0.0000000000      -0.8237011057
+2
+config_type=oh- sample_index=303 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1204087796
+H         0.0000000000       0.0000000000      -1.1017302239
+2
+config_type=oh- sample_index=304 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1042262242
+H        -0.0000000000      -0.0000000000      -0.8428143507
+2
+config_type=oh- sample_index=305 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1053741376
+H         0.0000000000       0.0000000000      -0.8611806095
+2
+config_type=oh- sample_index=306 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1058620742
+H         0.0000000000       0.0000000000      -0.8689874436
+2
+config_type=oh- sample_index=307 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1078023112
+H         0.0000000000       0.0000000000      -0.9000306341
+2
+config_type=oh- sample_index=308 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1050498758
+H        -0.0000000000      -0.0000000000      -0.8559925211
+2
+config_type=oh- sample_index=309 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1036183603
+H        -0.0000000000      -0.0000000000      -0.8330887163
+2
+config_type=oh- sample_index=310 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1063305193
+H         0.0000000000       0.0000000000      -0.8764824198
+2
+config_type=oh- sample_index=311 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071311834
+H         0.0000000000       0.0000000000      -0.8892927968
+2
+config_type=oh- sample_index=312 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1003374879
+H        -0.0000000000      -0.0000000000      -0.7805957741
+2
+config_type=oh- sample_index=313 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1097074643
+H         0.0000000000       0.0000000000      -0.9305124931
+2
+config_type=oh- sample_index=314 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1011384033
+H        -0.0000000000      -0.0000000000      -0.7934101723
+2
+config_type=oh- sample_index=315 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1045625520
+H        -0.0000000000      -0.0000000000      -0.8481954906
+2
+config_type=oh- sample_index=316 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1084994160
+H         0.0000000000       0.0000000000      -0.9111840951
+2
+config_type=oh- sample_index=317 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064356251
+H         0.0000000000       0.0000000000      -0.8781640795
+2
+config_type=oh- sample_index=318 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1089636290
+H         0.0000000000       0.0000000000      -0.9186113589
+2
+config_type=oh- sample_index=319 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1025632508
+H        -0.0000000000      -0.0000000000      -0.8162072913
+2
+config_type=oh- sample_index=320 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038760339
+H        -0.0000000000      -0.0000000000      -0.8372114144
+2
+config_type=oh- sample_index=321 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1075062521
+H         0.0000000000       0.0000000000      -0.8952937798
+2
+config_type=oh- sample_index=322 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1096948292
+H         0.0000000000       0.0000000000      -0.9303103370
+2
+config_type=oh- sample_index=323 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1040613599
+H        -0.0000000000      -0.0000000000      -0.8401765730
+2
+config_type=oh- sample_index=324 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1014304008
+H        -0.0000000000      -0.0000000000      -0.7980820410
+2
+config_type=oh- sample_index=325 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1057288182
+H         0.0000000000       0.0000000000      -0.8668553879
+2
+config_type=oh- sample_index=326 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1035933412
+H        -0.0000000000      -0.0000000000      -0.8326884179
+2
+config_type=oh- sample_index=327 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1067808928
+H         0.0000000000       0.0000000000      -0.8836882570
+2
+config_type=oh- sample_index=328 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1050009048
+H        -0.0000000000      -0.0000000000      -0.8552089993
+2
+config_type=oh- sample_index=329 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064408456
+H         0.0000000000       0.0000000000      -0.8782476058
+2
+config_type=oh- sample_index=330 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1040921527
+H        -0.0000000000      -0.0000000000      -0.8406692470
+2
+config_type=oh- sample_index=331 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1113301935
+H         0.0000000000       0.0000000000      -0.9564756589
+2
+config_type=oh- sample_index=332 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1026871368
+H        -0.0000000000      -0.0000000000      -0.8181894277
+2
+config_type=oh- sample_index=333 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1061946690
+H         0.0000000000       0.0000000000      -0.8743088568
+2
+config_type=oh- sample_index=334 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038330735
+H        -0.0000000000      -0.0000000000      -0.8365240606
+2
+config_type=oh- sample_index=335 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1066375736
+H         0.0000000000       0.0000000000      -0.8813951942
+2
+config_type=oh- sample_index=336 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1039865441
+H        -0.0000000000      -0.0000000000      -0.8389795422
+2
+config_type=oh- sample_index=337 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1095758327
+H         0.0000000000       0.0000000000      -0.9284064294
+2
+config_type=oh- sample_index=338 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1005003983
+H        -0.0000000000      -0.0000000000      -0.7832022895
+2
+config_type=oh- sample_index=339 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1121077292
+H         0.0000000000       0.0000000000      -0.9689159884
+2
+config_type=oh- sample_index=340 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1094421159
+H         0.0000000000       0.0000000000      -0.9262670014
+2
+config_type=oh- sample_index=341 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1043263943
+H        -0.0000000000      -0.0000000000      -0.8444170398
+2
+config_type=oh- sample_index=342 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0994021901
+H        -0.0000000000      -0.0000000000      -0.7656312988
+2
+config_type=oh- sample_index=343 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1041560170
+H        -0.0000000000      -0.0000000000      -0.8416910573
+2
+config_type=oh- sample_index=344 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1062667999
+H         0.0000000000       0.0000000000      -0.8754629294
+2
+config_type=oh- sample_index=345 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1109903945
+H         0.0000000000       0.0000000000      -0.9510389799
+2
+config_type=oh- sample_index=346 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1060395575
+H         0.0000000000       0.0000000000      -0.8718271210
+2
+config_type=oh- sample_index=347 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1053517941
+H         0.0000000000       0.0000000000      -0.8608231197
+2
+config_type=oh- sample_index=348 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0984884085
+H        -0.0000000000      -0.0000000000      -0.7510110757
+2
+config_type=oh- sample_index=349 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1027756767
+H        -0.0000000000      -0.0000000000      -0.8196060385
+2
+config_type=oh- sample_index=350 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1114077190
+H         0.0000000000       0.0000000000      -0.9577160423
+2
+config_type=oh- sample_index=351 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0971393203
+H        -0.0000000000      -0.0000000000      -0.7294260832
+2
+config_type=oh- sample_index=352 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1068570635
+H         0.0000000000       0.0000000000      -0.8849069638
+2
+config_type=oh- sample_index=353 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1088009815
+H         0.0000000000       0.0000000000      -0.9160090493
+2
+config_type=oh- sample_index=354 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0993541173
+H        -0.0000000000      -0.0000000000      -0.7648621492
+2
+config_type=oh- sample_index=355 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1054716865
+H         0.0000000000       0.0000000000      -0.8627413604
+2
+config_type=oh- sample_index=356 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1067462857
+H         0.0000000000       0.0000000000      -0.8831345535
+2
+config_type=oh- sample_index=357 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1043941278
+H        -0.0000000000      -0.0000000000      -0.8455007551
+2
+config_type=oh- sample_index=358 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1018818089
+H        -0.0000000000      -0.0000000000      -0.8053044315
+2
+config_type=oh- sample_index=359 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1012861443
+H        -0.0000000000      -0.0000000000      -0.7957739825
+2
+config_type=oh- sample_index=360 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1107902135
+H         0.0000000000       0.0000000000      -0.9478361450
+2
+config_type=oh- sample_index=361 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0972528682
+H        -0.0000000000      -0.0000000000      -0.7312428144
+2
+config_type=oh- sample_index=362 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1014726298
+H        -0.0000000000      -0.0000000000      -0.7987576918
+2
+config_type=oh- sample_index=363 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1067936286
+H         0.0000000000       0.0000000000      -0.8838920247
+2
+config_type=oh- sample_index=364 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1085570141
+H         0.0000000000       0.0000000000      -0.9121056471
+2
+config_type=oh- sample_index=365 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1091603234
+H         0.0000000000       0.0000000000      -0.9217584087
+2
+config_type=oh- sample_index=366 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1047769630
+H        -0.0000000000      -0.0000000000      -0.8516259999
+2
+config_type=oh- sample_index=367 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1078722846
+H         0.0000000000       0.0000000000      -0.9011501878
+2
+config_type=oh- sample_index=368 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1083411912
+H         0.0000000000       0.0000000000      -0.9086525482
+2
+config_type=oh- sample_index=369 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1020167712
+H        -0.0000000000      -0.0000000000      -0.8074637865
+2
+config_type=oh- sample_index=370 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038091611
+H        -0.0000000000      -0.0000000000      -0.8361414700
+2
+config_type=oh- sample_index=371 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1068553035
+H         0.0000000000       0.0000000000      -0.8848788042
+2
+config_type=oh- sample_index=372 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1023257710
+H        -0.0000000000      -0.0000000000      -0.8124076882
+2
+config_type=oh- sample_index=373 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0997852505
+H        -0.0000000000      -0.0000000000      -0.7717601457
+2
+config_type=oh- sample_index=374 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1096638438
+H         0.0000000000       0.0000000000      -0.9298145790
+2
+config_type=oh- sample_index=375 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1076928221
+H         0.0000000000       0.0000000000      -0.8982788432
+2
+config_type=oh- sample_index=376 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1014896423
+H        -0.0000000000      -0.0000000000      -0.7990298871
+2
+config_type=oh- sample_index=377 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1023871925
+H        -0.0000000000      -0.0000000000      -0.8133904123
+2
+config_type=oh- sample_index=378 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1043623764
+H        -0.0000000000      -0.0000000000      -0.8449927424
+2
+config_type=oh- sample_index=379 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1006076688
+H        -0.0000000000      -0.0000000000      -0.7849185849
+2
+config_type=oh- sample_index=380 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1096386261
+H         0.0000000000       0.0000000000      -0.9294111035
+2
+config_type=oh- sample_index=381 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1112072679
+H         0.0000000000       0.0000000000      -0.9545088869
+2
+config_type=oh- sample_index=382 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1087490084
+H         0.0000000000       0.0000000000      -0.9151774971
+2
+config_type=oh- sample_index=383 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1047803109
+H        -0.0000000000      -0.0000000000      -0.8516795653
+2
+config_type=oh- sample_index=384 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1084664367
+H         0.0000000000       0.0000000000      -0.9106564367
+2
+config_type=oh- sample_index=385 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1072270612
+H         0.0000000000       0.0000000000      -0.8908268127
+2
+config_type=oh- sample_index=386 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1091843498
+H         0.0000000000       0.0000000000      -0.9221428233
+2
+config_type=oh- sample_index=387 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1077615876
+H         0.0000000000       0.0000000000      -0.8993790697
+2
+config_type=oh- sample_index=388 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1093038744
+H         0.0000000000       0.0000000000      -0.9240551800
+2
+config_type=oh- sample_index=389 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1037975291
+H        -0.0000000000      -0.0000000000      -0.8359553607
+2
+config_type=oh- sample_index=390 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1020824312
+H        -0.0000000000      -0.0000000000      -0.8085143265
+2
+config_type=oh- sample_index=391 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1071998868
+H         0.0000000000       0.0000000000      -0.8903920307
+2
+config_type=oh- sample_index=392 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1061037160
+H         0.0000000000       0.0000000000      -0.8728536366
+2
+config_type=oh- sample_index=393 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1076035038
+H         0.0000000000       0.0000000000      -0.8968497768
+2
+config_type=oh- sample_index=394 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1031403204
+H        -0.0000000000      -0.0000000000      -0.8254402258
+2
+config_type=oh- sample_index=395 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1049146861
+H        -0.0000000000      -0.0000000000      -0.8538295266
+2
+config_type=oh- sample_index=396 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0988752731
+H        -0.0000000000      -0.0000000000      -0.7572007905
+2
+config_type=oh- sample_index=397 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1096677590
+H         0.0000000000       0.0000000000      -0.9298772213
+2
+config_type=oh- sample_index=398 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038174466
+H        -0.0000000000      -0.0000000000      -0.8362740348
+2
+config_type=oh- sample_index=399 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1034904618
+H        -0.0000000000      -0.0000000000      -0.8310423791
+2
+config_type=oh- sample_index=400 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1067183481
+H         0.0000000000       0.0000000000      -0.8826875598
+2
+config_type=oh- sample_index=401 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1029305284
+H        -0.0000000000      -0.0000000000      -0.8220836191
+2
+config_type=oh- sample_index=402 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1110442942
+H         0.0000000000       0.0000000000      -0.9519013580
+2
+config_type=oh- sample_index=403 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0967700623
+H        -0.0000000000      -0.0000000000      -0.7235180695
+2
+config_type=oh- sample_index=404 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1106571629
+H         0.0000000000       0.0000000000      -0.9457073770
+2
+config_type=oh- sample_index=405 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1015811888
+H        -0.0000000000      -0.0000000000      -0.8004946023
+2
+config_type=oh- sample_index=406 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1097706855
+H         0.0000000000       0.0000000000      -0.9315240140
+2
+config_type=oh- sample_index=407 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1006539672
+H        -0.0000000000      -0.0000000000      -0.7856593442
+2
+config_type=oh- sample_index=408 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1068159908
+H         0.0000000000       0.0000000000      -0.8842498137
+2
+config_type=oh- sample_index=409 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1046363425
+H        -0.0000000000      -0.0000000000      -0.8493761156
+2
+config_type=oh- sample_index=410 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1050579862
+H        -0.0000000000      -0.0000000000      -0.8561222851
+2
+config_type=oh- sample_index=411 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1008551963
+H        -0.0000000000      -0.0000000000      -0.7888789479
+2
+config_type=oh- sample_index=412 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1065622860
+H         0.0000000000       0.0000000000      -0.8801906146
+2
+config_type=oh- sample_index=413 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1171782455
+H         0.0000000000       0.0000000000      -1.0500426786
+2
+config_type=oh- sample_index=414 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1083218697
+H         0.0000000000       0.0000000000      -0.9083434099
+2
+config_type=oh- sample_index=415 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1045348654
+H        -0.0000000000      -0.0000000000      -0.8477525139
+2
+config_type=oh- sample_index=416 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1070394709
+H         0.0000000000       0.0000000000      -0.8878254266
+2
+config_type=oh- sample_index=417 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1021830287
+H        -0.0000000000      -0.0000000000      -0.8101238554
+2
+config_type=oh- sample_index=418 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1011979034
+H        -0.0000000000      -0.0000000000      -0.7943621552
+2
+config_type=oh- sample_index=419 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1058649886
+H         0.0000000000       0.0000000000      -0.8690340729
+2
+config_type=oh- sample_index=420 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1112494308
+H         0.0000000000       0.0000000000      -0.9551834811
+2
+config_type=oh- sample_index=421 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0997178925
+H        -0.0000000000      -0.0000000000      -0.7706824394
+2
+config_type=oh- sample_index=422 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009261420
+H        -0.0000000000      -0.0000000000      -0.7900140569
+2
+config_type=oh- sample_index=423 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064725783
+H         0.0000000000       0.0000000000      -0.8787553203
+2
+config_type=oh- sample_index=424 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0968122536
+H        -0.0000000000      -0.0000000000      -0.7241931168
+2
+config_type=oh- sample_index=425 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1066719431
+H         0.0000000000       0.0000000000      -0.8819450957
+2
+config_type=oh- sample_index=426 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1098348757
+H         0.0000000000       0.0000000000      -0.9325510375
+2
+config_type=oh- sample_index=427 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1058974974
+H         0.0000000000       0.0000000000      -0.8695542039
+2
+config_type=oh- sample_index=428 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009470871
+H        -0.0000000000      -0.0000000000      -0.7903491715
+2
+config_type=oh- sample_index=429 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1090336888
+H         0.0000000000       0.0000000000      -0.9197322952
+2
+config_type=oh- sample_index=430 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0974424907
+H        -0.0000000000      -0.0000000000      -0.7342767144
+2
+config_type=oh- sample_index=431 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1088694630
+H         0.0000000000       0.0000000000      -0.9171047329
+2
+config_type=oh- sample_index=432 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1014422915
+H        -0.0000000000      -0.0000000000      -0.7982722893
+2
+config_type=oh- sample_index=433 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1030873089
+H        -0.0000000000      -0.0000000000      -0.8245920584
+2
+config_type=oh- sample_index=434 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1058902090
+H         0.0000000000       0.0000000000      -0.8694375912
+2
+config_type=oh- sample_index=435 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009362559
+H        -0.0000000000      -0.0000000000      -0.7901758765
+2
+config_type=oh- sample_index=436 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1112901727
+H         0.0000000000       0.0000000000      -0.9558353375
+2
+config_type=oh- sample_index=437 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0998246017
+H        -0.0000000000      -0.0000000000      -0.7723897530
+2
+config_type=oh- sample_index=438 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1055275754
+H         0.0000000000       0.0000000000      -0.8636355669
+2
+config_type=oh- sample_index=439 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1074486270
+H         0.0000000000       0.0000000000      -0.8943717963
+2
+config_type=oh- sample_index=440 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1022658767
+H        -0.0000000000      -0.0000000000      -0.8114493975
+2
+config_type=oh- sample_index=441 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1010190524
+H        -0.0000000000      -0.0000000000      -0.7915005944
+2
+config_type=oh- sample_index=442 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1021831307
+H        -0.0000000000      -0.0000000000      -0.8101254874
+2
+config_type=oh- sample_index=443 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0972487659
+H        -0.0000000000      -0.0000000000      -0.7311771787
+2
+config_type=oh- sample_index=444 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009354811
+H        -0.0000000000      -0.0000000000      -0.7901634795
+2
+config_type=oh- sample_index=445 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1001217977
+H        -0.0000000000      -0.0000000000      -0.7771447979
+2
+config_type=oh- sample_index=446 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1074383092
+H         0.0000000000       0.0000000000      -0.8942067159
+2
+config_type=oh- sample_index=447 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1048445945
+H        -0.0000000000      -0.0000000000      -0.8527080832
+2
+config_type=oh- sample_index=448 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1030129942
+H        -0.0000000000      -0.0000000000      -0.8234030455
+2
+config_type=oh- sample_index=449 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1053432280
+H         0.0000000000       0.0000000000      -0.8606860654
+2
+config_type=oh- sample_index=450 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1040616844
+H        -0.0000000000      -0.0000000000      -0.8401817643
+2
+config_type=oh- sample_index=451 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1035622342
+H        -0.0000000000      -0.0000000000      -0.8321907160
+2
+config_type=oh- sample_index=452 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1018843965
+H        -0.0000000000      -0.0000000000      -0.8053458322
+2
+config_type=oh- sample_index=453 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1056797539
+H         0.0000000000       0.0000000000      -0.8660703748
+2
+config_type=oh- sample_index=454 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1066756498
+H         0.0000000000       0.0000000000      -0.8820044015
+2
+config_type=oh- sample_index=455 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1085957593
+H         0.0000000000       0.0000000000      -0.9127255575
+2
+config_type=oh- sample_index=456 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1088502269
+H         0.0000000000       0.0000000000      -0.9167969612
+2
+config_type=oh- sample_index=457 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1005674220
+H        -0.0000000000      -0.0000000000      -0.7842746480
+2
+config_type=oh- sample_index=458 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1056111885
+H         0.0000000000       0.0000000000      -0.8649733492
+2
+config_type=oh- sample_index=459 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1021143183
+H        -0.0000000000      -0.0000000000      -0.8090245104
+2
+config_type=oh- sample_index=460 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1104778761
+H         0.0000000000       0.0000000000      -0.9428388446
+2
+config_type=oh- sample_index=461 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1130491866
+H         0.0000000000       0.0000000000      -0.9839790150
+2
+config_type=oh- sample_index=462 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1094816500
+H         0.0000000000       0.0000000000      -0.9268995347
+2
+config_type=oh- sample_index=463 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1006710452
+H        -0.0000000000      -0.0000000000      -0.7859325871
+2
+config_type=oh- sample_index=464 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1009862354
+H        -0.0000000000      -0.0000000000      -0.7909755326
+2
+config_type=oh- sample_index=465 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1039396869
+H        -0.0000000000      -0.0000000000      -0.8382298421
+2
+config_type=oh- sample_index=466 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1084908470
+H         0.0000000000       0.0000000000      -0.9110469945
+2
+config_type=oh- sample_index=467 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1057968976
+H         0.0000000000       0.0000000000      -0.8679446381
+2
+config_type=oh- sample_index=468 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1064668376
+H         0.0000000000       0.0000000000      -0.8786634711
+2
+config_type=oh- sample_index=469 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1066562854
+H         0.0000000000       0.0000000000      -0.8816945767
+2
+config_type=oh- sample_index=470 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1153279661
+H         0.0000000000       0.0000000000      -1.0204387817
+2
+config_type=oh- sample_index=471 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1087145762
+H         0.0000000000       0.0000000000      -0.9146265915
+2
+config_type=oh- sample_index=472 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1060348716
+H         0.0000000000       0.0000000000      -0.8717521480
+2
+config_type=oh- sample_index=473 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0991871713
+H        -0.0000000000      -0.0000000000      -0.7621910645
+2
+config_type=oh- sample_index=474 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1046270326
+H        -0.0000000000      -0.0000000000      -0.8492271599
+2
+config_type=oh- sample_index=475 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0996507886
+H        -0.0000000000      -0.0000000000      -0.7696087974
+2
+config_type=oh- sample_index=476 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1068518352
+H         0.0000000000       0.0000000000      -0.8848233122
+2
+config_type=oh- sample_index=477 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1062859808
+H         0.0000000000       0.0000000000      -0.8757698175
+2
+config_type=oh- sample_index=478 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1209189717
+H         0.0000000000       0.0000000000      -1.1098931404
+2
+config_type=oh- sample_index=479 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1034128618
+H        -0.0000000000      -0.0000000000      -0.8298008030
+2
+config_type=oh- sample_index=480 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1030767425
+H        -0.0000000000      -0.0000000000      -0.8244229992
+2
+config_type=oh- sample_index=481 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0981947224
+H        -0.0000000000      -0.0000000000      -0.7463121892
+2
+config_type=oh- sample_index=482 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1072252277
+H         0.0000000000       0.0000000000      -0.8907974764
+2
+config_type=oh- sample_index=483 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1048942292
+H        -0.0000000000      -0.0000000000      -0.8535022232
+2
+config_type=oh- sample_index=484 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1081030577
+H         0.0000000000       0.0000000000      -0.9048424846
+2
+config_type=oh- sample_index=485 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1099919194
+H         0.0000000000       0.0000000000      -0.9350636878
+2
+config_type=oh- sample_index=486 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1081334734
+H         0.0000000000       0.0000000000      -0.9053291277
+2
+config_type=oh- sample_index=487 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1066563864
+H         0.0000000000       0.0000000000      -0.8816961931
+2
+config_type=oh- sample_index=488 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.0998331637
+H        -0.0000000000      -0.0000000000      -0.7725267420
+2
+config_type=oh- sample_index=489 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1052631607
+H        -0.0000000000      -0.0000000000      -0.8594050122
+2
+config_type=oh- sample_index=490 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1084441988
+H         0.0000000000       0.0000000000      -0.9103006379
+2
+config_type=oh- sample_index=491 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1047027318
+H        -0.0000000000      -0.0000000000      -0.8504383235
+2
+config_type=oh- sample_index=492 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1043990016
+H        -0.0000000000      -0.0000000000      -0.8455787356
+2
+config_type=oh- sample_index=493 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1079855041
+H         0.0000000000       0.0000000000      -0.9029616634
+2
+config_type=oh- sample_index=494 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1006846614
+H        -0.0000000000      -0.0000000000      -0.7861504424
+2
+config_type=oh- sample_index=495 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1128492805
+H         0.0000000000       0.0000000000      -0.9807805795
+2
+config_type=oh- sample_index=496 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1061289106
+H         0.0000000000       0.0000000000      -0.8732567429
+2
+config_type=oh- sample_index=497 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1026033709
+H        -0.0000000000      -0.0000000000      -0.8168492004
+2
+config_type=oh- sample_index=498 temperature=300.0 source=wigner
+O        -0.0000000000      -0.0000000000       0.1106426695
+H         0.0000000000       0.0000000000      -0.9454754878
+2
+config_type=oh- sample_index=499 temperature=300.0 source=wigner
+O         0.0000000000       0.0000000000       0.1038224574
+H        -0.0000000000      -0.0000000000      -0.8363542056

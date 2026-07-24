@@ -1,0 +1,9 @@
+{
+  "name": "oh-",
+  "charge": -1,
+  "mult": 1,
+  "spin": 0,
+  "xc": "wB97M-V",
+  "basis": "def2-svpd",
+  "opt_energy": -75.72090028223953
+}

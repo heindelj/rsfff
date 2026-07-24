@@ -1,0 +1,71 @@
+# Phase 1: the frozen monomer stack, on the labeled H2O / H3O+ / OH- monomers.
+#
+# Reference embeddings e(Z, Q_a, S_a) -> state-decorated intra-fragment lambda-SOAP -> 1-body
+# heads (E_1, chi, eta, chivec, alpha) + per-bond compliances -> split-charge equilibration.
+# The channel graph comes from the diabatic state library, not from a distance rule.
+#
+# Loss weights are in model units (Ha, Ha/A, e*A, e, e^2 A^2/Ha).
+run_name: monomer_h2o_h3o_oh
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/labels/h2o.extxyz
+    - data/labels/h3o+.extxyz
+    - data/labels/oh-.extxyz
+  reference_energies: data/atomic_references.json
+  diabatic_states: data/diabatic_states.yaml
+  atomic_reference_states: data/atomic_reference_states.json
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0          # covers every intra-fragment pair in these monomers
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]   # chivec needs lambda=1, alpha lambda=2
+  backend: e3nn
+
+# Reference embedding + state-decorated density + 1-body heads.
+monomer:
+  emb_dim: 32
+  weight_channels: 6   # Kw learned density channels; feature width ~ (Kw*n_max)^2
+  hidden: 64
+  depth: 2
+  equiv_channels: 32
+
+# Split-charge equilibration.
+sqe:
+  s_init: 0.5          # initial channel compliance, e^2/Ha
+  s_floor: 0.0         # 0 keeps channel closure exact
+  n_radial: 8
+  eta_init: 0.5        # only a fallback; per-element eta is seeded from the atomic IP-EA
+  eta_floor: 0.05
+  psd_floor: 1.0e-4
+
+train:
+  epochs: 200
+  batch_size: 16
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  grad_clip: 5.0
+  energy_weight: 1.0
+  force_weight: 1.0
+  dipole_weight: 10.0
+  dmu_dr_weight: 1.0
+  dmu_dr_every: 2      # stride the 3 double-backwards of dmu/dR
+  alpha_weight: 0.1
+  atomic_ref_weight: 100.0   # free-atom energy anchors (exact at init; keep them there)
+  free_alpha_weight: 1.0     # free-atom polarizability anchors
+  unbound_weight: 0.0        # drop H- : unbound at this level, so its E/alpha are basis noise
+  # No charge penalty. Under SQE the transfers are already regularized by the kappa*p^2 term
+  # *inside* the energy functional, so an extra loss-level penalty is redundant -- and measured
+  # to be actively harmful. At 1e-3 (the value the EEM config uses, where nothing else bounds
+  # the charges) it suppresses the monopoles and makes the atomic dipoles compensate: water's
+  # charges dropped to q_O = -0.28 carrying only 41% of the molecular dipole, H3O+ came out
+  # with a *positive* oxygen and OH- with a *negative* hydrogen, and energy/force errors were
+  # ~1.5x worse. At 0 the same fit gives q_O = -0.62 (91% of mu), correct signs everywhere.
+  q_l2_weight: 0.0
+  eval_every: 5

@@ -171,6 +171,67 @@ def eem_model_loss(
     return loss, metrics
 
 
+def monomer_loss(out, batch, **kwargs):
+    """Multi-target loss for the Phase-1 monomer stack.
+
+    :class:`rsfff.mlip.MonomerOutput` exposes the same observables as ``EEMOutput``, so the
+    term structure (energy / forces / dipole / dmu-dR / alpha / charge-L2) is shared with
+    :func:`eem_model_loss`; this wrapper adds the split-charge diagnostics that only exist
+    under SQE. Returns ``(loss, metrics)``.
+    """
+    loss, metrics = eem_model_loss(out, batch, **kwargs)
+    if out.compliance.numel():
+        metrics["s_mean"] = float(out.compliance.detach().mean())
+        metrics["p_abs_max"] = float(out.transfers.detach().abs().max())
+    return loss, metrics
+
+
+def atomic_reference_loss(
+    model,
+    anchor_batch,
+    states,
+    *,
+    energy_weight: float = 1.0,
+    alpha_weight: float = 0.0,
+    unbound_weight: float = 0.0,
+):
+    """Free-atom anchors: isolated-atom energy and polarizability at integer charge.
+
+    These are the exact free-atom limit of the model (zero features, no channels, ``q = Q``),
+    so they pin the per-element ``chi``/``eta``/``alpha`` rather than merely nudging them --
+    see ``rsfff.mlip.monomer`` for why the limit is architectural.
+
+    States flagged unbound at this level of theory (``AtomicStateReference.bound``) are scaled
+    by ``unbound_weight``; the default of 0 drops them entirely. Their energies and
+    polarizabilities are artifacts of whichever diffuse basis function the SCF fell into, so
+    fitting them at full weight teaches the model basis-set noise.
+
+    Returns ``(loss, metrics)`` with the max energy error over *bound* states for logging.
+    """
+    out = model(anchor_batch)
+    w = torch.where(
+        states.bound.to(out.energy.device),
+        torch.ones_like(out.energy),
+        torch.full_like(out.energy, float(unbound_weight)),
+    )
+
+    e_err = out.energy - anchor_batch.energy
+    loss = energy_weight * (w * e_err.pow(2)).mean()
+    metrics = {
+        "atomic_e_max": float(e_err.detach()[states.bound].abs().max())
+        if bool(states.bound.any()) else 0.0
+    }
+
+    if alpha_weight > 0.0 and anchor_batch.polarizability is not None:
+        a_err = out.alpha - anchor_batch.polarizability
+        loss = loss + alpha_weight * (w.view(-1, 1, 1) * a_err.pow(2)).mean()
+        metrics["atomic_alpha_max"] = float(
+            a_err.detach()[states.bound].abs().max()
+        ) if bool(states.bound.any()) else 0.0
+
+    return loss, metrics
+
+
 def isolated_species_loss(model, iso_batch, weight: float = 1.0):
     """Energy MSE over the isolated-species anchor systems (integer charges).
 

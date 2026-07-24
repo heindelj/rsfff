@@ -1,0 +1,9 @@
+{
+  "name": "hso4-",
+  "charge": -1,
+  "mult": 1,
+  "spin": 0,
+  "xc": "wB97M-V",
+  "basis": "def2-svpd",
+  "opt_energy": -699.3012458572948
+}

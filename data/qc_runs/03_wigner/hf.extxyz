@@ -1,0 +1,2000 @@
+2
+config_type=hf sample_index=0 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0914965566
+H         0.0000000000       0.0000000000      -0.8394988701
+2
+config_type=hf sample_index=1 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0906516468
+H        -0.0000000000      -0.0000000000      -0.8234467815
+2
+config_type=hf sample_index=2 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0931831723
+H         0.0000000000       0.0000000000      -0.8715421760
+2
+config_type=hf sample_index=3 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0914282977
+H         0.0000000000       0.0000000000      -0.8382020463
+2
+config_type=hf sample_index=4 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0893291906
+H        -0.0000000000      -0.0000000000      -0.7983219880
+2
+config_type=hf sample_index=5 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922694713
+H         0.0000000000       0.0000000000      -0.8541831526
+2
+config_type=hf sample_index=6 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0953576748
+H         0.0000000000       0.0000000000      -0.9128546419
+2
+config_type=hf sample_index=7 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0941880728
+H         0.0000000000       0.0000000000      -0.8906338617
+2
+config_type=hf sample_index=8 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0887784491
+H        -0.0000000000      -0.0000000000      -0.7878586792
+2
+config_type=hf sample_index=9 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0869378376
+H        -0.0000000000      -0.0000000000      -0.7528896709
+2
+config_type=hf sample_index=10 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0890421141
+H        -0.0000000000      -0.0000000000      -0.7928679411
+2
+config_type=hf sample_index=11 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0912199691
+H         0.0000000000       0.0000000000      -0.8342440990
+2
+config_type=hf sample_index=12 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0834655627
+H        -0.0000000000      -0.0000000000      -0.6869213700
+2
+config_type=hf sample_index=13 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0903675795
+H        -0.0000000000      -0.0000000000      -0.8180499047
+2
+config_type=hf sample_index=14 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0870017724
+H        -0.0000000000      -0.0000000000      -0.7541043413
+2
+config_type=hf sample_index=15 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0886849511
+H        -0.0000000000      -0.0000000000      -0.7860823495
+2
+config_type=hf sample_index=16 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0893010430
+H        -0.0000000000      -0.0000000000      -0.7977872230
+2
+config_type=hf sample_index=17 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0900480501
+H        -0.0000000000      -0.0000000000      -0.8119792996
+2
+config_type=hf sample_index=18 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0924334345
+H         0.0000000000       0.0000000000      -0.8572982212
+2
+config_type=hf sample_index=19 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0945007990
+H         0.0000000000       0.0000000000      -0.8965752154
+2
+config_type=hf sample_index=20 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0906633462
+H        -0.0000000000      -0.0000000000      -0.8236690522
+2
+config_type=hf sample_index=21 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0955623636
+H         0.0000000000       0.0000000000      -0.9167434394
+2
+config_type=hf sample_index=22 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0889047441
+H        -0.0000000000      -0.0000000000      -0.7902581064
+2
+config_type=hf sample_index=23 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922364234
+H         0.0000000000       0.0000000000      -0.8535552897
+2
+config_type=hf sample_index=24 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0940451629
+H         0.0000000000       0.0000000000      -0.8879187769
+2
+config_type=hf sample_index=25 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0913926190
+H         0.0000000000       0.0000000000      -0.8375242013
+2
+config_type=hf sample_index=26 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0886481448
+H        -0.0000000000      -0.0000000000      -0.7853830833
+2
+config_type=hf sample_index=27 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0880641087
+H        -0.0000000000      -0.0000000000      -0.7742872249
+2
+config_type=hf sample_index=28 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895846069
+H        -0.0000000000      -0.0000000000      -0.8031745345
+2
+config_type=hf sample_index=29 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0918061124
+H         0.0000000000       0.0000000000      -0.8453799898
+2
+config_type=hf sample_index=30 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0877760894
+H        -0.0000000000      -0.0000000000      -0.7688152655
+2
+config_type=hf sample_index=31 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0903990908
+H        -0.0000000000      -0.0000000000      -0.8186485754
+2
+config_type=hf sample_index=32 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0905627758
+H        -0.0000000000      -0.0000000000      -0.8217583573
+2
+config_type=hf sample_index=33 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0928568643
+H         0.0000000000       0.0000000000      -0.8653427874
+2
+config_type=hf sample_index=34 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0917879712
+H         0.0000000000       0.0000000000      -0.8450353339
+2
+config_type=hf sample_index=35 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922490810
+H         0.0000000000       0.0000000000      -0.8537957668
+2
+config_type=hf sample_index=36 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0889419900
+H        -0.0000000000      -0.0000000000      -0.7909657256
+2
+config_type=hf sample_index=37 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0906598104
+H        -0.0000000000      -0.0000000000      -0.8236018785
+2
+config_type=hf sample_index=38 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0936535861
+H         0.0000000000       0.0000000000      -0.8804793716
+2
+config_type=hf sample_index=39 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0959784289
+H         0.0000000000       0.0000000000      -0.9246480904
+2
+config_type=hf sample_index=40 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0869586656
+H        -0.0000000000      -0.0000000000      -0.7532853738
+2
+config_type=hf sample_index=41 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0960455820
+H         0.0000000000       0.0000000000      -0.9259239040
+2
+config_type=hf sample_index=42 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0954948979
+H         0.0000000000       0.0000000000      -0.9154616854
+2
+config_type=hf sample_index=43 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0936448561
+H         0.0000000000       0.0000000000      -0.8803135141
+2
+config_type=hf sample_index=44 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0919511513
+H         0.0000000000       0.0000000000      -0.8481355247
+2
+config_type=hf sample_index=45 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0900558405
+H        -0.0000000000      -0.0000000000      -0.8121273063
+2
+config_type=hf sample_index=46 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0958623910
+H         0.0000000000       0.0000000000      -0.9224435345
+2
+config_type=hf sample_index=47 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0975081930
+H         0.0000000000       0.0000000000      -0.9537114397
+2
+config_type=hf sample_index=48 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0969883937
+H         0.0000000000       0.0000000000      -0.9438359891
+2
+config_type=hf sample_index=49 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0953940610
+H         0.0000000000       0.0000000000      -0.9135459283
+2
+config_type=hf sample_index=50 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922556602
+H         0.0000000000       0.0000000000      -0.8539207607
+2
+config_type=hf sample_index=51 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0871249601
+H        -0.0000000000      -0.0000000000      -0.7564447333
+2
+config_type=hf sample_index=52 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910699505
+H        -0.0000000000      -0.0000000000      -0.8313939577
+2
+config_type=hf sample_index=53 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0932357746
+H         0.0000000000       0.0000000000      -0.8725415462
+2
+config_type=hf sample_index=54 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0868626647
+H        -0.0000000000      -0.0000000000      -0.7514614913
+2
+config_type=hf sample_index=55 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0923793372
+H         0.0000000000       0.0000000000      -0.8562704498
+2
+config_type=hf sample_index=56 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0924931834
+H         0.0000000000       0.0000000000      -0.8584333665
+2
+config_type=hf sample_index=57 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0933654358
+H         0.0000000000       0.0000000000      -0.8750049256
+2
+config_type=hf sample_index=58 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0872042642
+H        -0.0000000000      -0.0000000000      -0.7579513988
+2
+config_type=hf sample_index=59 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0889161875
+H        -0.0000000000      -0.0000000000      -0.7904755148
+2
+config_type=hf sample_index=60 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0896543748
+H        -0.0000000000      -0.0000000000      -0.8045000261
+2
+config_type=hf sample_index=61 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0872511771
+H        -0.0000000000      -0.0000000000      -0.7588426765
+2
+config_type=hf sample_index=62 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0967843486
+H         0.0000000000       0.0000000000      -0.9399594210
+2
+config_type=hf sample_index=63 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0894594773
+H        -0.0000000000      -0.0000000000      -0.8007972496
+2
+config_type=hf sample_index=64 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0921625598
+H         0.0000000000       0.0000000000      -0.8521519852
+2
+config_type=hf sample_index=65 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0902372200
+H        -0.0000000000      -0.0000000000      -0.8155732587
+2
+config_type=hf sample_index=66 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0962734902
+H         0.0000000000       0.0000000000      -0.9302538360
+2
+config_type=hf sample_index=67 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0954112886
+H         0.0000000000       0.0000000000      -0.9138732282
+2
+config_type=hf sample_index=68 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0931600042
+H         0.0000000000       0.0000000000      -0.8711020159
+2
+config_type=hf sample_index=69 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0838637793
+H        -0.0000000000      -0.0000000000      -0.6944869198
+2
+config_type=hf sample_index=70 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0912550422
+H         0.0000000000       0.0000000000      -0.8349104374
+2
+config_type=hf sample_index=71 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0933249442
+H         0.0000000000       0.0000000000      -0.8742356426
+2
+config_type=hf sample_index=72 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0943744671
+H         0.0000000000       0.0000000000      -0.8941750890
+2
+config_type=hf sample_index=73 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0890597028
+H        -0.0000000000      -0.0000000000      -0.7932021014
+2
+config_type=hf sample_index=74 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0970551662
+H         0.0000000000       0.0000000000      -0.9451045724
+2
+config_type=hf sample_index=75 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0867575749
+H        -0.0000000000      -0.0000000000      -0.7494649339
+2
+config_type=hf sample_index=76 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0889167595
+H        -0.0000000000      -0.0000000000      -0.7904863818
+2
+config_type=hf sample_index=77 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0941486480
+H         0.0000000000       0.0000000000      -0.8898848470
+2
+config_type=hf sample_index=78 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0912452954
+H         0.0000000000       0.0000000000      -0.8347252621
+2
+config_type=hf sample_index=79 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0976462644
+H         0.0000000000       0.0000000000      -0.9563346009
+2
+config_type=hf sample_index=80 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0917023123
+H         0.0000000000       0.0000000000      -0.8434079352
+2
+config_type=hf sample_index=81 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0890096081
+H        -0.0000000000      -0.0000000000      -0.7922503729
+2
+config_type=hf sample_index=82 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0898472939
+H        -0.0000000000      -0.0000000000      -0.8081652155
+2
+config_type=hf sample_index=83 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0875089273
+H        -0.0000000000      -0.0000000000      -0.7637395652
+2
+config_type=hf sample_index=84 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0868976666
+H        -0.0000000000      -0.0000000000      -0.7521264789
+2
+config_type=hf sample_index=85 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0931503663
+H         0.0000000000       0.0000000000      -0.8709189093
+2
+config_type=hf sample_index=86 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0929889912
+H         0.0000000000       0.0000000000      -0.8678530116
+2
+config_type=hf sample_index=87 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0953267365
+H         0.0000000000       0.0000000000      -0.9122668577
+2
+config_type=hf sample_index=88 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0886117494
+H        -0.0000000000      -0.0000000000      -0.7846916212
+2
+config_type=hf sample_index=89 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0966196482
+H         0.0000000000       0.0000000000      -0.9368303480
+2
+config_type=hf sample_index=90 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901427945
+H        -0.0000000000      -0.0000000000      -0.8137793075
+2
+config_type=hf sample_index=91 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0962437861
+H         0.0000000000       0.0000000000      -0.9296894994
+2
+config_type=hf sample_index=92 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0896663336
+H        -0.0000000000      -0.0000000000      -0.8047272275
+2
+config_type=hf sample_index=93 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0886744126
+H        -0.0000000000      -0.0000000000      -0.7858821343
+2
+config_type=hf sample_index=94 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0919030778
+H         0.0000000000       0.0000000000      -0.8472221956
+2
+config_type=hf sample_index=95 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0944645551
+H         0.0000000000       0.0000000000      -0.8958866332
+2
+config_type=hf sample_index=96 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0916121649
+H         0.0000000000       0.0000000000      -0.8416952638
+2
+config_type=hf sample_index=97 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0891658042
+H        -0.0000000000      -0.0000000000      -0.7952178785
+2
+config_type=hf sample_index=98 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0866894514
+H        -0.0000000000      -0.0000000000      -0.7481706850
+2
+config_type=hf sample_index=99 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0864918504
+H        -0.0000000000      -0.0000000000      -0.7444165451
+2
+config_type=hf sample_index=100 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0927318074
+H         0.0000000000       0.0000000000      -0.8629668827
+2
+config_type=hf sample_index=101 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0943277755
+H         0.0000000000       0.0000000000      -0.8932880147
+2
+config_type=hf sample_index=102 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0905461631
+H        -0.0000000000      -0.0000000000      -0.8214427394
+2
+config_type=hf sample_index=103 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0875639185
+H        -0.0000000000      -0.0000000000      -0.7647843193
+2
+config_type=hf sample_index=104 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0939454521
+H         0.0000000000       0.0000000000      -0.8860244132
+2
+config_type=hf sample_index=105 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0868887737
+H        -0.0000000000      -0.0000000000      -0.7519575267
+2
+config_type=hf sample_index=106 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0887478659
+H        -0.0000000000      -0.0000000000      -0.7872776415
+2
+config_type=hf sample_index=107 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0931195839
+H         0.0000000000       0.0000000000      -0.8703340878
+2
+config_type=hf sample_index=108 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0837109714
+H        -0.0000000000      -0.0000000000      -0.6915837864
+2
+config_type=hf sample_index=109 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0923506559
+H         0.0000000000       0.0000000000      -0.8557255461
+2
+config_type=hf sample_index=110 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0891785449
+H        -0.0000000000      -0.0000000000      -0.7954599337
+2
+config_type=hf sample_index=111 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0914426493
+H         0.0000000000       0.0000000000      -0.8384747067
+2
+config_type=hf sample_index=112 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0908364771
+H        -0.0000000000      -0.0000000000      -0.8269582950
+2
+config_type=hf sample_index=113 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0917468629
+H         0.0000000000       0.0000000000      -0.8442543344
+2
+config_type=hf sample_index=114 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0933593054
+H         0.0000000000       0.0000000000      -0.8748884557
+2
+config_type=hf sample_index=115 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0885994151
+H        -0.0000000000      -0.0000000000      -0.7844572876
+2
+config_type=hf sample_index=116 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0957410176
+H         0.0000000000       0.0000000000      -0.9201376114
+2
+config_type=hf sample_index=117 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0934639113
+H         0.0000000000       0.0000000000      -0.8768758206
+2
+config_type=hf sample_index=118 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0938494067
+H         0.0000000000       0.0000000000      -0.8841996866
+2
+config_type=hf sample_index=119 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0949017344
+H         0.0000000000       0.0000000000      -0.9041924211
+2
+config_type=hf sample_index=120 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0936654248
+H         0.0000000000       0.0000000000      -0.8807042914
+2
+config_type=hf sample_index=121 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0938505406
+H         0.0000000000       0.0000000000      -0.8842212287
+2
+config_type=hf sample_index=122 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0913322620
+H         0.0000000000       0.0000000000      -0.8363775055
+2
+config_type=hf sample_index=123 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0864090957
+H        -0.0000000000      -0.0000000000      -0.7428443246
+2
+config_type=hf sample_index=124 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0906420119
+H        -0.0000000000      -0.0000000000      -0.8232637307
+2
+config_type=hf sample_index=125 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0885628940
+H        -0.0000000000      -0.0000000000      -0.7837634381
+2
+config_type=hf sample_index=126 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0864223086
+H        -0.0000000000      -0.0000000000      -0.7430953508
+2
+config_type=hf sample_index=127 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0919314804
+H         0.0000000000       0.0000000000      -0.8477618048
+2
+config_type=hf sample_index=128 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0892214446
+H        -0.0000000000      -0.0000000000      -0.7962749665
+2
+config_type=hf sample_index=129 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0877099402
+H        -0.0000000000      -0.0000000000      -0.7675585259
+2
+config_type=hf sample_index=130 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0876666956
+H        -0.0000000000      -0.0000000000      -0.7667369401
+2
+config_type=hf sample_index=131 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0919641328
+H         0.0000000000       0.0000000000      -0.8483821534
+2
+config_type=hf sample_index=132 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922598924
+H         0.0000000000       0.0000000000      -0.8540011682
+2
+config_type=hf sample_index=133 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0954181587
+H         0.0000000000       0.0000000000      -0.9140037493
+2
+config_type=hf sample_index=134 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910389489
+H        -0.0000000000      -0.0000000000      -0.8308049713
+2
+config_type=hf sample_index=135 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0944985916
+H         0.0000000000       0.0000000000      -0.8965332784
+2
+config_type=hf sample_index=136 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0956796825
+H         0.0000000000       0.0000000000      -0.9189723313
+2
+config_type=hf sample_index=137 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0948535689
+H         0.0000000000       0.0000000000      -0.9032773434
+2
+config_type=hf sample_index=138 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0833335901
+H        -0.0000000000      -0.0000000000      -0.6844140779
+2
+config_type=hf sample_index=139 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0951108678
+H         0.0000000000       0.0000000000      -0.9081656588
+2
+config_type=hf sample_index=140 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0921974604
+H         0.0000000000       0.0000000000      -0.8528150479
+2
+config_type=hf sample_index=141 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0924732192
+H         0.0000000000       0.0000000000      -0.8580540744
+2
+config_type=hf sample_index=142 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0923010359
+H         0.0000000000       0.0000000000      -0.8547828365
+2
+config_type=hf sample_index=143 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0923388182
+H         0.0000000000       0.0000000000      -0.8555006459
+2
+config_type=hf sample_index=144 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0921312473
+H         0.0000000000       0.0000000000      -0.8515570922
+2
+config_type=hf sample_index=145 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899084094
+H        -0.0000000000      -0.0000000000      -0.8093263244
+2
+config_type=hf sample_index=146 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0848530038
+H        -0.0000000000      -0.0000000000      -0.7132807839
+2
+config_type=hf sample_index=147 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0907276395
+H        -0.0000000000      -0.0000000000      -0.8248905343
+2
+config_type=hf sample_index=148 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0884507663
+H        -0.0000000000      -0.0000000000      -0.7816331708
+2
+config_type=hf sample_index=149 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0946241758
+H         0.0000000000       0.0000000000      -0.8989192014
+2
+config_type=hf sample_index=150 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901382762
+H        -0.0000000000      -0.0000000000      -0.8136934674
+2
+config_type=hf sample_index=151 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0913580900
+H         0.0000000000       0.0000000000      -0.8368682008
+2
+config_type=hf sample_index=152 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0883004396
+H        -0.0000000000      -0.0000000000      -0.7787771776
+2
+config_type=hf sample_index=153 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0894112678
+H        -0.0000000000      -0.0000000000      -0.7998813380
+2
+config_type=hf sample_index=154 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910467533
+H        -0.0000000000      -0.0000000000      -0.8309532435
+2
+config_type=hf sample_index=155 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0862170628
+H        -0.0000000000      -0.0000000000      -0.7391959701
+2
+config_type=hf sample_index=156 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0920698731
+H         0.0000000000       0.0000000000      -0.8503910707
+2
+config_type=hf sample_index=157 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0907369541
+H        -0.0000000000      -0.0000000000      -0.8250674988
+2
+config_type=hf sample_index=158 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0871990151
+H        -0.0000000000      -0.0000000000      -0.7578516729
+2
+config_type=hf sample_index=159 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0832256840
+H        -0.0000000000      -0.0000000000      -0.6823640134
+2
+config_type=hf sample_index=160 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0927657869
+H         0.0000000000       0.0000000000      -0.8636124452
+2
+config_type=hf sample_index=161 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901093817
+H        -0.0000000000      -0.0000000000      -0.8131445126
+2
+config_type=hf sample_index=162 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0893477412
+H        -0.0000000000      -0.0000000000      -0.7986744235
+2
+config_type=hf sample_index=163 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0903106821
+H        -0.0000000000      -0.0000000000      -0.8169689352
+2
+config_type=hf sample_index=164 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0970370270
+H         0.0000000000       0.0000000000      -0.9447599526
+2
+config_type=hf sample_index=165 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0909213517
+H        -0.0000000000      -0.0000000000      -0.8285707910
+2
+config_type=hf sample_index=166 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0913683924
+H         0.0000000000       0.0000000000      -0.8370639317
+2
+config_type=hf sample_index=167 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0862114995
+H        -0.0000000000      -0.0000000000      -0.7390902770
+2
+config_type=hf sample_index=168 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0964827758
+H         0.0000000000       0.0000000000      -0.9342299655
+2
+config_type=hf sample_index=169 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0940910984
+H         0.0000000000       0.0000000000      -0.8887914859
+2
+config_type=hf sample_index=170 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0945808267
+H         0.0000000000       0.0000000000      -0.8980956293
+2
+config_type=hf sample_index=171 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0912407670
+H         0.0000000000       0.0000000000      -0.8346392299
+2
+config_type=hf sample_index=172 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0940883681
+H         0.0000000000       0.0000000000      -0.8887396135
+2
+config_type=hf sample_index=173 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0923001165
+H         0.0000000000       0.0000000000      -0.8547653682
+2
+config_type=hf sample_index=174 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0930939295
+H         0.0000000000       0.0000000000      -0.8698466902
+2
+config_type=hf sample_index=175 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0905858194
+H        -0.0000000000      -0.0000000000      -0.8221961531
+2
+config_type=hf sample_index=176 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0862547057
+H        -0.0000000000      -0.0000000000      -0.7399111332
+2
+config_type=hf sample_index=177 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0944560392
+H         0.0000000000       0.0000000000      -0.8957248431
+2
+config_type=hf sample_index=178 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0847438020
+H        -0.0000000000      -0.0000000000      -0.7112061041
+2
+config_type=hf sample_index=179 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0902982886
+H        -0.0000000000      -0.0000000000      -0.8167334759
+2
+config_type=hf sample_index=180 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0904143387
+H        -0.0000000000      -0.0000000000      -0.8189382635
+2
+config_type=hf sample_index=181 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0876671575
+H        -0.0000000000      -0.0000000000      -0.7667457145
+2
+config_type=hf sample_index=182 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0930937134
+H         0.0000000000       0.0000000000      -0.8698425849
+2
+config_type=hf sample_index=183 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0904280782
+H        -0.0000000000      -0.0000000000      -0.8191992946
+2
+config_type=hf sample_index=184 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0896529556
+H        -0.0000000000      -0.0000000000      -0.8044730639
+2
+config_type=hf sample_index=185 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0927880360
+H         0.0000000000       0.0000000000      -0.8640351464
+2
+config_type=hf sample_index=186 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895228260
+H        -0.0000000000      -0.0000000000      -0.8020007862
+2
+config_type=hf sample_index=187 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0956361488
+H         0.0000000000       0.0000000000      -0.9181452537
+2
+config_type=hf sample_index=188 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922362432
+H         0.0000000000       0.0000000000      -0.8535518660
+2
+config_type=hf sample_index=189 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895301862
+H        -0.0000000000      -0.0000000000      -0.8021406192
+2
+config_type=hf sample_index=190 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0847133090
+H        -0.0000000000      -0.0000000000      -0.7106267798
+2
+config_type=hf sample_index=191 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0867991191
+H        -0.0000000000      -0.0000000000      -0.7502542164
+2
+config_type=hf sample_index=192 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0946460244
+H         0.0000000000       0.0000000000      -0.8993342933
+2
+config_type=hf sample_index=193 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0909187200
+H        -0.0000000000      -0.0000000000      -0.8285207926
+2
+config_type=hf sample_index=194 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901567629
+H        -0.0000000000      -0.0000000000      -0.8140446877
+2
+config_type=hf sample_index=195 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0964693815
+H         0.0000000000       0.0000000000      -0.9339754922
+2
+config_type=hf sample_index=196 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0868813833
+H        -0.0000000000      -0.0000000000      -0.7518171181
+2
+config_type=hf sample_index=197 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0891653816
+H        -0.0000000000      -0.0000000000      -0.7952098489
+2
+config_type=hf sample_index=198 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895359055
+H        -0.0000000000      -0.0000000000      -0.8022492773
+2
+config_type=hf sample_index=199 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0930059378
+H         0.0000000000       0.0000000000      -0.8681749727
+2
+config_type=hf sample_index=200 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0889101821
+H        -0.0000000000      -0.0000000000      -0.7903614207
+2
+config_type=hf sample_index=201 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0890744136
+H        -0.0000000000      -0.0000000000      -0.7934815862
+2
+config_type=hf sample_index=202 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0858245700
+H        -0.0000000000      -0.0000000000      -0.7317391639
+2
+config_type=hf sample_index=203 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0934745798
+H         0.0000000000       0.0000000000      -0.8770785060
+2
+config_type=hf sample_index=204 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0937262158
+H         0.0000000000       0.0000000000      -0.8818592331
+2
+config_type=hf sample_index=205 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895234889
+H        -0.0000000000      -0.0000000000      -0.8020133804
+2
+config_type=hf sample_index=206 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0916198014
+H         0.0000000000       0.0000000000      -0.8418403460
+2
+config_type=hf sample_index=207 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0868486241
+H        -0.0000000000      -0.0000000000      -0.7511947405
+2
+config_type=hf sample_index=208 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895384435
+H        -0.0000000000      -0.0000000000      -0.8022974969
+2
+config_type=hf sample_index=209 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0956000074
+H         0.0000000000       0.0000000000      -0.9174586178
+2
+config_type=hf sample_index=210 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0915293277
+H         0.0000000000       0.0000000000      -0.8401214740
+2
+config_type=hf sample_index=211 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0986554663
+H         0.0000000000       0.0000000000      -0.9755080048
+2
+config_type=hf sample_index=212 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0885049639
+H        -0.0000000000      -0.0000000000      -0.7826628491
+2
+config_type=hf sample_index=213 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0929861029
+H         0.0000000000       0.0000000000      -0.8677981384
+2
+config_type=hf sample_index=214 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0904438858
+H        -0.0000000000      -0.0000000000      -0.8194996155
+2
+config_type=hf sample_index=215 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0929386969
+H         0.0000000000       0.0000000000      -0.8668974903
+2
+config_type=hf sample_index=216 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910609152
+H        -0.0000000000      -0.0000000000      -0.8312223005
+2
+config_type=hf sample_index=217 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0892455345
+H        -0.0000000000      -0.0000000000      -0.7967326405
+2
+config_type=hf sample_index=218 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0882414193
+H        -0.0000000000      -0.0000000000      -0.7776558752
+2
+config_type=hf sample_index=219 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.1011317613
+H         0.0000000000       0.0000000000      -1.0225541002
+2
+config_type=hf sample_index=220 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0908310914
+H        -0.0000000000      -0.0000000000      -0.8268559732
+2
+config_type=hf sample_index=221 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0844760726
+H        -0.0000000000      -0.0000000000      -0.7061196259
+2
+config_type=hf sample_index=222 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0889591219
+H        -0.0000000000      -0.0000000000      -0.7912912063
+2
+config_type=hf sample_index=223 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0933064411
+H         0.0000000000       0.0000000000      -0.8738841096
+2
+config_type=hf sample_index=224 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0894460493
+H        -0.0000000000      -0.0000000000      -0.8005421380
+2
+config_type=hf sample_index=225 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0955426454
+H         0.0000000000       0.0000000000      -0.9163688212
+2
+config_type=hf sample_index=226 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0943693442
+H         0.0000000000       0.0000000000      -0.8940777621
+2
+config_type=hf sample_index=227 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0905853420
+H        -0.0000000000      -0.0000000000      -0.8221870837
+2
+config_type=hf sample_index=228 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895371236
+H        -0.0000000000      -0.0000000000      -0.8022724205
+2
+config_type=hf sample_index=229 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0877918749
+H        -0.0000000000      -0.0000000000      -0.7691151694
+2
+config_type=hf sample_index=230 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0887907988
+H        -0.0000000000      -0.0000000000      -0.7880933074
+2
+config_type=hf sample_index=231 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0862571466
+H        -0.0000000000      -0.0000000000      -0.7399575069
+2
+config_type=hf sample_index=232 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0950312794
+H         0.0000000000       0.0000000000      -0.9066535918
+2
+config_type=hf sample_index=233 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0962971756
+H         0.0000000000       0.0000000000      -0.9307038253
+2
+config_type=hf sample_index=234 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0869682588
+H        -0.0000000000      -0.0000000000      -0.7534676294
+2
+config_type=hf sample_index=235 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0872122435
+H        -0.0000000000      -0.0000000000      -0.7581029945
+2
+config_type=hf sample_index=236 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0852892412
+H        -0.0000000000      -0.0000000000      -0.7215686757
+2
+config_type=hf sample_index=237 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0879260550
+H        -0.0000000000      -0.0000000000      -0.7716644007
+2
+config_type=hf sample_index=238 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0809052707
+H        -0.0000000000      -0.0000000000      -0.6382794500
+2
+config_type=hf sample_index=239 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0873413681
+H        -0.0000000000      -0.0000000000      -0.7605561781
+2
+config_type=hf sample_index=240 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0953344589
+H         0.0000000000       0.0000000000      -0.9124135717
+2
+config_type=hf sample_index=241 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899517987
+H        -0.0000000000      -0.0000000000      -0.8101506582
+2
+config_type=hf sample_index=242 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0938849667
+H         0.0000000000       0.0000000000      -0.8848752751
+2
+config_type=hf sample_index=243 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0894822247
+H        -0.0000000000      -0.0000000000      -0.8012294182
+2
+config_type=hf sample_index=244 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0968541455
+H         0.0000000000       0.0000000000      -0.9412854631
+2
+config_type=hf sample_index=245 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0917373715
+H         0.0000000000       0.0000000000      -0.8440740119
+2
+config_type=hf sample_index=246 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0898327482
+H        -0.0000000000      -0.0000000000      -0.8078888691
+2
+config_type=hf sample_index=247 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0994486838
+H         0.0000000000       0.0000000000      -0.9905780144
+2
+config_type=hf sample_index=248 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0900212720
+H        -0.0000000000      -0.0000000000      -0.8114705526
+2
+config_type=hf sample_index=249 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0870826722
+H        -0.0000000000      -0.0000000000      -0.7556413218
+2
+config_type=hf sample_index=250 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0917461931
+H         0.0000000000       0.0000000000      -0.8442416094
+2
+config_type=hf sample_index=251 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0909572864
+H        -0.0000000000      -0.0000000000      -0.8292534990
+2
+config_type=hf sample_index=252 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0945788268
+H         0.0000000000       0.0000000000      -0.8980576329
+2
+config_type=hf sample_index=253 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0880644084
+H        -0.0000000000      -0.0000000000      -0.7742929185
+2
+config_type=hf sample_index=254 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0937215546
+H         0.0000000000       0.0000000000      -0.8817706767
+2
+config_type=hf sample_index=255 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0938789510
+H         0.0000000000       0.0000000000      -0.8847609855
+2
+config_type=hf sample_index=256 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0888965760
+H        -0.0000000000      -0.0000000000      -0.7901029230
+2
+config_type=hf sample_index=257 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0916194870
+H         0.0000000000       0.0000000000      -0.8418343731
+2
+config_type=hf sample_index=258 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0883622230
+H        -0.0000000000      -0.0000000000      -0.7799509747
+2
+config_type=hf sample_index=259 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0987716160
+H         0.0000000000       0.0000000000      -0.9777146853
+2
+config_type=hf sample_index=260 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0887771241
+H        -0.0000000000      -0.0000000000      -0.7878335069
+2
+config_type=hf sample_index=261 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895998492
+H        -0.0000000000      -0.0000000000      -0.8034641165
+2
+config_type=hf sample_index=262 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0875918604
+H        -0.0000000000      -0.0000000000      -0.7653151762
+2
+config_type=hf sample_index=263 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899503281
+H        -0.0000000000      -0.0000000000      -0.8101227205
+2
+config_type=hf sample_index=264 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910652910
+H        -0.0000000000      -0.0000000000      -0.8313054346
+2
+config_type=hf sample_index=265 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0936005444
+H         0.0000000000       0.0000000000      -0.8794716558
+2
+config_type=hf sample_index=266 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0890840190
+H        -0.0000000000      -0.0000000000      -0.7936640746
+2
+config_type=hf sample_index=267 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0904757765
+H        -0.0000000000      -0.0000000000      -0.8201054943
+2
+config_type=hf sample_index=268 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0864427974
+H        -0.0000000000      -0.0000000000      -0.7434846078
+2
+config_type=hf sample_index=269 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0883731999
+H        -0.0000000000      -0.0000000000      -0.7801595195
+2
+config_type=hf sample_index=270 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.1001151592
+H         0.0000000000       0.0000000000      -1.0032401023
+2
+config_type=hf sample_index=271 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0944966367
+H         0.0000000000       0.0000000000      -0.8964961377
+2
+config_type=hf sample_index=272 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0885238676
+H        -0.0000000000      -0.0000000000      -0.7830219922
+2
+config_type=hf sample_index=273 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0867019774
+H        -0.0000000000      -0.0000000000      -0.7484086614
+2
+config_type=hf sample_index=274 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0878876211
+H        -0.0000000000      -0.0000000000      -0.7709342110
+2
+config_type=hf sample_index=275 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910134668
+H        -0.0000000000      -0.0000000000      -0.8303208475
+2
+config_type=hf sample_index=276 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0911983472
+H         0.0000000000       0.0000000000      -0.8338333141
+2
+config_type=hf sample_index=277 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0886453222
+H        -0.0000000000      -0.0000000000      -0.7853294580
+2
+config_type=hf sample_index=278 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0868685205
+H        -0.0000000000      -0.0000000000      -0.7515727447
+2
+config_type=hf sample_index=279 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0957455938
+H         0.0000000000       0.0000000000      -0.9202245525
+2
+config_type=hf sample_index=280 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0925646920
+H         0.0000000000       0.0000000000      -0.8597919278
+2
+config_type=hf sample_index=281 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0898571099
+H        -0.0000000000      -0.0000000000      -0.8083517060
+2
+config_type=hf sample_index=282 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0903614531
+H        -0.0000000000      -0.0000000000      -0.8179335121
+2
+config_type=hf sample_index=283 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0893493075
+H        -0.0000000000      -0.0000000000      -0.7987041796
+2
+config_type=hf sample_index=284 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0814633050
+H        -0.0000000000      -0.0000000000      -0.6488813118
+2
+config_type=hf sample_index=285 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0914635631
+H         0.0000000000       0.0000000000      -0.8388720402
+2
+config_type=hf sample_index=286 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0875764378
+H        -0.0000000000      -0.0000000000      -0.7650221697
+2
+config_type=hf sample_index=287 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0877988113
+H        -0.0000000000      -0.0000000000      -0.7692469497
+2
+config_type=hf sample_index=288 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0889864457
+H        -0.0000000000      -0.0000000000      -0.7918103194
+2
+config_type=hf sample_index=289 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0934842543
+H         0.0000000000       0.0000000000      -0.8772623086
+2
+config_type=hf sample_index=290 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0872487885
+H        -0.0000000000      -0.0000000000      -0.7587972972
+2
+config_type=hf sample_index=291 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0863844938
+H        -0.0000000000      -0.0000000000      -0.7423769220
+2
+config_type=hf sample_index=292 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0931813025
+H         0.0000000000       0.0000000000      -0.8715066536
+2
+config_type=hf sample_index=293 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0935565672
+H         0.0000000000       0.0000000000      -0.8786361499
+2
+config_type=hf sample_index=294 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0879421793
+H        -0.0000000000      -0.0000000000      -0.7719707387
+2
+config_type=hf sample_index=295 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0929274892
+H         0.0000000000       0.0000000000      -0.8666845602
+2
+config_type=hf sample_index=296 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901288848
+H        -0.0000000000      -0.0000000000      -0.8135150430
+2
+config_type=hf sample_index=297 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0920718624
+H         0.0000000000       0.0000000000      -0.8504288647
+2
+config_type=hf sample_index=298 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0869524567
+H        -0.0000000000      -0.0000000000      -0.7531674121
+2
+config_type=hf sample_index=299 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0938138906
+H         0.0000000000       0.0000000000      -0.8835249299
+2
+config_type=hf sample_index=300 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0950275524
+H         0.0000000000       0.0000000000      -0.9065827843
+2
+config_type=hf sample_index=301 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0931721964
+H         0.0000000000       0.0000000000      -0.8713336508
+2
+config_type=hf sample_index=302 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0929141923
+H         0.0000000000       0.0000000000      -0.8664319382
+2
+config_type=hf sample_index=303 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0787230314
+H        -0.0000000000      -0.0000000000      -0.5968199974
+2
+config_type=hf sample_index=304 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0919386141
+H         0.0000000000       0.0000000000      -0.8478973361
+2
+config_type=hf sample_index=305 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910011637
+H        -0.0000000000      -0.0000000000      -0.8300871055
+2
+config_type=hf sample_index=306 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0906026873
+H        -0.0000000000      -0.0000000000      -0.8225166190
+2
+config_type=hf sample_index=307 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0890181809
+H        -0.0000000000      -0.0000000000      -0.7924132439
+2
+config_type=hf sample_index=308 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0912659740
+H         0.0000000000       0.0000000000      -0.8351181274
+2
+config_type=hf sample_index=309 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0924350299
+H         0.0000000000       0.0000000000      -0.8573285323
+2
+config_type=hf sample_index=310 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0902201287
+H        -0.0000000000      -0.0000000000      -0.8152485491
+2
+config_type=hf sample_index=311 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895662615
+H        -0.0000000000      -0.0000000000      -0.8028259992
+2
+config_type=hf sample_index=312 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0951143744
+H         0.0000000000       0.0000000000      -0.9082322797
+2
+config_type=hf sample_index=313 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0874623260
+H        -0.0000000000      -0.0000000000      -0.7628542063
+2
+config_type=hf sample_index=314 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0944603020
+H         0.0000000000       0.0000000000      -0.8958058304
+2
+config_type=hf sample_index=315 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0916639500
+H         0.0000000000       0.0000000000      -0.8426791072
+2
+config_type=hf sample_index=316 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0884488860
+H        -0.0000000000      -0.0000000000      -0.7815974478
+2
+config_type=hf sample_index=317 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901342935
+H        -0.0000000000      -0.0000000000      -0.8136178007
+2
+config_type=hf sample_index=318 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0880697836
+H        -0.0000000000      -0.0000000000      -0.7743950403
+2
+config_type=hf sample_index=319 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0932966915
+H         0.0000000000       0.0000000000      -0.8736988814
+2
+config_type=hf sample_index=320 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922245992
+H         0.0000000000       0.0000000000      -0.8533306466
+2
+config_type=hf sample_index=321 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0892599594
+H        -0.0000000000      -0.0000000000      -0.7970066926
+2
+config_type=hf sample_index=322 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0874726444
+H        -0.0000000000      -0.0000000000      -0.7630502422
+2
+config_type=hf sample_index=323 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0920732516
+H         0.0000000000       0.0000000000      -0.8504552565
+2
+config_type=hf sample_index=324 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0942218405
+H         0.0000000000       0.0000000000      -0.8912753999
+2
+config_type=hf sample_index=325 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0907115116
+H        -0.0000000000      -0.0000000000      -0.8245841279
+2
+config_type=hf sample_index=326 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0924554620
+H         0.0000000000       0.0000000000      -0.8577167119
+2
+config_type=hf sample_index=327 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0898523284
+H        -0.0000000000      -0.0000000000      -0.8082608646
+2
+config_type=hf sample_index=328 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0913059666
+H         0.0000000000       0.0000000000      -0.8358779286
+2
+config_type=hf sample_index=329 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901300301
+H        -0.0000000000      -0.0000000000      -0.8135368031
+2
+config_type=hf sample_index=330 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0920481045
+H         0.0000000000       0.0000000000      -0.8499774979
+2
+config_type=hf sample_index=331 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0861371142
+H        -0.0000000000      -0.0000000000      -0.7376770609
+2
+config_type=hf sample_index=332 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0931955194
+H         0.0000000000       0.0000000000      -0.8717767532
+2
+config_type=hf sample_index=333 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0903310717
+H        -0.0000000000      -0.0000000000      -0.8173563086
+2
+config_type=hf sample_index=334 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922596831
+H         0.0000000000       0.0000000000      -0.8539971911
+2
+config_type=hf sample_index=335 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899693709
+H        -0.0000000000      -0.0000000000      -0.8104845062
+2
+config_type=hf sample_index=336 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0921343504
+H         0.0000000000       0.0000000000      -0.8516160479
+2
+config_type=hf sample_index=337 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0875698237
+H        -0.0000000000      -0.0000000000      -0.7648965101
+2
+config_type=hf sample_index=338 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0949813327
+H         0.0000000000       0.0000000000      -0.9057046752
+2
+config_type=hf sample_index=339 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0855021350
+H        -0.0000000000      -0.0000000000      -0.7256133555
+2
+config_type=hf sample_index=340 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0876790244
+H        -0.0000000000      -0.0000000000      -0.7669711681
+2
+config_type=hf sample_index=341 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0918568097
+H         0.0000000000       0.0000000000      -0.8463431675
+2
+config_type=hf sample_index=342 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0958781911
+H         0.0000000000       0.0000000000      -0.9227437138
+2
+config_type=hf sample_index=343 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0919959493
+H         0.0000000000       0.0000000000      -0.8489866223
+2
+config_type=hf sample_index=344 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0902721656
+H        -0.0000000000      -0.0000000000      -0.8162371750
+2
+config_type=hf sample_index=345 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0864146131
+H        -0.0000000000      -0.0000000000      -0.7429491475
+2
+config_type=hf sample_index=346 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0904577445
+H        -0.0000000000      -0.0000000000      -0.8197629113
+2
+config_type=hf sample_index=347 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910194107
+H        -0.0000000000      -0.0000000000      -0.8304337726
+2
+config_type=hf sample_index=348 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0966244365
+H         0.0000000000       0.0000000000      -0.9369213178
+2
+config_type=hf sample_index=349 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0931232127
+H         0.0000000000       0.0000000000      -0.8704030294
+2
+config_type=hf sample_index=350 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0860738026
+H        -0.0000000000      -0.0000000000      -0.7364742294
+2
+config_type=hf sample_index=351 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0977261776
+H         0.0000000000       0.0000000000      -0.9578528366
+2
+config_type=hf sample_index=352 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0897901232
+H        -0.0000000000      -0.0000000000      -0.8070790535
+2
+config_type=hf sample_index=353 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0882026107
+H        -0.0000000000      -0.0000000000      -0.7769185664
+2
+config_type=hf sample_index=354 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0959174500
+H         0.0000000000       0.0000000000      -0.9234895779
+2
+config_type=hf sample_index=355 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0909214998
+H        -0.0000000000      -0.0000000000      -0.8285736055
+2
+config_type=hf sample_index=356 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0898805905
+H        -0.0000000000      -0.0000000000      -0.8087978050
+2
+config_type=hf sample_index=357 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0918014947
+H         0.0000000000       0.0000000000      -0.8452922610
+2
+config_type=hf sample_index=358 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0938531953
+H         0.0000000000       0.0000000000      -0.8842716633
+2
+config_type=hf sample_index=359 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0943396484
+H         0.0000000000       0.0000000000      -0.8935135832
+2
+config_type=hf sample_index=360 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0865780922
+H        -0.0000000000      -0.0000000000      -0.7460550184
+2
+config_type=hf sample_index=361 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0976334480
+H         0.0000000000       0.0000000000      -0.9560911059
+2
+config_type=hf sample_index=362 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0941873539
+H         0.0000000000       0.0000000000      -0.8906202040
+2
+config_type=hf sample_index=363 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0898419277
+H        -0.0000000000      -0.0000000000      -0.8080632658
+2
+config_type=hf sample_index=364 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0884018481
+H        -0.0000000000      -0.0000000000      -0.7807037952
+2
+config_type=hf sample_index=365 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0879091519
+H        -0.0000000000      -0.0000000000      -0.7713432657
+2
+config_type=hf sample_index=366 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0914888500
+H         0.0000000000       0.0000000000      -0.8393524547
+2
+config_type=hf sample_index=367 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0889610366
+H        -0.0000000000      -0.0000000000      -0.7913275841
+2
+config_type=hf sample_index=368 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0885781012
+H        -0.0000000000      -0.0000000000      -0.7840523535
+2
+config_type=hf sample_index=369 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0937429775
+H         0.0000000000       0.0000000000      -0.8821776815
+2
+config_type=hf sample_index=370 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922792113
+H         0.0000000000       0.0000000000      -0.8543681990
+2
+config_type=hf sample_index=371 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0897915605
+H        -0.0000000000      -0.0000000000      -0.8071063605
+2
+config_type=hf sample_index=372 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0934906309
+H         0.0000000000       0.0000000000      -0.8773834537
+2
+config_type=hf sample_index=373 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0955653625
+H         0.0000000000       0.0000000000      -0.9168004144
+2
+config_type=hf sample_index=374 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0874979489
+H        -0.0000000000      -0.0000000000      -0.7635309914
+2
+config_type=hf sample_index=375 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0891075958
+H        -0.0000000000      -0.0000000000      -0.7941120003
+2
+config_type=hf sample_index=376 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0941734605
+H         0.0000000000       0.0000000000      -0.8903562492
+2
+config_type=hf sample_index=377 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0934404707
+H         0.0000000000       0.0000000000      -0.8764304810
+2
+config_type=hf sample_index=378 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0918274247
+H         0.0000000000       0.0000000000      -0.8457848939
+2
+config_type=hf sample_index=379 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0948937295
+H         0.0000000000       0.0000000000      -0.9040403396
+2
+config_type=hf sample_index=380 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0875185431
+H        -0.0000000000      -0.0000000000      -0.7639222520
+2
+config_type=hf sample_index=381 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0862375022
+H        -0.0000000000      -0.0000000000      -0.7395842900
+2
+config_type=hf sample_index=382 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0882450548
+H        -0.0000000000      -0.0000000000      -0.7777249438
+2
+config_type=hf sample_index=383 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0914861159
+H         0.0000000000       0.0000000000      -0.8393005109
+2
+config_type=hf sample_index=384 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0884758187
+H        -0.0000000000      -0.0000000000      -0.7821091316
+2
+config_type=hf sample_index=385 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0894879623
+H        -0.0000000000      -0.0000000000      -0.8013384247
+2
+config_type=hf sample_index=386 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0878895306
+H        -0.0000000000      -0.0000000000      -0.7709704890
+2
+config_type=hf sample_index=387 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0890514380
+H        -0.0000000000      -0.0000000000      -0.7930450826
+2
+config_type=hf sample_index=388 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0877919201
+H        -0.0000000000      -0.0000000000      -0.7691160278
+2
+config_type=hf sample_index=389 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922887107
+H         0.0000000000       0.0000000000      -0.8545486740
+2
+config_type=hf sample_index=390 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0936893558
+H         0.0000000000       0.0000000000      -0.8811589461
+2
+config_type=hf sample_index=391 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0895101544
+H        -0.0000000000      -0.0000000000      -0.8017600440
+2
+config_type=hf sample_index=392 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0904053491
+H        -0.0000000000      -0.0000000000      -0.8187674729
+2
+config_type=hf sample_index=393 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0891805382
+H        -0.0000000000      -0.0000000000      -0.7954978025
+2
+config_type=hf sample_index=394 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0928254241
+H         0.0000000000       0.0000000000      -0.8647454689
+2
+config_type=hf sample_index=395 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0913763776
+H         0.0000000000       0.0000000000      -0.8372156385
+2
+config_type=hf sample_index=396 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0963085011
+H         0.0000000000       0.0000000000      -0.9309189932
+2
+config_type=hf sample_index=397 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0874947515
+H        -0.0000000000      -0.0000000000      -0.7634702456
+2
+config_type=hf sample_index=398 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922724449
+H         0.0000000000       0.0000000000      -0.8542396475
+2
+config_type=hf sample_index=399 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0925394791
+H         0.0000000000       0.0000000000      -0.8593129177
+2
+config_type=hf sample_index=400 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899034060
+H        -0.0000000000      -0.0000000000      -0.8092312662
+2
+config_type=hf sample_index=401 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0929967521
+H         0.0000000000       0.0000000000      -0.8680004562
+2
+config_type=hf sample_index=402 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0863705956
+H        -0.0000000000      -0.0000000000      -0.7421128774
+2
+config_type=hf sample_index=403 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0980277344
+H         0.0000000000       0.0000000000      -0.9635819885
+2
+config_type=hf sample_index=404 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0866867488
+H        -0.0000000000      -0.0000000000      -0.7481193391
+2
+config_type=hf sample_index=405 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0940986985
+H         0.0000000000       0.0000000000      -0.8889358776
+2
+config_type=hf sample_index=406 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0874106959
+H        -0.0000000000      -0.0000000000      -0.7618733086
+2
+config_type=hf sample_index=407 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0948559197
+H         0.0000000000       0.0000000000      -0.9033220064
+2
+config_type=hf sample_index=408 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0898236654
+H        -0.0000000000      -0.0000000000      -0.8077163087
+2
+config_type=hf sample_index=409 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0916036886
+H         0.0000000000       0.0000000000      -0.8415342250
+2
+config_type=hf sample_index=410 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0912593506
+H         0.0000000000       0.0000000000      -0.8349922920
+2
+config_type=hf sample_index=411 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0946915847
+H         0.0000000000       0.0000000000      -0.9001998744
+2
+config_type=hf sample_index=412 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0900308551
+H        -0.0000000000      -0.0000000000      -0.8116526179
+2
+config_type=hf sample_index=413 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0813612668
+H        -0.0000000000      -0.0000000000      -0.6469427309
+2
+config_type=hf sample_index=414 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0885938802
+H        -0.0000000000      -0.0000000000      -0.7843521328
+2
+config_type=hf sample_index=415 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0916865604
+H         0.0000000000       0.0000000000      -0.8431086730
+2
+config_type=hf sample_index=416 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0896411590
+H        -0.0000000000      -0.0000000000      -0.8042489455
+2
+config_type=hf sample_index=417 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0936072023
+H         0.0000000000       0.0000000000      -0.8795981447
+2
+config_type=hf sample_index=418 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0944117109
+H         0.0000000000       0.0000000000      -0.8948826682
+2
+config_type=hf sample_index=419 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0906003072
+H        -0.0000000000      -0.0000000000      -0.8224714014
+2
+config_type=hf sample_index=420 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0862030695
+H        -0.0000000000      -0.0000000000      -0.7389301188
+2
+config_type=hf sample_index=421 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0956203708
+H         0.0000000000       0.0000000000      -0.9178454938
+2
+config_type=hf sample_index=422 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0946336465
+H         0.0000000000       0.0000000000      -0.8990991302
+2
+config_type=hf sample_index=423 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901041153
+H        -0.0000000000      -0.0000000000      -0.8130444593
+2
+config_type=hf sample_index=424 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0979932786
+H         0.0000000000       0.0000000000      -0.9629273778
+2
+config_type=hf sample_index=425 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899413029
+H        -0.0000000000      -0.0000000000      -0.8099512527
+2
+config_type=hf sample_index=426 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0873582746
+H        -0.0000000000      -0.0000000000      -0.7608773777
+2
+config_type=hf sample_index=427 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0905737587
+H        -0.0000000000      -0.0000000000      -0.8219670171
+2
+config_type=hf sample_index=428 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0946165416
+H         0.0000000000       0.0000000000      -0.8987741610
+2
+config_type=hf sample_index=429 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0880125688
+H        -0.0000000000      -0.0000000000      -0.7733080397
+2
+config_type=hf sample_index=430 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0974785917
+H         0.0000000000       0.0000000000      -0.9531490556
+2
+config_type=hf sample_index=431 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0881466848
+H        -0.0000000000      -0.0000000000      -0.7758560540
+2
+config_type=hf sample_index=432 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0942121298
+H         0.0000000000       0.0000000000      -0.8910909113
+2
+config_type=hf sample_index=433 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0928687163
+H         0.0000000000       0.0000000000      -0.8655679586
+2
+config_type=hf sample_index=434 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0905797108
+H        -0.0000000000      -0.0000000000      -0.8220800994
+2
+config_type=hf sample_index=435 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0946253869
+H         0.0000000000       0.0000000000      -0.8989422096
+2
+config_type=hf sample_index=436 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0861697975
+H        -0.0000000000      -0.0000000000      -0.7382979970
+2
+config_type=hf sample_index=437 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0955332261
+H         0.0000000000       0.0000000000      -0.9161898681
+2
+config_type=hf sample_index=438 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0908758577
+H        -0.0000000000      -0.0000000000      -0.8277064706
+2
+config_type=hf sample_index=439 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0893070193
+H        -0.0000000000      -0.0000000000      -0.7979007635
+2
+config_type=hf sample_index=440 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0935395439
+H         0.0000000000       0.0000000000      -0.8783127327
+2
+config_type=hf sample_index=441 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0945577707
+H         0.0000000000       0.0000000000      -0.8976575969
+2
+config_type=hf sample_index=442 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0936071190
+H         0.0000000000       0.0000000000      -0.8795965621
+2
+config_type=hf sample_index=443 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0976367982
+H         0.0000000000       0.0000000000      -0.9561547546
+2
+config_type=hf sample_index=444 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0946260197
+H         0.0000000000       0.0000000000      -0.8989542313
+2
+config_type=hf sample_index=445 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0952905191
+H         0.0000000000       0.0000000000      -0.9115787795
+2
+config_type=hf sample_index=446 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0893154453
+H        -0.0000000000      -0.0000000000      -0.7980608462
+2
+config_type=hf sample_index=447 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0914336183
+H         0.0000000000       0.0000000000      -0.8383031308
+2
+config_type=hf sample_index=448 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0929294059
+H         0.0000000000       0.0000000000      -0.8667209747
+2
+config_type=hf sample_index=449 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0910264062
+H        -0.0000000000      -0.0000000000      -0.8305666776
+2
+config_type=hf sample_index=450 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0920729866
+H         0.0000000000       0.0000000000      -0.8504502224
+2
+config_type=hf sample_index=451 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0924808657
+H         0.0000000000       0.0000000000      -0.8581993461
+2
+config_type=hf sample_index=452 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0938510821
+H         0.0000000000       0.0000000000      -0.8842315159
+2
+config_type=hf sample_index=453 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0907515803
+H        -0.0000000000      -0.0000000000      -0.8253453752
+2
+config_type=hf sample_index=454 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899382758
+H        -0.0000000000      -0.0000000000      -0.8098937423
+2
+config_type=hf sample_index=455 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0883702067
+H        -0.0000000000      -0.0000000000      -0.7801026523
+2
+config_type=hf sample_index=456 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0881623941
+H        -0.0000000000      -0.0000000000      -0.7761545080
+2
+config_type=hf sample_index=457 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0949265974
+H         0.0000000000       0.0000000000      -0.9046647817
+2
+config_type=hf sample_index=458 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0908075747
+H        -0.0000000000      -0.0000000000      -0.8264091889
+2
+config_type=hf sample_index=459 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0936633150
+H         0.0000000000       0.0000000000      -0.8806642076
+2
+config_type=hf sample_index=460 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0868331644
+H        -0.0000000000      -0.0000000000      -0.7509010282
+2
+config_type=hf sample_index=461 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0847332880
+H        -0.0000000000      -0.0000000000      -0.7110063537
+2
+config_type=hf sample_index=462 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0876467386
+H        -0.0000000000      -0.0000000000      -0.7663577844
+2
+config_type=hf sample_index=463 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0948419729
+H         0.0000000000       0.0000000000      -0.9030570358
+2
+config_type=hf sample_index=464 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0945845709
+H         0.0000000000       0.0000000000      -0.8981667627
+2
+config_type=hf sample_index=465 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0921726166
+H         0.0000000000       0.0000000000      -0.8523430512
+2
+config_type=hf sample_index=466 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0884558839
+H        -0.0000000000      -0.0000000000      -0.7817303977
+2
+config_type=hf sample_index=467 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0906559141
+H        -0.0000000000      -0.0000000000      -0.8235278542
+2
+config_type=hf sample_index=468 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0901088035
+H        -0.0000000000      -0.0000000000      -0.8131335279
+2
+config_type=hf sample_index=469 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899540898
+H        -0.0000000000      -0.0000000000      -0.8101941873
+2
+config_type=hf sample_index=470 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0828723088
+H        -0.0000000000      -0.0000000000      -0.6756503862
+2
+config_type=hf sample_index=471 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0882731741
+H        -0.0000000000      -0.0000000000      -0.7782591710
+2
+config_type=hf sample_index=472 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0904615712
+H        -0.0000000000      -0.0000000000      -0.8198356146
+2
+config_type=hf sample_index=473 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0960537875
+H         0.0000000000       0.0000000000      -0.9260797969
+2
+config_type=hf sample_index=474 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0916112916
+H         0.0000000000       0.0000000000      -0.8416786711
+2
+config_type=hf sample_index=475 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0956751716
+H         0.0000000000       0.0000000000      -0.9188866318
+2
+config_type=hf sample_index=476 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0897943929
+H        -0.0000000000      -0.0000000000      -0.8071601725
+2
+config_type=hf sample_index=477 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0902565014
+H        -0.0000000000      -0.0000000000      -0.8159395778
+2
+config_type=hf sample_index=478 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0783063798
+H        -0.0000000000      -0.0000000000      -0.5889042086
+2
+config_type=hf sample_index=479 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0926028516
+H         0.0000000000       0.0000000000      -0.8605169058
+2
+config_type=hf sample_index=480 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0928773454
+H         0.0000000000       0.0000000000      -0.8657318996
+2
+config_type=hf sample_index=481 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0968642770
+H         0.0000000000       0.0000000000      -0.9414779481
+2
+config_type=hf sample_index=482 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0894894597
+H        -0.0000000000      -0.0000000000      -0.8013668729
+2
+config_type=hf sample_index=483 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0913930838
+H         0.0000000000       0.0000000000      -0.8375330330
+2
+config_type=hf sample_index=484 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0887725744
+H        -0.0000000000      -0.0000000000      -0.7877470695
+2
+config_type=hf sample_index=485 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0872300239
+H        -0.0000000000      -0.0000000000      -0.7584407965
+2
+config_type=hf sample_index=486 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0887477352
+H        -0.0000000000      -0.0000000000      -0.7872751593
+2
+config_type=hf sample_index=487 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0899540073
+H        -0.0000000000      -0.0000000000      -0.8101926198
+2
+config_type=hf sample_index=488 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0955262339
+H         0.0000000000       0.0000000000      -0.9160570263
+2
+config_type=hf sample_index=489 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0910917937
+H         0.0000000000       0.0000000000      -0.8318089477
+2
+config_type=hf sample_index=490 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0884939794
+H        -0.0000000000      -0.0000000000      -0.7824541588
+2
+config_type=hf sample_index=491 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0915494714
+H         0.0000000000       0.0000000000      -0.8405041748
+2
+config_type=hf sample_index=492 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0917975144
+H         0.0000000000       0.0000000000      -0.8452166414
+2
+config_type=hf sample_index=493 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0888685753
+H        -0.0000000000      -0.0000000000      -0.7895709499
+2
+config_type=hf sample_index=494 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0948308531
+H         0.0000000000       0.0000000000      -0.9028457759
+2
+config_type=hf sample_index=495 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0848965426
+H        -0.0000000000      -0.0000000000      -0.7141079583
+2
+config_type=hf sample_index=496 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0903847737
+H        -0.0000000000      -0.0000000000      -0.8183765704
+2
+config_type=hf sample_index=497 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0932639272
+H         0.0000000000       0.0000000000      -0.8730764058
+2
+config_type=hf sample_index=498 temperature=300.0 source=wigner
+F         0.0000000000       0.0000000000       0.0866985849
+H        -0.0000000000      -0.0000000000      -0.7483442079
+2
+config_type=hf sample_index=499 temperature=300.0 source=wigner
+F        -0.0000000000      -0.0000000000       0.0922683528
+H         0.0000000000       0.0000000000      -0.8541619038

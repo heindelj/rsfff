@@ -97,6 +97,46 @@ class DensityExpansion(nn.Module):
         self.backend = _resolve_backend(backend)
         self.radial = BesselBasis(n_max, cutoff)
 
+    def edge_expansion(
+        self,
+        positions: torch.Tensor,     # (N, 3)
+        edge_index: torch.Tensor,    # (2, E)  rows are [center, neighbor]
+    ) -> torch.Tensor:
+        """Per-edge radial x angular expansion ``RY``: (E, n_max, sph_dim).
+
+        The geometry-only part of the density, independent of how neighbors are weighted.
+        Splitting it out lets several decorations of the same geometry share one basis
+        construction -- the cross-diabat amortization of §2.1 ("the geometric density basis is
+        state-independent and built once per configuration").
+        """
+        i, j = edge_index[0], edge_index[1]
+        r_vec = positions[j] - positions[i]
+        r = r_vec.norm(dim=-1)
+        R = self.radial(r) * cosine_cutoff(r, self.cutoff).unsqueeze(-1)   # (E, n_max)
+        Y = self.backend.spherical_harmonics(r_vec, self.l_max, normalize=True)  # (E, sph_dim)
+        return R.unsqueeze(-1) * Y.unsqueeze(-2)                           # (E, n_max, sph_dim)
+
+    def scatter_weighted(
+        self,
+        RY: torch.Tensor,            # (E, n_max, sph_dim) from edge_expansion
+        edge_index: torch.Tensor,    # (2, E)
+        atom_weights: torch.Tensor,  # (N, Kw) per-atom channel weights
+        num_atoms: int,
+    ) -> torch.Tensor:
+        """Weighted density ``A[i,k,n,lm] = sum_{j~i} w_k(j) RY[ij,n,lm]``: (N, Kw, n_max, sph).
+
+        Generalizes the species one-hot scatter of :meth:`forward`: with
+        ``atom_weights = one_hot(species_idx)`` it reproduces that exactly, and with weights
+        derived from reference embeddings it becomes the *state-decorated* density of §2.1 --
+        neighbors enter through their diabatic identity rather than their bare element. The
+        weights are invariant scalars, so equivariance is untouched.
+        """
+        i, j = edge_index[0], edge_index[1]
+        k_w = atom_weights.shape[1]
+        contrib = atom_weights[j][:, :, None, None] * RY[:, None]  # (E, Kw, n_max, sph)
+        A = RY.new_zeros(num_atoms, k_w, self.n_max, self.sph_dim)
+        return A.index_add_(0, i, contrib)
+
     def forward(
         self,
         positions: torch.Tensor,     # (N, 3)
@@ -104,15 +144,8 @@ class DensityExpansion(nn.Module):
         edge_index: torch.Tensor,    # (2, E)  rows are [center, neighbor]
         num_atoms: int,
     ) -> torch.Tensor:
+        RY = self.edge_expansion(positions, edge_index)                    # (E, n_max, sph_dim)
         i, j = edge_index[0], edge_index[1]
-        r_vec = positions[j] - positions[i]
-        r = r_vec.norm(dim=-1)
-
-        R = self.radial(r) * cosine_cutoff(r, self.cutoff).unsqueeze(-1)   # (E, n_max)
-        Y = self.backend.spherical_harmonics(r_vec, self.l_max, normalize=True)  # (E, sph_dim)
-
-        RY = R.unsqueeze(-1) * Y.unsqueeze(-2)                             # (E, n_max, sph_dim)
-
         z_j = species_idx[j]
         flat_idx = i * self.n_species + z_j
         A_flat = positions.new_zeros(num_atoms * self.n_species, self.n_max, self.sph_dim)
@@ -575,6 +608,176 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
             equiv = torch.cat((equiv, bis[2]), dim=-1)               # (Ntot, 5, P2 + out_mul)
             if 1 in bis and vec is not None:
                 vec = torch.cat((vec, bis[1]), dim=-1)               # (Ntot, 3, P1 + out_mul)
+
+        return LambdaFeatures(
+            inv_feats=inv,
+            equiv_feats=equiv,
+            species_idx=species_idx,
+            batch_idx=batch.batch_idx,
+            vec_feats=vec,
+            edge_index=edge_index,
+        )
+
+
+class FlatStateSOAPFeaturizer(nn.Module):
+    """State-decorated intra-fragment lambda-SOAP featurizer (``F_mono`` of §2.1).
+
+    Same pipeline as :class:`FlatLambdaSOAPFeaturizer` -- one fused ``radius_graph``, one
+    density scatter, the same CG power spectrum and optional trainable bispectrum -- with two
+    changes that make it the monomer stack's featurizer rather than a generic descriptor:
+
+    1. **The density channel axis is learned, not a species one-hot.** Neighbors are weighted by
+       ``atom_weights`` (``(N, Kw)``, supplied by the caller from the reference embeddings; see
+       ``rsfff.mlip.reference_states.AtomWeightNet``), so a neighbor enters through its diabatic
+       identity -- element *and* fragment charge/spin -- instead of its bare element. This
+       subsumes ``FlatLambdaSOAPFeaturizer``'s ``density_channels`` compression: the weight net
+       *is* the compression, and it is state-aware.
+    2. **Edges are confined to the fragment.** ``fragment_idx`` (not ``batch_idx``) is the
+       ``radius_graph`` grouping, so message passing never crosses a fragment boundary. In
+       Phase 1 there is one fragment per frame and this coincides with the per-frame graph; the
+       argument is what keeps the monomer features frozen-and-isolated once several fragments
+       share a configuration.
+
+    Feature width scales as ``(Kw * n_max)^2``, so ``Kw`` is the knob controlling cost.
+    """
+
+    def __init__(
+        self,
+        *,
+        cutoff: float,
+        n_max: int,
+        l_max: int,
+        neighbor_types: Sequence[int],
+        weight_channels: int,
+        selected_lambdas: Sequence[int] = (0, 1, 2),
+        backend: "EquivariantBackend | str" = "e3nn",
+        bispectrum=None,
+    ) -> None:
+        super().__init__()
+        cleaned = tuple(sorted({int(z) for z in neighbor_types}))
+        if not cleaned:
+            raise ValueError("neighbor_types can not be empty")
+        self.cutoff = float(cutoff)
+        self.l_max = int(l_max)
+        self.n_max = int(n_max)
+        self.n_species = len(cleaned)
+        self.weight_channels = int(weight_channels)
+        self.selected_lambdas = tuple(sorted({int(v) for v in selected_lambdas}))
+        self.backend = _resolve_backend(backend)
+
+        lut = torch.full((max(cleaned) + 1,), -1, dtype=torch.long)
+        for index, z in enumerate(cleaned):
+            lut[z] = index
+        self.register_buffer("_species_lut", lut, persistent=False)
+
+        # n_species is the *weight* channel count here: the density scatter is over learned
+        # channels, and DensityExpansion only uses it to size the one-hot path we bypass.
+        self.density = DensityExpansion(
+            n_max=self.n_max, l_max=self.l_max, cutoff=self.cutoff,
+            n_species=self.weight_channels, backend=self.backend,
+        )
+
+        n_channels = self.weight_channels * self.n_max
+        self._equivariant_specs, cached_tensors = _build_equivariant_power_spectrum_specs(
+            l_max=self.l_max,
+            selected_lambdas=self.selected_lambdas,
+            n_channels=n_channels,
+            backend=self.backend,
+        )
+        for name, tensor in cached_tensors.items():
+            self.register_buffer(name, tensor, persistent=False)
+        self.feature_dims = {
+            lam: sum(spec.width for spec in specs)
+            for lam, specs in self._equivariant_specs.items()
+        }
+
+        self.bispectrum = None
+        if bispectrum is not None:
+            num_elements = (
+                self.n_species if getattr(bispectrum, "per_species_weights", False) else 1
+            )
+            self.bispectrum = self.backend.make_weighted_bispectrum(
+                n_species=self.weight_channels,
+                n_max=self.n_max,
+                l_max=self.l_max,
+                selected_lambdas=self.selected_lambdas,
+                out_mul=getattr(bispectrum, "out_mul", None),
+                num_elements=num_elements,
+                implementation=getattr(bispectrum, "implementation", "sym_contraction"),
+                contraction_degree=getattr(bispectrum, "contraction_degree", 3),
+                degrees=tuple(getattr(bispectrum, "degrees", (3,))),
+                method=getattr(bispectrum, "method", "auto"),
+            )
+            self._bispectrum_on_cpu = self.backend.name == "cue" and not torch.cuda.is_available()
+            for lam, width in self.bispectrum.feature_dims.items():
+                self.feature_dims[lam] = self.feature_dims.get(lam, 0) + width
+
+    def species_index(self, atomic_numbers: torch.Tensor) -> torch.Tensor:
+        """Map atomic numbers to this featurizer's species indices: (N,) -> (N,).
+
+        Public because callers that build per-atom inputs *before* featurization (the reference
+        embeddings of the monomer stack, for instance) need the same indexing the features will
+        carry, and should not have to reach into the lookup buffer.
+        """
+        return self._species_lut[atomic_numbers]
+
+    def _build_edges(self, positions: torch.Tensor, group_idx: torch.Tensor) -> torch.Tensor:
+        # torch_cluster has CPU+CUDA kernels but no MPS kernel; fall back to CPU on MPS.
+        if positions.device.type == "mps":
+            return radius_graph(
+                positions.cpu(), r=self.cutoff, batch=group_idx.cpu(), loop=False
+            ).to(positions.device)
+        return radius_graph(positions, r=self.cutoff, batch=group_idx, loop=False)
+
+    def _run_bispectrum(self, A: torch.Tensor, species_idx: torch.Tensor) -> dict:
+        if getattr(self, "_bispectrum_on_cpu", False) and A.device.type != "cpu":
+            dev = A.device
+            bis = self.bispectrum(A.cpu(), species_idx.cpu())
+            return {lam: t.to(dev) for lam, t in bis.items()}
+        return self.bispectrum(A, species_idx)
+
+    # See FlatLambdaSOAPFeaturizer.forward for why this is a torch.compile boundary.
+    @torch.compiler.disable
+    def forward(
+        self,
+        batch: "Batch",
+        atom_weights: torch.Tensor,          # (N, Kw) from the reference embeddings
+        fragment_idx: torch.Tensor | None = None,
+    ) -> LambdaFeatures:
+        positions = batch.positions
+        species_idx = self._species_lut[batch.atomic_numbers]
+        if atom_weights.shape[-1] != self.weight_channels:
+            raise ValueError(
+                f"atom_weights has {atom_weights.shape[-1]} channels, featurizer was built "
+                f"for weight_channels={self.weight_channels}"
+            )
+        group = fragment_idx if fragment_idx is not None else batch.batch_idx
+        edge_index = self._build_edges(positions, group)
+
+        RY = self.density.edge_expansion(positions, edge_index)
+        A = self.density.scatter_weighted(
+            RY, edge_index, atom_weights, int(positions.shape[0])
+        )                                                     # (N, Kw, n_max, sph_dim)
+
+        per_lambda = equivariant_power_spectrum(
+            A,
+            self.l_max,
+            self.selected_lambdas,
+            specs_by_lam=self._equivariant_specs,
+            triu_rows=self._equivariant_triu_rows,
+            triu_cols=self._equivariant_triu_cols,
+            cg_buffer_owner=self,
+        )
+        inv = per_lambda[0][:, 0, :]
+        equiv = per_lambda[2]
+        vec = per_lambda.get(1)
+
+        if self.bispectrum is not None:
+            bis = self._run_bispectrum(A, species_idx)
+            inv = torch.cat((inv, bis[0][:, 0, :]), dim=-1)
+            equiv = torch.cat((equiv, bis[2]), dim=-1)
+            if 1 in bis and vec is not None:
+                vec = torch.cat((vec, bis[1]), dim=-1)
 
         return LambdaFeatures(
             inv_feats=inv,

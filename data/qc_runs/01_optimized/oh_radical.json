@@ -1,0 +1,9 @@
+{
+  "name": "oh_radical",
+  "charge": 0,
+  "mult": 2,
+  "spin": 1,
+  "xc": "wB97M-V",
+  "basis": "def2-svpd",
+  "opt_energy": -75.65422352457196
+}

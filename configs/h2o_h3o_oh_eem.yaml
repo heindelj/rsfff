@@ -1,0 +1,61 @@
+# EEM baseline on the same three monomers as configs/monomer_h2o_h3o_oh.yaml, with the same
+# data seed and holdout, so the two models get an identical train/val split. This is the
+# controlled comparison for the Phase-1 monomer stack: same frames, same targets, same weights.
+# The EEM layer (chi, eta, chivec, alpha parameter heads + Lagrange-constrained
+# analytic charge solve) supplies the crude short-range electrostatic energy and
+# all multipole/response observables; the MLIP head corrects the energy.
+# Loss weights are in model units (Ha, Ha/A, e*A, e, e^2 A^2/Ha).
+run_name: h2o_h3o_oh_eem
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/labels/h2o.extxyz
+    - data/labels/h3o+.extxyz
+    - data/labels/oh-.extxyz
+  reference_energies: data/atomic_references.json
+  isolated_species: data/isolated_species.extxyz
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 6
+  l_max: 3
+  selected_lambdas: [0, 1, 2]   # chivec needs lambda=1, alpha lambda=2
+  backend: e3nn
+  density_channels: 8
+
+# MLIP correction head (energy only).
+mlip:
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+
+# EEM parameter-function heads (chi, eta, chivec, alpha).
+eem:
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+  equiv_channels: 32
+  eta_init: 0.5        # Ha/e^2 starting hardness
+  eta_floor: 0.05      # keeps the charge problem strongly convex
+  psd_floor: 1.0e-4    # minimum eigenvalue of atomic alphas
+
+train:
+  epochs: 200
+  batch_size: 16
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  grad_clip: 5.0
+  energy_weight: 1.0
+  force_weight: 1.0
+  dipole_weight: 10.0
+  dmu_dr_weight: 1.0
+  dmu_dr_every: 2      # stride the 3 double-backwards of dmu/dR
+  alpha_weight: 0.1
+  iso_weight: 100.0
+  q_l2_weight: 1.0e-3
+  eval_every: 5
