@@ -24,6 +24,7 @@ from .monomer import (
     MonomerParameterHeads,
     build_monomer_model,
 )
+from .adiabatic import AdiabaticCorrection, AdiabaticDelta
 from .mixture import EnvelopeConfig, MixtureModel, MixtureOutput, mixture_channel_graph
 from .switch import pairwise_switch, smoothstep, validity_bump
 from .reference_states import (
@@ -68,11 +69,13 @@ __all__ = [
     "assign_from_headers",
     "enumerate_diabats",
     "finest_common_refinement",
-    # diabatic mixture (Phase 2)
+    # diabatic mixture / adiabaticization
     "MixtureModel",
     "MixtureOutput",
     "EnvelopeConfig",
     "mixture_channel_graph",
+    "AdiabaticCorrection",
+    "AdiabaticDelta",
     "smoothstep",
     "pairwise_switch",
     "validity_bump",

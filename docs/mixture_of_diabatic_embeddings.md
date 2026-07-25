@@ -1,368 +1,1185 @@
-# Latent-Space Diabatic Range-Separated MLIPs
-## Architecture, Mathematical Formulation, and Ion-Pair Dissociation Testing Protocol
-### Revision 2: Split-Charge Equilibration, Learned Channel Hardness, and Local Diabatic Gating
+# Latent-Space Diabatic Adiabaticization for Range-Separated MLIPs
+## Architecture, Cover Discovery, Feature Mixing, and Training Protocol
+### Revision 3: Learned Diabatic Covers, Overlap-Controlled Adiabaticization, and a Single Final System Evaluation
 
 ---
 
-## 1. Executive Summary & Theoretical Foundations
+## 1. Executive Summary
 
-Standard Machine-Learned Interatomic Potentials (MLIPs)—whether based on Atomic Cluster Expansions (ACE) or equivariant Message Passing Neural Networks (MPNNs)—rely on a monolithic, continuous latent representation of atomic environments. While highly successful near equilibrium geometries, this monolithic paradigm fails fundamentally when describing physical processes that involve **electronic state transitions, non-local charge transfer, or asymptotic dissociation into distinct charge and spin states**.
+Standard machine-learned interatomic potentials describe a system with one continuous set of atom-centered features. This is efficient, but it obscures processes in which the physically relevant electronic description changes qualitatively: homolytic and heterolytic bond cleavage, proton transfer, redox reactions, ion-pair neutralization, and transitions among distinct charge- or spin-localized states.
 
-When an ion pair dissociates (e.g., $\mathrm{Na}^+ + \mathrm{Cl}^- \longrightarrow \mathrm{Na}^\bullet + \mathrm{Cl}^\bullet$), standard MLIPs are forced to smoothly interpolate between radically different electronic structures using a single set of atom-centered features. Consequently, they cannot rigorously capture:
+The present architecture introduces a library of physically interpretable **reference diabatic fragment states**, but it does not evaluate a complete potential for every possible diabat and then mix the resulting energies or force-field parameters. Instead, the diabatic states are used as a basis for **learned adiabaticization**:
 
-1. **The Asymptotic Coulomb Tail:** Distinguishing between the long-range $-q_1 q_2 / r$ electrostatic attraction of closed-shell ions and the $-C_6 / r^6$ dispersion interaction of neutral radicals.
-2. **Avoided Crossings (The Harpoon Mechanism):** The sharp physical transition where the ionic diabatic state crosses the neutral radical diabatic state as a function of separation distance.
-3. **Integer Charge Localization at Dissociation vs. Many-Body Charge Transfer at Contact:** Conventional global Electronegativity Equalization (EEM/QEq) permits unphysical fractional charge transfer between arbitrarily distant fragments ("metallic" delocalization). The correct physics is two-sided: fragments in short-range contact genuinely exchange small amounts of charge (a dominant source of many-body cooperative polarization, e.g., in hydrogen-bonded networks), while dissociated fragments must localize exactly integer charge.
-4. **Rigorous Energy Decomposition Analysis (EDA) Integration:** Classical and polarizable long-range force fields require well-defined unperturbed monomer reference states to compute induction and electrostatics without unphysical short-range catastrophe.
+1. The nuclear system is covered by several candidate sets of chemically valid fragment states. Each complete cover defines a candidate diabat.
+2. A cheap proxy model ranks the covers and identifies a small active diabatic space.
+3. Each active diabat supplies atom-centered reference features and inexpensive environment-conditioned feature corrections.
+4. A learned adiabaticization network combines the active diabatic feature sets into one final set of **adiabatic atomic features**.
+5. A single shared inference network maps those adiabatic features to all short-range and long-range model parameters.
+6. The short-range MLIP and the global electrostatic, polarization, dispersion, and split-charge model are each evaluated only once.
 
-### The Diabatic Latent-Mixing + Split-Charge Solution
-This document details a rigorous mathematical architecture and testing protocol for a **Latent-Space Diabatic Range-Separated MLIP**. By conditioning short-range atomic features on explicit reference molecular/atomic diabatic states—frozen monomer features corrected by a state-decorated atomic cluster expansion (ACE)—and blending them directly in latent space, we preserve the formal identity (valence, spin, and baseline response) of chemical fragments.
+The central object is therefore not a mixture of energies, charges, polarizabilities, or other predicted observables. It is a learned map
 
-Four design decisions define the architecture:
+$$
+\boxed{
+\{\text{active diabatic atomic representations}\}
+\longrightarrow
+\{\text{one adiabatic atomic representation}\}.
+}
+$$
 
-- **A permanently frozen monomer stack anchors all asymptotics.** Fragment reference features, 1-body energies, and baseline response parameters are trained once on isolated fragments and frozen; every interaction effect enters as a state-decorated atomic cluster expansion (ACE) correction that vanishes *identically* at fragment isolation, with prediction heads constructed (via a subtraction trick) to be exactly zero there for any network weights. Dissociation limits, ionization-energy differences, and the gate's Coulomb bias are thereby consistent by construction, not by regularization.
-- **State mixing occurs in latent space, locally per reactive center, prior to property prediction.** A single downstream network maps the blended representation to short-range atomic energies (capturing non-linear resonance stabilization, automatically confined to short range) and effective response tensors. Gating is factorized over reactive centers, guaranteeing size extensivity.
-- **Charge conservation is structural, not constrained.** The long-range polarizable solve uses **Split-Charge Equilibration (SQE)**: atomic charges are parameterized as diabatic baseline charges plus antisymmetric transfers along an explicit **channel graph**. Total fragment charge is conserved identically for any channel values—no Lagrange multipliers. Every channel compliance is multiplied by a smooth pairwise switching function vanishing at the short-range cutoff, so inter-fragment charge transfer is structurally zero beyond $r_{\text{SR}}$ and asymptotic charges are exactly integer.
-- **Charge-transfer physics is learned, and exists even among ground states.** Per-channel compliance (inverse bond hardness) is predicted by a network head from the blended latent features. Inter-fragment channels exist between *all* fragment pairs in short-range contact—not only those merged by an active diabat—so neighboring closed-shell molecules (e.g., two ground-state waters) exchange small amounts of charge that couple automatically into the global polarization solve. This is a deliberate mechanism for capturing **many-body charge transfer**: ambient compliances are small (trained against EDA charge-transfer energies), while channels between fragments merged by an active diabat become soft, enabling the large transfers of genuine bond formation. The formal diabatic charges enter only as baselines; deviations are governed by the learned compliance landscape, the electrostatic environment, and the gating weights.
+The architecture is designed to satisfy an exact **pure-state vertex condition**: when a reference diabat is the only active state, every atom must be represented by that diabat's own feature vector. Nonlinear mixing is allowed only when multiple diabats are active, and the nonlinear correction is multiplied by a learned electronic-overlap envelope that vanishes when the fragments involved in the transition cease to overlap.
 
-Global spin is treated as a **bookkeeping constraint on valid combinations of diabatic states** (e.g., a global singlet restricts which local fragment-spin assignments may be simultaneously active); the model does not attempt to describe spin degrees of freedom explicitly. A simple damped dispersion model (e.g., Tang–Toennies-damped $C_6/r^6$ with fragment-state-conditioned coefficients) is included in the long-range component; it is conceptually standard and elided from the formalism below except where its diabatic conditioning matters.
+A formally rigorous extension would treat the diabatic coefficients as variational degrees of freedom and minimize the final energy over the coefficient simplex, analogous to an MCSCF calculation. That extension defines the theoretical interpretation of the model, but the present implementation uses a learned one-shot coefficient inference network and performs no inner coefficient optimization.
 
----
-
-## 2. Mathematical Formulation & Architecture
-
-The total energy of the system is partitioned into a single long-range polarizable electrostatic/induction/dispersion component and a short-range quantum mechanical component:
-
-$$E_{\text{total}} = E_{\text{LR}}^{\text{final}}\left(\boldsymbol{\chi}^{\text{final}},\ \boldsymbol{\alpha}_{\text{eff}}^{\text{final}},\ \{\kappa_{ij}\},\ \{q_i^{(0)}\}\right) + \sum_{i} E_{i,\text{SR}}\left(\mathbf{h}_i^{\text{final}}\right)$$
-
-where $\mathbf{h}_i^{\text{final}}$ represents the smoothly blended atomic latent features formed over an active space of enumerated diabatic states, and $E_{\text{LR}}^{\text{final}}$ is obtained from a single global SQE solve over the channel graph.
-
-```
-       [ Input Coordinates & Formal Diabatic References {K} ]
-                                 │
-         ┌───────────────────────┴───────────────────────┐
-         ▼                                               ▼
-┌─────────────────────────────────┐     ┌─────────────────────────────────┐
-│  Short-Range MLIP (per Diabat)  │     │   Zeroth-Order Coulomb Estimate │
-│  • Frozen Monomer Features      │     │  • Asymptotic Energy Ẽ^(K)(r)   │
-│  • State-Decorated ACE Δh^(K)   │     │  • Long-Range Coordinate Bias   │
-└────────────────┬────────────────┘     └────────────────┬────────────────┘
-                 │                                       │
-                 └───────────────────┬───────────────────┘
-                                     ▼
-                    [ Validity Envelope Pruning Ω_K(r) ]
-                                     │
-                    [ LOCAL Attention Gating per Reactive Center ]
-                                     │
-                                     ▼
-        Blended Latents: h_i^final = h_{i,0}^final + Δh_i^final  (∑_{K_R} c_{K_R} · each)
-                                     │
-         ┌───────────────────────────┴───────────────────────────┐
-         ▼                                                       ▼
-┌──────────────────────────────────────────┐     ┌──────────────────────────────────────────┐
-│   Short-Range Energy (Frozen Baseline    │     │   Effective Response, EEM & Channel      │
-│   + Isolation-Exact Correction)          │     │   Parameter Heads (same structure)       │
-│  • 1-Body Baseline ∑ c_K E_1^(K) (frozen)│     │  • χ_i^final = ∑ c_K χ_{i,0}^(K) + Δχ_i  │
-│  • ΔE via Subtraction Trick (≡0 at       │     │  • α_eff^final = ∑ c_K α_{i,0}^(K) + Δα_i│
-│    isolation): Pauli/Penetration,        │     │  • Channel Compliance s_ij (→ κ_ij)      │
-│    Non-Linear Resonance Stabilization    │     └────────────────────┬─────────────────────┘
-└─────────────────────┬────────────────────┘                          │
-                      │                                               ▼
-                      │                          [ Channel Graph Assembly (all short-range
-                      │                            contacts) & Pairwise Switch S(r_ij) ]
-                      │                                               │
-                      │                                               ▼
-                      │                          [ Single Global SQE Solve over {p_ij} ]
-                      │                          • q_i = q_i^(0) + ∑_j p_ij  (conservation
-                      │                            structural — no Lagrange multipliers)
-                      │                          • Damped Multipole Operators + Dispersion
-                      ▼                                               ▼
-            Short-Range Energy ∑ E_{i,SR}            Long-Range Energy E_LR^final
-                      │                                               │
-                      └───────────────────────┬───────────────────────┘
-                                              ▼
-                          Total Energy E_total & Analytical Forces
-```
-
-### 2.1 Hierarchical Featurization: Frozen Monomer Stack + State-Decorated ACE Correction
-
-The featurization is a strict hierarchy: **atomic reference embeddings → frozen state-aware intra-fragment features → a state-decorated atomic cluster expansion (ACE) correction over frozen inputs → blended final features.** The division is not merely organizational—the frozen monomer stack carries the model's asymptotic guarantees by construction, while the correction layer carries all interaction physics and vanishes identically at fragment isolation.
-
-For a given diabatic configuration $K$, every atom $i$ is assigned to a specific chemical fragment $F_a^{(K)}$ with a formal charge $Q_a^{(K)}$ and spin multiplicity $2S_a^{(K)} + 1$.
-
-1. **Atomic Reference Embeddings:** Instead of a single generic element embedding $\mathbf{z}_Z$, each atom is initialized with a reference embedding conditioned on its formal diabatic fragment state:
-   $$\mathbf{e}_i^{(K)} = \mathcal{E}\left(Z_i,\ \text{FragmentType}(i \in F_a^{(K)}),\ Q_a^{(K)},\ S_a^{(K)}\right)$$
-
-2. **Frozen Intra-Fragment (Monomer) Features:** A state-aware intra-fragment network, message-passing only *within* the fragment's covalent graph, maps the reference embeddings and internal geometry to monomer features:
-   $$\mathbf{h}_{i,0}^{(K)} = \mathcal{F}_{\text{mono}}\left(\{\mathbf{e}_j^{(K)}, \mathbf{r}_j\}_{j \in F_a^{(K)}}\right)$$
-   $\mathcal{F}_{\text{mono}}$ is trained in Phase 1 on isolated (including distorted) fragments against rich auxiliary targets—energies, multipoles, response tensors—so that the frozen representation exposes the physically relevant directions downstream layers will need, then **frozen permanently**. All subsequent training phases treat $\mathbf{h}_{i,0}^{(K)}$ as fixed inputs. (If additional flexibility proves necessary, a small learned linear adapter of the frozen features may be trained in Phase 2; the monomer network itself is never revisited.)
-
-3. **State-Decorated ACE Correction (the "Molecular Cluster Expansion"):** As fragments interact at short range, their internal electronic structure deforms. This is modeled as an additive, atom-centered correction:
-   $$\mathbf{h}_i^{(K)} = \mathbf{h}_{i,0}^{(K)} + \Delta\mathbf{h}_i^{(K)}, \qquad \Delta\mathbf{h}_i^{(K)} = \text{ACE}_\nu\!\left(\left\{\mathbf{h}_{j,0}^{(K)},\ \mathbf{r}_{ij}\right\}_{r_{ij} < r_{\text{SR}}}\right)$$
-   Concretely, the atomic density basis (radial functions × spherical harmonics over neighbors within $r_{\text{SR}}$, typically $4.5$–$5.0\ \text{Å}$) is decorated with channel weights derived from each neighbor's *frozen diabatic features* $\mathbf{h}_{j,0}^{(K)}$ rather than bare element identity; density products then deliver body-ordered ($\nu$-truncated) corrections at linear cost. Design commitments:
-   - **Not a fragment-enumerated MBE.** A literal fragment-level many-body expansion requires $\mathcal{O}(S^2)$ dimer and $\mathcal{O}(S^3)$ trimer scan families as the fragment-state library of size $S$ grows, and tabulated terms cannot generalize to unsampled state combinations. The state-decorated ACE achieves genuine body-ordered structure (truncatable order, per-order attribution) with a *shared* parameterization: learned state embeddings interpolate across fragment-state pairs never explicitly sampled.
-   - **Cross-diabat amortization.** The geometric density basis is state-independent and built once per configuration; evaluating $M$ active diabats costs one basis construction plus $M$ cheap channel contractions, not $M$ full feature passes.
-   - **Exact receptive field.** A single-shot ACE (at most one message-passing layer) keeps the receptive field at exactly $r_{\text{SR}}$; deep message passing would grow it to $L \cdot r_{\text{SR}}$, silently violating the range separation and the frozen-feature asymptotics.
-   - **The isolation zero.** Because every basis function carries the $r_{\text{SR}}$ cutoff, $\Delta\mathbf{h}_i^{(K)} \equiv 0$ *identically* for an isolated fragment—an exact architectural property, not a trained one. This zero anchors the monomer-preservation guarantees of Section 2.3.
-   - **Low body order suffices.** The slowly-converging many-body physics (polarization, cooperative charge transfer) is carried by the global SQE solve and the ambient channels (Section 2.4); the ACE correction represents only the residual short-range physics (Pauli, penetration, short-range CT stabilization), whose body-order expansion converges rapidly. $\nu = 3$ is a defensible design point, not a compromise.
-
-### 2.2 Local Diabatic Gating & Size-Extensive Latent Mixing
-
-**Why gating must be local.** A single global softmax over enumerated system-wide diabatic states is neither size-extensive nor computationally tractable. If a condensed-phase system contains $N_c$ independent reactive centers, each with $m$ local states, the global state space is the product set of size $m^{N_c}$, and the mixing weight at one center would depend on the logits of arbitrarily distant, physically decoupled centers. Furthermore, a pooled global logit grows in magnitude with system size, silently rescaling the softmax temperature $\tau$ relative to its dimer-calibrated value. A global softmax factorizes into independent local softmaxes only if the logits are exactly additive over centers, which a nonlinear pooled MLP does not guarantee.
-
-**The reactive-center factorization (mean-field ansatz).** We therefore define gating locally:
-
-1. **Reactive Center Identification:** Continuous coordination-defect analysis (Step 1, Section 3) identifies localized reactive centers $R = 1, \dots, N_c$. Each center carries its own $k$-hop local active space of diabatic states $\{K_R\}$, enumerated over the atoms in its $k$-hop graph. Two provisional centers whose $k$-hop graphs overlap, or that are spanned by a common candidate diabat, are **merged into a single center** so that every diabatic state is wholly owned by exactly one center. Atoms belonging to no reactive center carry a single reference state ($c \equiv 1$).
-
-2. **Local Logits with Local Coulomb Bias:** For each state $K_R$ of center $R$, pool only over the atoms of that center and subtract the *local* zeroth-order asymptotic estimate:
-   $$z_{K_R} = \text{MLP}_{\text{gate}}\left(\sum_{i \in R} \mathbf{W}_{\text{pool}}\, \mathbf{h}_i^{(K_R)}\right) - \beta\, \tilde{E}^{(K_R)}(r), \qquad \tilde{E}^{(K_R)}(r) = E_{\text{monomer}}^{(K_R)} + \sum_{a < b \,\in R} \frac{Q_a^{(K_R)} Q_b^{(K_R)}}{r_{ab}}$$
-   The zeroth-order bias is what gives the gate long-range geometric awareness beyond $r_{\text{SR}}$ (where the ACE correction vanishes identically and diabatic features reduce to frozen monomer features), guaranteeing Harpoon crossings are triggered at the correct asymptotic separations. Optionally, a small set of explicit long-range scalars (inter-fragment separations $r_{K_R}$, field estimates at fragment centroids) may be appended to the pooled features so that the learned component of the logit retains geometric sensitivity beyond $r_{\text{SR}}$ rather than delegating the entire crossing shape to $\beta\tilde{E}$.
-
-3. **Local Validity-Weighted Softmax:** Mixing coefficients are computed independently per center:
-   $$c_{K_R} = \frac{\Omega_{K_R} \exp\left(z_{K_R} / \tau\right)}{\sum_{J_R} \Omega_{J_R} \exp\left(z_{J_R} / \tau\right)}$$
-   where $\Omega_{K_R} \in [0,1]$ is a $C^2$-continuous compact-support bump function guaranteeing zero force noise when states are pruned. Because each softmax runs over a bounded local state count, $\tau$ has a fixed, system-size-independent meaning, and the total computational cost is $\mathcal{O}(N_c)$.
-
-4. **Global State Interpretation.** The implied global mixing weight of a product state $(K_1, K_2, \dots)$ is $\prod_R c_{K_R}$—a mean-field (Hartree-like) factorization over centers. Correlated multi-center states (e.g., genuine long-range electron transfer between distant redox partners) are handled by explicitly merging the participating centers into one active space, not by globalizing the softmax.
-
-5. **Global Spin Bookkeeping.** A global spin (or charge) constraint acts as a filter on the *product* space: local states whose fragment spin assignments cannot participate in any spin-valid global product are pruned from their local active spaces before gating. This uses the diabatic spin labels purely combinatorially; no explicit spin dynamics are modeled.
-
-6. **Latent Feature Blending:** All active local diabatic representations are collapsed into a single physical representation per atom, with the baseline and correction components tracked separately for the heads of Section 2.3:
-   $$\mathbf{h}_{i,0}^{\text{final}} = \sum_{K_R} c_{K_R} \mathbf{h}_{i,0}^{(K_R)}, \qquad \Delta\mathbf{h}_i^{\text{final}} = \sum_{K_R} c_{K_R} \Delta\mathbf{h}_i^{(K_R)}, \qquad \mathbf{h}_i^{\text{final}} = \mathbf{h}_{i,0}^{\text{final}} + \Delta\mathbf{h}_i^{\text{final}} \quad (i \in R)$$
-   *Why Latent Mixing?* Taking linear combinations of features rather than late energies grants downstream networks the expressivity to learn **non-linear resonance stabilization**. At avoided crossings ($c_1 \approx c_2 \approx 0.5$), the network maps the blended latent vector to an adiabatic ground-state energy that drops below the linear average of isolated diabatic curves, mimicking off-diagonal Hamiltonian coupling without solving a matrix equation. Crucially, this nonlinearity is *automatically confined to short range*: beyond $r_{\text{SR}}$, $\Delta\mathbf{h} \equiv 0$ and the head constructions of Section 2.3 make the energy exactly linear in $c$—the physically correct limit, since coupling matrix elements vanish with overlap. (At an exactly degenerate long-range seam, linear blending yields the average of the two states—but at degeneracy the average *is* the minimum, and the Coulomb bias breaks degeneracy elsewhere, so this is benign.)
-   *Interpretation of the weights.* The $c_{K_R}$ live on the probability simplex (softmax is its natural unconstrained parameterization), and the gate is best understood as **amortized inference** of a variational mixing solution: a future self-consistent (MCSCF-like) extension would define $E_{\text{total}}(\{c\})$ and minimize over the simplex directly—at much greater cost—while the gating network learns to emit the minimizer in a single pass. To keep that door open, training includes evaluations at perturbed mixing coefficients (Section 4.3, Phase 3) so that $E(\{c\})$ has physically sensible curvature off the gate's output manifold, not merely correct values on it. Note that $c_{K_R}$ blend *representations*, and the nonlinear energy head deliberately blurs the distinction between a classical ensemble and a coherent superposition; $c = 0.5$ should not be read as a literal state population.
-
-### 2.3 Property Prediction: Frozen Monomer Baselines + Isolation-Exact Correction Heads
-
-Freezing monomer *features* alone is an incomplete freeze: if shared prediction heads were trained in Phases 2–3, the model's output for an isolated monomer would drift even with fixed inputs, silently invalidating Phase-1 calibration. This matters quantitatively—dissociation limits are differences of large monomer energies, and the Harpoon crossing position shifts by $\sim 1\ \text{Å}$ per $0.1\ \text{eV}$ of $IE - EA$ error—and it would desynchronize the gate (whose Coulomb bias uses the frozen $E_{\text{monomer}}^{(K)}$) from the energy head's actual asymptote. Monomer preservation is therefore enforced **architecturally**, not by regularization: every predicted quantity is a frozen, $c$-linear 1-body baseline plus a correction that vanishes *identically* at fragment isolation.
-
-1. **Frozen 1-Body Baseline (Blended Linearly):** The Phase-1 monomer stack includes frozen heads for the 1-body energy $E_1^{(K)}(i)$ (a function of intra-fragment geometry, covering distorted monomers), baseline electronegativity $\boldsymbol{\chi}_{i,0}^{(K)}$, polarizability $\boldsymbol{\alpha}_{i,0}^{(K)}$, and the baseline charge distributions entering $q^{(0)}$. Baselines blend linearly with the mixing weights—exactly the weighted 1-body energies of the diabats:
-   $$E_{i,\text{SR}}^{\text{base}} = \sum_{K_R} c_{K_R} E_1^{(K_R)}(i), \qquad \boldsymbol{\chi}_{i}^{\text{base}} = \sum_{K_R} c_{K_R}\, \boldsymbol{\chi}_{i,0}^{(K_R)}, \qquad \boldsymbol{\alpha}_{i}^{\text{base}} = \sum_{K_R} c_{K_R}\, \boldsymbol{\alpha}_{i,0}^{(K_R)}$$
-
-2. **Isolation-Exact Correction Heads (the Subtraction Trick):** Corrections take the blended baseline and correction features as *separate* inputs, and subtract the head's own value at zero correction:
-   $$\Delta E_{i,\text{SR}} = \text{MLP}_{\Delta E}\!\left(\left[\mathbf{h}_{i,0}^{\text{final}},\ \Delta\mathbf{h}_i^{\text{final}}\right]\right) - \text{MLP}_{\Delta E}\!\left(\left[\mathbf{h}_{i,0}^{\text{final}},\ \mathbf{0}\right]\right)$$
-   and identically for $\Delta\boldsymbol{\chi}_i$ and $\Delta\boldsymbol{\alpha}_i$. Because $\Delta\mathbf{h} \equiv 0$ for an isolated fragment (Section 2.1), the correction is **exactly zero at isolation for any network weights**—full nonlinear expressivity at short range, machine-precision monomer preservation at long range. The subtracted term is constant per fragment-state and cacheable, so the overhead is negligible. This construction *replaces* the earlier soft training constraint "$\Delta\boldsymbol{\alpha}, \Delta\boldsymbol{\chi} \to 0$ as $r \to r_{\text{SR}}$" with an exact architectural property, and simultaneously guarantees exact linearity of the energy in $c$ beyond $r_{\text{SR}}$ (Section 2.2.6). The final quantities are
-   $$E_{i,\text{SR}} = E_{i,\text{SR}}^{\text{base}} + \Delta E_{i,\text{SR}}, \qquad \boldsymbol{\chi}_i^{\text{final}} = \boldsymbol{\chi}_i^{\text{base}} + \Delta\boldsymbol{\chi}_i, \qquad \boldsymbol{\alpha}_{i,\text{eff}}^{\text{final}} = \boldsymbol{\alpha}_i^{\text{base}} + \Delta\boldsymbol{\alpha}_i$$
-   The correction $\Delta E_{i,\text{SR}}$ carries the short-range EDA components (Pauli repulsion, charge penetration) and the non-linear resonance stabilization at avoided crossings; the baseline carries all 1-body physics.
-
-3. **Channel Compliance (Learned Bond Hardness):** For every edge $(i,j)$ of the channel graph (Section 2.4), a pair head predicts a raw **compliance** (inverse hardness):
-   $$s_{ij}^{\text{raw}} = \text{softplus}\!\left(\text{MLP}_{s}\left(\mathbf{h}_i^{\text{final}}, \mathbf{h}_j^{\text{final}}, e(r_{ij})\right)\right) \geq 0$$
-   where $e(r_{ij})$ is a radial basis expansion. Predicting compliance $s = 1/\kappa$ rather than hardness $\kappa$ is deliberate: channel closure corresponds to $s \to 0$ (a bounded, well-conditioned limit) rather than $\kappa \to \infty$, and the pairwise switching function acts multiplicatively on $s$ (Section 2.4.3). No subtraction trick is needed here—the switch $S(r_{ij})$ already enforces exact shutdown of inter-fragment channels at $r_{\text{SR}}$, and intra-fragment compliances are legitimately monomer properties trained in Phase 1 and frozen with the rest of the monomer stack. Because the inputs are the *blended* features, the learned compliance is implicitly conditioned on the local mixing weights $c_{K_R}$—e.g., a channel between two fragments softens as a diabat merging them gains weight—without any explicit $c$-dependence in the head. Between ordinary ground-state fragments the head yields small but nonzero ambient compliances, the mechanism for many-body charge transfer (Section 2.4.3).
-
-4. **What Trains When:** "Freeze the monomer stack" means, operationally: $\mathcal{F}_{\text{mono}}$, $E_1^{(K)}$, $\boldsymbol{\chi}_{i,0}^{(K)}$, $\boldsymbol{\alpha}_{i,0}^{(K)}$, intra-fragment compliances, and the $q^{(0)}$ charge distributions are all fixed after Phase 1. Phases 2–3 train only the ACE decoration weights, the correction heads $\text{MLP}_{\Delta E}, \text{MLP}_{\Delta\chi}, \text{MLP}_{\Delta\alpha}$, the inter-fragment compliance head $\text{MLP}_s$, and the gate. Light monomer replay in Phase 2 remains useful purely for conditioning the correction heads near the $\Delta\mathbf{h} \to 0$ boundary (where gradients are small); it carries no correctness burden.
-
-### 2.4 Split-Charge Equilibration: Structural Charge Conservation & Learned Charge Transfer
-
-Conventional EEM/QEq minimizes a globally quadratic $E(\{q_i\})$ subject to total-charge constraints enforced by Lagrange multipliers. Two pathologies follow: (i) fractional charge flows between arbitrarily distant fragments at dissociation, and (ii) blending diabats with *different fragment partitions* changes the number of constraints discretely, producing force discontinuities at validity-envelope boundaries. Split-Charge Equilibration (SQE) removes both by changing the coordinate system of the solve.
-
-#### 2.4.1 Split-Charge Parameterization
-Charge exists only as antisymmetric transfers along the edges of an explicit **channel graph** $\mathcal{G}$:
-$$q_i = q_i^{(0)} + \sum_{j \in \mathcal{N}(i)} p_{ij}, \qquad p_{ij} = -p_{ji}$$
-Every transfer $p_{ij}$ adds to atom $i$ exactly what it removes from atom $j$; therefore **the total charge of every connected component of $\mathcal{G}$ is conserved identically, for arbitrary $\{p_{ij}\}$**. There are no constraints and no Lagrange multipliers—the minimization over $\{p_{ij}\}$ is unconstrained. The former role of blended fragment-charge constraints is now played jointly by (i) the baseline charges $q^{(0)}$, (ii) the switched channel topology, and (iii) the learned compliances: the *distribution* of charge among fragments is a learned outcome of the solve rather than an imposed constraint value.
-
-**Baseline charges.** $q_i^{(0)}$ are constructed on the **finest common refinement** of all active fragment partitions, by distributing each finest-level fragment's blended formal charge $\sum_{K_R} c_{K_R} Q_a^{(K_R)}$ over its atoms with a fixed per-fragment-type reference distribution (trained in Phase 1). Diabats that merge fragments do not define sub-fragment charges; any convention adopted for the baseline is immaterial because the open channel between the sub-fragments absorbs the difference (see 2.4.3), and the convention is irrelevant when the channel is closed.
-
-#### 2.4.2 The SQE Energy Functional
-Substituting $q(p)$ into the polarizable electrostatic energy and adding per-channel hardness penalties:
-$$E_{\text{LR}}\left(\{p\}\right) = \sum_i \boldsymbol{\chi}_i^{\text{final}} \cdot \mathbf{q}_i(p) + \frac{1}{2}\sum_{i,j} \mathbf{q}_i(p)\, \mathbf{J}_{ij}\, \mathbf{q}_j(p) + \frac{1}{2}\sum_{(ij) \in \mathcal{G}} \kappa_{ij}\, p_{ij}^2 + E_{\text{disp}}$$
-Here $\mathbf{q}_i$ collects the atomic charge (and, where used, higher on-site multipoles/induced dipoles governed by $\boldsymbol{\alpha}_{i,\text{eff}}^{\text{final}}$), $\mathbf{J}_{ij}$ contains Tang–Toennies-damped multipole interaction operators off-diagonal and effective hardness on-diagonal, $\kappa_{ij} = 1/s_{ij}$ is the channel hardness, and $E_{\text{disp}}$ is the damped dispersion model with fragment-state-conditioned coefficients. The functional remains quadratic in $\{p_{ij}\}$: the solve is a single sparse linear system per configuration, exactly as before, merely in transfer coordinates. SQE interpolates continuously between EEM ($\kappa \to 0$, "metallic") and fixed baseline charges ($\kappa \to \infty$, "insulating") on a per-channel basis, and additionally corrects EEM's well-known superlinear scaling of polarizability with system size.
-
-#### 2.4.3 Channel Graph Construction, Switching & Ambient Charge Transfer
-The channel graph is assembled from two edge classes:
-
-- **Intra-fragment channels:** the covalent bond graph within each finest-partition fragment. Their compliances $s_{ij} = s_{ij}^{\text{raw}}$ are generally large (soft), granting near-full EEM flexibility inside a fragment.
-- **Inter-fragment channels:** one channel for *every* pair of finest-partition fragments in short-range contact, between designated contact atoms (nearest heavy-atom pair; for polyatomic fragments a softmin-weighted multi-channel construction is the robust choice). The channel topology is purely distance-based—channels are not conditional on any diabat. The topology is a subgraph of the short-range neighbor list, so no new bookkeeping is introduced.
-
-Every channel compliance is multiplied by an explicit $C^2$ pairwise switching function anchored at the short-range cutoff:
-$$s_{ij}^{\text{eff}} = s_{ij}^{\text{raw}}\!\left(\mathbf{h}_i^{\text{final}}, \mathbf{h}_j^{\text{final}}, e(r_{ij})\right) \cdot S(r_{ij}), \qquad S \in C^2,\ S(r) = 1 \ (r \le r_{\text{on}}),\ S(r) = 0\ (r \ge r_{\text{SR}})$$
-Compliance is a rapidly decaying pairwise quantity (charge-transfer matrix elements fall off roughly exponentially with overlap), so hard truncation via $S$ costs essentially nothing physically while making channel removal *exact and structural*: beyond $r_{\text{SR}}$ the channel does not exist, no learned suppression or numerical-threshold pruning is required, and asymptotic integer charges are guaranteed by topology.
-
-Within the cutoff, the learned $s^{\text{raw}}$ produces two physical regimes from a single head:
-
-1. **Ambient many-body charge transfer.** Between ordinary ground-state fragments (e.g., two hydrogen-bonded waters), $s^{\text{raw}}$ is small but nonzero. Small amounts of charge flow along the contact network and couple automatically into the global polarization solve—reproducing cooperative, non-additive many-body effects (dipole enhancement along hydrogen-bond chains, donor–acceptor asymmetry) that pure induction models miss. This is a deliberate design feature, not leakage: the flow is short-ranged by construction and its magnitude is trained against EDA charge-transfer energies (Section 4.2).
-2. **Diabat-driven bond formation.** For a fragment pair merged by an active diabat, the blended features $\mathbf{h}^{\text{final}}$ shift toward the merged state as $c_{K_R}$ grows, and the compliance head—whose inputs are those blended features—softens the channel accordingly, enabling the large transfers of genuine bond formation. No explicit $\Omega$-gate on the compliance is needed: when the merging diabat is pruned ($\Omega_{K_R} \to 0$), the blended features relax smoothly to the unmerged states and the channel relaxes continuously to its ambient value rather than disappearing. Diabat pruning therefore never changes the structure of the solve at all—only the (smooth) feature inputs to $s^{\text{raw}}$.
-
-#### 2.4.4 Continuity, Conditioning & Loop Redundancy
-At the minimizer, each transfer scales with its compliance: for fixed electrostatic driving force $f_{ij}$, $p_{ij}^{\ast} = \mathcal{O}(s_{ij}^{\text{eff}} f_{ij})$, and the channel's total energy contribution is likewise $\mathcal{O}(s_{ij}^{\text{eff}})$. Consequently:
-
-1. **Smooth closure at the cutoff.** As $r_{ij} \to r_{\text{SR}}$, $S(r_{ij}) \to 0$ with $C^2$ smoothness, so $p^{\ast} \to 0$ and the channel's energy and force contributions vanish continuously before the channel is dropped from the neighbor list. Channel removal is exact—zero energy and force error at the boundary by construction.
-2. **Smooth behavior under diabat pruning.** Because channel existence is distance-based and compliance depends on diabats only through the smoothly blended features, pruning a state from the active space changes no solve structure whatsoever; $s^{\text{raw}}$ varies $C^2$-continuously with $\Omega$ through the blending weights. This replaces the earlier constraint-blending scheme, which could not avoid a discrete change in constraint count when a merged partition split.
-3. **Conditioning.** The switching function bounds the dynamic range of active compliances: channels near the cutoff carry small $s^{\text{eff}}$ but equally small $p^{\ast}$, and the corresponding stiff rows can be Schur-eliminated or diagonally preconditioned without approximation concerns. No dead-zone regularization of the compliance head is required—the switch, not a learned value, is responsible for closure.
-4. **Loop redundancy.** On cyclic channel topologies (ubiquitous now that the contact network is dense—e.g., water rings), circulating transfers change no $q_i$; the electrostatic part of $E$ is flat along these loop directions, but the $\kappa p^2$ terms regularize them, so the solve remains well-posed. The $\{p_{ij}\}$ are then not unique—only the charges are—and a spanning tree may be used when unique transfer coordinates are desired (e.g., for diagnostics). Merged multi-fragment diabats (e.g., an Eigen cation $\mathrm{H}_9\mathrm{O}_4^+$) require no special handling: the ambient contact channels among the constituent fragments already exist and simply soften as the merged state gains weight.
+Energy decomposition analysis (EDA) is essential to the training strategy. Pure diabatic fragment models and the shared property-inference heads are first trained on constrained, well-defined fragment states using energies, forces, multipoles, polarization, charge-transfer, and response targets. Adiabatic training then teaches the mixing network how combinations of these pretrained reference representations deform into the physical adiabatic representation.
 
 ---
 
-## 3. Implementation Guide: Step-by-Step Computational Workflow
+## 2. Conceptual Separation of Responsibilities
 
-```
-[Step 1] Neighbor List & Coordination Defect Identification
-   │     • Compute continuous coordination numbers n_i for reactive atoms.
-   │     • Flag localized reactive centers where |n_i - n_val| > threshold.
-   │     • Merge centers with overlapping k-hop graphs or shared candidate diabats.
-   ▼
-[Step 2] Local Graph Enumeration (k-Hop Active Space, per Center)
-   │     • Enumerate chemically valid diabatic partitionings {K_R} per center.
-   │     • Filter local states against global spin/charge bookkeeping constraints.
-   │     • Compute geometric order parameters r_{K_R} and local Coulomb estimates Ẽ^(K_R)(r).
-   ▼
-[Step 3] Validity Envelope Evaluation & Pruning
-   │     • Calculate polynomial bump envelopes Ω_{K_R}(r_{K_R}) for all candidate states.
-   │     • Prune states where Ω_{K_R} < ε (guaranteed zero force/energy noise).
-   ▼
-[Step 4] Frozen Monomer Features, ACE Correction & Local Attention Gating
-   │     • For active K_R, evaluate frozen monomer features h_{i,0}^{(K_R)}
-   │       (frozen intra-fragment network on reference embeddings).
-   │     • Build the state-independent ACE density basis once; contract per diabat
-   │       with state-decoration weights to get corrections Δh_i^{(K_R)}
-   │       (Δh ≡ 0 identically for isolated fragments).
-   │     • Per center: predict logits z_{K_R} (incl. Coulomb bias -βẼ) and weights c_{K_R}.
-   ▼
-[Step 5] Latent Feature Blending & Property Prediction
-   │     • Blend baseline and correction latents separately:
-   │       h_{i,0}^final = ∑ c_{K_R} h_{i,0}^{(K_R)},  Δh_i^final = ∑ c_{K_R} Δh_i^{(K_R)}.
-   │     • Evaluate frozen 1-body baselines ∑ c_{K_R} E_1^{(K_R)}, ∑ c_{K_R} χ_{i,0}^{(K_R)},
-   │       ∑ c_{K_R} α_{i,0}^{(K_R)}; add subtraction-trick corrections ΔE, Δχ, Δα
-   │       (exactly zero at isolation for any weights).
-   │     • Assemble channel graph: intra-fragment bonds + one inter-fragment channel
-   │       for every fragment pair in short-range contact (distance-based; no diabat
-   │       condition).
-   │     • Predict raw compliances s_ij^raw; apply switch: s_ij^eff = s_ij^raw · S(r_ij).
-   │     • Build baseline charges q_i^(0) on the finest common partition from
-   │       c-blended formal fragment charges.
-   ▼
-[Step 6] Single Global SQE Solve & Force Evaluation
-   │     • Channels with S(r_ij) = 0 are simply absent (exact, structural removal);
-   │       Schur-eliminate or precondition stiff near-cutoff rows for conditioning.
-   │     • Solve the sparse quadratic problem over {p_ij} once (unconstrained —
-   │       charge conservation is structural).
-   │     • Recover q_i = q_i^(0) + ∑_j p_ij; evaluate E_LR^final incl. damped dispersion.
-   │     • Aggregate E_total = E_LR^final + ∑ E_{i,SR}.
-   │     • Backpropagate exact analytical spatial gradients F_i = -∇_i E_total
-   │       (differentiating through the linear solve via the adjoint system).
-   ▼
+The architecture separates four problems that should not be conflated.
+
+### 2.1 Diabatic state definition
+
+A diabatic state is a discrete electronic bookkeeping choice. For a system of atoms, a diabat specifies:
+
+$$
+K = \left\{
+\mathcal P_K,
+\{G_a,Q_a,S_a,\Gamma_a\}_{a\in\mathcal P_K},
+S_{\mathrm{tot}}
+\right\},
+$$
+
+where:
+
+- $\mathcal P_K$ is a partition of the atoms into fragments;
+- $G_a$ is the internal bonding or valence graph of fragment $a$;
+- $Q_a$ is its integer formal charge;
+- $S_a$ is its local spin;
+- $\Gamma_a$ optionally identifies additional electronic character, such as an orbital occupation or excitation class;
+- $S_{\mathrm{tot}}$ specifies the allowed total spin sector.
+
+For an elongated O--H bond in water, distinct valid diabats include
+
+$$
+\mathrm{H_2O},\qquad
+\mathrm{OH}^{\bullet}+\mathrm{H}^{\bullet},\qquad
+\mathrm{OH}^{-}+\mathrm{H}^{+}.
+$$
+
+The environment does not define these states. It changes their relative relevance and the adiabatic representation inferred from them.
+
+### 2.2 Cover discovery
+
+Given only atoms, coordinates, total charge, and total spin, the system must be covered by compatible fragment states. This is a structured combinatorial inference problem.
+
+### 2.3 Active-space inference
+
+The number of valid covers can be large. A cheap proxy model identifies a small set of low-energy or chemically adjacent covers that are worth representing explicitly.
+
+### 2.4 Adiabatic energy evaluation
+
+The active diabats are converted into one final atomic representation. Only this final representation is sent through the expensive short-range and long-range models.
+
+The proxy model therefore answers
+
+> Which diabatic covers should be represented?
+
+It does not answer
+
+> What is the final energy of the system?
+
+---
+
+## 3. Candidate Fragment States and Complete Diabatic Covers
+
+### 3.1 Fragment-state library
+
+The model maintains a library of reference fragment states. A fragment-state entry is
+
+$$
+f = (A_f,G_f,Q_f,S_f,\Gamma_f),
+$$
+
+where $A_f$ is a subset of atoms and the remaining labels define its electronic state.
+
+For an O/H chemistry library, possible entries include
+
+$$
+\mathrm{H},\ \mathrm{H}^{+},\ \mathrm{H}^{-},\
+\mathrm{O},\ \mathrm{O}^{-},\ \mathrm{O}^{+},\
+\mathrm{OH},\ \mathrm{OH}^{-},\ \mathrm{OH}^{+},\
+\mathrm{H_2O},\ \mathrm{H_2O}^{+},\ \mathrm{H_2O}^{-},\
+\mathrm{H_3O}^{+},\ldots
+$$
+
+with the appropriate spin and graph labels.
+
+The library is not simply a list of equilibrium molecules. Each state is trained over distorted internal geometries and must remain evaluable throughout the geometric region in which it can participate in a reaction.
+
+### 3.2 Fragment-state hypergraph
+
+Each eligible fragment state is represented as a hyperedge spanning its atoms. Eligibility is controlled by permissive, smooth geometric criteria. The criteria should reject chemically impossible assignments, but should not prematurely remove states near bond-breaking or bond-forming regions.
+
+A complete diabatic cover $K$ is a set of nonoverlapping fragment-state hyperedges satisfying
+
+$$
+\bigcup_{f\in K} A_f = \{1,\ldots,N\},
+\qquad
+A_f\cap A_g = \varnothing,
+$$
+
+along with global electronic constraints
+
+$$
+\sum_{f\in K}Q_f = Q_{\mathrm{tot}}
+$$
+
+and total-spin compatibility.
+
+A box of O and H atoms is therefore not assigned one topology before the model begins. The cover generator proposes several complete, electronically valid interpretations.
+
+### 3.3 Locality and factorization
+
+In a large system, covers should be generated locally around ambiguous bonding, charge, or coordination regions. Provisional reactive centers are merged whenever:
+
+- their candidate fragment assignments overlap;
+- a candidate diabat spans both centers;
+- they participate in a low-gap proton- or electron-transfer proposal.
+
+Atoms outside reactive centers retain a single unambiguous reference assignment. This avoids construction of the full Cartesian product of independent local state spaces.
+
+---
+
+## 4. Proxy Model for Cover Discovery
+
+### 4.1 Purpose
+
+The proxy model should be substantially cheaper than the final potential. It needs high recall, not spectroscopic accuracy. Its purpose is to avoid discarding a physically relevant cover before the learned adiabaticization model sees it.
+
+### 4.2 Proxy cover energy
+
+For a candidate cover $K$, define
+
+$$
+\widetilde E_K
+=
+\sum_{a\in K}\widetilde E_{a}^{\mathrm{mono}}
++
+\frac{1}{2}
+\sum_{\substack{a\neq b\\R_{ab}<r_{\mathrm{proxy}}}}
+\widetilde V_{ab}^{(K)}
++
+\widetilde E_{\mathrm{LR}}^{(K)}.
+$$
+
+The terms are:
+
+1. **Fragment self-energy** $\widetilde E_a^{\mathrm{mono}}$: a cheap approximation to the distorted isolated fragment-state energy.
+2. **Short-range fragment-pair interaction** $\widetilde V_{ab}^{(K)}$: predicted by a small dimer MLIP, pair network, or inexpensive force-field representation.
+3. **Cheap long-range state discrimination** $\widetilde E_{\mathrm{LR}}^{(K)}$: at minimum, formal-charge electrostatics and possibly fixed reference multipoles and polarizabilities.
+
+The long-range term is required because a short-range dimer score cannot recognize state crossings whose dominant distinction is Coulombic, such as ionic and neutral-radical asymptotes.
+
+### 4.3 Incremental evaluation
+
+Candidate covers usually differ only within a small reactive region. The proxy score should therefore be evaluated incrementally:
+
+- cache contributions from unchanged fragments;
+- recompute only fragment self-energies and pair terms affected by a local cover edit;
+- share geometric neighbor lists and radial bases across candidate covers.
+
+This permits beam search, $k$-best set packing, or factor-graph inference without a full evaluation for every combinatorial partition.
+
+### 4.4 Active cover set
+
+A preliminary active set is
+
+$$
+\mathcal A_0
+=
+\left\{
+K:\widetilde E_K-\widetilde E_{\min}<\Delta E_{\mathrm{screen}}
+\right\}.
+$$
+
+To avoid missing an approaching crossing, augment this set with chemically adjacent states:
+
+$$
+\mathcal A
+=
+\mathcal A_0
+\cup
+\left\{
+J:d_{\mathrm{edit}}(J,K)\leq 1
+\text{ for some }K\in\mathcal A_0
+\right\}.
+$$
+
+The edit graph includes elementary operations such as:
+
+- homolytic bond cleavage or formation;
+- heterolytic bond cleavage or formation;
+- proton transfer;
+- one-electron transfer;
+- local spin recoupling;
+- fragment merge or split.
+
+Each candidate has a smooth validity factor $\Omega_K\in[0,1]$. A state enters or exits the active set through a compact-support envelope rather than a discontinuous top-$k$ change.
+
+---
+
+## 5. Reference Diabatic Feature Construction
+
+### 5.1 Atomic reference embeddings
+
+Each atom begins with an embedding conditioned on its element and its role in the reference fragment state:
+
+$$
+\mathbf e_i^{(K)}
+=
+\mathcal E\left(
+Z_i,
+G_a,
+Q_a,
+S_a,
+\Gamma_a,
+\mathrm{role}_i
+\right),
+\qquad i\in a.
+$$
+
+Bare element embeddings alone are insufficient because they do not distinguish oxygen in $\mathrm{H_2O}$, $\mathrm{OH}^{\bullet}$, and $\mathrm{OH}^{-}$.
+
+### 5.2 Frozen fragment-state encoder
+
+A fragment encoder produces reference atomic features
+
+$$
+\mathbf h_{i,0}^{(K)}
+=
+\mathcal F_{\mathrm{frag}}
+\left(
+\{\mathbf e_j^{(K)},\mathbf R_j\}_{j\in a}
+\right).
+$$
+
+The fragment encoder is trained on isolated, distorted diabatic fragment states and then frozen or strongly regularized during later phases. It supplies a stable electronic vocabulary for the adiabaticization network.
+
+### 5.3 Inexpensive environment-conditioned diabatic features
+
+Each active diabat receives a short-range environment correction
+
+$$
+\mathbf h_i^{(K)}
+=
+\mathbf h_{i,0}^{(K)}
++
+\Delta\mathbf h_{i,\mathrm{env}}^{(K)}.
+$$
+
+A state-decorated ACE or shallow equivariant neighborhood contraction is suitable:
+
+$$
+\Delta\mathbf h_{i,\mathrm{env}}^{(K)}
+=
+\operatorname{ACE}_{\nu}
+\left(
+\{\mathbf h_{j,0}^{(K)},\mathbf r_{ij}\}_{r_{ij}<r_{\mathrm{SR}}}
+\right).
+$$
+
+The expensive geometric basis is built once. Each active cover changes only the state-decoration contractions. This is not a full system energy evaluation for each diabat.
+
+The correction must vanish when the relevant neighboring fragments leave the short-range region:
+
+$$
+\Delta\mathbf h_{i,\mathrm{env}}^{(K)}\equiv 0
+\quad\text{at fragment isolation}.
+$$
+
+### 5.4 Common mixing space
+
+Before mixing, every diabatic feature is mapped into a shared latent space:
+
+$$
+\widehat{\mathbf h}_i^{(K)}
+=
+\mathcal P\left(\mathbf h_i^{(K)}\right).
+$$
+
+The same map $\mathcal P$ is used for every state. It may be identity after pretraining, or a small equivariant adapter. The common space is necessary so that feature differences and similarities across diabats are meaningful.
+
+---
+
+## 6. Learned Coefficients as Amortized Active-Space Inference
+
+### 6.1 Local cover logits
+
+For a reactive center $R$, pool each active cover into a state representation
+
+$$
+\mathbf g_K^{(R)}
+=
+\operatorname{Pool}_{i\in R}
+\widehat{\mathbf h}_i^{(K)}.
+$$
+
+The coefficient network receives:
+
+- the proxy cover score $\widetilde E_K$;
+- the pooled state feature $\mathbf g_K^{(R)}$;
+- validity information $\Omega_K$;
+- geometric reaction descriptors;
+- cheap electrostatic potentials and fields;
+- formal charge and spin labels;
+- edit-graph information.
+
+The logits are
+
+$$
+z_K
+=
+\mathcal G
+\left(
+\mathbf g_K^{(R)},
+\widetilde E_K,
+\boldsymbol\xi_K
+\right),
+$$
+
+and the current one-shot coefficients are
+
+$$
+c_K
+=
+\frac{
+\Omega_K\exp(z_K/\tau)
+}{
+\sum_{J\in\mathcal A_R}
+\Omega_J\exp(z_J/\tau)
+}.
+$$
+
+The $c_K$ are latent inference coordinates, not literal state populations.
+
+### 6.2 Long-range awareness
+
+Most of the learned adiabaticization may be local, but state selection cannot always be purely short ranged. The gate should therefore receive inexpensive state-specific long-range descriptors such as
+
+$$
+\widetilde E_{K}^{\mathrm{Coul}}
+=
+\sum_{a<b}
+\frac{Q_a^{(K)}Q_b^{(K)}}{R_{ab}},
+$$
+
+reference multipole interactions, and approximate donor--acceptor redox gaps. This allows long-range ionic/radical crossings to enter the active space even when no local coordination defect is present.
+
+---
+
+## 7. The Core Adiabaticization Map
+
+This is the central component of the architecture.
+
+### 7.1 Weighted diabatic mean
+
+For each atom, compute the coefficient-weighted mean in the common mixing space:
+
+$$
+\boldsymbol\mu_i
+=
+\sum_{K\in\mathcal A_R}
+ c_K\widehat{\mathbf h}_i^{(K)}.
+$$
+
+This term gives the correct pure-state limit automatically: if $c_L=1$, then
+
+$$
+\boldsymbol\mu_i=\widehat{\mathbf h}_i^{(L)}.
+$$
+
+The mean alone is not sufficient. It can discard information about how different the competing states are and cannot, by itself, represent nonlinear resonance stabilization.
+
+### 7.2 Feature spread and state disagreement
+
+Compute a permutation-invariant measure of the spread among active diabatic representations:
+
+$$
+\mathbf v_i
+=
+\sum_K c_K
+\left(
+\widehat{\mathbf h}_i^{(K)}-\boldsymbol\mu_i
+\right)^{\odot 2}.
+$$
+
+For equivariant tensor channels, use invariant contractions of state differences to generate scalar spread descriptors while retaining equivariant state features for the correction network.
+
+The spread distinguishes:
+
+- a nearly pure state;
+- a mixture of two very similar states;
+- a mixture of electronically distinct ionic and radical states.
+
+### 7.3 Pairwise nonlinear mixing correction
+
+The adiabatic atomic feature is
+
+$$
+\boxed{
+\mathbf z_i^{\mathrm{ad}}
+=
+\boldsymbol\mu_i
++
+\Delta\mathbf z_{i}^{\mathrm{mix}}.
+}
+$$
+
+The leading nonlinear correction is constructed pairwise over connected states in the diabat edit graph:
+
+$$
+\Delta\mathbf z_i^{\mathrm{mix}}
+=
+\sum_{K<J}
+4c_Kc_J\,
+\mathcal O_{KJ}\,
+\boldsymbol\Psi_i^{KJ}.
+$$
+
+Here:
+
+- $4c_Kc_J$ is zero at every pure-state vertex and maximal for an equal two-state mixture;
+- $\mathcal O_{KJ}\in[0,1]$ is an electronic-overlap envelope;
+- $\boldsymbol\Psi_i^{KJ}$ is a learned, symmetric equivariant correction.
+
+A suitable symmetric input representation is
+
+$$
+\boldsymbol\Psi_i^{KJ}
+=
+\Psi\left(
+\widehat{\mathbf h}_i^{(K)}+\widehat{\mathbf h}_i^{(J)},
+\left(\widehat{\mathbf h}_i^{(K)}-\widehat{\mathbf h}_i^{(J)}\right)^{\odot 2},
+\boldsymbol\mu_i,
+\mathbf v_i,
+\mathbf z_R,
+\mathbf e_{KJ}
+\right),
+$$
+
+where $\mathbf e_{KJ}$ identifies the chemical edit connecting the states and $\mathbf z_R$ is a shared center-level latent.
+
+The pairwise form is analogous to retaining leading pair couplings among configuration-state functions. Higher-order corrections can be introduced later:
+
+$$
+\sum_{K<J<L}
+c_Kc_Jc_L\,
+\mathcal O_{KJL}\,
+\Psi^{KJL},
+$$
+
+but they are not required in the first implementation.
+
+### 7.4 Why the correction must vanish at pure-state vertices
+
+If only state $L$ is active,
+
+$$
+c_L=1,\qquad c_{K\neq L}=0,
+$$
+
+then every pair factor $c_Kc_J$ is zero. Therefore,
+
+$$
+\boxed{
+\mathbf z_i^{\mathrm{ad}}
+=
+\widehat{\mathbf h}_i^{(L)}
+}
+$$
+
+exactly, for arbitrary network weights.
+
+This is stronger than a training penalty. It ensures that the shared decoder sees exactly the pretrained diabatic feature whenever the active space has a single state.
+
+### 7.5 The overlap envelope is not just a feature dot product
+
+A normalized feature dot product is useful:
+
+$$
+\kappa_{KJ}
+=
+\frac{
+\left\langle
+W\mathbf g_K,
+W\mathbf g_J
+\right\rangle
+}{
+\|W\mathbf g_K\|\,\|W\mathbf g_J\|+\epsilon
+}.
+$$
+
+It measures compatibility in the learned common space. It should not, however, be the sole definition of electronic overlap because:
+
+1. learned latent vectors have gauge freedom and can be rescaled or rotated;
+2. two separated states can have similar fragment features even when their electronic coupling is negligible;
+3. two strongly coupled states can have dissimilar features precisely because their charge or spin assignments differ;
+4. a dot product has no structural guarantee of vanishing at fragment separation.
+
+The overlap envelope should combine a guaranteed geometric support factor with learned feature compatibility:
+
+$$
+\boxed{
+\mathcal O_{KJ}
+=
+S_{KJ}^{\mathrm{geo}}(\mathbf R)
+\times
+\sigma\left[
+ f_{\mathrm{ov}}
+ \left(
+ \kappa_{KJ},
+ \|W\mathbf g_K-W\mathbf g_J\|^2,
+ \mathbf d_{KJ},
+ \Delta\widetilde E_{KJ},
+ \mathbf e_{KJ}
+ \right)
+\right].
+}
+$$
+
+The learned factor estimates whether the two state representations are capable of meaningful local mixing. The geometric factor enforces the asymptotic limit.
+
+### 7.6 Geometric overlap support
+
+Every edge $K\leftrightarrow J$ in the diabat edit graph has an associated set of transition contacts $\mathcal T_{KJ}$. Examples include:
+
+- the bond being broken or formed;
+- the donor--proton and proton--acceptor contacts in proton transfer;
+- the donor--acceptor contact in short-range electron transfer;
+- the fragment interface across which ionic and covalent states mix.
+
+For each required contact $e$, define a $C^2$ switching function
+
+$$
+s_e(r)=
+\begin{cases}
+1, & r\leq r_{\mathrm{on}},\\
+\text{$C^2$ transition}, & r_{\mathrm{on}}<r<r_{\mathrm{off}},\\
+0, & r\geq r_{\mathrm{off}}.
+\end{cases}
+$$
+
+For a transition requiring all contacts, use a smooth product:
+
+$$
+S_{KJ}^{\mathrm{geo}}
+=
+\prod_{e\in\mathcal T_{KJ}}s_e(r_e).
+$$
+
+For a transition that can proceed through any of several equivalent contacts, use a smooth OR:
+
+$$
+S_{KJ}^{\mathrm{geo}}
+=
+1-
+\prod_{e\in\mathcal T_{KJ}}
+\left[1-s_e(r_e)\right].
+$$
+
+More complex concerted edits can use learned soft-AND or soft-OR combinations, but the final result must retain the exact condition
+
+$$
+S_{KJ}^{\mathrm{geo}}=0
+$$
+
+when the relevant fragments no longer overlap.
+
+### 7.7 Physical interpretation of the nonlinear correction
+
+The weighted mean $\boldsymbol\mu_i$ represents the first-order interpolation among reference state descriptions. The correction $\Delta\mathbf z_i^{\mathrm{mix}}$ represents the electronic reorganization that is absent from any classical mixture of diabatic features:
+
+- resonance stabilization;
+- partial covalency;
+- charge redistribution;
+- spin-pairing effects represented within a fixed total-spin sector;
+- nonlinear changes in polarizability and short-range repulsion;
+- changes in charge-transfer compliance.
+
+The correction is largest when:
+
+- at least two coefficients are appreciable;
+- the states differ meaningfully;
+- the transition contacts have substantial geometric overlap;
+- the learned compatibility network predicts strong mixing.
+
+It vanishes when:
+
+- the active space has only one state;
+- one state dominates completely;
+- the states are not connected by an allowed local edit;
+- the transition fragments separate beyond the overlap range.
+
+### 7.8 Center-level coherence
+
+Atomic adiabaticization cannot be performed independently for each atom. A shared center representation is first formed:
+
+$$
+\mathbf z_R
+=
+\mathcal A_R
+\left(
+\{c_K,\mathbf g_K,\widetilde E_K,\boldsymbol\xi_K\}_{K\in\mathcal A_R}
+\right).
+$$
+
+Every atomic correction $\boldsymbol\Psi_i^{KJ}$ receives $\mathbf z_R$. This ensures that all atoms in a reactive center make a consistent collective transition. For example, the oxygen and departing hydrogen cannot independently select incompatible homolytic and heterolytic characters.
+
+### 7.9 Equivariance
+
+The final feature should be an equivariant bundle
+
+$$
+\mathbf z_i^{\mathrm{ad}}
+=
+\left\{
+\mathbf z_i^{(l=0)},
+\mathbf z_i^{(l=1)},
+\mathbf z_i^{(l=2)},\ldots
+\right\}.
+$$
+
+Mixing occurs only among matching irreducible representations. Scalar coefficient and overlap factors can multiply equivariant corrections without breaking rotational covariance.
+
+---
+
+## 8. Pure-State, Isolation, and Asymptotic Conditions
+
+### 8.1 Pure-state identity
+
+For every reference diabat $K$, require
+
+$$
+\mathcal A
+\left(
+\{c_K=1,\widehat{\mathbf h}^{(K)}\}
+\right)
+=
+\widehat{\mathbf h}^{(K)}.
+$$
+
+The pairwise residual construction enforces this exactly.
+
+### 8.2 Pretrained decoder consistency
+
+The shared decoder is pretrained so that each pure diabatic feature reproduces the corresponding reference model:
+
+$$
+\mathcal D
+\left(
+\widehat{\mathbf h}^{(K)}
+\right)
+\longrightarrow
+\left
+\{
+E_{\mathrm{SR}}^{(K)},
+\chi^{(K)},
+\alpha^{(K)},
+q_0^{(K)},
+C_6^{(K)},
+s^{(K)},\ldots
+\right\}.
+$$
+
+When only one state is active, no downstream retraining is permitted to destroy this correspondence.
+
+### 8.3 Nonlinear mixing must vanish with overlap
+
+Because $\mathcal O_{KJ}$ contains compact geometric support,
+
+$$
+\Delta\mathbf z_i^{\mathrm{mix}}\rightarrow 0
+$$
+
+when the fragments involved in every competing state transition separate.
+
+### 8.4 Asymptotic state sharpness
+
+At long range, the nonlinear correction vanishes. The coefficient model must then approach the lowest relevant diagonal state rather than maintain an arbitrary soft hybrid. Training therefore includes:
+
+- asymptotic coefficient targets or ranking losses;
+- low-entropy regularization once all state couplings have vanished;
+- exact formal-charge and dissociation-limit tests.
+
+At an exact asymptotic degeneracy, the energy is invariant to the choice of diabatic combination. A deterministic tie-breaking convention may still be useful for stable observables.
+
+---
+
+## 9. One Shared Decoder and One Final Physical Evaluation
+
+### 9.1 Shared electronic inference trunk
+
+The final adiabatic feature is passed through one shared inference network:
+
+$$
+\mathbf u_i
+=
+\mathcal D_{\mathrm{shared}}
+\left(
+\mathbf z_i^{\mathrm{ad}}
+\right).
+$$
+
+Small structured heads derive all final quantities from the same electronic latent:
+
+$$
+\begin{aligned}
+\boldsymbol\theta_i^{\mathrm{SR}} &= D_{\mathrm{SR}}(\mathbf u_i),\\
+\chi_i &= D_{\chi}(\mathbf u_i),\\
+\alpha_i &= D_{\alpha}(\mathbf u_i),\\
+q_{i}^{(0)} &= D_q(\mathbf u_i),\\
+C_{6,i} &= D_{C_6}(\mathbf u_i),\\
+s_{ij}^{\mathrm{raw}} &= D_s(\mathbf u_i,\mathbf u_j,e(r_{ij})).
+\end{aligned}
+$$
+
+This is not output-level mixing. Every quantity is inferred once from the final adiabatic representation.
+
+The heads must enforce their mathematical constraints structurally:
+
+- positive-definite polarizabilities;
+- nonnegative compliances and dispersion coefficients;
+- symmetric pair parameters;
+- equivariant multipoles;
+- correct total charge;
+- permutation invariance.
+
+### 9.2 Short-range MLIP
+
+The final short-range energy is evaluated once:
+
+$$
+E_{\mathrm{SR}}
+=
+\mathcal M_{\mathrm{SR}}
+\left(
+\{\boldsymbol\theta_i^{\mathrm{SR}},\mathbf R_i\}
+\right).
+$$
+
+The MLIP may use an ACE, equivariant message-passing network, or another local model. It sees only the inferred adiabatic features, not separate diabatic energies.
+
+### 9.3 Long-range model and SQE
+
+The final long-range parameters are inserted into one global electrostatic, polarization, dispersion, and split-charge solve.
+
+The split-charge parameterization is
+
+$$
+q_i=q_i^{(0)}+\sum_j p_{ij},
+\qquad p_{ij}=-p_{ji}.
+$$
+
+Interfragment channel compliances are switched off smoothly with distance:
+
+$$
+s_{ij}^{\mathrm{eff}}
+=
+s_{ij}^{\mathrm{raw}}S(r_{ij}).
+$$
+
+The global response coordinates are obtained once:
+
+$$
+\mathbf p^*
+=
+\arg\min_{\mathbf p}
+E_{\mathrm{LR}}
+\left(
+\mathbf p;
+\{\chi_i,\alpha_i,q_i^{(0)},s_{ij},C_{6,i},\ldots\},
+\mathbf R
+\right).
+$$
+
+The total energy is
+
+$$
+\boxed{
+E_{\mathrm{total}}
+=
+E_{\mathrm{SR}}
+\left(\{\mathbf z_i^{\mathrm{ad}}\}\right)
++
+E_{\mathrm{LR}}
+\left(\mathbf p^*;\{\mathbf z_i^{\mathrm{ad}}\}\right).
+}
+$$
+
+There is no complete short-range evaluation, parameter inference, or SQE solve for each active diabat.
+
+---
+
+## 10. MCSCF Interpretation and Present Approximation
+
+The final physical model defines an energy for any allowed coefficient vector:
+
+$$
+E(\mathbf c)
+=
+E_{\mathrm{SR}}
+\left[
+\mathcal A(\{\mathbf h^{(K)}\},\mathbf c)
+\right]
++
+E_{\mathrm{LR}}
+\left[
+\mathcal A(\{\mathbf h^{(K)}\},\mathbf c)
+\right].
+$$
+
+A rigorous variational extension would solve
+
+$$
+\boxed{
+\mathbf c^*
+=
+\arg\min_{\mathbf c\in\Delta}
+E(\mathbf c),
+\qquad
+\Delta=\left\{\mathbf c:c_K\geq0,\ \sum_Kc_K=1\right\}.
+}
+$$
+
+This is analogous to optimizing configuration coefficients in MCSCF while the learned feature maps play the role of an adaptive electronic representation.
+
+The present model does not perform this minimization. It uses
+
+$$
+\mathbf c=\mathcal G(\text{proxy scores, diabatic features, environment})
+$$
+
+as an amortized estimate of the variational solution. The coefficient network is therefore an inference accelerator rather than a fundamental definition of the energy.
+
+To preserve the future variational interpretation, training should evaluate the energy at perturbed coefficient vectors and penalize pathological off-manifold behavior. The model should learn a smooth, locally stable $E(\mathbf c)$ even though only the inferred $\mathbf c$ is used during production.
+
+---
+
+## 11. EDA-Based Training Strategy
+
+### Phase 1: Fragment-state library and pure-diat decoder pretraining
+
+Train the reference fragment encoder and shared decoder on isolated, distorted diabatic fragments.
+
+Targets include:
+
+- diabatic fragment energies and forces;
+- permanent multipoles;
+- electrostatic potentials;
+- static and anisotropic polarizabilities;
+- reference electronegativities or hardness information;
+- intra-fragment charge response;
+- dispersion coefficients;
+- spin- and charge-state energy differences.
+
+EDA and constrained electronic-structure calculations make these states well defined. The shared decoder learns to interpret each reference diabatic feature before any state mixing is introduced.
+
+After this phase, enforce the audit
+
+$$
+\mathcal D\left(\widehat{\mathbf h}^{(K)}\right)
+=\text{reference properties of }K.
+$$
+
+### Phase 2: Proxy cover and environment-conditioned feature training
+
+Train:
+
+- the fragment self-energy proxy;
+- the fragment-dimer proxy interaction model;
+- cheap long-range cover corrections;
+- the state-decorated environment feature contraction.
+
+The proxy objective emphasizes active-space recall. A physically important state ranked slightly too low is more damaging than several unnecessary extra candidates.
+
+For fixed pure diabats, train the environment-conditioned features and shared decoder against EDA-resolved interaction data:
+
+- frozen electrostatics;
+- polarization;
+- charge transfer;
+- Pauli repulsion;
+- penetration;
+- dispersion;
+- total interaction energy and forces.
+
+### Phase 3: Adiabaticization and coefficient inference
+
+Activate multiple covers. Train:
+
+- the coefficient network $\mathcal G$;
+- the center-level state-set encoder;
+- the overlap model $f_{\mathrm{ov}}$;
+- the nonlinear pair correction $\Psi$;
+- limited fine-tuning of the shared decoder and short-range MLIP.
+
+Targets include:
+
+- adiabatic total energies and forces;
+- molecular and fragment-resolved multipoles;
+- charge redistribution;
+- polarizability and response changes;
+- EDA component changes across crossings;
+- reference diabatic weights when a trustworthy diabatization provides them.
+
+Pure-state examples remain in every batch. Because the vertex identity is architectural, these examples primarily prevent decoder drift and preserve calibration.
+
+### Phase 4: End-to-end robustness and active-set perturbation
+
+Train against changes in the candidate set:
+
+- randomly remove irrelevant high-energy states;
+- insert redundant or nearly duplicate covers;
+- vary the proxy screening window;
+- permute state ordering;
+- include graph-edit neighbors before they become energetically competitive;
+- perturb inferred coefficients and evaluate energy curvature.
+
+The final prediction should be insensitive to irrelevant candidate states and stable as covers enter or leave through their validity envelopes.
+
+---
+
+## 12. Computational Workflow
+
+```text
+[Input]
+  Coordinates, elements, total charge, total spin
+      |
+      v
+[1. Candidate fragment-state generation]
+  Build eligible fragment-state hyperedges from the library
+      |
+      v
+[2. Compatible-cover search]
+  Generate k-best complete covers under charge/spin constraints
+      |
+      v
+[3. Cheap proxy scoring]
+  Fragment self energies + short-range fragment-dimer terms
+  + cheap long-range state discrimination
+      |
+      v
+[4. Active-space construction]
+  Retain low-score covers + one-edit neighbors
+  Apply smooth validity envelopes; merge overlapping centers
+      |
+      v
+[5. Active-diat feature construction]
+  Frozen fragment features + cheap state-decorated environment contractions
+  Shared geometric basis constructed once
+      |
+      v
+[6. Coefficient inference]
+  Local state-set gate with proxy, geometric, and long-range descriptors
+      |
+      v
+[7. Learned adiabaticization]
+  Weighted mean + overlap-controlled nonlinear pair corrections
+  Exact pure-state vertex identity
+      |
+      v
+[8. Shared parameter inference]
+  One adiabatic latent per atom -> all final physical parameters
+      |
+      +---------------------------+
+      |                           |
+      v                           v
+[9a. One short-range MLIP]   [9b. One global LR/SQE solve]
+      |                           |
+      +-------------+-------------+
+                    v
+              Total energy and forces
 ```
 
 ---
 
-## 4. Experimental Testing Protocol: Ion-Pair Dissociation
+## 13. Evaluation and Pass/Fail Tests
 
-To rigorously exercise the model's ability to distinguish ionic, radical, and covalently bound states—and to exercise the **overlapping-diabat and learned charge-transfer machinery**—we deploy a testing suite focusing on classic ion-pair dissociation curves.
+### 13.1 Cover recall
 
-### 4.1 Test Case Selection: Why Ion Pairs?
-In gas-phase and solvent-separated ion pairs, the potential energy surface exhibits dramatic electronic transitions that serve as an ideal stress test for range-separated models. Crucially, each test case now includes a **merged-fragment (bound-pair) diabat** whose partition overlaps the dissociated partitions, so that the SQE channel machinery is exercised even in the simplest system:
+For every reaction trajectory, verify that the reference-dominant diabats are present in the active set before their crossing region is reached.
 
-| Test Case | Diabat 1 (Ionic) | Diabat 2 (Radical) | Diabat 3 (Merged Pair) | Physical Phenomena Tested |
-| :--- | :--- | :--- | :--- | :--- |
-| **Alkali Halide ($\mathrm{NaCl}$)** | $\lvert \mathrm{Na}^+ + \mathrm{Cl}^- \rangle$ ($Q=[+1,-1]$, $S=[0,0]$) | $\lvert \mathrm{Na}^\bullet + \mathrm{Cl}^\bullet \rangle$ ($Q=[0,0]$, $S=[\tfrac{1}{2},\tfrac{1}{2}]$) | $\lvert \mathrm{NaCl} \rangle$: one fragment, $Q_{\text{tot}}=0$, $S=0$ | **Harpoon Mechanism** (ionic/radical crossing at $r_c \approx 9.5\ \text{Å}$) **+ Learned CT:** partial covalency at equilibrium via the soft Na–Cl channel; smooth switch-off of the channel on dissociation; exact integer asymptotic charges. |
-| **Organic Molecular Pair** | $\lvert \mathrm{CH}_3^+ + \mathrm{Cl}^- \rangle$ | $\lvert \mathrm{CH}_3^\bullet + \mathrm{Cl}^\bullet \rangle$ | $\lvert \mathrm{CH}_3\mathrm{Cl} \rangle$: one fragment | **Multi-Center Polarization** of polyatomic fragments + channel between polyatomic sub-fragments (contact-atom selection, intra-fragment redistribution of transferred charge). |
-| **Proton Transfer Pair** | $\lvert \mathrm{H}_3\mathrm{O}^+ + \mathrm{OH}^- \rangle$ | $\lvert 2\,\mathrm{H}_2\mathrm{O} \rangle$ (Neutral) | $\lvert \mathrm{H}_5\mathrm{O}_2^+ \cdot \mathrm{OH}^- \rangle$-type merged states | **Solvation, Asymmetry & Hierarchical Overlap:** diabats with different fragment *counts*; finest-common-refinement baselines; recursive channel opening (Zundel/Eigen hierarchy) relevant to Grotthuss transport. |
+Primary metric:
 
-The Na–Cl channel exists whenever the pair is within the switching range and closes smoothly as $S(r) \to 0$ at $r_{\text{SR}} \approx 4.5$–$5\ \text{Å}$. Within that range, the channel compliance transitions between two learned regimes: soft while the merged diabat $\lvert \mathrm{NaCl} \rangle$ carries weight (large covalent back-transfer) and small-but-ambient once only the ionic diabat remains active (residual contact CT). The merged diabat's validity envelope $\Omega_3(r)$ likewise has compact short-range support, and its pruning changes only the smooth feature inputs to the compliance head—never the structure of the solve.
+$$
+\mathrm{Recall@active\ set}>99.9\%
+$$
 
-### 4.2 Training Data Generation & EDA Decomposition
-Training data must be generated using high-level electronic structure methods coupled with Energy Decomposition Analysis. **A single diabatization convention must be fixed across all phases** (e.g., ALMO-based fragment states throughout, or constrained DFT throughout); mixing conventions bakes inconsistencies into precisely the 3–6 Å hand-off window between the short-range network and the long-range solve.
+on chemically relevant states, even if precision is lower.
 
-1. **Scan Generation:** 1D and 2D potential energy surface scans across inter-fragment separations $r \in [1.5\ \text{Å}, 15.0\ \text{Å}]$, explicitly including distorted monomer geometries.
-2. **Diabatic Reference Curves:** Constrained DFT or CASSCF/NEVPT2 energies forcing specific charge and spin distributions to isolate diabatic reference curves $E_{\text{QM}}^{(K)}(r)$; the merged-pair diabat is referenced to the adiabatic ground state in the strongly bound region where it dominates.
-3. **EDA Partitioning:** Decompose QM interaction energies into long-range and short-range targets:
-   $$E_{\text{target,LR}} = E_{\text{elstat}} + E_{\text{pol}} + E_{\text{disp}} + E_{\text{ct}}, \qquad E_{\text{target,SR}} = E_{\text{1-body}} + E_{\text{Pauli}} + E_{\text{pen}}$$
-   The EDA polarization/CT split (well-defined in ALMO-EDA, where polarization is intra-fragment relaxation by construction) maps directly onto the channel structure, and **the fitting must respect that map**: when fitting $E_{\text{pol}}$, all inter-fragment compliances are clamped to zero, so polarization is carried entirely by $\boldsymbol{\alpha}_{\text{eff}}$ and intra-fragment channels; $E_{\text{ct}}$ is then fit with inter-fragment channels released, training the ambient compliances against the CT energy and the QM inter-fragment charge flow (e.g., ALMO CT charge). This assignment prevents double counting between induction and charge transfer and gives each channel class an unambiguous physical target. Because inter-fragment CT couples back into the multipole distribution, the released-channel fit is run with the (already-fit) polarization parameters frozen.
-4. **Charge/Multipole References:** Fragment-resolved charges (e.g., from the chosen diabatization's population analysis) and molecular dipoles along each scan, used to train baselines, $\boldsymbol{\chi}$, and channel compliances jointly.
+### 13.2 Pure-state vertex identity
 
-### 4.3 Step-by-Step Training Strategy
+For every library state, force it to be the only active diabat and verify
 
-```
-[Phase 1: Monomer Reference Training (the Frozen Stack)]
-  └─► Train the intra-fragment featurization F_mono, 1-body energy heads E_1^(K)
-      (over distorted monomer geometries), baseline electronegativities χ_{i,0}^(K),
-      static polarizabilities α_{i,0}^(K), intra-fragment channel compliances, and
-      per-fragment-type baseline charge distributions (for q^(0) construction)
-      on isolated gas-phase fragments.
-  └─► Target: monomer energies AND rich auxiliary targets — multipoles, static
-      response tensors, formation energies — so the frozen features expose the
-      directions downstream correction layers will need.
-  └─► FREEZE the entire monomer stack permanently. All asymptotic guarantees
-      (dissociation limits, IE−EA differences, Harpoon crossing position, gate/energy
-      consistency of E_monomer^(K)) now rest on this validated, immutable component.
+$$
+\mathbf z_i^{\mathrm{ad}}
+=
+\widehat{\mathbf h}_i^{(K)}
+$$
 
-[Phase 2: ACE Correction, Response & Channel Training (Fixed Diabats)]
-  └─► Train ONLY: ACE state-decoration weights, correction heads MLP_ΔE, MLP_Δχ,
-      MLP_Δα (subtraction-trick form — exactly zero at isolation for any weights),
-      and the inter-fragment compliance head MLP_s, on isolated diabatic states
-      (c_K ∈ {0,1}). Optionally a small linear adapter of the frozen features.
-  └─► Two-stage channel fit respecting the EDA pol/CT split (§4.2): (a) fit E_pol with
-      inter-fragment compliances clamped to zero (intra-fragment channels + α_eff only);
-      (b) release inter-fragment channels and fit ambient compliances to E_ct and QM
-      inter-fragment charge flow, with polarization parameters frozen.
-  └─► Merged-pair diabats: inter-fragment (sub-fragment) compliances trained against
-      the large CT/covalency of the bound state along dissociation scans.
-  └─► No closure constraints or dead-zone regularization needed anywhere: the ACE
-      cutoff makes Δh ≡ 0 at isolation, the subtraction trick makes ΔE, Δχ, Δα ≡ 0
-      there, and the pairwise switch S(r_ij) shuts inter-fragment channels at r_SR —
-      all by construction. Light monomer replay is retained purely to condition the
-      correction heads near the Δh → 0 boundary; it carries no correctness burden.
+and that all predicted energies and properties match the pretrained pure-diat model to machine precision.
 
-[Phase 3: Latent Mixing & Avoided Crossing Training]
-  └─► Activate all diabatic states and local gating. Train MLP_gate, Coulomb scaling β,
-      and temperature τ across dissociation trajectories; fine-tune the ACE decoration
-      weights and correction heads at mixed c (this is where non-linear resonance
-      stabilization is learned). The monomer stack remains frozen — the subtraction
-      trick guarantees monomer predictions are untouched by any of this fine-tuning.
-  └─► Target: total adiabatic ground-state QM energy E_total, QM charges/dipoles μ(r),
-      and analytical QM forces across the avoided crossing AND across the channel-closure
-      window (r ≈ 3–5 Å for NaCl), where gating, blending, and SQE interact.
-  └─► Include evaluations at perturbed mixing coefficients c + δc (energy consistency
-      regularizer) so E({c}) is meaningful off the gate's output manifold, preserving
-      the future self-consistent (MCSCF-like) extension.
-```
+### 13.3 Overlap shutdown
 
-### 4.4 Evaluation Metrics & Quantitative Verification
+Along dissociation coordinates, verify that
 
-The model must be evaluated against eight strict pass/fail quantitative criteria:
+$$
+\mathcal O_{KJ}\rightarrow0,
+\qquad
+\Delta\mathbf z_i^{\mathrm{mix}}\rightarrow0
+$$
 
-#### 1. Asymptotic Tail & Multipole Verification (The $-1/r$ vs $-1/r^6$ Test)
-Plot the predicted interaction energy $\Delta E(r)$ for $r \in [8.0\ \text{Å}, 15.0\ \text{Å}]$ on a log-log scale against analytical asymptotics.
-* **Ionic Diabat Target:** convergence to $-q_1 q_2 / r$ with slope $-1.0$.
-* **Radical Diabat Target:** convergence to $-C_6 / r^6$ with slope $-6.0$, confirming zero spurious Coulomb leakage. Under SQE this is a *structural* guarantee (no channel exists at these separations); the test verifies the implementation honors it.
+smoothly and exactly at the geometric support boundary.
 
-#### 2. Avoided Crossing & Weight Tracking
-For the $\mathrm{NaCl}$ dissociation curve, monitor the local mixing weights $c_{\text{ion}}(r)$, $c_{\text{rad}}(r)$, $c_{\text{mol}}(r)$:
-* **Criterion:** Near equilibrium ($r \approx 2.3\ \text{Å}$), $c_{\text{mol}} + c_{\text{ion}}$ must exceed $0.98$ (bound region dominated by molecular + ionic character). For $5\ \text{Å} < r < 8\ \text{Å}$, $c_{\text{ion}} > 0.98$ ($\Omega_{\text{mol}}$ has closed). At $r > 10.0\ \text{Å}$, $c_{\text{rad}} > 0.98$.
-* **The Crossing Point:** The inflection where $c_{\text{ion}}(r_c) = c_{\text{rad}}(r_c) = 0.5$ must match the theoretical Harpoon distance $r_c \approx \frac{e^2}{IE(\mathrm{Na}) - EA(\mathrm{Cl})} \approx 9.4\ \text{Å}$ within $\pm 0.2\ \text{Å}$.
+Numerically test analytical force continuity across every overlap cutoff.
 
-#### 3. Charge Trace & Dipole Staircase (New — Learned CT Verification)
-Track the SQE charge $q_{\mathrm{Na}}(r)$ and molecular dipole $\mu(r)$ along the full dissociation curve:
-* **Equilibrium region ($r \approx 2.3\ \text{Å}$):** the soft Na–Cl channel must pull $q_{\mathrm{Na}}$ *below* the ionic baseline of $+1$ toward the QM partial charge (NaCl's experimental dipole of $\sim 9.0\ \mathrm{D}$ implies $q_{\mathrm{Na}} \approx +0.79$ at $r_e$). Pass: $\mu(r)$ within $3\%$ of the QM dipole curve for $r < 4\ \text{Å}$.
-* **Intermediate plateau ($r_{\text{SR}}$–$9\ \text{Å}$):** channel switched off ($S = 0$), ionic diabat dominant ⇒ $q_{\mathrm{Na}} = +1.000$ **exactly** (structural, machine precision).
-* **Post-crossing ($r > 10\ \text{Å}$):** $q_{\mathrm{Na}} = 0.000$ exactly.
-* **Transfer decay:** $p_{\mathrm{NaCl}}(r) \to 0$ smoothly through the switching window $[r_{\text{on}}, r_{\text{SR}}]$, with the ambient-CT contribution visible as a small residual transfer just inside $r_{\text{on}}$ after $\Omega_{\text{mol}}$ has closed.
+### 13.4 Active-set invariance
 
-#### 4. Strict $C^1$ Force Continuity Verification (Extended)
-Numerical differentiation checks across **both** classes of smooth-structure boundaries: (a) diabatic validity-envelope cutoffs $r_{\text{cut}}$ where states are pruned, and (b) the **channel switch-off radius** $r_{\text{SR}}$ where $S(r_{ij})$ reaches zero and the channel leaves the solve.
-* **Protocol:** Sample trajectories stepping across each boundary with $\Delta r = 10^{-5}\ \text{Å}$.
-* **Metric:** $\Delta_{\text{force}} = \max_i \frac{\left|\mathbf{F}_{i,\text{anal}} - \mathbf{F}_{i,\text{num}}\right|}{\left|\mathbf{F}_{i,\text{anal}}\right| + \epsilon}$
-* **Pass Criterion:** $\Delta_{\text{force}} < 10^{-6}$ across all pruning and switch-off boundaries, confirming that envelope weighting (for states) and the $C^2$ pairwise switch (for channels) completely suppress topological force spikes.
+Add irrelevant states with small validity or high proxy energy. The final energy, forces, and observables should remain unchanged within tolerance.
 
-#### 5. Baseline-Convention Invariance (New)
-Because the merged-pair diabat does not define sub-fragment charges, the baseline $q^{(0)}$ under Diabat 3 involves a convention (Section 2.4.1). Recompute the full NaCl curve under at least two distinct baseline conventions (e.g., inherit split-partition formal charges vs. symmetric split).
-* **Pass Criterion:** total energies agree to within the linear-solve tolerance wherever Diabat 3 carries weight (the convention-dependent part of $q^{(0)}$ scales with $c_{\text{mol}}$, and the correspondingly soft channel absorbs it), and *exactly* wherever $c_{\text{mol}} = 0$ (the ambiguity vanishes from the baseline itself). Monitor the residual convention sensitivity through the window where $c_{\text{mol}}$ is small but nonzero and the channel has stiffened toward its ambient value—this cross-term must stay below the force-continuity tolerance.
+### 13.5 Avoided crossings
 
-#### 6. Ambient Many-Body Charge Transfer (New)
-Verify the ground-state inter-fragment channels on hydrogen-bonded water clusters, where cooperative charge transfer is a well-characterized many-body effect:
-* **Dimer:** reproduce the EDA CT energy along the water-dimer O···O scan within $0.1\ \text{kcal/mol}$, and the donor→acceptor charge flow (a few m$e$) in sign and magnitude against the reference population analysis.
-* **Cooperativity:** for linear water chains and cyclic clusters $(\mathrm{H}_2\mathrm{O})_{n}$, $n = 2$–$6$, reproduce the non-additive enhancement of per-molecule dipole moments and total CT with chain length—the signature that channel flow couples correctly into the polarization solve. Pass: cluster dipoles within $3\%$ of QM.
-* **Locality:** confirm that per-molecule charges in a large cluster are unchanged (to solve tolerance) when a molecule beyond $r_{\text{SR}}$ of its contact network is displaced—ambient CT must remain strictly short-ranged through the switch.
+For NaCl, water bond dissociation, and organic ion-pair systems, verify:
 
-#### 7. Monomer Preservation Audit (New)
-After Phases 2–3 are complete, re-run the full Phase-1 monomer validation suite (energies, multipoles, response tensors for every fragment state in the library) through the *final* model with each fragment isolated.
-* **Pass Criterion:** predictions identical to the frozen Phase-1 model to machine precision. This is guaranteed architecturally (Δh ≡ 0 at isolation; subtraction-trick heads exactly zero there); the audit verifies the implementation honors the guarantee, and in particular that dissociation limits and the gate's E_monomer^(K) bias remain synchronized with the energy head's actual asymptotes.
+- correct diabatic asymptotes;
+- smooth coefficient transfer;
+- correct adiabatic energy lowering;
+- no long-range nonlinear resonance after overlap vanishes;
+- correct ionic versus neutral long-range tails.
 
+### 13.6 EDA component reconstruction
+
+Test not only total energies but also:
+
+- frozen electrostatics;
+- polarization;
+- charge transfer;
+- Pauli and penetration terms;
+- dispersion;
+- fragment charge and dipole changes.
+
+The purpose is to verify that the inferred adiabatic latent is electronically meaningful rather than merely an energy-fitting variable.
+
+### 13.7 Water-cluster charge transfer
+
+Use water dimers and clusters to verify that the final adiabatic features produce:
+
+- correct donor--acceptor charge flow;
+- cooperative dipole enhancement;
+- short-range closure of interfragment transfer channels;
+- stable behavior as proton-transfer covers become active.
+
+### 13.8 One-evaluation audit
+
+Profile the implementation and verify that per-diat work is restricted to:
+
+- fragment feature lookup/evaluation;
+- state-decoration contractions;
+- proxy and gating calculations;
+- the small adiabaticization block.
+
+There must be exactly one final short-range energy evaluation and one global long-range response solve.
 
 ---
 
-## 5. Summary & Roadmap
+## 14. Initial Test Systems
 
-By elevating the MLIP from an atom-centered monolithic feature space to a **diabatic, range-separated latent mixing architecture with a frozen monomer stack, state-decorated ACE corrections, and split-charge equilibration**, we bridge the gap between machine-learned quantum accuracy and classical empirical valence bond physics. The featurization hierarchy—frozen state-aware monomer features, corrected by a body-ordered cluster expansion that vanishes identically at isolation, blended per reactive center—makes monomer preservation, long-range linearity in the mixing weights, and dissociation asymptotics architectural properties rather than trained behaviors.
+### 14.1 Water bond dissociation
 
-Local, per-reactive-center attention gating makes state mixing size-extensive and $\mathcal{O}(N_c)$, while a zeroth-order Coulomb bias guarantees rigorous Harpoon crossing behavior at asymptotic separations. Replacing constraint-based EEM with SQE turns charge conservation into a property of the coordinate system: charge flows only along an explicit short-range channel network, with **learned compliances** supplying the charge-transfer physics—from small ambient flows between ground-state neighbors that capture cooperative many-body polarization, to soft channels enabling bond formation when a merging diabat gains weight—and an explicit **$C^2$ pairwise switching function** enforcing exact, structural channel shutdown at the short-range cutoff. Formal diabatic charges are demoted from constraints to baselines; what was previously imposed is now learned.
+Active states:
 
-The extended ion-pair protocol—with the bound pair included as an explicit overlapping diabat—exercises the full machinery in the minimal system: partial covalency through a soft channel at equilibrium, exact integer charges on the intermediate ionic plateau once the switch closes, the Harpoon crossing to radicals, and structural absence of long-range CT, complemented by water-cluster tests of ambient many-body charge transfer. This validates the core asymptotic, electrostatic, and charge-transfer machinery, paving the way for condensed-phase multi-electron redox reactions and Grotthuss proton transport networks. A natural future extension replaces amortized gating with self-consistent minimization of $E(\{c\})$ over the mixing simplex (an MCSCF-like mode), for which the perturbed-coefficient training in Phase 3 keeps the energy landscape well-defined.
+$$
+\mathrm{H_2O},
+\qquad
+\mathrm{OH}^{\bullet}+\mathrm{H}^{\bullet}
+\text{ in the desired total-spin sector},
+\qquad
+\mathrm{OH}^{-}+\mathrm{H}^{+}.
+$$
+
+This test probes:
+
+- homolytic versus heterolytic competition;
+- environmental stabilization of charge-separated states;
+- pure-state identity;
+- overlap decay on bond dissociation;
+- nonlinear adiabatic feature formation.
+
+### 14.2 NaCl harpoon crossing
+
+Active states:
+
+$$
+\mathrm{Na}^{+}+\mathrm{Cl}^{-},
+\qquad
+\mathrm{Na}^{\bullet}+\mathrm{Cl}^{\bullet},
+\qquad
+\mathrm{NaCl}.
+$$
+
+This test probes:
+
+- long-range cover ranking;
+- ionic/radical crossing;
+- short-range nonlinear covalency;
+- exact disappearance of resonance at separation;
+- integer asymptotic charges.
+
+### 14.3 Proton transfer in water clusters
+
+Covers differ by the identity of the protonated and deprotonated fragments. This test probes:
+
+- overlapping fragment covers;
+- center merging;
+- collective atomic adiabaticization;
+- coupling of the final latent to global SQE and polarization;
+- multiple simultaneously plausible proton locations.
+
+---
+
+## 15. Summary and Roadmap
+
+The revised architecture treats diabatic states as a physically meaningful reference basis and the final potential as a learned adiabatic inference model.
+
+The complete logic is:
+
+1. Construct chemically valid fragment-state covers of the nuclear system.
+2. Rank them with a cheap monomer, fragment-dimer, and long-range proxy model.
+3. Retain a conservative active set of low-score covers and nearby chemical edits.
+4. Build inexpensive state-conditioned atomic features for each active diabat.
+5. Infer local diabatic coefficients in one pass.
+6. Form a coefficient-weighted mean feature and add an overlap-controlled nonlinear correction.
+7. Guarantee that every pure-state vertex exactly reproduces its reference diabatic feature.
+8. Decode the single adiabatic atomic representation into all physical model parameters.
+9. Evaluate one short-range MLIP and one global long-range/SQE model.
+
+The single most important design choice is the form
+
+$$
+\mathbf z_i^{\mathrm{ad}}
+=
+\sum_Kc_K\widehat{\mathbf h}_i^{(K)}
++
+\sum_{K<J}
+4c_Kc_J\mathcal O_{KJ}\boldsymbol\Psi_i^{KJ}.
+$$
+
+It combines four desirable properties:
+
+- exact recovery of every reference diabat at a simplex vertex;
+- nonlinear expressivity near crossings;
+- explicit dependence on state disagreement and chemical edit type;
+- exact decay of nonlinear mixing when electronic overlap disappears.
+
+A future variational mode will minimize the final energy over the coefficient simplex, providing an MCSCF-like treatment. The current model instead learns that minimizer through amortized inference, preserving the computational goal of a single full system evaluation.

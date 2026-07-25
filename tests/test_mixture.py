@@ -1,11 +1,15 @@
-"""Diabatic mixture: the dissociation-limit properties that must hold by construction.
+"""Latent-space diabatic adiabaticization: the architectural properties that hold by construction.
 
-These mirror the free-atom limit test of the monomer stack (test_monomer_stack.py) one level up:
-the whole point of the mixture machinery is that pulling a bond apart collapses the model
-*exactly* onto the sum of its fragment reference predictions, with integer charges and a
-continuous force. None of that is trained — it follows from the dissociated diabat partitioning
-into isolated fragments, the renormalized envelope gate, and the C² compliance switch — so the
-tests run on a small randomly-initialized model, not the checkpoint.
+The model blends the active diabats' *feature bundles* into one adiabatic feature, adds a
+nonlinear correction that is exactly zero at every pure-state vertex, and decodes once through the
+frozen monomer heads (docs/mixture_of_diabatic_embeddings.md, Revision 3). None of that is
+trained -- it follows from the ``4c_Kc_J`` prefactor, the geometric overlap shutdown, the
+envelope-gated proxy coefficients, and the C² compliance switch -- so these tests run on a small
+randomly-initialized model, not the checkpoint.
+
+The nine systems the design targets appear here: the bare atoms H, H⁺, O, O⁻, O⁺ (single-diabat
+vertices), the radicals/ions OH, OH⁻ (one dissociation channel each), H3O⁺ (one channel), and H2O
+(the flagship two-channel homolytic-vs-heterolytic active space).
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ ATOMIC_NUMBER = {"H": 1, "O": 8}
 
 # Geometries (O is atom 0, the stretched O-H is atom 1).
 GEOMETRY = {
+    "oh":   (["O", "H"], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]),
     "oh-":  (["O", "H"], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]),
     "h2o":  (["O", "H", "H"], [[0, 0, 0.12], [0, 0.76, -0.47], [0, -0.76, -0.47]]),
     "h3o+": (["O", "H", "H", "H"],
@@ -51,7 +56,8 @@ def env():
     return EnvelopeConfig(
         bound_envelope=dict(hi1=1.6, hi0=3.0),
         channel_envelope=dict(lo0=1.3, lo1=2.6),
-        switch_r_on=1.6, switch_r_off=4.5, beta=0.0, tau=1.0,
+        switch_r_on=1.6, switch_r_off=4.5,
+        overlap_r_on=1.6, overlap_r_off=4.5, tau=0.05,
     )
 
 
@@ -81,6 +87,9 @@ def models():
         for p in monomer.parameters():
             p.add_(0.05 * torch.randn(p.shape, generator=g))
     monomer.eval()
+    # Default small-init correction: nonzero through the crossover (‖Δz‖ ~ 1e-2) yet gentle
+    # enough that the untrained decoder stays smooth (a large random Ψ can push the PSD-clamped
+    # α head into a kink). The vertex identity is enforced by 4c_Kc_J regardless of the scale.
     mix = MixtureModel(monomer)
     mix.eval()
     return monomer, mix
@@ -132,25 +141,71 @@ def test_finest_refinement_marks_the_broken_bond_inter(library):
     assert is_inter.sum() == 1 and (~is_inter).sum() == 2     # two spectator O-H stay intra
 
 
+def test_water_is_a_three_diabat_active_space(library):
+    """H2O enumerates bound + homolytic (OH+H) + heterolytic (OH-+H+); all break the same bond."""
+    das = enumerate_diabats(library, ["O", "H", "H"], config_type="h2o")
+    assert len(das) == 3
+    keys = [tuple(s.key for s, _ in a.fragments) for a in das]
+    assert keys == [("h2o",), ("oh", "h"), ("oh-", "h+")]
+    # both dissociated diabats refine to the same {O,H2}|{H1} partition
+    _, is_inter = mixture_channel_graph(das)
+    assert is_inter.sum() == 1
+
+
 # ---------------------------------------------------------------------------
-# Equilibrium recovery
+# Pure-state vertex identity (§7.4, §13.2): the correction vanishes and the shared decoder
+# reproduces the monomer stack whenever a single diabat is active.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("config_type", ["oh-", "h2o", "h3o+"])
+@pytest.mark.parametrize(
+    "config_type, symbols", [("h", ["H"]), ("h+", ["H"]), ("o", ["O"]), ("o-", ["O"]),
+                             ("o+", ["O"])]
+)
+def test_bare_atom_is_a_pure_state_vertex(models, library, env, config_type, symbols):
+    """A single-diabat system: c=1, no correction, and the mixture *is* the monomer stack."""
+    monomer, mix = models
+    out = mix(one_system(symbols, [[0.0, 0.0, 0.0]]),
+              enumerate_diabats(library, symbols, config_type=config_type), env)
+    ref = mono_call(monomer, library, symbols, [[0.0, 0.0, 0.0]], config_type)
+    assert float(out.weights[0]) == pytest.approx(1.0, abs=1e-13)
+    assert float(out.correction_norm) == 0.0                         # exactly zero, not ~0
+    assert torch.allclose(out.energy, ref.energy[0], atol=1e-12)
+    assert torch.allclose(out.charges, ref.charges, atol=1e-12)
+
+
+@pytest.mark.parametrize("config_type", ["oh", "oh-", "h2o", "h3o+"])
 def test_equilibrium_recovers_the_monomer_stack(models, library, env, config_type):
-    """At a sampled geometry (Ω_dissoc=0, switch=1) the mixture *is* the monomer stack."""
+    """At a sampled geometry (Ω_dissoc=0, switch=1) the mixture *is* the monomer stack.
+
+    Only the bound diabat is valid, so c_bound=1 is a vertex: μ is its feature, Δz is exactly 0,
+    and the single shared decode reproduces MonomerModel to machine precision.
+    """
     monomer, mix = models
     symbols, pos = stretched(config_type, 0.98)
     das = enumerate_diabats(library, symbols, config_type=config_type)
     out = mix(one_system(symbols, pos), das, env)
     ref = mono_call(monomer, library, symbols, pos, config_type)
     assert float(out.weights[0]) == pytest.approx(1.0, abs=1e-13)     # bound diabat only
+    assert float(out.correction_norm) == 0.0
     assert torch.allclose(out.energy, ref.energy[0], atol=1e-11)
     assert torch.allclose(out.charges, ref.charges, atol=1e-11)
 
 
+def test_correction_is_active_in_the_crossover_and_zero_at_both_ends(models, library, env):
+    """‖Δz‖ is exactly 0 at every vertex and strictly positive where two diabats genuinely mix."""
+    _, mix = models
+    das = enumerate_diabats(library, ["O", "H"], config_type="oh-")
+    norms = {}
+    for r in (0.98, 2.0, 12.0):
+        symbols, pos = stretched("oh-", r)
+        norms[r] = float(mix(one_system(symbols, pos), das, env).correction_norm)
+    assert norms[0.98] == 0.0                                        # bound vertex (Ω_dissoc=0)
+    assert norms[12.0] == 0.0                                        # dissociated vertex + 𝒪=0
+    assert norms[2.0] > 1e-4                                         # genuine two-state mixture
+
+
 # ---------------------------------------------------------------------------
-# Dissociation limits (exact = sum of standalone fragment predictions)
+# Dissociation limits (exact for the single-channel systems)
 # ---------------------------------------------------------------------------
 
 def test_oh_minus_collapses_to_atomic_references(models, library, env):
@@ -166,35 +221,59 @@ def test_oh_minus_collapses_to_atomic_references(models, library, env):
     assert torch.allclose(out.energy, e_o + e_h, atol=1e-10)
 
 
-@pytest.mark.parametrize(
-    "config_type, remainder, remainder_key, remainder_charge",
-    [("h3o+", [0, 2, 3], "h2o", 0.0), ("h2o", [0, 2], "oh-", -1.0)],
-)
-def test_proton_loss_collapses_to_monomer_plus_proton(
-    models, library, env, config_type, remainder, remainder_key, remainder_charge
-):
-    """H3O+/H2O -> (trained monomer) + H+: leaving proton is exactly +1, energy is exact."""
+def test_oh_radical_collapses_to_atomic_references(models, library, env):
+    """OH -> O(atom) + H(atom): both neutral, E = E_mono(O) + E_mono(H) exactly."""
     monomer, mix = models
-    symbols, pos = stretched(config_type, 12.0)
-    das = enumerate_diabats(library, symbols, config_type=config_type)
+    symbols, pos = stretched("oh", 12.0)
+    das = enumerate_diabats(library, symbols, config_type="oh")
     out = mix(one_system(symbols, pos), das, env)
-    assert float(out.charges[1]) == pytest.approx(1.0, abs=1e-9)                     # leaving proton
-    assert float(out.charges[remainder].sum()) == pytest.approx(remainder_charge, abs=1e-9)
-    rem_syms = [symbols[i] for i in remainder]
-    e_rem = mono_call(monomer, library, rem_syms, pos[remainder], remainder_key).energy[0]
+    assert float(out.charges[0]) == pytest.approx(0.0, abs=1e-10)
+    assert float(out.charges[1]) == pytest.approx(0.0, abs=1e-10)
+    e_o = mono_call(monomer, library, ["O"], [[0, 0, 0]], "o").energy[0]
+    e_h = mono_call(monomer, library, ["H"], [[0, 0, 0]], "h").energy[0]
+    assert torch.allclose(out.energy, e_o + e_h, atol=1e-10)
+
+
+def test_hydronium_proton_loss_collapses_to_water_plus_proton(models, library, env):
+    """H3O+ -> H2O + H+: the leaving proton is exactly +1, energy is exact (single channel)."""
+    monomer, mix = models
+    symbols, pos = stretched("h3o+", 12.0)
+    das = enumerate_diabats(library, symbols, config_type="h3o+")
+    out = mix(one_system(symbols, pos), das, env)
+    assert float(out.charges[1]) == pytest.approx(1.0, abs=1e-9)
+    assert float(out.charges[[0, 2, 3]].sum()) == pytest.approx(0.0, abs=1e-9)
+    e_rem = mono_call(monomer, library, ["O", "H", "H"], pos[[0, 2, 3]], "h2o").energy[0]
     e_hp = mono_call(monomer, library, ["H"], [[0, 0, 0]], "h+").energy[0]
     assert torch.allclose(out.energy, e_rem + e_hp, atol=1e-9)
+
+
+def test_water_dissociates_homolytically(models, library, env):
+    """H2O pulls apart to OH + H, not OH- + H+ (gas-phase): the proxy picks the neutral channel.
+
+    With two dissociation channels sharing an envelope the asymptote is a *near*-vertex -- the
+    ionic cover keeps an exponentially small proxy weight -- so this checks the neutral channel
+    dominates and the leaving H is near-neutral, not that the charge is an exact integer.
+    """
+    _, mix = models
+    symbols, pos = stretched("h2o", 12.0)
+    das = enumerate_diabats(library, symbols, config_type="h2o")
+    out = mix(one_system(symbols, pos), das, env)
+    c = out.weights
+    assert float(c[0]) == pytest.approx(0.0, abs=1e-6)               # bound closed by the envelope
+    assert float(c[1]) > 0.98                                        # homolytic (OH+H) dominates
+    assert float(c[1]) > float(c[2])                                 # ... over heterolytic (OH-+H+)
+    assert float(out.charges[1]) < 0.05                              # leaving H nearly neutral
+    assert float(out.correction_norm) < 1e-3                         # overlap 𝒪 has shut the mix off
 
 
 # ---------------------------------------------------------------------------
 # Normalization, conservation, continuity, symmetry (across the scan)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("config_type", ["oh-", "h2o", "h3o+"])
+@pytest.mark.parametrize("config_type", ["oh", "oh-", "h2o", "h3o+"])
 def test_weights_normalized_and_charge_conserved(models, library, env, config_type):
     """Σc_K = 1 (so total charge stays exactly Q) at every separation."""
     _, mix = models
-    symbols = GEOMETRY[config_type][0]
     q_total = float(library[config_type].charge)
     for r in np.linspace(0.9, 6.0, 12):
         symbols, pos = stretched(config_type, r)
@@ -204,37 +283,44 @@ def test_weights_normalized_and_charge_conserved(models, library, env, config_ty
         assert float(out.charges.sum()) == pytest.approx(q_total, abs=1e-10)
 
 
-def test_force_is_continuous_across_switch_and_envelope(models, library, env):
-    """Analytic -dE/dx matches central finite difference across the crossover (§4.4.4).
+@pytest.mark.parametrize("config_type", ["oh-", "h2o"])
+def test_force_is_continuous_across_switch_envelope_and_overlap(models, library, env, config_type):
+    """Analytic -dE/dx matches central finite difference across the crossover (§4.4.4, §13.3).
 
-    Sampled at radii straddling the envelope onset, the crossover, the envelope close, and the
-    switch-off radius -- the boundaries where a naive gate/switch would spike the force.
+    Sampled at radii straddling the envelope onset, the crossover (where Δz peaks), the envelope
+    close, and the switch-off radius -- every boundary where a naive gate/switch/overlap would
+    spike the force. H2O adds the three-diabat homolytic/heterolytic crossover.
     """
     _, mix = models
-    symbols, _ = GEOMETRY["oh-"]
-    das = enumerate_diabats(library, symbols, config_type="oh-")
-    unit = np.array([0.0, 0.0, 1.0])
+    symbols, pos0 = GEOMETRY[config_type]
+    das = enumerate_diabats(library, symbols, config_type=config_type)
+    pos0 = np.array(pos0, dtype=float)
+    unit = (pos0[1] - pos0[0]) / np.linalg.norm(pos0[1] - pos0[0])
+    unit_t = torch.tensor(unit)
     step = 1e-6
-    for r in (1.35, 2.2, 3.0, 4.5):
-        pos = np.array([[0.0, 0, 0], r * unit])
+    for r in (1.35, 1.7, 2.2, 3.0, 4.5):
+        pos = pos0.copy()
+        pos[1] = pos0[0] + r * unit
         b = one_system(symbols, pos)
         b.positions.requires_grad_(True)
         out = mix(b, das, env)
         (grad,) = torch.autograd.grad(out.energy, b.positions)
-        f_h_analytic = -float(grad[1, 2])
+        f_h_analytic = -float(grad[1] @ unit_t)          # force on the leaving H along the bond
 
-        e_plus = float(mix(one_system(symbols, pos + np.array([[0, 0, 0], step * unit])), das, env).energy)
-        e_minus = float(mix(one_system(symbols, pos - np.array([[0, 0, 0], step * unit])), das, env).energy)
+        dp = np.zeros_like(pos)
+        dp[1] = step * unit
+        e_plus = float(mix(one_system(symbols, pos + dp), das, env).energy)
+        e_minus = float(mix(one_system(symbols, pos - dp), das, env).energy)
         f_h_numeric = -(e_plus - e_minus) / (2 * step)
         assert abs(f_h_analytic - f_h_numeric) < 1e-6, f"force discontinuity near r={r}"
 
 
 def test_rotation_equivariance(models, library, env):
-    """Energy/charges invariant; dipole/α equivariant under a global rotation."""
+    """Energy/charges invariant; dipole/α equivariant under a global rotation (in the crossover)."""
     from e3nn import o3
 
     _, mix = models
-    symbols, pos = stretched("h2o", 2.0)                      # in the crossover, both diabats live
+    symbols, pos = stretched("h2o", 2.0)                      # in the crossover, all diabats live
     das = enumerate_diabats(library, symbols, config_type="h2o")
     out = mix(one_system(symbols, pos), das, env)
 

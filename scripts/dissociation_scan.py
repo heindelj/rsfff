@@ -1,18 +1,23 @@
-"""Scan O-H dissociation of H2O / H3O+ / OH- through the diabatic mixture model.
+"""Scan O-H dissociation of OH / OH- / H2O / H3O+ through the diabatic adiabaticization model.
 
     python scripts/dissociation_scan.py
 
 Loads the frozen Phase-1 monomer stack, wraps it in a :class:`rsfff.mlip.MixtureModel`, and
-pulls one O-H bond of each monomer apart from equilibrium to ~10 A. For each geometry it records
-the total energy, the mixing weights c_K(r), the per-atom SQE charges, and the stretched-channel
-compliance, and writes a figure to ``notebooks/figures/dissociation.png``.
+pulls one O-H bond of each system apart from equilibrium to ~10 A. For each geometry it records
+the total energy, the mixing weights c_K(r), the nonlinear-correction magnitude ‖Δz‖, the
+per-atom SQE charges, and the stretched-channel compliance, and writes a figure to
+``notebooks/figures/dissociation.png``.
 
-What the plots should show (all *architectural*, on the untrained gate):
-  * c_bound / c_dissoc cross smoothly over the envelope overlap window.
+What the plots should show (all *architectural*, on the untrained correction):
+  * the coefficients cross smoothly over the envelope overlap window; water resolves the
+    homolytic (OH + H) vs heterolytic (OH- + H+) competition through the cheap formal-charge
+    proxy -- gas-phase water dissociates homolytically, so c(OH+H) -> 1.
+  * ‖Δz‖ rises through the crossover and returns to exactly 0 at both ends (the pure-state vertex
+    identity and the overlap shutdown).
   * the stretched-channel compliance is driven to exactly 0 by the switch.
-  * the charge on the leaving fragment collapses to an exact integer (the reference-state limit).
-  * the energy is flat at the sum of the fragment reference predictions beyond the cutoff --
-    there is no -1/r or -C6/r^6 tail yet (long-range electrostatics is Phase 3).
+  * the charge on the leaving fragment collapses to its integer reference value.
+  * the energy is flat at the fragment reference limit beyond the cutoff -- there is no -1/r or
+    -C6/r^6 tail yet (long-range electrostatics is Phase 3).
 """
 
 import os
@@ -41,6 +46,7 @@ REPO = os.path.dirname(HERE)
 
 # Equilibrium geometries (Angstrom); atom 0 is O, atom 1 is the O-H being stretched.
 GEOMETRY = {
+    "oh":   (["O", "H"], [[0, 0, 0.1078], [0, 0, -0.8621]]),
     "oh-":  (["O", "H"], [[0, 0, 0.1078], [0, 0, -0.8621]]),
     "h2o":  (["O", "H", "H"],
              [[0, 0, 0.1178], [0, 0.7642, -0.4712], [0, -0.7642, -0.4714]]),
@@ -80,7 +86,9 @@ def load_mixture(config_path=os.path.join(REPO, "configs", "mixture_h2o_h3o_oh.y
     env = EnvelopeConfig(
         bound_envelope=m["bound_envelope"], channel_envelope=m["channel_envelope"],
         switch_r_on=float(m["switch_r_on"]), switch_r_off=float(m["switch_r_off"]),
-        beta=float(m.get("beta", 0.0)), tau=float(m.get("tau", 1.0)),
+        overlap_r_on=(None if m.get("overlap_r_on") is None else float(m["overlap_r_on"])),
+        overlap_r_off=(None if m.get("overlap_r_off") is None else float(m["overlap_r_off"])),
+        tau=float(m.get("tau", 0.05)),
     )
     return model, library, env
 
@@ -95,26 +103,37 @@ def single_system_batch(symbols, positions):
     )
 
 
+# Human-readable labels for each diabat of a config, in enumerate_diabats order (bound first).
+DIABAT_LABELS = {
+    "oh":   [r"$|$OH$\rangle$", "O + H"],
+    "oh-":  [r"$|$OH$^-\rangle$", r"O$^-$ + H"],
+    "h2o":  [r"$|$H$_2$O$\rangle$", "OH + H (homolytic)", r"OH$^-$ + H$^+$ (heterolytic)"],
+    "h3o+": [r"$|$H$_3$O$^+\rangle$", r"H$_2$O + H$^+$"],
+}
+
+
 def scan(model, library, env, config_type, distances):
     """Stretch the O0-H1 bond over ``distances``; return per-r arrays."""
     symbols, pos0 = GEOMETRY[config_type]
     pos0 = np.array(pos0, dtype=float)
     unit = (pos0[1] - pos0[0]) / np.linalg.norm(pos0[1] - pos0[0])
     das = enumerate_diabats(library, symbols, config_type=config_type)
-    rec = {k: [] for k in ("E", "c_bound", "c_diss", "q", "s_stretched")}
+    rec = {k: [] for k in ("E", "c", "q", "s_stretched", "dz", "overlap")}
     for r in distances:
         pos = pos0.copy()
         pos[1] = pos0[0] + r * unit
         out = model(single_system_batch(symbols, pos), das, env)
         rec["E"].append(float(out.energy))
-        rec["c_bound"].append(float(out.weights[0]))
-        rec["c_diss"].append(float(out.weights[1]))
+        rec["c"].append(out.weights.detach().numpy())
         rec["q"].append(out.charges.detach().numpy())
+        rec["dz"].append(float(out.correction_norm))
+        rec["overlap"].append(float(out.overlap))
         # the stretched channel is the inter-fragment one (O0-H1)
         e = int(np.flatnonzero(out.is_inter.numpy())[0])
         rec["s_stretched"].append(float(out.compliance[e]))
+    rec["c"] = np.array(rec["c"])
     rec["q"] = np.array(rec["q"])
-    return symbols, rec
+    return symbols, das, rec
 
 
 def main():
@@ -125,15 +144,23 @@ def main():
     import matplotlib.pyplot as plt
     plt.rcParams.update({"figure.dpi": 110, "font.size": 10, "axes.grid": True,
                          "grid.alpha": 0.3, "axes.axisbelow": True})
-    species = ["oh-", "h2o", "h3o+"]
-    fig, axes = plt.subplots(3, 3, figsize=(14, 10), sharex=True)
+    species = ["oh", "oh-", "h2o", "h3o+"]
+    ncol = len(species)
+    fig, axes = plt.subplots(3, ncol, figsize=(4.6 * ncol, 10), sharex=True)
     for col, ct in enumerate(species):
-        symbols, rec = scan(model, library, env, ct, distances)
+        symbols, das, rec = scan(model, library, env, ct, distances)
         d = distances
-        # weights
-        axes[0, col].plot(d, rec["c_bound"], label=f"c(|{ct}⟩)", lw=1.8)
-        axes[0, col].plot(d, rec["c_diss"], label="c(dissociated)", lw=1.8, ls="--")
-        axes[0, col].set_title(f"{ct}: mixing weights"); axes[0, col].legend(fontsize=8)
+        # weights c_K, plus ‖Δz‖ of the nonlinear correction on a twin axis
+        labels = DIABAT_LABELS[ct]
+        for k in range(rec["c"].shape[1]):
+            axes[0, col].plot(d, rec["c"][:, k], lw=1.8, ls="--" if k else "-",
+                              label=f"c({labels[k]})")
+        axes[0, col].set_title(f"{ct}: mixing weights & ‖Δz‖")
+        axes[0, col].legend(fontsize=7, loc="center right")
+        tw = axes[0, col].twinx()
+        tw.plot(d, rec["dz"], lw=1.4, color="#4d4d4d", alpha=0.7)
+        tw.set_ylabel("‖Δz‖", color="#4d4d4d"); tw.grid(False)
+        tw.set_ylim(bottom=0)
         # charges
         for i in range(len(symbols)):
             axes[1, col].plot(d, rec["q"][:, i], lw=1.8, ls="--" if i == 1 else "-",
@@ -155,9 +182,10 @@ def main():
 
     # A short numeric summary of the endpoints.
     for ct in species:
-        symbols, rec = scan(model, library, env, ct, np.array([0.97, 10.0]))
-        q_far = rec["q"][-1]
-        print(f"{ct:>5}: q(leaving H, r=10A) = {q_far[1]:+.6f}   "
+        symbols, das, rec = scan(model, library, env, ct, np.array([0.97, 10.0]))
+        c_far = rec["c"][-1]
+        print(f"{ct:>5}: q(leaving H, r=10A) = {rec['q'][-1][1]:+.6f}   "
+              f"c(r=10A) = [{', '.join(f'{x:.4f}' for x in c_far)}]   "
               f"s_stretched(r=10A) = {rec['s_stretched'][-1]:.2e}   E = {rec['E'][-1]:.6f}")
 
 

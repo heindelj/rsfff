@@ -44,7 +44,16 @@ states:
     multiplicity: 1
     elements: [O, H, H]
     bonds: [[0, 1], [0, 2]]
+    # Two competing diabats for pulling O-H1 apart -- the flagship homolytic-vs-heterolytic
+    # crossing (docs §14.1). Both break the same bond into the same {O,H2}|{H1} partition; they
+    # differ only in the fragments' charge/spin labels, and the cheap formal-charge-Coulomb proxy
+    # (plus fragment self-energies) is what decides which one dominates at a given separation.
     dissociation:
+      - name: homolysis             # O-H1 homolysis: H1 leaves neutral (radical channel)
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: oh, atoms: [0, 2]}    # O0, H2 -> oh's canonical [O, H]
+          - {state: h,  atoms: [1]}
       - name: proton_loss           # O-H1 heterolysis: H1 leaves as a proton
         order_parameter_bond: [0, 1]
         fragments:
@@ -76,9 +85,15 @@ states:
           - {state: h,  atoms: [1]}
 
   # Neutral OH radical (X 2Pi). A trained monomer once data/labels/oh.extxyz is included in a
-  # training config; it also anchors the radical channel H2O -> OH + H (not wired in yet).
+  # training config; it also anchors the radical channel H2O -> OH + H.
   oh:
     charge: 0
     multiplicity: 2
     elements: [O, H]
     bonds: [[0, 1]]
+    dissociation:
+      - name: homolysis             # O-H homolysis: both fragments stay neutral radicals
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o, atoms: [0]}   # O atom, ground-term triplet
+          - {state: h, atoms: [1]}

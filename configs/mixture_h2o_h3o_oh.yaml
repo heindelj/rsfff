@@ -1,21 +1,25 @@
-# Diabatic mixture on top of the frozen Phase-1 monomer stack (no retraining).
+# Latent-space diabatic adiabaticization on top of the frozen Phase-1 monomer stack (no retrain).
 #
-# Exercises the §2.2/§2.4 mixture machinery on the three monomer dissociations declared in
-# data/diabatic_states.yaml. The gate is untrained (zero-init MLP); the crossover is driven by
-# hand-specified C2 validity envelopes, and the inter-fragment compliance switch closes the
-# breaking bond so the products reach their exact reference states.
+# Blends the diabats' feature bundles into one adiabatic feature, adds the small (untrained)
+# nonlinear correction Psi, and decodes once through the frozen monomer heads (Revision 3 of
+# docs/mixture_of_diabatic_embeddings.md). Coefficients come from a cheap proxy (fragment
+# self-energy + formal-charge Coulomb) gated by hand-specified C2 validity envelopes; the
+# inter-fragment compliance switch closes the breaking bond so the products reach their exact
+# reference states.
 #
 # Geometry of the gate (units: Angstrom). Max sampled O-H bond is 1.214 A, so the dissociated
-# envelope stays off (lo0 = 1.3) and the switch stays fully on (r_on = 1.6) over every trained
-# geometry -- that is what makes MixtureModel == MonomerModel exactly at equilibrium.
+# envelope stays off (lo0 = 1.3) and both switches stay fully on (r_on = 1.6) over every trained
+# geometry -- that is what makes MixtureModel == MonomerModel exactly at equilibrium, and keeps
+# the correction exactly zero there (bound state alone -> c = 1 vertex).
 run_name: mixture_h2o_h3o_oh
 checkpoint: checkpoints/monomer_h2o_h3o_oh/best.pt   # the frozen monomer stack to wrap
 monomer_config: configs/monomer_h2o_h3o_oh.yaml       # rebuilds the same architecture
 
 mixture:
   bound_envelope: {hi1: 1.6, hi0: 3.0}     # bound state: full weight <=1.6 A, closed by 3.0 A
-  channel_envelope: {lo0: 1.3, lo1: 2.6}   # dissociated state: opens 1.3 -> 2.6 A
+  channel_envelope: {lo0: 1.3, lo1: 2.6}   # dissociated state(s): opens 1.3 -> 2.6 A
   switch_r_on: 1.6                          # inter-fragment compliance switch on window (A)
   switch_r_off: 4.5
-  beta: 0.0                                 # Coulomb/E_monomer gate bias (0 -> envelope-driven)
-  tau: 1.0                                  # gate softmax temperature
+  overlap_r_on: 1.6                         # geometric overlap 𝒪(r) for the nonlinear correction
+  overlap_r_off: 4.5
+  tau: 0.05                                 # proxy softmax temperature (Hartree)
