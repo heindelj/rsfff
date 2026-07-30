@@ -92,11 +92,11 @@ def test_channel_graph_is_the_diabats_not_a_distance_rule(library):
 def test_assignment_rejects_inconsistent_frames(library):
     """Element order, charge, and multiplicity are validated, never silently coerced."""
     with pytest.raises(ValueError, match="element order"):
-        assign_from_headers(library, ["H", "O", "H"], config_type="h2o")
+        assign_from_headers(library, ["H", "O", "H"], config_type="h2o_q0_m1")
     with pytest.raises(ValueError, match="charge"):
-        assign_from_headers(library, ["O", "H", "H"], config_type="h2o", charge=1.0)
+        assign_from_headers(library, ["O", "H", "H"], config_type="h2o_q0_m1", charge=1.0)
     with pytest.raises(ValueError, match="multiplicity"):
-        assign_from_headers(library, ["O", "H", "H"], config_type="h2o", multiplicity=3)
+        assign_from_headers(library, ["O", "H", "H"], config_type="h2o_q0_m1", multiplicity=3)
     with pytest.raises(KeyError):
         assign_from_headers(library, ["O", "H"], config_type="not_a_state")
 
@@ -169,12 +169,18 @@ def test_free_atom_energies_are_exact_at_initialization(states):
     ``E = E0[Z] + E_1(e) + chi Q + eta Q^2 / 2``, and seeding chi/eta at the Mulliken values
     gives ``chi + eta/2 = IP`` and ``-chi + eta/2 = -EA`` identically. So q = 0, +1, -1 are
     reproduced exactly; nothing is fitted here.
+
+    This exactness holds only for ``|Q| <= 1``: the two-parameter (chi, eta) per element is fixed
+    by IP and EA, so it cannot also hit a third charge state. ``O(2-)`` (Q = -2) is therefore
+    *not* exact at init -- its residual rides on the zero-initialized, trainable ``E_1`` head --
+    and is excluded from the energy check (its integer charge is still exact).
     """
     model = make_model(states)
     anchor = load_atomic_reference_batch(states, [1, 8])
     out = model(anchor)
     assert torch.allclose(out.charges, anchor.total_charge, atol=1e-13)
-    assert torch.allclose(out.energy, anchor.energy, atol=1e-12)
+    seeded = anchor.total_charge.abs() <= 1                      # the IP/EA-anchored charge states
+    assert torch.allclose(out.energy[seeded], anchor.energy[seeded], atol=1e-12)
 
 
 def test_free_atom_limit_survives_training_of_the_environment_heads(states):

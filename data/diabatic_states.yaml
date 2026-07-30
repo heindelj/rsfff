@@ -10,10 +10,12 @@
 # in the fragment. Nothing in the code infers bonds from distances.
 #
 # `elements` is the canonical atom ordering; `bonds` index into it. Keys match the `config_type`
-# header written by scripts/generate_dataset.py (lookup is case-insensitive).
+# header written by the data generators (lookup is case-insensitive).
 #
-# Phase 1 covers only the labeled monomers. Phase 2/3 grow this file with radical states,
-# merged-pair diabats (e.g. the bound NaCl of §4.1), and validity envelopes.
+# KEY SCHEME: `<formula>_q<charge>_m<multiplicity>`, e.g. `o2_q0_m3` (triplet O2) vs `o2_q0_m1`
+# (singlet O2) vs `o2_q-1_m2` (superoxide) vs the atomic dianion `o_q-2_m1`. Encoding charge and
+# spin in the key keeps otherwise-identical formulas (spin variants, atomic vs molecular anions)
+# from colliding. This is an interim convention; a more robust identity scheme comes later.
 
 states:
   # --- atomic reference states -------------------------------------------------------------
@@ -23,77 +25,155 @@ states:
   # prediction head reduces to a function of its reference embedding alone -- these states are
   # what pin that limit. Multiplicities are the atomic ground terms; see
   # scripts/atomic_reference_states.py.
-  h+:   {charge: +1, multiplicity: 1, elements: [H], bonds: []}
-  h:    {charge:  0, multiplicity: 2, elements: [H], bonds: []}
-  h-:   {charge: -1, multiplicity: 1, elements: [H], bonds: []}
-  o+:   {charge: +1, multiplicity: 4, elements: [O], bonds: []}
-  o:    {charge:  0, multiplicity: 3, elements: [O], bonds: []}
-  o-:   {charge: -1, multiplicity: 2, elements: [O], bonds: []}
-  # No o2-: the free O(2-) ion does not bind its second electron in the gas phase, so there is
-  # no reference state to anchor it to. Doubly-reduced oxygen enters as part of a fragment
-  # (a lattice or solvated species), never as an isolated atomic reference.
+  h_q+1_m1: {charge: +1, multiplicity: 1, elements: [H], bonds: []}   # bare proton, E = 0
+  h_q0_m2:  {charge:  0, multiplicity: 2, elements: [H], bonds: []}   # H, 1s^1 2S
+  h_q-1_m1: {charge: -1, multiplicity: 1, elements: [H], bonds: []}   # H-, 1s^2 1S (unbound here)
+  o_q+1_m4: {charge: +1, multiplicity: 4, elements: [O], bonds: []}   # O+, 2p^3 4S
+  o_q0_m3:  {charge:  0, multiplicity: 3, elements: [O], bonds: []}   # O, 2p^4 3P
+  o_q-1_m2: {charge: -1, multiplicity: 2, elements: [O], bonds: []}   # O-, 2p^5 2P
+  o_q-2_m1: {charge: -2, multiplicity: 1, elements: [O], bonds: []}   # O2-, 2p^6 1S (unbound here)
 
-  # --- molecular fragment states -----------------------------------------------------------
-  # `dissociation` lists competing diabats for pulling one O-H apart (Phase-2 mixture machinery,
-  # §2.2/§2.4). Each channel partitions the atoms into smaller library states and names the bond
-  # whose length is the reaction coordinate. Channels here are chosen so every product is an
-  # already-anchored state (an atomic reference or a trained monomer), so the large-separation
-  # limit is exact: H+ contributes E=0, O-/H are atomic references, OH-/H2O are trained monomers.
-  h2o:
+  # --- diatomic fragment states ------------------------------------------------------------
+  # Each carries the single O-H / H-H / O-O channel [[0,1]] and its competing dissociation
+  # diabats. `dissociation` lists covers -- covalent (homolytic) and, where spin-allowed, ionic
+  # (heterolytic) -- each partitioning the two atoms into anchored atomic references. The
+  # formal-charge-Coulomb + fragment-self-energy proxy selects among them along the bond, and the
+  # compliance switch closes the channel at large separation so the products reach their exact
+  # reference states. Ionic covers are included only where the products can couple to the parent
+  # spin (e.g. singlet H2 -> H+ + H-, but not triplet H2 or singlet O2).
+
+  h2_q0_m1:                            # H2, X 1Sigma_g+ (bound)
     charge: 0
     multiplicity: 1
-    elements: [O, H, H]
-    bonds: [[0, 1], [0, 2]]
-    # Two competing diabats for pulling O-H1 apart -- the flagship homolytic-vs-heterolytic
-    # crossing (docs §14.1). Both break the same bond into the same {O,H2}|{H1} partition; they
-    # differ only in the fragments' charge/spin labels, and the cheap formal-charge-Coulomb proxy
-    # (plus fragment self-energies) is what decides which one dominates at a given separation.
-    dissociation:
-      - name: homolysis             # O-H1 homolysis: H1 leaves neutral (radical channel)
-        order_parameter_bond: [0, 1]
-        fragments:
-          - {state: oh, atoms: [0, 2]}    # O0, H2 -> oh's canonical [O, H]
-          - {state: h,  atoms: [1]}
-      - name: proton_loss           # O-H1 heterolysis: H1 leaves as a proton
-        order_parameter_bond: [0, 1]
-        fragments:
-          - {state: oh-, atoms: [0, 2]}   # O0, H2 -> oh-'s canonical [O, H]
-          - {state: h+,  atoms: [1]}
-
-  h3o+:
-    charge: +1
-    multiplicity: 1
-    elements: [O, H, H, H]
-    bonds: [[0, 1], [0, 2], [0, 3]]
-    dissociation:
-      - name: proton_loss           # O-H1 heterolysis: H1 leaves as a proton
-        order_parameter_bond: [0, 1]
-        fragments:
-          - {state: h2o, atoms: [0, 2, 3]}   # O0, H2, H3 -> h2o's canonical [O, H, H]
-          - {state: h+,  atoms: [1]}
-
-  oh-:
-    charge: -1
-    multiplicity: 1
-    elements: [O, H]
+    elements: [H, H]
     bonds: [[0, 1]]
     dissociation:
-      - name: homolysis             # O-H homolysis: H leaves neutral, charge stays on O
+      - name: homolysis                # covalent: H + H
         order_parameter_bond: [0, 1]
         fragments:
-          - {state: o-, atoms: [0]}
-          - {state: h,  atoms: [1]}
+          - {state: h_q0_m2, atoms: [0]}
+          - {state: h_q0_m2, atoms: [1]}
+      - name: heterolysis              # ionic: H+ + H-
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: h_q+1_m1, atoms: [0]}
+          - {state: h_q-1_m1, atoms: [1]}
 
-  # Neutral OH radical (X 2Pi). A trained monomer once data/labels/oh.extxyz is included in a
-  # training config; it also anchors the radical channel H2O -> OH + H.
-  oh:
+  h2_q0_m3:                            # H2, b 3Sigma_u+ (repulsive, non-bonding)
+    charge: 0
+    multiplicity: 3
+    elements: [H, H]
+    bonds: [[0, 1]]
+    dissociation:
+      - name: homolysis                # covalent only: two triplet-coupled H (no triplet ionic)
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: h_q0_m2, atoms: [0]}
+          - {state: h_q0_m2, atoms: [1]}
+
+  oh_q0_m2:                            # OH radical, X 2Pi
     charge: 0
     multiplicity: 2
     elements: [O, H]
     bonds: [[0, 1]]
     dissociation:
-      - name: homolysis             # O-H homolysis: both fragments stay neutral radicals
+      - name: homolysis                # covalent: O + H
         order_parameter_bond: [0, 1]
         fragments:
-          - {state: o, atoms: [0]}   # O atom, ground-term triplet
-          - {state: h, atoms: [1]}
+          - {state: o_q0_m3, atoms: [0]}
+          - {state: h_q0_m2, atoms: [1]}
+      - name: heterolysis              # ionic: O- + H+
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o_q-1_m2, atoms: [0]}
+          - {state: h_q+1_m1, atoms: [1]}
+
+  oh_q-1_m1:                           # hydroxide OH-
+    charge: -1
+    multiplicity: 1
+    elements: [O, H]
+    bonds: [[0, 1]]
+    dissociation:
+      - name: homolysis                # covalent: O- + H (charge stays on O -- the lower channel)
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o_q-1_m2, atoms: [0]}
+          - {state: h_q0_m2, atoms: [1]}
+      - name: heterolysis              # ionic: O + H- (hydride leaves)
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o_q0_m3, atoms: [0]}
+          - {state: h_q-1_m1, atoms: [1]}
+
+  o2_q0_m3:                            # O2, X 3Sigma_g- (ground state)
+    charge: 0
+    multiplicity: 3
+    elements: [O, O]
+    bonds: [[0, 1]]
+    dissociation:
+      - name: homolysis                # covalent: O + O
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o_q0_m3, atoms: [0]}
+          - {state: o_q0_m3, atoms: [1]}
+      - name: heterolysis              # ionic: O+ + O- (2P (x) 4S couples to triplet)
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o_q+1_m4, atoms: [0]}
+          - {state: o_q-1_m2, atoms: [1]}
+
+  o2_q0_m1:                            # singlet oxygen, a 1Delta_g / b 1Sigma_g+ (BS-UKS approx)
+    charge: 0
+    multiplicity: 1
+    elements: [O, O]
+    bonds: [[0, 1]]
+    dissociation:
+      - name: homolysis                # covalent only: O + O (O+/O- cannot couple to a singlet)
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o_q0_m3, atoms: [0]}
+          - {state: o_q0_m3, atoms: [1]}
+
+  o2_q-1_m2:                           # superoxide O2-, X 2Pi_g
+    charge: -1
+    multiplicity: 2
+    elements: [O, O]
+    bonds: [[0, 1]]
+    dissociation:
+      - name: homolysis                # O- + O (the only low-lying anion channel)
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: o_q-1_m2, atoms: [0]}
+          - {state: o_q0_m3, atoms: [1]}
+
+  # --- polyatomic fragment states ----------------------------------------------------------
+  # Deferred phase (kept so the existing labels and tests resolve). Dissociation covers pull one
+  # O-H apart; every product is an anchored atomic reference or a diatomic/monomer state above.
+  h2o_q0_m1:
+    charge: 0
+    multiplicity: 1
+    elements: [O, H, H]
+    bonds: [[0, 1], [0, 2]]
+    dissociation:
+      - name: homolysis                # O-H1 homolysis: H1 leaves neutral (radical channel)
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: oh_q0_m2, atoms: [0, 2]}    # O0, H2 -> oh's canonical [O, H]
+          - {state: h_q0_m2,  atoms: [1]}
+      - name: proton_loss              # O-H1 heterolysis: H1 leaves as a proton
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: oh_q-1_m1, atoms: [0, 2]}   # O0, H2 -> oh-'s canonical [O, H]
+          - {state: h_q+1_m1,  atoms: [1]}
+
+  h3o_q+1_m1:
+    charge: +1
+    multiplicity: 1
+    elements: [O, H, H, H]
+    bonds: [[0, 1], [0, 2], [0, 3]]
+    dissociation:
+      - name: proton_loss              # O-H1 heterolysis: H1 leaves as a proton
+        order_parameter_bond: [0, 1]
+        fragments:
+          - {state: h2o_q0_m1, atoms: [0, 2, 3]}   # O0, H2, H3 -> h2o's canonical [O, H, H]
+          - {state: h_q+1_m1,  atoms: [1]}

@@ -66,16 +66,17 @@ _PERTURB_SIGN = -1.0
 #   H+  : bare proton, no electrons          -> E = 0 exactly (no SCF)
 #   H   : 1s^1,  2S                          H-  : 1s^2, 1S
 #   O+  : 2p^3,  4S                          O   : 2p^4, 3P
-#   O-  : 2p^5,  2P
+#   O-  : 2p^5,  2P                          O2- : 2p^6, 1S
 #
-# O(2-) is deliberately absent: it does not bind its second electron in the gas phase at all
-# (that is physics, not a basis-set artifact -- it is stabilized only by a surrounding lattice
-# or solvent), so any computed energy is whatever diffuse function the basis happens to offer.
-# H(-) is kept despite also coming out unbound here, because that one *is* a basis artifact:
-# hydride is a real bound species (EA = +0.75 eV) that def2-svpd's tight diffuse set misses.
+# O(2-) is included as a formal reference anchor for the O/H chemistry (it appears within
+# fragments -- hydroxide, peroxide, oxide -- even though the *free* dianion is unbound in the gas
+# phase). It does not bind its second electron here, so `_mark_boundness` flags it `bound: false`
+# and its energy/polarizability are whatever diffuse function def2-svpd offers -- weight it
+# accordingly in training. H(-) is unbound at this level too (EA = -0.34 vs +0.75 eV experiment),
+# but that one is a genuine basis-set artifact of a real bound species.
 STATE_MULTIPLICITY = {
     "H": {+1: 1, 0: 2, -1: 1},
-    "O": {+1: 4, 0: 3, -1: 2},
+    "O": {+1: 4, 0: 3, -1: 2, -2: 1},
 }
 
 # An anion state is "unbound" when its energy lies *above* the next-lower-charge state, i.e. the

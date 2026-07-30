@@ -46,11 +46,11 @@ REPO = os.path.dirname(HERE)
 
 # Equilibrium geometries (Angstrom); atom 0 is O, atom 1 is the O-H being stretched.
 GEOMETRY = {
-    "oh":   (["O", "H"], [[0, 0, 0.1078], [0, 0, -0.8621]]),
-    "oh-":  (["O", "H"], [[0, 0, 0.1078], [0, 0, -0.8621]]),
-    "h2o":  (["O", "H", "H"],
+    "oh_q0_m2":   (["O", "H"], [[0, 0, 0.1078], [0, 0, -0.8621]]),
+    "oh_q-1_m1":  (["O", "H"], [[0, 0, 0.1078], [0, 0, -0.8621]]),
+    "h2o_q0_m1":  (["O", "H", "H"],
              [[0, 0, 0.1178], [0, 0.7642, -0.4712], [0, -0.7642, -0.4714]]),
-    "h3o+": (["O", "H", "H", "H"],
+    "h3o_q+1_m1": (["O", "H", "H", "H"],
              [[0, 0, 0.0749], [0, 0.9436, -0.1997], [0.8172, -0.4718, -0.1997],
               [-0.8172, -0.4718, -0.1997]]),
 }
@@ -105,10 +105,10 @@ def single_system_batch(symbols, positions):
 
 # Human-readable labels for each diabat of a config, in enumerate_diabats order (bound first).
 DIABAT_LABELS = {
-    "oh":   [r"$|$OH$\rangle$", "O + H"],
-    "oh-":  [r"$|$OH$^-\rangle$", r"O$^-$ + H"],
-    "h2o":  [r"$|$H$_2$O$\rangle$", "OH + H (homolytic)", r"OH$^-$ + H$^+$ (heterolytic)"],
-    "h3o+": [r"$|$H$_3$O$^+\rangle$", r"H$_2$O + H$^+$"],
+    "oh_q0_m2":   [r"$|$OH$\rangle$", "O + H"],
+    "oh_q-1_m1":  [r"$|$OH$^-\rangle$", r"O$^-$ + H"],
+    "h2o_q0_m1":  [r"$|$H$_2$O$\rangle$", "OH + H (homolytic)", r"OH$^-$ + H$^+$ (heterolytic)"],
+    "h3o_q+1_m1": [r"$|$H$_3$O$^+\rangle$", r"H$_2$O + H$^+$"],
 }
 
 
@@ -144,7 +144,7 @@ def main():
     import matplotlib.pyplot as plt
     plt.rcParams.update({"figure.dpi": 110, "font.size": 10, "axes.grid": True,
                          "grid.alpha": 0.3, "axes.axisbelow": True})
-    species = ["oh", "oh-", "h2o", "h3o+"]
+    species = ["oh_q0_m2", "oh_q-1_m1", "h2o_q0_m1", "h3o_q+1_m1"]
     ncol = len(species)
     fig, axes = plt.subplots(3, ncol, figsize=(4.6 * ncol, 10), sharex=True)
     for col, ct in enumerate(species):

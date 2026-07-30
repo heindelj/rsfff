@@ -38,11 +38,12 @@ ATOMIC_NUMBER = {"H": 1, "O": 8}
 
 # Geometries (O is atom 0, the stretched O-H is atom 1).
 GEOMETRY = {
-    "oh":   (["O", "H"], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]),
-    "oh-":  (["O", "H"], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]),
-    "h2o":  (["O", "H", "H"], [[0, 0, 0.12], [0, 0.76, -0.47], [0, -0.76, -0.47]]),
-    "h3o+": (["O", "H", "H", "H"],
+    "oh_q0_m2":   (["O", "H"], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]),
+    "oh_q-1_m1":  (["O", "H"], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]),
+    "h2o_q0_m1":  (["O", "H", "H"], [[0, 0, 0.12], [0, 0.76, -0.47], [0, -0.76, -0.47]]),
+    "h3o_q+1_m1": (["O", "H", "H", "H"],
              [[0, 0, 0.07], [0, 0.94, -0.20], [0.82, -0.47, -0.20], [-0.82, -0.47, -0.20]]),
+    "o2_q-1_m2":  (["O", "O"], [[0.0, 0.0, 0.0], [0.0, 0.0, 1.35]]),
 }
 
 
@@ -133,7 +134,7 @@ def stretched(config_type, r):
 
 def test_finest_refinement_marks_the_broken_bond_inter(library):
     """The stretched O-H is inter-fragment on the finest refinement; the spectators are intra."""
-    das = enumerate_diabats(library, ["O", "H", "H", "H"], config_type="h3o+")
+    das = enumerate_diabats(library, ["O", "H", "H", "H"], config_type="h3o_q+1_m1")
     bond_index, is_inter = mixture_channel_graph(das)
     inter = {frozenset((int(bond_index[0, e]), int(bond_index[1, e])))
              for e in range(bond_index.shape[1]) if is_inter[e]}
@@ -143,10 +144,10 @@ def test_finest_refinement_marks_the_broken_bond_inter(library):
 
 def test_water_is_a_three_diabat_active_space(library):
     """H2O enumerates bound + homolytic (OH+H) + heterolytic (OH-+H+); all break the same bond."""
-    das = enumerate_diabats(library, ["O", "H", "H"], config_type="h2o")
+    das = enumerate_diabats(library, ["O", "H", "H"], config_type="h2o_q0_m1")
     assert len(das) == 3
     keys = [tuple(s.key for s, _ in a.fragments) for a in das]
-    assert keys == [("h2o",), ("oh", "h"), ("oh-", "h+")]
+    assert keys == [("h2o_q0_m1",), ("oh_q0_m2", "h_q0_m2"), ("oh_q-1_m1", "h_q+1_m1")]
     # both dissociated diabats refine to the same {O,H2}|{H1} partition
     _, is_inter = mixture_channel_graph(das)
     assert is_inter.sum() == 1
@@ -158,8 +159,8 @@ def test_water_is_a_three_diabat_active_space(library):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "config_type, symbols", [("h", ["H"]), ("h+", ["H"]), ("o", ["O"]), ("o-", ["O"]),
-                             ("o+", ["O"])]
+    "config_type, symbols", [("h_q0_m2", ["H"]), ("h_q+1_m1", ["H"]), ("o_q0_m3", ["O"]), ("o_q-1_m2", ["O"]),
+                             ("o_q+1_m4", ["O"])]
 )
 def test_bare_atom_is_a_pure_state_vertex(models, library, env, config_type, symbols):
     """A single-diabat system: c=1, no correction, and the mixture *is* the monomer stack."""
@@ -173,7 +174,7 @@ def test_bare_atom_is_a_pure_state_vertex(models, library, env, config_type, sym
     assert torch.allclose(out.charges, ref.charges, atol=1e-12)
 
 
-@pytest.mark.parametrize("config_type", ["oh", "oh-", "h2o", "h3o+"])
+@pytest.mark.parametrize("config_type", ["oh_q0_m2", "oh_q-1_m1", "h2o_q0_m1", "h3o_q+1_m1"])
 def test_equilibrium_recovers_the_monomer_stack(models, library, env, config_type):
     """At a sampled geometry (Ω_dissoc=0, switch=1) the mixture *is* the monomer stack.
 
@@ -194,10 +195,10 @@ def test_equilibrium_recovers_the_monomer_stack(models, library, env, config_typ
 def test_correction_is_active_in_the_crossover_and_zero_at_both_ends(models, library, env):
     """‖Δz‖ is exactly 0 at every vertex and strictly positive where two diabats genuinely mix."""
     _, mix = models
-    das = enumerate_diabats(library, ["O", "H"], config_type="oh-")
+    das = enumerate_diabats(library, ["O", "H"], config_type="oh_q-1_m1")
     norms = {}
     for r in (0.98, 2.0, 12.0):
-        symbols, pos = stretched("oh-", r)
+        symbols, pos = stretched("oh_q-1_m1", r)
         norms[r] = float(mix(one_system(symbols, pos), das, env).correction_norm)
     assert norms[0.98] == 0.0                                        # bound vertex (Ω_dissoc=0)
     assert norms[12.0] == 0.0                                        # dissociated vertex + 𝒪=0
@@ -208,42 +209,65 @@ def test_correction_is_active_in_the_crossover_and_zero_at_both_ends(models, lib
 # Dissociation limits (exact for the single-channel systems)
 # ---------------------------------------------------------------------------
 
-def test_oh_minus_collapses_to_atomic_references(models, library, env):
-    """OH- -> O-(atom) + H(atom): integer charges and E = E_mono(O-) + E_mono(H) exactly."""
-    monomer, mix = models
-    symbols, pos = stretched("oh-", 12.0)
-    das = enumerate_diabats(library, symbols, config_type="oh-")
+def test_oh_minus_collapses_to_the_covalent_reference(models, library, env):
+    """OH- pulls apart to O- + H (the covalent cover), not O + H- (ionic).
+
+    OH- now carries competing covalent/ionic covers (like water), so the asymptote is a
+    *near*-vertex: the ionic cover keeps a small proxy weight, and the covalent O- charge is near
+    -1, not an exact integer. The covalent cover wins because O- binds its electron here while H-
+    does not (IP/EA-seeded self-energies).
+    """
+    _, mix = models
+    symbols, pos = stretched("oh_q-1_m1", 12.0)
+    das = enumerate_diabats(library, symbols, config_type="oh_q-1_m1")
     out = mix(one_system(symbols, pos), das, env)
-    assert float(out.charges[0]) == pytest.approx(-1.0, abs=1e-10)
-    assert float(out.charges[1]) == pytest.approx(0.0, abs=1e-10)
-    e_o = mono_call(monomer, library, ["O"], [[0, 0, 0]], "o-").energy[0]
-    e_h = mono_call(monomer, library, ["H"], [[0, 0, 0]], "h").energy[0]
-    assert torch.allclose(out.energy, e_o + e_h, atol=1e-10)
+    assert float(out.weights[0]) == pytest.approx(0.0, abs=1e-6)      # bound closed by the envelope
+    assert float(out.weights[1]) > 0.9                               # covalent (O- + H) dominates
+    assert float(out.weights[1]) > float(out.weights[2])             # ... over ionic (O + H-)
+    assert float(out.charges[0]) == pytest.approx(-1.0, abs=0.1)      # ~ -1 on oxygen
+    assert float(out.charges[1]) == pytest.approx(0.0, abs=0.1)       # ~ 0 on the leaving H
+    assert float(out.charges.sum()) == pytest.approx(-1.0, abs=1e-10)
+    assert float(out.correction_norm) < 1e-3                          # overlap 𝒪 has shut the mix off
 
 
-def test_oh_radical_collapses_to_atomic_references(models, library, env):
-    """OH -> O(atom) + H(atom): both neutral, E = E_mono(O) + E_mono(H) exactly."""
-    monomer, mix = models
-    symbols, pos = stretched("oh", 12.0)
-    das = enumerate_diabats(library, symbols, config_type="oh")
+def test_oh_radical_collapses_to_neutral_atoms(models, library, env):
+    """OH -> O + H (covalent): both fragments near-neutral, a near-vertex like water's homolysis."""
+    _, mix = models
+    symbols, pos = stretched("oh_q0_m2", 12.0)
+    das = enumerate_diabats(library, symbols, config_type="oh_q0_m2")
     out = mix(one_system(symbols, pos), das, env)
-    assert float(out.charges[0]) == pytest.approx(0.0, abs=1e-10)
-    assert float(out.charges[1]) == pytest.approx(0.0, abs=1e-10)
-    e_o = mono_call(monomer, library, ["O"], [[0, 0, 0]], "o").energy[0]
-    e_h = mono_call(monomer, library, ["H"], [[0, 0, 0]], "h").energy[0]
-    assert torch.allclose(out.energy, e_o + e_h, atol=1e-10)
+    assert float(out.weights[1]) > 0.9                               # covalent (O + H) dominates
+    assert float(out.charges[0]) == pytest.approx(0.0, abs=0.05)
+    assert float(out.charges[1]) == pytest.approx(0.0, abs=0.05)
+    assert float(out.charges.sum()) == pytest.approx(0.0, abs=1e-10)
+    assert float(out.correction_norm) < 1e-3
+
+
+def test_superoxide_collapses_to_atomic_references(models, library, env):
+    """O2- -> O-(atom) + O(atom): a single-channel diatomic, so an *exact* vertex at large r."""
+    monomer, mix = models
+    symbols, pos = stretched("o2_q-1_m2", 12.0)
+    das = enumerate_diabats(library, symbols, config_type="o2_q-1_m2")
+    assert len(das) == 2                                             # bound + one dissociation cover
+    out = mix(one_system(symbols, pos), das, env)
+    assert float(out.weights[1]) == pytest.approx(1.0, abs=1e-9)     # single channel -> exact vertex
+    assert float(out.charges[0]) == pytest.approx(-1.0, abs=1e-9)
+    assert float(out.charges[1]) == pytest.approx(0.0, abs=1e-9)
+    e_om = mono_call(monomer, library, ["O"], [[0, 0, 0]], "o_q-1_m2").energy[0]
+    e_o = mono_call(monomer, library, ["O"], [[0, 0, 0]], "o_q0_m3").energy[0]
+    assert torch.allclose(out.energy, e_om + e_o, atol=1e-9)
 
 
 def test_hydronium_proton_loss_collapses_to_water_plus_proton(models, library, env):
     """H3O+ -> H2O + H+: the leaving proton is exactly +1, energy is exact (single channel)."""
     monomer, mix = models
-    symbols, pos = stretched("h3o+", 12.0)
-    das = enumerate_diabats(library, symbols, config_type="h3o+")
+    symbols, pos = stretched("h3o_q+1_m1", 12.0)
+    das = enumerate_diabats(library, symbols, config_type="h3o_q+1_m1")
     out = mix(one_system(symbols, pos), das, env)
     assert float(out.charges[1]) == pytest.approx(1.0, abs=1e-9)
     assert float(out.charges[[0, 2, 3]].sum()) == pytest.approx(0.0, abs=1e-9)
-    e_rem = mono_call(monomer, library, ["O", "H", "H"], pos[[0, 2, 3]], "h2o").energy[0]
-    e_hp = mono_call(monomer, library, ["H"], [[0, 0, 0]], "h+").energy[0]
+    e_rem = mono_call(monomer, library, ["O", "H", "H"], pos[[0, 2, 3]], "h2o_q0_m1").energy[0]
+    e_hp = mono_call(monomer, library, ["H"], [[0, 0, 0]], "h_q+1_m1").energy[0]
     assert torch.allclose(out.energy, e_rem + e_hp, atol=1e-9)
 
 
@@ -255,8 +279,8 @@ def test_water_dissociates_homolytically(models, library, env):
     dominates and the leaving H is near-neutral, not that the charge is an exact integer.
     """
     _, mix = models
-    symbols, pos = stretched("h2o", 12.0)
-    das = enumerate_diabats(library, symbols, config_type="h2o")
+    symbols, pos = stretched("h2o_q0_m1", 12.0)
+    das = enumerate_diabats(library, symbols, config_type="h2o_q0_m1")
     out = mix(one_system(symbols, pos), das, env)
     c = out.weights
     assert float(c[0]) == pytest.approx(0.0, abs=1e-6)               # bound closed by the envelope
@@ -270,7 +294,7 @@ def test_water_dissociates_homolytically(models, library, env):
 # Normalization, conservation, continuity, symmetry (across the scan)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("config_type", ["oh", "oh-", "h2o", "h3o+"])
+@pytest.mark.parametrize("config_type", ["oh_q0_m2", "oh_q-1_m1", "h2o_q0_m1", "h3o_q+1_m1"])
 def test_weights_normalized_and_charge_conserved(models, library, env, config_type):
     """Σc_K = 1 (so total charge stays exactly Q) at every separation."""
     _, mix = models
@@ -283,7 +307,7 @@ def test_weights_normalized_and_charge_conserved(models, library, env, config_ty
         assert float(out.charges.sum()) == pytest.approx(q_total, abs=1e-10)
 
 
-@pytest.mark.parametrize("config_type", ["oh-", "h2o"])
+@pytest.mark.parametrize("config_type", ["oh_q-1_m1", "h2o_q0_m1"])
 def test_force_is_continuous_across_switch_envelope_and_overlap(models, library, env, config_type):
     """Analytic -dE/dx matches central finite difference across the crossover (§4.4.4, §13.3).
 
@@ -320,8 +344,8 @@ def test_rotation_equivariance(models, library, env):
     from e3nn import o3
 
     _, mix = models
-    symbols, pos = stretched("h2o", 2.0)                      # in the crossover, all diabats live
-    das = enumerate_diabats(library, symbols, config_type="h2o")
+    symbols, pos = stretched("h2o_q0_m1", 2.0)                      # in the crossover, all diabats live
+    das = enumerate_diabats(library, symbols, config_type="h2o_q0_m1")
     out = mix(one_system(symbols, pos), das, env)
 
     rot = o3.rand_matrix().to(torch.float64)
