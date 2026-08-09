@@ -11,6 +11,10 @@ import types
 
 # macOS: avoid the duplicate-libomp abort (torch + conda MKL); must precede torch.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# macOS: torch and pyscf each pull in an OpenMP runtime; multi-threaded pyscf DFT
+# then segfaults in the grid loop. Pinning one thread before torch loads (so the
+# env var is read at runtime init) avoids the crash for the qcgen tests.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import pytest  # noqa: E402
 import torch  # noqa: E402

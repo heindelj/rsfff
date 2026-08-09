@@ -10,6 +10,22 @@ The compute core (:mod:`rsfff.qcgen.backend`, :mod:`rsfff.qcgen.compute`) prefer
 ``pyscf`` on CPU, so the same pipeline runs on a Colab GPU or a local laptop.
 """
 
-from . import backend, compute, extxyz, pipeline, wigner
+from . import (
+    backend,
+    compute,
+    extxyz,
+    pipeline,
+    probe_charges,
+    probe_response,
+    wigner,
+)
 
-__all__ = ["backend", "compute", "extxyz", "pipeline", "wigner"]
+__all__ = [
+    "backend",
+    "compute",
+    "extxyz",
+    "pipeline",
+    "probe_charges",
+    "probe_response",
+    "wigner",
+]
