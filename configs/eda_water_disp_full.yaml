@@ -1,0 +1,72 @@
+# Intermolecular dispersion against the Q-Chem ALMO-EDA `disp` component.
+#
+#   python -m rsfff.train.train_dispersion configs/eda_water_disp.yaml
+#
+# The untrained backbone (pyCMM priors, r0 -> 0, no correction) already reaches
+# ~0.3 kJ/mol MAE on w2 and ~0.6 on w5, so watch `ff_mae` vs `mae`: the gap is what the
+# neural correction is actually contributing. `r0` should drift downward under its penalty
+# unless the correction is genuinely buying something in the region it opens up.
+#
+# Caveat: eda_disp here is wB97X-V's VV10 nonlocal correlation contribution to the frozen
+# interaction, and eda_mod_pauli is defined as cls_pauli - disp -- the two are entangled by
+# the decomposition. The fitted C6 is not a transferable Casimir-Polder C6.
+run_name: eda_water_disp
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/eda_data/w2_wb97xv_qzvppd.xyz
+    - data/eda_data/w3_wb97xv_qzvppd.xyz
+    - data/eda_data/w4_wb97xv_qzvppd.xyz
+    - data/eda_data/w5_wb97xv_qzvppd.xyz
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 2]     # the parameter heads read only the invariants
+  backend: e3nn
+  density_channels: 8
+
+dispersion:
+  target: disp
+  cutoff: 10.0                 # pair-list cutoff, Angstrom
+  taper_width: 1.0
+  r0_init: 2.0                 # Fermi midpoint; learnable, biased downward
+  alpha: 8.0
+  learn_r0: true
+  r0_weight: 0.05              # dimensionless, per Angstrom of range handed to the network
+  # Damping exponent. The uniform 2.0 prior over-binds substantially on water (MAE 2.9
+  # kJ/mol on w2 rising to 14.5 on w5, against 0.28-0.61 for the fitted per-element
+  # values), because H's fitted b is 1.31 and hydrogen dominates the close H-bond
+  # contacts. So `learn_b` is on here: two per-species scalars, enough to walk off the
+  # prior without giving b the environment dependence §4.5 warns about. Set
+  # `b_prior: per_element` to start from the fitted values instead.
+  b_prior: 2.0                 # bohr^-1, or "per_element"
+  learn_c6: true
+  environment_c6: true
+  learn_b: true
+  environment_b: false
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+  correction: true
+  corr_hidden: 64
+  corr_depth: 2
+  corr_r_on: 4.0
+  corr_r_off: 5.0              # must not exceed features.cutoff
+  corr_energy_scale: 1.0e-3
+  corr_l2_weight: 0.0          # dimensionless (see dispersion.energy_scale)
+  intra_fragment_features: false   # true = C6 sees only its own monomer (ablation)
+
+train:
+  epochs: 60
+  batch_size: 32
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4         # on the log-space deviations, this pulls toward the priors
+  grad_clip: 5.0
+  eval_every: 2

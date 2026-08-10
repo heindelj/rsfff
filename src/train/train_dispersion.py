@@ -49,6 +49,7 @@ import torch  # noqa: E402
 
 from ..features.features import FlatLambdaSOAPFeaturizer  # noqa: E402
 from ..ff.dispersion import (  # noqa: E402
+    DispersionModel,
     DispersionParameterHeads,
     TTDispersion,
     build_log_priors,
@@ -61,8 +62,8 @@ from .train import _iter_minibatches  # noqa: E402
 from .train_eem import resolve_device  # noqa: E402
 
 
-def build_dispersion_model(features_cfg, disp_cfg, neighbor_types):
-    """Featurizer + :class:`TTDispersion` at the per-species priors."""
+def build_dispersion_model(features_cfg, disp_cfg, neighbor_types) -> DispersionModel:
+    """Featurizer + :class:`TTDispersion` at the per-species priors, as one module."""
     featurizer = FlatLambdaSOAPFeaturizer(
         cutoff=features_cfg.cutoff,
         n_max=features_cfg.n_max,
@@ -97,17 +98,18 @@ def build_dispersion_model(features_cfg, disp_cfg, neighbor_types):
             r_on=disp_cfg.corr_r_on, r_off=disp_cfg.corr_r_off,
             energy_scale=disp_cfg.corr_energy_scale,
         )
-    model = TTDispersion(
+    dispersion = TTDispersion(
         params, correction,
         cutoff=disp_cfg.cutoff, taper_width=disp_cfg.taper_width,
         r0_init=disp_cfg.r0_init, alpha=disp_cfg.alpha,
         order=disp_cfg.order, learn_r0=disp_cfg.learn_r0,
     )
-    return featurizer, model
+    return DispersionModel(
+        featurizer, dispersion, intra_fragment=disp_cfg.intra_fragment_features
+    )
 
 
-def _run_epoch(featurizer, model, dataset, indices, config: Config,
-               device, *, optimizer=None, seed=0):
+def _run_epoch(model, dataset, indices, config: Config, device, *, optimizer=None, seed=0):
     """One pass over ``indices``. Trains if ``optimizer`` is given, else evaluates."""
     training = optimizer is not None
     model.train(training)
@@ -125,9 +127,8 @@ def _run_epoch(featurizer, model, dataset, indices, config: Config,
             )
         target = batch.eda[dcfg.target]
 
-        group = batch.fragment_idx if dcfg.intra_fragment_features else None
         with torch.set_grad_enabled(training):
-            out = model(batch, featurizer(batch, group))
+            out = model(batch)
             err = out.energy - target
             # Normalized by energy_scale so the fit term is O(1) at an error of that size
             # and the penalty weights are dimensionless. Comparing a *squared* error in
@@ -187,8 +188,7 @@ def train(config: Config):
     neighbor_types = dataset.unique_atomic_numbers
     print(f"loaded {len(dataset)} frames; species Z={neighbor_types}")
 
-    featurizer, model = build_dispersion_model(config.features, dcfg, neighbor_types)
-    featurizer, model = featurizer.to(device), model.to(device)
+    model = build_dispersion_model(config.features, dcfg, neighbor_types).to(device)
     train_idx, val_idx = split_indices(
         len(dataset), config.data.holdout_fraction, config.data.seed
     )
@@ -202,7 +202,7 @@ def train(config: Config):
 
     # Baseline before any training: the FF backbone alone, which is the number every
     # later epoch has to beat for the neural correction to be earning its place.
-    base = _run_epoch(featurizer, model, dataset, val_idx, config, device)
+    base = _run_epoch(model, dataset, val_idx, config, device)
     print(f"untrained: {_fmt(base, _LOG_KEYS)}")
 
     optimizer = torch.optim.Adam(
@@ -215,21 +215,21 @@ def train(config: Config):
 
     for epoch in range(config.train.epochs):
         t0 = time.time()
-        tr = _run_epoch(featurizer, model, dataset, train_idx, config, device,
+        tr = _run_epoch(model, dataset, train_idx, config, device,
                         optimizer=optimizer, seed=config.data.seed + epoch)
         do_eval = (
             (epoch + 1) % config.train.eval_every == 0 or epoch == config.train.epochs - 1
         )
         line = f"epoch {epoch+1:4d}  train: {_fmt(tr, _LOG_KEYS)}  ({time.time()-t0:.1f}s)"
         if do_eval and len(val_idx) > 0:
-            va = _run_epoch(featurizer, model, dataset, val_idx, config, device)
+            va = _run_epoch(model, dataset, val_idx, config, device)
             print(line)
             print(f"            val:   {_fmt(va, _LOG_KEYS)}")
             if va["loss"] < best_val:
                 best_val = va["loss"]
                 torch.save(
                     {"model_state": model.state_dict(), "neighbor_types": neighbor_types,
-                     "epoch": epoch, "val_loss": best_val},
+                     "config": config, "epoch": epoch, "val_loss": best_val},
                     ckpt_dir / "best.pt",
                 )
         else:
@@ -242,7 +242,7 @@ def train(config: Config):
     print(f"per-species b  (1/bohr):    {dict(zip(neighbor_types, b.exp().tolist()))}")
     print(f"r0 = {float(model.r0.detach()):.4f} A")
     print(f"done; best val loss {best_val:.4e}; checkpoints in {ckpt_dir}")
-    return featurizer, model
+    return model
 
 
 def main():

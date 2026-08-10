@@ -207,6 +207,40 @@ class DispersionParameterHeads(nn.Module):
         return log_c6.exp(), log_b.exp()
 
 
+class DispersionModel(nn.Module):
+    """Featurizer + :class:`TTDispersion` as one module.
+
+    :class:`TTDispersion` takes precomputed features so it can later share a featurizer
+    with the rest of the stack. Standalone, though, the featurizer carries learnable
+    parameters of its own (``FlatLambdaSOAPFeaturizer.channel_proj``, the density-channel
+    compression), so it has to be owned by something for ``parameters()``,
+    ``state_dict()``, and ``.to()`` to cover it -- which is what this wrapper is for.
+
+    ``group_idx`` selects the descriptor's neighborhood: ``None`` (default) gives every
+    atom the full supersystem environment, so the emitted C6 is an *effective*,
+    environment-dependent coefficient; passing ``fragment_idx`` restricts each atom to its
+    own monomer and makes the pair sum strictly two-body.
+    """
+
+    def __init__(self, featurizer, dispersion: "TTDispersion", *, intra_fragment: bool = False):
+        super().__init__()
+        self.featurizer = featurizer
+        self.dispersion = dispersion
+        self.intra_fragment = bool(intra_fragment)
+
+    @property
+    def params(self):
+        return self.dispersion.params
+
+    @property
+    def r0(self) -> torch.Tensor:
+        return self.dispersion.r0
+
+    def forward(self, batch) -> "DispersionOutput":
+        group = batch.fragment_idx if self.intra_fragment else None
+        return self.dispersion(batch, self.featurizer(batch, group))
+
+
 @dataclass
 class DispersionOutput:
     """Per-system energies plus the per-pair breakdown the diagnostics need."""
