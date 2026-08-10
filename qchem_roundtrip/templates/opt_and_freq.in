@@ -1,0 +1,27 @@
+$molecule
+0 1
+  O     1.7154930     0.3835570     0.0802420
+  H     2.1895610    -0.4940910     0.0332330
+  H     0.7577100     0.0649480    -0.1096450
+  O    -1.2738910    -0.1279640    -0.2491310
+  H    -1.3456690     0.8117560     0.0809930
+  H    -2.0432030    -0.6382050     0.1643080
+$end
+
+$rem
+   JOBTYPE          =  opt
+   METHOD           =  wB97M-V
+   BASIS            =  def2-TZVPD
+   SCF_CONVERGENCE  =  8
+   THRESH           =  14
+   XC_GRID          =  000099000590
+   NL_GRID          =  1
+   SYMMETRY         =  false
+   MEM_TOTAL        =  64000
+   MEM_STATIC       =  10000
+$end
+
+$geom_opt
+hessian_verify = recomputed
+final_vibrational_analysis = true
+$end

@@ -1,0 +1,29 @@
+{
+  "defaults": {},
+  "calculations": {
+    "force": {
+      "template": "templates/force.in",
+      "molecule": {
+        "mode": "plain"
+      }
+    },
+    "opt": {
+      "template": "templates/opt_and_freq.in",
+      "molecule": {
+        "mode": "plain"
+      }
+    },
+    "polarizability": {
+      "template": "templates/polarizability.in",
+      "molecule": {
+        "mode": "plain"
+      }
+    },
+    "eda": {
+      "template": "templates/eda.in",
+      "molecule": {
+        "mode": "fragments"
+      }
+    }
+  }
+}
