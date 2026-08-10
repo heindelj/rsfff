@@ -102,6 +102,53 @@ class TrainConfig:
 
 
 @dataclass
+class DispersionConfig:
+    """Tang-Toennies damped C6 dispersion plus its short-range pair correction.
+
+    ``r0`` is the Fermi range-separation midpoint in Angstrom: the explicit dispersion is
+    switched *off* below it and the pair correction carries that region. It is learnable,
+    with ``r0_weight`` applying a linear penalty that biases it small -- so moving energy
+    out of the physical backbone and into the network has to be earned
+    (``docs/range_separated_mlip.md`` §4.5, §7).
+    """
+
+    cutoff: float = 10.0            # pair-list cutoff, Angstrom
+    taper_width: float = 1.0        # C2 taper width below the cutoff, Angstrom
+    r0_init: float = 2.0            # Fermi midpoint, Angstrom
+    alpha: float = 8.0              # Fermi steepness, Angstrom^-1
+    learn_r0: bool = True
+    order: int = 6                  # damped inverse power (6 for C6)
+    # Damping-exponent prior: a number in bohr^-1, or "per_element" for the fitted values.
+    # A uniform 2.0 over-binds badly on water (see build_log_priors); leave learn_b on if
+    # you use it, so the two per-species scalars can move off it.
+    b_prior: float | str = 2.0
+    learn_c6: bool = True           # per-species log-C6 deviation
+    environment_c6: bool = True     # environment-dependent log-C6 residual
+    learn_b: bool = True            # per-species log-b deviation
+    environment_b: bool = False     # never on by default; see DispersionParameterHeads
+    emb_dim: int = 16
+    hidden: int = 64
+    depth: int = 2
+    # Pair correction head
+    correction: bool = True
+    corr_hidden: int = 64
+    corr_depth: int = 2
+    corr_n_radial: int = 8
+    corr_r_on: float = 4.0          # Angstrom; envelope full strength below this
+    corr_r_off: float = 5.0         # Angstrom; exactly zero at and beyond this
+    corr_energy_scale: float = 1.0e-3   # Hartree
+    # Loss. Squared errors are divided by `energy_scale`^2, so the fit term is O(1) for an
+    # error of that size and every penalty weight below is a plain dimensionless number.
+    # Without that normalization the weights would have to be quoted in Hartree^2 (~1e-7
+    # for a 1 kJ/mol error), which is a very easy place to be off by orders of magnitude.
+    target: str = "disp"            # which batch.eda[...] component to fit
+    energy_scale: float = 3.8093e-4  # 1 kJ/mol in Hartree
+    corr_l2_weight: float = 0.0     # penalty on the correction's magnitude
+    r0_weight: float = 0.05         # per Angstrom of range separation handed to the network
+    intra_fragment_features: bool = False   # ablation: group features by fragment
+
+
+@dataclass
 class Config:
     run_name: str = "run"
     device: str = "auto"       # auto -> cuda > mps > cpu
@@ -112,6 +159,7 @@ class Config:
     eem: EEMConfig = field(default_factory=EEMConfig)
     monomer: MonomerConfig = field(default_factory=MonomerConfig)
     sqe: SQEConfig = field(default_factory=SQEConfig)
+    dispersion: DispersionConfig = field(default_factory=DispersionConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
@@ -179,6 +227,7 @@ def load_config(path) -> Config:
     )
     monomer_cfg = _from_block(MonomerConfig, raw.get("monomer", {}) or {})
     sqe_cfg = _from_block(SQEConfig, raw.get("sqe", {}) or {})
+    dispersion_cfg = _from_block(DispersionConfig, raw.get("dispersion", {}) or {})
     train_cfg = TrainConfig(
         epochs=int(train.get("epochs", TrainConfig.epochs)),
         batch_size=int(train.get("batch_size", TrainConfig.batch_size)),
@@ -212,6 +261,7 @@ def load_config(path) -> Config:
         eem=eem_cfg,
         monomer=monomer_cfg,
         sqe=sqe_cfg,
+        dispersion=dispersion_cfg,
         data=data_cfg,
         train=train_cfg,
     )

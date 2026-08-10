@@ -135,7 +135,7 @@ def eem_model_loss(
     loss = energy_weight * (e_err.pow(2) / counts).mean()
     metrics["energy_mae"] = float(e_err.detach().abs().mean())
 
-    if force_weight > 0.0:
+    if force_weight > 0.0 and batch.forces is not None:
         # retain_graph: the dipole-derivative term below runs further backward
         # passes over the same graph even at eval.
         forces = compute_forces(

@@ -49,19 +49,29 @@ class Batch:
     batch_idx           : (Ntot,)   long, frame id per atom in [0, n_systems)
     n_systems           : number of frames B in this batch
     energy              : (B,)      per-molecule total energy target
-    forces              : (Ntot, 3) per-atom force target
+    forces              : (Ntot, 3) per-atom force target, or None when the reference
+                                    calculation produced no nuclear gradient (e.g. the
+                                    Q-Chem ALMO-EDA single points)
     total_charge        : (B,)      per-molecule total charge (e), or None
     dipole              : (B, 3)    molecular dipole target (e*Angstrom), or None
     polarizability      : (B, 3, 3) molecular polarizability (e^2*Ang^2/Ha), or None
     dipole_derivatives  : (Ntot, 3, 3) d mu_b / d R_{i,a} (e), or None
+    eda                 : {name: (B,)} energy-decomposition components in Hartree, keyed
+                                    without the ``eda_`` prefix (``cls_elec``, ``disp``,
+                                    ``pol``, ``ct``, ``mod_pauli``, ``int``, ...), or None
 
-    Diabatic-assignment fields (``rsfff.mlip.diabats``), all None for datasets loaded without a
-    state library. Indices are batch-global, re-offset by :meth:`MoleculeDataset.flat_batch`:
+    Fragment fields, from either a diabatic state library (``rsfff.mlip.diabats``) or the
+    per-atom ``fragment_idx`` column of the extxyz. Indices are batch-global, re-offset by
+    :meth:`MoleculeDataset.flat_batch`:
 
     fragment_idx        : (Ntot,)   long, fragment id per atom in [0, n_fragments)
     fragment_charge     : (F,)      formal charge Q_a of each fragment
     fragment_two_s      : (F,)      2S_a of each fragment
     n_fragments         : number of fragments F in this batch
+
+    Channel-graph fields, available only from a state library (a distance-independent
+    partition cannot supply them):
+
     bond_index          : (2, Nb)   long, the channel graph in global atom indices
     bond_batch          : (Nb,)     long, frame id per channel in [0, n_systems)
     """
@@ -71,11 +81,12 @@ class Batch:
     batch_idx: torch.Tensor
     n_systems: int
     energy: torch.Tensor
-    forces: torch.Tensor
+    forces: torch.Tensor | None = None
     total_charge: torch.Tensor | None = None
     dipole: torch.Tensor | None = None
     polarizability: torch.Tensor | None = None
     dipole_derivatives: torch.Tensor | None = None
+    eda: dict[str, torch.Tensor] | None = None
     fragment_idx: torch.Tensor | None = None
     fragment_charge: torch.Tensor | None = None
     fragment_two_s: torch.Tensor | None = None
@@ -91,11 +102,16 @@ class Batch:
             batch_idx=self.batch_idx.to(device),
             n_systems=self.n_systems,
             energy=self.energy.to(device),
-            forces=self.forces.to(device),
+            forces=opt(self.forces),
             total_charge=opt(self.total_charge),
             dipole=opt(self.dipole),
             polarizability=opt(self.polarizability),
             dipole_derivatives=opt(self.dipole_derivatives),
+            eda=(
+                {k: v.to(device) for k, v in self.eda.items()}
+                if self.eda is not None
+                else None
+            ),
             fragment_idx=opt(self.fragment_idx),
             fragment_charge=opt(self.fragment_charge),
             fragment_two_s=opt(self.fragment_two_s),
@@ -117,7 +133,7 @@ class MoleculeDataset:
         self,
         positions: torch.Tensor,   # (Ntot_all, 3)
         atomic_numbers: torch.Tensor,  # (Ntot_all,)
-        forces: torch.Tensor,      # (Ntot_all, 3)
+        forces: torch.Tensor | None,   # (Ntot_all, 3), or None if unlabeled
         energy: torch.Tensor,      # (n_frames,)
         counts: torch.Tensor,      # (n_frames,) atoms per frame
         *,
@@ -125,6 +141,7 @@ class MoleculeDataset:
         dipole: torch.Tensor | None = None,              # (n_frames, 3)
         polarizability: torch.Tensor | None = None,      # (n_frames, 3, 3)
         dipole_derivatives: torch.Tensor | None = None,  # (Ntot_all, 3, 3)
+        eda: dict[str, torch.Tensor] | None = None,      # {name: (n_frames,)}
         fragment_idx: torch.Tensor | None = None,        # (Ntot_all,) frame-local
         fragment_charge: torch.Tensor | None = None,     # (Nfrag_all,)
         fragment_two_s: torch.Tensor | None = None,      # (Nfrag_all,)
@@ -144,9 +161,12 @@ class MoleculeDataset:
         self._dipole = dipole
         self._polarizability = polarizability
         self._dipole_derivatives = dipole_derivatives
+        self._eda = eda
 
-        # Diabatic assignment: stored frame-local and re-offset in flat_batch, exactly like the
-        # atom rows. Present as a group or not at all.
+        # Fragment partition and channel graph: stored frame-local and re-offset in
+        # flat_batch, exactly like the atom rows. They are *separate* groups -- an extxyz
+        # with a `fragment_idx` column gives a partition but no channel graph, which only
+        # a diabatic state library can supply.
         self._fragment_idx = fragment_idx
         self._fragment_charge = fragment_charge
         self._fragment_two_s = fragment_two_s
@@ -157,13 +177,29 @@ class MoleculeDataset:
             self._frag_offsets = torch.cat(
                 (torch.zeros(1, dtype=torch.long), torch.cumsum(self._fragment_counts, 0))
             )
+        if self._bond_counts is not None:
             self._bond_offsets = torch.cat(
                 (torch.zeros(1, dtype=torch.long), torch.cumsum(self._bond_counts, 0))
             )
 
     @property
-    def has_diabats(self) -> bool:
+    def has_fragments(self) -> bool:
+        """A fragment partition is available (from a state library or a column)."""
         return self._fragment_counts is not None
+
+    @property
+    def has_channels(self) -> bool:
+        """An SQE charge-transfer channel graph is available (state library only)."""
+        return self._bond_counts is not None
+
+    @property
+    def has_forces(self) -> bool:
+        return self._forces is not None
+
+    @property
+    def has_diabats(self) -> bool:
+        """Both a partition and its channel graph -- what the SQE models require."""
+        return self.has_fragments and self.has_channels
 
     def __len__(self) -> int:
         return int(self._counts.shape[0])
@@ -183,10 +219,11 @@ class MoleculeDataset:
         rows = torch.cat(atom_slices) if atom_slices else torch.empty(0, dtype=torch.long)
         batch_idx = torch.repeat_interleave(torch.arange(idx.shape[0]), counts)
 
-        diabatic: dict = {}
-        if self.has_diabats:
-            # New-batch atom offsets, so frame-local indices become batch-global ones.
-            atom_offsets = torch.cumsum(counts, 0) - counts
+        # New-batch atom offsets, so frame-local indices become batch-global ones.
+        atom_offsets = torch.cumsum(counts, 0) - counts
+
+        fragments: dict = {}
+        if self.has_fragments:
             frag_counts = self._fragment_counts[idx]
             frag_offsets = torch.cumsum(frag_counts, 0) - frag_counts
             frag_rows = torch.cat(
@@ -196,6 +233,18 @@ class MoleculeDataset:
                 ]
             ) if idx.numel() else torch.empty(0, dtype=torch.long)
 
+            fragments = dict(
+                fragment_idx=(
+                    self._fragment_idx[rows]
+                    + torch.repeat_interleave(frag_offsets, counts)
+                ),
+                fragment_charge=self._fragment_charge[frag_rows],
+                fragment_two_s=self._fragment_two_s[frag_rows],
+                n_fragments=int(frag_counts.sum()),
+            )
+
+        channels: dict = {}
+        if self.has_channels:
             bond_counts = self._bond_counts[idx]
             bond_rows = torch.cat(
                 [
@@ -204,14 +253,7 @@ class MoleculeDataset:
                 ]
             ) if idx.numel() else torch.empty(0, dtype=torch.long)
 
-            diabatic = dict(
-                fragment_idx=(
-                    self._fragment_idx[rows]
-                    + torch.repeat_interleave(frag_offsets, counts)
-                ),
-                fragment_charge=self._fragment_charge[frag_rows],
-                fragment_two_s=self._fragment_two_s[frag_rows],
-                n_fragments=int(frag_counts.sum()),
+            channels = dict(
                 bond_index=(
                     self._bond_index[:, bond_rows]
                     + torch.repeat_interleave(atom_offsets, bond_counts)
@@ -225,7 +267,7 @@ class MoleculeDataset:
             batch_idx=batch_idx,
             n_systems=int(idx.shape[0]),
             energy=self._energy[idx],
-            forces=self._forces[rows],
+            forces=self._forces[rows] if self._forces is not None else None,
             total_charge=self._total_charge[idx] if self._total_charge is not None else None,
             dipole=self._dipole[idx] if self._dipole is not None else None,
             polarizability=(
@@ -236,7 +278,11 @@ class MoleculeDataset:
                 if self._dipole_derivatives is not None
                 else None
             ),
-            **diabatic,
+            eda=(
+                {k: v[idx] for k, v in self._eda.items()} if self._eda is not None else None
+            ),
+            **fragments,
+            **channels,
         )
 
 
@@ -251,11 +297,25 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
     **Hartree/Angstrom** so they match autograd forces ``-dE/d(positions in Angstrom)``.
     (Verified by finite difference: stored/Bohr == -dE/dx to ~1e-4.)
 
-    ``library`` is an optional :class:`rsfff.mlip.diabats.DiabaticStateLibrary`. When given,
-    each frame's ``config_type`` header is resolved against it to obtain the fragment
-    partition, formal charges/spins, and the **channel graph** for the SQE solve. The frame is
-    validated against the registry (element order, charge, multiplicity) rather than coerced to
-    fit -- see ``rsfff.mlip.diabats.assign_from_headers``.
+    Forces are optional: reference calculations that produce no nuclear gradient (the
+    Q-Chem ALMO-EDA single points in ``data/eda_data``) yield ``forces=None`` rather than
+    a block of zeros, so a mis-wired loss raises instead of quietly training against a
+    flat surface. All-or-nothing across frames.
+
+    ``eda_*`` headers are collected into an ``eda`` dict keyed without the prefix
+    (``eda_disp`` -> ``"disp"``), in Hartree as stored.
+
+    The fragment partition comes from one of two places, in order of precedence:
+
+    1. ``library``, an optional :class:`rsfff.mlip.diabats.DiabaticStateLibrary`. Each
+       frame's ``config_type`` header is resolved against it to obtain the partition,
+       formal charges/spins, and the **channel graph** for the SQE solve. The frame is
+       validated against the registry (element order, charge, multiplicity) rather than
+       coerced to fit -- see ``rsfff.mlip.diabats.assign_from_headers``.
+    2. a per-atom ``fragment_idx`` column, with ``fragment_charges`` /
+       ``fragment_multiplicities`` headers. This gives a partition but **no channel
+       graph** (a distance-independent set of charge-transfer channels cannot be inferred
+       from a partition alone), so SQE models still need a library.
     """
     import ase.units
     from ase.io import iread
@@ -263,18 +323,25 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
     bohr = float(ase.units.Bohr)  # Angstrom per bohr
     pos_list, num_list, force_list, energy_list, counts = [], [], [], [], []
     charge_list, dip_list, pol_list, dmu_list = [], [], [], []
+    eda_lists: dict[str, list[float]] = {}
     frag_idx_list, frag_q_list, frag_s_list, frag_counts = [], [], [], []
     bond_list, bond_counts = [], []
     for atoms in iread(str(path), index=":"):
         n = len(atoms)
         pos_list.append(np.asarray(atoms.get_positions(), dtype=np.float64))
         num_list.append(np.asarray(atoms.numbers, dtype=np.int64))
-        force_list.append(np.asarray(atoms.get_forces(), dtype=np.float64) / bohr)
+        try:
+            force_list.append(np.asarray(atoms.get_forces(), dtype=np.float64) / bohr)
+        except (NotImplementedError, RuntimeError):
+            pass  # no gradient in the reference calculation; checked for consistency below
         energy_list.append(float(atoms.get_potential_energy()))
         counts.append(n)
 
         info = atoms.info
         charge_list.append(float(info.get("charge", 0.0)))
+        for key, value in info.items():
+            if key.startswith("eda_"):
+                eda_lists.setdefault(key[4:], []).append(float(value))
         # ASE recognizes "dipole" as a calculator property and moves it out of info.
         dip = info.get("dipole")
         if dip is None and atoms.calc is not None:
@@ -313,6 +380,21 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
             frag_counts.append(assignment.n_fragments)
             bond_list.append(assignment.bond_index)
             bond_counts.append(assignment.bond_index.shape[1])
+        elif "fragment_idx" in atoms.arrays:
+            fi = np.asarray(atoms.arrays["fragment_idx"], dtype=np.int64)
+            nf = int(fi.max()) + 1 if fi.size else 0
+            frag_idx_list.append(fi)
+            frag_counts.append(nf)
+            q = info.get("fragment_charges")
+            m = info.get("fragment_multiplicities")
+            frag_q_list.append(
+                np.asarray(q, dtype=np.float64).reshape(nf) if q is not None
+                else np.zeros(nf)
+            )
+            frag_s_list.append(
+                np.asarray(m, dtype=np.float64).reshape(nf) - 1.0 if m is not None
+                else np.zeros(nf)
+            )
 
     n_frames = len(counts)
     if len(dip_list) not in (0, n_frames) or len(pol_list) not in (0, n_frames) or len(
@@ -323,19 +405,34 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
             f"(dipole {len(dip_list)}, polarizability {len(pol_list)}, "
             f"dipole_derivatives {len(dmu_list)} of {n_frames})"
         )
+    if len(force_list) not in (0, n_frames):
+        raise ValueError(
+            f"{path}: forces present on {len(force_list)} of {n_frames} frames; "
+            f"labels must be all-or-nothing"
+        )
+    bad_eda = {k: len(v) for k, v in eda_lists.items() if len(v) != n_frames}
+    if bad_eda:
+        raise ValueError(
+            f"{path}: EDA components present on some frames but not all "
+            f"(of {n_frames} frames: {bad_eda})"
+        )
 
     positions = torch.tensor(np.concatenate(pos_list), dtype=dtype)
     atomic_numbers = torch.tensor(np.concatenate(num_list), dtype=torch.long)
-    forces = torch.tensor(np.concatenate(force_list), dtype=dtype)
+    forces = torch.tensor(np.concatenate(force_list), dtype=dtype) if force_list else None
     energy = torch.tensor(energy_list, dtype=dtype)
     counts_t = torch.tensor(counts, dtype=torch.long)
-    diabatic: dict = {}
-    if library is not None:
-        diabatic = dict(
+
+    partition: dict = {}
+    if frag_counts:
+        partition = dict(
             fragment_idx=torch.tensor(np.concatenate(frag_idx_list), dtype=torch.long),
             fragment_charge=torch.tensor(np.concatenate(frag_q_list), dtype=dtype),
             fragment_two_s=torch.tensor(np.concatenate(frag_s_list), dtype=dtype),
             fragment_counts=torch.tensor(frag_counts, dtype=torch.long),
+        )
+    if bond_counts:  # channel graph, from a state library only
+        partition.update(
             bond_index=torch.tensor(np.concatenate(bond_list, axis=1), dtype=torch.long),
             bond_counts=torch.tensor(bond_counts, dtype=torch.long),
         )
@@ -348,7 +445,11 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
         dipole_derivatives=(
             torch.tensor(np.concatenate(dmu_list), dtype=dtype) if dmu_list else None
         ),
-        **diabatic,
+        eda=(
+            {k: torch.tensor(v, dtype=dtype) for k, v in eda_lists.items()}
+            if eda_lists else None
+        ),
+        **partition,
     )
 
 
@@ -372,16 +473,33 @@ def concatenate_datasets(datasets: "list[MoleculeDataset]") -> MoleculeDataset:
             raise ValueError(f"cannot concatenate: {name} present on some datasets only")
         return torch.cat(fields, dim=dim)
 
+    def _cat_eda():
+        dicts = [d._eda for d in datasets]
+        present = [e is not None for e in dicts]
+        if not any(present):
+            return None
+        if not all(present):
+            raise ValueError("cannot concatenate: eda labels present on some datasets only")
+        keys = set(dicts[0])
+        for e in dicts[1:]:
+            if set(e) != keys:
+                raise ValueError(
+                    f"cannot concatenate: EDA component sets differ "
+                    f"({sorted(keys)} vs {sorted(e)})"
+                )
+        return {k: torch.cat([e[k] for e in dicts]) for k in dicts[0]}
+
     return MoleculeDataset(
         torch.cat([d._pos for d in datasets]),
         torch.cat([d._num for d in datasets]),
-        torch.cat([d._forces for d in datasets]),
+        _cat_optional("_forces"),
         torch.cat([d._energy for d in datasets]),
         torch.cat([d._counts for d in datasets]),
         total_charge=_cat_optional("_total_charge"),
         dipole=_cat_optional("_dipole"),
         polarizability=_cat_optional("_polarizability"),
         dipole_derivatives=_cat_optional("_dipole_derivatives"),
+        eda=_cat_eda(),
         # Frame-local indices, so plain concatenation is correct -- flat_batch re-offsets.
         fragment_idx=_cat_optional("_fragment_idx"),
         fragment_charge=_cat_optional("_fragment_charge"),

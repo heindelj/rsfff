@@ -574,10 +574,21 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
     # power-spectrum is already efficient cuBLAS bmm) and lets inductor cleanly compile
     # the dense readout in `pf_model`, which is where fusion actually helps.
     @torch.compiler.disable
-    def forward(self, batch: "Batch") -> LambdaFeatures:
+    def forward(self, batch: "Batch", group_idx: torch.Tensor | None = None) -> LambdaFeatures:
+        """``group_idx`` restricts which atoms may be neighbors (default: the frame).
+
+        Passing ``batch.fragment_idx`` makes every atom's descriptor a function of its own
+        fragment only, so any per-atom parameter derived from it is independent of the
+        surroundings and a pair sum built on it is rigorously two-body. The default keeps
+        the full supersystem environment, which lets parameters respond to neighboring
+        molecules (real physics, e.g. environment quenching of atomic C6) at the cost of
+        that strict separability. ``FlatStateSOAPFeaturizer`` takes the same argument.
+        """
         positions = batch.positions
         species_idx = self._species_lut[batch.atomic_numbers]
-        edge_index = self._build_edges(positions, batch.batch_idx)
+        edge_index = self._build_edges(
+            positions, batch.batch_idx if group_idx is None else group_idx
+        )
         # radius_graph returns directed edges; DensityExpansion treats edge_index[0]
         # as the center i and [1] as the neighbor j. The graph is symmetric so either
         # orientation yields the same density.

@@ -43,4 +43,4 @@ rsfff-train-monomer = "rsfff.train.train_monomer:main"
 
 [tool.setuptools]
 package-dir = { "rsfff" = "src" }
-packages = ["rsfff", "rsfff.features", "rsfff.mlip", "rsfff.train", "rsfff.qcgen"]
+packages = ["rsfff", "rsfff.features", "rsfff.ff", "rsfff.mlip", "rsfff.train", "rsfff.qcgen"]

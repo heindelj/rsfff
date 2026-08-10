@@ -25,6 +25,11 @@ from rsfff.train.data import Batch
 DATA_H2O = "data/labels/h2o.extxyz"
 DATA_H3O = "data/labels/h3o+.extxyz"
 
+# Q-Chem ALMO-EDA water clusters (scripts/parse_qchem_eda.py): no forces, a per-atom
+# fragment_idx column, and eda_* component labels on the header line.
+DATA_W2 = "data/eda_data/w2_wb97xv_qzvppd.xyz"
+DATA_W3 = "data/eda_data/w3_wb97xv_qzvppd.xyz"
+
 
 @pytest.fixture(autouse=True)
 def _float64_cpu():
