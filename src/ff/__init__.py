@@ -16,13 +16,41 @@ from .dispersion import (
     build_log_priors,
     tt_damped_c6_energy,
 )
+from .multipole import (
+    build_polytensor,
+    damped_interaction_tensor,
+    multipole_pair_energy,
+    slater_one_center_damp,
+    slater_two_center_damp,
+)
 from .pairs import inter_fragment_pairs
+from .pauli import (
+    DEFAULT_PAULI_DIPOLE_SCALE,
+    DEFAULT_PAULI_PRIOR,
+    PauliModel,
+    PauliMultipoleHeads,
+    PauliOutput,
+    SlaterPauli,
+    build_pauli_priors,
+)
 from .units import BOHR_ANG, KJMOL_PER_HARTREE
 
 __all__ = [
     "fermi_switch",
     "tang_toennies",
     "inter_fragment_pairs",
+    "slater_two_center_damp",
+    "slater_one_center_damp",
+    "damped_interaction_tensor",
+    "multipole_pair_energy",
+    "build_polytensor",
+    "PauliMultipoleHeads",
+    "PauliOutput",
+    "SlaterPauli",
+    "PauliModel",
+    "build_pauli_priors",
+    "DEFAULT_PAULI_PRIOR",
+    "DEFAULT_PAULI_DIPOLE_SCALE",
     "tt_damped_c6_energy",
     "DispersionParameterHeads",
     "DispersionOutput",

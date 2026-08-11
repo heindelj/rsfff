@@ -149,6 +149,51 @@ class DispersionConfig:
 
 
 @dataclass
+class PauliConfig:
+    """Slater-damped multipolar Pauli repulsion plus its short-range pair correction.
+
+    Deliberately has no range-separation parameter, unlike ``DispersionConfig``: the Slater
+    form is short-ranged by construction (the undamped tail is subtracted off) and valid
+    all the way in, so there is nothing to hand over to the network at a midpoint, and the
+    correction head's own envelope is already at full strength at short range.
+
+    Intramolecular pairs are excluded by ``inter_only`` -- a hard mask on the pair list, not
+    a distance cutoff. On this data intra H-H reaches 1.688 A while inter O-H reaches down
+    to 1.552 A, so no radius separates them; reactivity is a job for a learned per-pair
+    weight (``SlaterPauli.pair_weight``), not a threshold.
+    """
+
+    cutoff: float = 7.0             # pair-list cutoff, Angstrom
+    taper_width: float = 1.0        # C2 taper width below the cutoff, Angstrom
+    max_rank: int = 1               # 0 = charges, 1 = +dipoles, 2 = +quadrupoles
+    inter_only: bool = True
+    learn_q: bool = True            # per-species log-q deviation
+    environment_q: bool = True      # environment-dependent log-q residual
+    learn_b: bool = True            # per-species log-b deviation
+    environment_b: bool = False     # never on by default; b competes with q and with dE
+    learn_dipole: bool = True       # needs features.selected_lambdas to include 1
+    learn_quadrupole: bool = True   # max_rank 2 only; needs lambda=2 features
+    emb_dim: int = 16
+    hidden: int = 64
+    depth: int = 2
+    equiv_channels: int = 32        # lambda=1 channel reduction in the dipole head
+    # Pair correction head
+    correction: bool = True
+    corr_hidden: int = 64
+    corr_depth: int = 2
+    corr_n_radial: int = 8
+    corr_r_on: float = 4.0          # Angstrom; envelope full strength below this
+    corr_r_off: float = 5.0         # Angstrom; exactly zero at and beyond this
+    corr_energy_scale: float = 3.0e-3   # Hartree; mod_pauli runs ~5x larger than disp
+    # Loss. Squared errors are divided by `energy_scale`^2 so the fit term is O(1) for an
+    # error of that size and every penalty weight is a plain dimensionless number.
+    target: str = "mod_pauli"       # which batch.eda[...] component to fit
+    energy_scale: float = 3.8093e-4  # 1 kJ/mol in Hartree
+    corr_l2_weight: float = 0.0     # penalty on the correction's magnitude
+    intra_fragment_features: bool = False   # ablation: group features by fragment
+
+
+@dataclass
 class Config:
     run_name: str = "run"
     device: str = "auto"       # auto -> cuda > mps > cpu
@@ -160,6 +205,7 @@ class Config:
     monomer: MonomerConfig = field(default_factory=MonomerConfig)
     sqe: SQEConfig = field(default_factory=SQEConfig)
     dispersion: DispersionConfig = field(default_factory=DispersionConfig)
+    pauli: PauliConfig = field(default_factory=PauliConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
@@ -228,6 +274,7 @@ def load_config(path) -> Config:
     monomer_cfg = _from_block(MonomerConfig, raw.get("monomer", {}) or {})
     sqe_cfg = _from_block(SQEConfig, raw.get("sqe", {}) or {})
     dispersion_cfg = _from_block(DispersionConfig, raw.get("dispersion", {}) or {})
+    pauli_cfg = _from_block(PauliConfig, raw.get("pauli", {}) or {})
     train_cfg = TrainConfig(
         epochs=int(train.get("epochs", TrainConfig.epochs)),
         batch_size=int(train.get("batch_size", TrainConfig.batch_size)),
@@ -262,6 +309,7 @@ def load_config(path) -> Config:
         monomer=monomer_cfg,
         sqe=sqe_cfg,
         dispersion=dispersion_cfg,
+        pauli=pauli_cfg,
         data=data_cfg,
         train=train_cfg,
     )

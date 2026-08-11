@@ -1,0 +1,75 @@
+# Rank-2 variant of configs/eda_water_pauli.yaml: the parameter function also emits a
+# traceless quadrupole, predicted as its five spherical components (q20, q21c, q21s, q22c,
+# q22s) and converted to Cartesian for the contraction. The head is zero-initialized, so
+# this is a strict superset of the rank-1 model at initialization.
+#
+# Motivation: rank 1 left `ff_mae` occasionally above `mae`, meaning the correction head was
+# absorbing systematic backbone error. pyCMM's K_quad_pauli is non-zero for both elements,
+# so the quadrupole is real missing physics rather than something the network should carry.
+#
+# Intermolecular Pauli repulsion against the Q-Chem ALMO-EDA `mod_pauli` component.
+#
+#   python -m rsfff.train.train_pauli configs/eda_water_pauli.yaml
+#
+# The untrained backbone (pyCMM Pauli priors, charges only, no correction) already reaches
+# ~7 kJ/mol MAE on w2 at correlation 0.992 -- the priors have the shape right and the scale
+# off by ~18%, so watch `ff_mae` vs `mae`: the gap is what the neural correction is actually
+# contributing, and a large share is a hint that the missing physics is the quadrupole
+# rather than anything neural.
+#
+# `mod_pauli` = cls_pauli - disp, so this composes with configs/eda_water_disp_full.yaml
+# without double counting. Note the split between the two is a property of the EDA scheme;
+# the fitted Pauli multipoles are not transferable to a different decomposition.
+run_name: eda_water_pauli_q
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/eda_data/w2_wb97xv_qzvppd.xyz
+    - data/eda_data/w3_wb97xv_qzvppd.xyz
+    - data/eda_data/w4_wb97xv_qzvppd.xyz
+    - data/eda_data/w5_wb97xv_qzvppd.xyz
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]  # lambda=1 (odd parity) is what the Pauli dipole head reads
+  backend: e3nn
+  density_channels: 8
+
+pauli:
+  target: mod_pauli
+  cutoff: 7.0                  # pair-list cutoff, Angstrom; f1(b r)/r there is ~1e-8 Ha
+  taper_width: 1.0
+  max_rank: 2                  # 0 = charges, 1 = +dipoles, 2 = +quadrupoles
+  inter_only: true             # hard mask; no radius separates intra from inter on this data
+  learn_q: true
+  environment_q: true
+  learn_b: true
+  environment_b: false         # b competes with q and with the correction; opt in explicitly
+  learn_dipole: true
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+  equiv_channels: 32
+  correction: true
+  corr_hidden: 64
+  corr_depth: 2
+  corr_r_on: 4.0
+  corr_r_off: 5.0              # must not exceed features.cutoff
+  corr_energy_scale: 3.0e-3    # Hartree; mod_pauli runs ~5x larger per pair than disp
+  corr_l2_weight: 0.0          # dimensionless (see pauli.energy_scale)
+  intra_fragment_features: false   # true = parameters see only their own monomer (ablation)
+
+train:
+  epochs: 60
+  batch_size: 32
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4         # on the log-space deviations, this pulls toward the priors
+  grad_clip: 5.0
+  eval_every: 2

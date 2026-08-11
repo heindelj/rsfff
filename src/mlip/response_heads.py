@@ -197,3 +197,59 @@ class AtomicVectorHead(nn.Module):
         gate = self.gate_mlp(torch.cat((inv_feats, emb), dim=-1))         # (N, K)
         vec_k = torch.einsum("nmp,pk->nmk", vec_feats, self.equiv_reduce)  # (N,3,K)
         return torch.einsum("nmk,nk->nm", vec_k, gate)                     # (N, 3)
+
+
+class AtomicQuadrupoleHead(nn.Module):
+    """Per-atom traceless quadrupole as **spherical** components ``(N, 5)``.
+
+    Same construction as :class:`AtomicVectorHead` one rank up: an invariant MLP gates a
+    learned reduction of the lambda=2 (even-parity) channels, so the output is equivariant
+    while its magnitude is conditioned on the invariant environment. Zero-initialized, so
+    the quadrupole starts at exactly zero.
+
+    Emits ``(q20, q21c, q21s, q22c, q22s)`` -- the convention the multipole force field
+    quotes -- rather than the backend's raw lambda=2 slots. The two are *not* the same
+    labeling: e3nn's real spherical harmonics carry a permuted axis convention that mixes
+    m=0 with m=2c, so the ``irrep2_to_spherical`` change of basis is injected here (built
+    by :func:`rsfff.ff.multipole.irrep2_to_spherical` from the backend's own tested
+    constant) exactly as :class:`AtomicAlphaHead` injects ``irrep6_to_voigt``.
+
+    Five components rather than six Cartesian ones is deliberate: the traceless constraint
+    is then structural. A six-component prediction would carry an isotropic degree of
+    freedom the interaction tensor cannot see -- an unconstrained gauge on the parameters.
+    """
+
+    def __init__(
+        self,
+        p0: int,
+        p2: int,
+        emb_dim: int,
+        irrep2_to_spherical: torch.Tensor,   # (5, 5)
+        *,
+        hidden: int = 64,
+        depth: int = 2,
+        equiv_channels: int = 32,
+    ) -> None:
+        super().__init__()
+        if irrep2_to_spherical.shape != (5, 5):
+            raise ValueError(
+                f"irrep2_to_spherical must be (5, 5), got {tuple(irrep2_to_spherical.shape)}"
+            )
+        self.equiv_channels = equiv_channels
+        self.equiv_reduce = nn.Parameter(torch.randn(p2, equiv_channels) / (p2 ** 0.5))
+        self.gate_mlp = mlp(p0 + emb_dim, hidden, depth, equiv_channels)
+        self.register_buffer("_to_spherical", irrep2_to_spherical, persistent=False)
+        with torch.no_grad():
+            self.gate_mlp[-1].weight.zero_()
+            self.gate_mlp[-1].bias.zero_()
+
+    def forward(
+        self,
+        inv_feats: torch.Tensor,    # (N, P0)
+        emb: torch.Tensor,          # (N, emb_dim)
+        equiv_feats: torch.Tensor,  # (N, 5, P2)
+    ) -> torch.Tensor:
+        gate = self.gate_mlp(torch.cat((inv_feats, emb), dim=-1))              # (N, K)
+        equiv_k = torch.einsum("nmp,pk->nmk", equiv_feats, self.equiv_reduce)  # (N,5,K)
+        a2 = torch.einsum("nmk,nk->nm", equiv_k, gate)                         # (N, 5)
+        return a2 @ self._to_spherical                                         # (N, 5)

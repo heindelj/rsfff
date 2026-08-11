@@ -295,6 +295,231 @@ for k, v in res.by_order.items():
     print(f"  {k}-body          {float(v) * K:8.3f}")
 """)
 
+# ===========================================================================
+# Part 2 -- Pauli repulsion
+# ===========================================================================
+
+md("""
+---
+
+# Part 2 — Pauli repulsion vs. Q-Chem ALMO-EDA
+
+The model is `rsfff.ff.pauli.SlaterPauli`: the **Slater two-center damping** applied to the
+multipole interaction tensor, with the undamped tail subtracted off so the term is
+exponentially short-ranged by construction, plus its own term-specific pair correction.
+
+$$E_\\mathrm{Pauli} = \\sum_{i<j}^{\\text{inter}} \\Big[\\, T_\\mathrm{cut}(r_{ij})\;
+\\mathbf{m}_j^{\\mathsf T}\\, \\big[f_n(b_{ij} r_{ij})\\, \\mathbf{T}(\\mathbf{r}_{ij})\\big]\\, \\mathbf{m}_i
+\;+\; W(r_{ij})\\, \\Delta E_{ij} \\,\\Big]$$
+
+Unlike dispersion there is **no Fermi range separation**: the Slater form is valid all the
+way in, so nothing has to be handed to the network at a midpoint.
+
+The parameter function emits the Pauli multipoles $\\mathbf{m}_i = [q_i, \\boldsymbol{\\mu}_i,
+\\mathbf{\\Theta}_i]$ *directly* — a departure from pyCMM, which scales the real
+electrostatic multipoles by fitted $K_\\mathrm{dipo}$/$K_\\mathrm{quad}$ factors. The dipole
+comes from the $\\lambda=1$ (odd-parity) features and the quadrupole from $\\lambda=2$,
+predicted as its five **spherical** components $(q_{20}, q_{21c}, q_{21s}, q_{22c}, q_{22s})$
+and converted to Cartesian for the contraction. Five rather than six is structural: the
+traceless constraint is then exact, where a six-component Cartesian prediction would carry
+an isotropic degree of freedom the interaction tensor cannot see.
+
+Target is `eda_mod_pauli` = `cls_pauli − disp`, so it composes with Part 1 with no double
+counting.
+""")
+
+code("""
+import pauli_plots as pp
+from pauli_analysis import load_model as load_pauli, predict as predict_pauli, atom_parameters as pauli_params
+from rsfff.ff.pauli import DEFAULT_PAULI_PRIOR
+
+PAULI_RUNS = [
+    ("rank 2 (+quadrupoles)", "checkpoints/eda_water_pauli_q/best.pt", "configs/eda_water_pauli_quad.yaml"),
+    ("rank 1 (charges + dipoles)", "checkpoints/eda_water_pauli/best.pt", "configs/eda_water_pauli.yaml"),
+    ("rank 1, intra-fragment features", "checkpoints/eda_water_pauli_intra/best.pt", "configs/eda_water_pauli_intra.yaml"),
+]
+
+pauli_model, pauli_cfg, pauli_state = load_pauli(*PAULI_RUNS[0][1:])
+print(f"{PAULI_RUNS[0][0]}: epoch {pauli_state['epoch']}  val_loss {pauli_state['val_loss']:.4f}")
+pauli_preds = {tag: predict_pauli(pauli_model, ds, pauli_cfg.pauli.target) for tag, ds in datasets.items()}
+
+print(f"{'cluster':<9}{'MAE':<9}{'RMSE':<9}{'R^2':<10}{'corr share'}")
+for tag, p in pauli_preds.items():
+    err = p["pred"] - p["ref"]
+    share = np.abs(p["corr"]) / np.maximum(np.abs(p["ff"]) + np.abs(p["corr"]), 1e-30)
+    print(f"{tag:<9}{np.abs(err).mean():<9.4f}{np.sqrt((err**2).mean()):<9.4f}"
+          f"{np.corrcoef(p['pred'], p['ref'])[0,1]**2:<10.5f}{share.mean()*100:.2f}%")
+""")
+
+md("""
+## Correlation, colored by how much came from the correction head
+
+Same convention as Part 1: the residual row exists because at $R^2 > 0.999$ the parity plot
+alone shows nothing. Color is the share of the pair energy the network supplied — a nearly
+white cloud means the Slater backbone is carrying the physics and the correction really is a
+delta.
+""")
+
+code("""
+_ = pp.correlation_panels(pauli_preds, title=f"Pauli repulsion: {PAULI_RUNS[0][0]}")
+""")
+
+md("""
+## The learned Pauli multipoles
+
+Charge and damping exponent are shown against pyCMM's fitted priors; the interesting
+statement is the *displacement* from a fitted classical model. The dipole and quadrupole
+panels have no prior marker because those heads are zero-initialized — the reference is the
+origin, and any nonzero width is something the fit decided it needed.
+""")
+
+code("""
+pauli_atoms = pauli_params(pauli_model, datasets, n_frames=150, target=pauli_cfg.pauli.target)
+_ = pp.parameter_panels(pauli_atoms, DEFAULT_PAULI_PRIOR)
+
+for z, sym in ((1, "H"), (8, "O")):
+    m = pauli_atoms["Z"] == z
+    print(f"{sym}: q {pauli_atoms['q'][m].mean():7.3f} (prior {DEFAULT_PAULI_PRIOR[z][0]:.3f})"
+          f"   b {pauli_atoms['b'][m].mean():5.3f} (prior {DEFAULT_PAULI_PRIOR[z][1]:.3f})"
+          f"   |mu| {pauli_atoms['mu'][m].mean():.4f}   |Q| {pauli_atoms['quad'][m].mean():.4f}")
+""")
+
+md("""
+## What each rank of the multipole expansion buys
+
+The rank ladder is a strict nesting: both equivariant heads are zero-initialized, so rank 2
+reproduces rank 1 exactly at initialization and any gain is real. The intra-fragment run is
+the additive control — parameters that see only their own monomer.
+""")
+
+code("""
+pauli_table = {}
+for label, ckpt, conf in PAULI_RUNS:
+    if not Path(ckpt).exists():
+        print(f"skipping '{label}': not trained")
+        continue
+    m, c, s = load_pauli(ckpt, conf)
+    pr = {tag: predict_pauli(m, ds, c.pauli.target) for tag, ds in datasets.items()}
+    pauli_table[label] = {t: float(np.abs(p["pred"] - p["ref"]).mean()) for t, p in pr.items()}
+
+_ = pp.rank_comparison(pauli_table)
+print(f"{'variant':<34}" + "".join(f"{t:<10}" for t in CLUSTERS))
+for label, row in pauli_table.items():
+    print(f"{label:<34}" + "".join(f"{row[t]:<10.4f}" for t in CLUSTERS))
+""")
+
+md("""
+## Range separation vs. the delta-learning cutoff
+
+Every term carries **two independent distance scales**, and they are set in completely
+different ways:
+
+- where the *physics* hands over — dispersion's Fermi midpoint $r_0$, **learned** under a
+  penalty pushing it down;
+- where the *network* is allowed to contribute — the pair head's compact envelope
+  $[r_\\mathrm{on}, r_\\mathrm{off}]$, a **fixed hyperparameter**.
+
+Nothing in the training loop forces those to agree. The shaded band below is the region
+where the full analytic term and the correction are *both* at full strength — the place a
+systematic backbone error can hide inside the network instead of showing up as a fit error.
+The bottom two panels say whether that band matters: how many pairs live there, and how much
+of each piece's energy it accounts for.
+""")
+
+code("""
+pair = predict_pauli(pauli_model, datasets["w3"], pauli_cfg.pauli.target,
+                     n_frames=400, with_pairs=True)
+disp_r0 = float(model.r0.detach())
+
+_ = pp.switching_functions(
+    pair["pair_r"], pair["pair_e_ff"], pair["pair_e_corr"],
+    disp_r0=disp_r0,
+    corr_window=(pauli_cfg.pauli.corr_r_on, pauli_cfg.pauli.corr_r_off),
+    taper_window=(pauli_cfg.pauli.cutoff - pauli_cfg.pauli.taper_width, pauli_cfg.pauli.cutoff),
+)
+""")
+
+code("""
+r = pair["pair_r"]; ff = np.abs(pair["pair_e_ff"]); corr = np.abs(pair["pair_e_corr"])
+r_on = pauli_cfg.pauli.corr_r_on
+
+print(f"dispersion learned Fermi midpoint r0 = {disp_r0:.3f} A")
+print(f"correction envelope                  = {r_on:.1f}-{pauli_cfg.pauli.corr_r_off:.1f} A (fixed)")
+print(f"band where both are at full strength = {disp_r0:.2f}-{r_on:.1f} A ({r_on - disp_r0:.2f} A wide)")
+
+inside = (r >= disp_r0) & (r <= r_on)
+print(f"  {inside.mean()*100:.1f}% of inter-fragment pairs sit in that band,"
+      f" carrying {ff[inside].sum()/ff.sum()*100:.1f}% of |E_FF|"
+      f" and {corr[inside].sum()/max(corr.sum(),1e-30)*100:.1f}% of |dE|")
+
+order = np.argsort(r)
+for name, mag in (("|E_FF|", ff), ("|dE|", corr)):
+    if mag.sum() <= 0:
+        continue
+    c = np.cumsum(mag[order]) / mag.sum()
+    pts = ", ".join(f"{f:.0%} by {r[order][np.searchsorted(c, f)]:.2f} A" for f in (0.5, 0.9, 0.99))
+    print(f"  {name:>7}: {pts}")
+""")
+
+
+md("""
+## Many-body expansion of the Pauli repulsion
+
+`SlaterPauli` is a **pair sum**, so with per-species multipoles it would be strictly
+additive and every $E^{(k\\ge3)}$ identically zero. Two things can make it non-additive
+anyway, and this figure separates them:
+
+- **force field** — the emitted charges, dipoles and quadrupoles are functions of the
+  environment, so deleting a neighbor changes the multipoles of the molecules that remain.
+  Real many-body physics, carried by an explicit functional form.
+- **correction head** — its pair features are environment-aware too, so the neural delta is
+  non-additive by the same route, but with nothing physical constraining it.
+
+Which one dominates is what the delta-learning arrangement lives or dies on. Each subset is
+evaluated with only that subset present, so the descriptors see exactly the sub-cluster —
+this is the counterpoise-free MBE of a supermolecular calculation, not a partition of the
+full-cluster energy.
+""")
+
+code("""
+from pauli_analysis import many_body_table as pauli_mbe_table
+
+pauli_mbe = pauli_mbe_table(pauli_model, datasets, 167, target=pauli_cfg.pauli.target)
+_ = pp.many_body_panels(pauli_mbe)
+""")
+
+code("""
+print(f"many-body expansion over {len(pauli_mbe['total_total'])} strongly-interacting clusters:")
+print("cluster   n     total     2-body    3-body    4-body    5-body   |MB|/|tot|")
+for tag in ("w3", "w4", "w5"):
+    m = pauli_mbe["tag"] == tag
+    print(f"{tag:<10}{m.sum():<6}{pauli_mbe['total_total'][m].mean():<10.3f}"
+          f"{pauli_mbe['total_two_body'][m].mean():<10.3f}{pauli_mbe['total_e3'][m].mean():<10.3f}"
+          f"{pauli_mbe['total_e4'][m].mean():<10.3f}{pauli_mbe['total_e5'][m].mean():<10.3f}"
+          f"{np.abs(pauli_mbe['total_many_body'][m] / pauli_mbe['total_total'][m]).mean()*100:.2f}%")
+
+print("\\nsource of the non-additivity (mean beyond-pairwise, kJ/mol):")
+print(f"{'cluster':<10}{'force field':<14}{'correction head':<18}{'corr share'}")
+for tag in ("w3", "w4", "w5"):
+    m = pauli_mbe["tag"] == tag
+    a = np.abs(pauli_mbe["ff_many_body"][m]).mean()
+    b = np.abs(pauli_mbe["corr_many_body"][m]).mean()
+    print(f"{tag:<10}{pauli_mbe['ff_many_body'][m].mean():<+14.4f}"
+          f"{pauli_mbe['corr_many_body'][m].mean():<+18.3e}{b/max(a+b,1e-30)*100:.3f}%")
+
+x = pauli_mbe["ref"] - pauli_mbe["total_two_body"]; y = pauli_mbe["total_many_body"]
+print(f"\\nmodel many-body vs (reference - model 2-body): "
+      f"r = {np.corrcoef(y, x)[0,1]:.4f}, slope = {np.polyfit(y, x, 1)[0]:.3f}")
+""")
+
+md("""
+Note the **sign contrast with dispersion**: the dispersion 3-body term came out positive
+(repulsive, the Axilrod–Teller signature), while the Pauli 3-body is *negative* — repulsion
+in a cluster is weaker than the sum of its pairs. The 4-body term flips sign again, as an
+alternating expansion should.
+""")
+
+
 nb = {
     "cells": CELLS,
     "metadata": {
