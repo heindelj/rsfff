@@ -16,6 +16,12 @@ from .dispersion import (
     build_log_priors,
     tt_damped_c6_energy,
 )
+from .molecular_multipoles import (
+    buckingham_from_second_moment,
+    center_of_nuclear_charge,
+    fragment_multipoles,
+    reference_multipoles,
+)
 from .multipole import (
     build_polytensor,
     damped_interaction_tensor,
@@ -23,7 +29,10 @@ from .multipole import (
     slater_one_center_damp,
     slater_two_center_damp,
 )
-from .pairs import inter_fragment_pairs
+from .onebody import OneBodyEnergy, OneBodyModel, OneBodyOutput
+from .onebody_elec import OneBodyElecModel, OneBodyElecOutput
+from .pairs import inter_fragment_pairs, intra_fragment_pairs
+from .response import FragmentResponse, FragmentResponseOutput
 from .pauli import (
     DEFAULT_PAULI_DIPOLE_SCALE,
     DEFAULT_PAULI_PRIOR,
@@ -39,11 +48,23 @@ __all__ = [
     "fermi_switch",
     "tang_toennies",
     "inter_fragment_pairs",
+    "intra_fragment_pairs",
+    "FragmentResponse",
+    "FragmentResponseOutput",
+    "OneBodyEnergy",
+    "OneBodyModel",
+    "OneBodyOutput",
+    "OneBodyElecModel",
+    "OneBodyElecOutput",
     "slater_two_center_damp",
     "slater_one_center_damp",
     "damped_interaction_tensor",
     "multipole_pair_energy",
     "build_polytensor",
+    "buckingham_from_second_moment",
+    "center_of_nuclear_charge",
+    "fragment_multipoles",
+    "reference_multipoles",
     "PauliMultipoleHeads",
     "PauliOutput",
     "SlaterPauli",

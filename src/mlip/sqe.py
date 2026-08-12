@@ -283,3 +283,28 @@ def atomic_dipole_energy(
     drive = -chivec if field is None else field[batch_idx] - chivec
     e_atom = -0.5 * torch.einsum("na,nab,nb->n", drive, alpha, drive)
     return e_atom.new_zeros(n_systems).index_add_(0, batch_idx, e_atom)
+
+
+def atomic_quadrupole_energy(
+    chiquad: torch.Tensor,       # (N, 5) spherical l=2
+    cquad: torch.Tensor,         # (N,) isotropic or (N, 5, 5) PSD
+    batch_idx: torch.Tensor,
+    n_systems: int,
+    field_gradient: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Minimized on-site quadrupole energy ``-1/2 drive^T C drive`` per system: (M,).
+
+    The rank-2 mirror of :func:`atomic_dipole_energy`. ``drive = gradF - chiquad``; the
+    minimizing quadrupoles are ``Theta_i = C_i drive_i``
+    (:func:`rsfff.mlip.eem.atomic_quadrupoles`, reused unchanged). Evaluating the quadratic
+    form at its minimum avoids ever inverting ``C`` -- the same property the compliance
+    rescaling gives the charge sector, and the one any future coupled solve has to preserve.
+
+    With ``C`` PSD this is <= 0, so a quadrupole sector can only lower the internal energy.
+    """
+    drive = -chiquad if field_gradient is None else field_gradient[batch_idx] - chiquad
+    if cquad.dim() == 1:
+        e_atom = -0.5 * cquad * drive.pow(2).sum(-1)
+    else:
+        e_atom = -0.5 * torch.einsum("na,nab,nb->n", drive, cquad, drive)
+    return e_atom.new_zeros(n_systems).index_add_(0, batch_idx, e_atom)

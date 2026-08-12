@@ -1,0 +1,198 @@
+"""The shared training loop for the standalone force-field terms.
+
+``train_dispersion``, ``train_pauli`` and ``train_elec`` all fit one explicit physical term
+plus a pairwise neural correction against one ``batch.eda[...]`` component, and all three had
+the same forty-line epoch loop. Factored here at the third instance -- two is where a shared
+abstraction is guessed at, three is where its shape is known.
+
+What the terms keep for themselves is what actually differs: how the model is built, which
+penalties the loss carries beyond the fit term, and which diagnostics are worth printing.
+Those arrive as callbacks rather than as flags, so adding a term does not mean editing this
+file.
+
+**The one invariant worth stating loudly:** squared errors are divided by ``energy_scale``
+*before* squaring, so the fit term is O(1) at an error of that size and every penalty weight
+is a plain dimensionless number. During the dispersion work a penalty quoted in Hartree
+against a squared error in Hartree^2 (~1e-7) came out 700x too large, and the optimizer
+duly minimized the penalty while the MAE got worse. Keeping the normalization here means no
+term can reintroduce that mistake by accident.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import torch
+
+from ..ff.units import KJMOL_PER_HARTREE
+from .train import _iter_minibatches
+
+
+def eda_component_fit(out, batch, cfg):
+    """The default fit term: one EDA component against ``out.energy``.
+
+    Returns ``(loss, metrics, target)``. This is exactly what ``run_epoch`` did
+    inline before a term arrived (the 1-body head) whose target is per *fragment*
+    rather than per frame and whose output carries no ``energy_ff``.
+    """
+    if batch.eda is None or cfg.target not in batch.eda:
+        raise ValueError(
+            f"batch carries no eda['{cfg.target}'] label; the dataset must come from "
+            f"scripts/parse_roundtrip.py or scripts/parse_qchem_eda.py (available: "
+            f"{sorted(batch.eda) if batch.eda else 'none'})"
+        )
+    target = batch.eda[cfg.target]
+    err = out.energy - target
+    loss = (err / cfg.energy_scale).pow(2).mean()
+
+    # Share of the *system* energy the correction supplies, not of the mean per-pair
+    # magnitude. Those differ enormously once pair energies carry mixed signs: in
+    # electrostatics the attractive and repulsive pairs largely cancel, so a correction
+    # worth 0.1% of the mean |pair energy| can still move the total by 10 kJ/mol. The
+    # per-pair version reads reassuringly small exactly when it should not.
+    ff, corr = out.energy_ff.detach().abs(), out.energy_corr.detach().abs()
+    metrics = {
+        # kJ/mol throughout: the targets are ~1e-2 Ha and unreadable in Hartree.
+        "mae": float(err.detach().abs().mean()) * KJMOL_PER_HARTREE,
+        "rmse": float(err.detach().pow(2).mean().sqrt()) * KJMOL_PER_HARTREE,
+        "ff_mae": float((out.energy_ff.detach() - target).abs().mean()) * KJMOL_PER_HARTREE,
+        "corr_share": float((corr / (ff + corr).clamp(min=1e-30)).mean()),
+    }
+    return loss, metrics, target
+
+
+def run_epoch(
+    model,
+    dataset,
+    indices,
+    cfg,                       # the term's own config block (needs target, energy_scale)
+    train_cfg,
+    device,
+    *,
+    optimizer=None,
+    seed: int = 0,
+    fit_term=None,             # (out, batch, cfg) -> (Tensor, dict, target); default above
+    penalties=None,            # (out, batch, cfg) -> dict[str, Tensor], extra loss terms
+    diagnostics=None,          # (out, batch, target) -> dict[str, float]
+    grad_positions: bool = False,
+):
+    """One pass over ``indices``. Trains if ``optimizer`` is given, else evaluates.
+
+    Returns per-sample means of every metric, so train and validation lines are comparable
+    regardless of how the last minibatch was sized.
+
+    ``grad_positions`` turns on the autograd path a force term needs: positions become
+    leaves and gradients stay enabled even during evaluation, because ``-dE/dR`` is itself
+    computed by a backward pass. Terms without force labels leave it off and pay nothing.
+    """
+    training = optimizer is not None
+    fit_term = fit_term if fit_term is not None else eda_component_fit
+    model.train(training)
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+
+    for mb in _iter_minibatches(indices, train_cfg.batch_size, shuffle=training, seed=seed):
+        batch = dataset.flat_batch(mb).to(device)
+        if grad_positions:
+            batch.positions.requires_grad_(True)
+
+        with torch.set_grad_enabled(training or grad_positions):
+            out = model(batch)
+            loss, fit_metrics, target = fit_term(out, batch, cfg)
+            extra = penalties(out, batch, cfg) if penalties is not None else {}
+            for value in extra.values():
+                loss = loss + value
+
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                if train_cfg.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                optimizer.step()
+
+        metrics = {"loss": float(loss.detach()), **fit_metrics}
+        # Penalties are summed into the loss; without logging them the loss can be
+        # dominated by a term nothing in the printed line accounts for.
+        metrics.update({k: float(v.detach()) for k, v in extra.items()})
+        if diagnostics is not None:
+            metrics.update(diagnostics(out, batch, target))
+
+        n = len(mb)
+        for k, v in metrics.items():
+            sums[k] = sums.get(k, 0.0) + v * n
+            counts[k] = counts.get(k, 0) + n
+
+    return {k: sums[k] / max(counts[k], 1) for k in sums}
+
+
+def fmt(metrics: dict[str, float], keys) -> str:
+    return "  ".join(f"{k} {metrics[k]:.4g}" for k in keys if k in metrics)
+
+
+def fit(
+    model,
+    dataset,
+    config,
+    cfg,                       # the term's config block
+    device,
+    train_idx,
+    val_idx,
+    *,
+    log_keys,
+    fit_term=None,
+    penalties=None,
+    diagnostics=None,
+    grad_positions: bool = False,
+    report=None,               # (model) -> None, printed once at the end
+):
+    """Baseline evaluation, then the training loop with best-checkpoint saving.
+
+    The untrained line is printed before anything is optimized on purpose: it is the number
+    every later epoch has to beat for the learned parts to be earning their place, and for
+    these terms the physical backbone alone is often already close.
+    """
+    def epoch(indices, **kw):
+        return run_epoch(
+            model, dataset, indices, cfg, config.train, device,
+            fit_term=fit_term, penalties=penalties, diagnostics=diagnostics,
+            grad_positions=grad_positions, **kw
+        )
+
+    base = epoch(val_idx)
+    print(f"untrained: {fmt(base, log_keys)}")
+
+    optimizer = torch.optim.Adam(
+        (p for p in model.parameters() if p.requires_grad),
+        lr=config.train.learning_rate, weight_decay=config.train.weight_decay,
+    )
+    ckpt_dir = Path(config.checkpoint_root) / config.run_name
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_val = float("inf")
+
+    for ep in range(config.train.epochs):
+        t0 = time.time()
+        tr = epoch(train_idx, optimizer=optimizer, seed=config.data.seed + ep)
+        do_eval = (
+            (ep + 1) % config.train.eval_every == 0 or ep == config.train.epochs - 1
+        )
+        line = f"epoch {ep+1:4d}  train: {fmt(tr, log_keys)}  ({time.time()-t0:.1f}s)"
+        if do_eval and len(val_idx) > 0:
+            va = epoch(val_idx)
+            print(line)
+            print(f"            val:   {fmt(va, log_keys)}")
+            if va["loss"] < best_val:
+                best_val = va["loss"]
+                torch.save(
+                    {"model_state": model.state_dict(),
+                     "neighbor_types": dataset.unique_atomic_numbers,
+                     "config": config, "epoch": ep, "val_loss": best_val},
+                    ckpt_dir / "best.pt",
+                )
+        else:
+            print(line)
+
+    if report is not None:
+        report(model)
+    print(f"done; best val loss {best_val:.4e}; checkpoints in {ckpt_dir}")
+    return best_val

@@ -40,6 +40,7 @@ Properties=species:S:1:pos:R:3:fragment_idx:I:1 charge=0 multiplicity=1 n_fragme
 ```
 
 The files in `data/eda_data/*.xyz` are examples of the intended format.
+Both `.xyz` and `.extxyz` extensions are scanned.
 
 ## Interactive Worker Test
 
@@ -97,6 +98,24 @@ export QCHEM_POLL_SECONDS=30
 
 The Slurm account, queue, constraint, wall time, and node count live in
 `scripts/worker.slurm`.
+
+## Job Priority
+
+Workers claim inputs by calculation priority first, then by input filename. The
+priority is configured per calculation in `config.json`; higher numbers run
+first:
+
+```json
+"force": {
+  "priority": 20,
+  "template": "templates/force.in",
+  "molecule": {"mode": "plain"}
+}
+```
+
+Missing priorities default to `0`. Existing running workers keep the script and
+config they loaded when they started, so priority changes apply to newly started
+workers after the updated bundle is synced.
 
 ## Rsync Setup
 

@@ -38,8 +38,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import time
-from pathlib import Path
 
 # macOS: torch's bundled libomp + conda's llvm-openmp abort with OMP Error #15
 # unless this is set before the first OpenMP runtime initializes.
@@ -58,7 +56,7 @@ from ..ff.units import KJMOL_PER_HARTREE  # noqa: E402
 from ..mlip.pair_heads import PairEnergyHead  # noqa: E402
 from .config import Config, load_config  # noqa: E402
 from .data import load_datasets, split_indices  # noqa: E402
-from .train import _iter_minibatches  # noqa: E402
+from .term_loop import fit  # noqa: E402
 from .train_eem import resolve_device  # noqa: E402
 
 
@@ -109,68 +107,26 @@ def build_dispersion_model(features_cfg, disp_cfg, neighbor_types) -> Dispersion
     )
 
 
-def _run_epoch(model, dataset, indices, config: Config, device, *, optimizer=None, seed=0):
-    """One pass over ``indices``. Trains if ``optimizer`` is given, else evaluates."""
-    training = optimizer is not None
-    model.train(training)
-    dcfg, tcfg = config.dispersion, config.train
-    sums: dict[str, float] = {}
-    counts: dict[str, int] = {}
-
-    for mb in _iter_minibatches(indices, tcfg.batch_size, shuffle=training, seed=seed):
-        batch = dataset.flat_batch(mb).to(device)
-        if batch.eda is None or dcfg.target not in batch.eda:
-            raise ValueError(
-                f"batch carries no eda['{dcfg.target}'] label; the dataset must come from "
-                f"scripts/parse_qchem_eda.py (available: "
-                f"{sorted(batch.eda) if batch.eda else 'none'})"
-            )
-        target = batch.eda[dcfg.target]
-
-        with torch.set_grad_enabled(training):
-            out = model(batch)
-            err = out.energy - target
-            # Normalized by energy_scale so the fit term is O(1) at an error of that size
-            # and the penalty weights are dimensionless. Comparing a *squared* error in
-            # Hartree^2 (~1e-7 here) against a penalty quoted in Hartree is a silent
-            # three-orders-of-magnitude mistake that just optimizes the penalty.
-            scale = dcfg.energy_scale
-            loss = (err / scale).pow(2).mean()
-            if dcfg.corr_l2_weight > 0.0:
-                loss = loss + dcfg.corr_l2_weight * (out.e_pair_corr / scale).pow(2).mean()
-            if dcfg.r0_weight > 0.0:
-                loss = loss + dcfg.r0_weight * out.r0
-
-            if training:
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                if tcfg.grad_clip:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), tcfg.grad_clip)
-                optimizer.step()
-
-        n = len(mb)
-        ff_mag = out.e_pair_ff.detach().abs().mean().clamp(min=1e-30)
-        metrics = {
-            "loss": float(loss.detach()),
-            # kJ/mol throughout: the targets are ~1e-2 Ha and unreadable in Hartree.
-            "mae": float(err.detach().abs().mean()) * KJMOL_PER_HARTREE,
-            "rmse": float(err.detach().pow(2).mean().sqrt()) * KJMOL_PER_HARTREE,
-            "ff_mae": float((out.energy_ff.detach() - target).abs().mean()) * KJMOL_PER_HARTREE,
-            "corr_frac": float(out.e_pair_corr.detach().abs().mean() / ff_mag),
-            "r0": float(out.r0.detach()),
-        }
-        for k, v in metrics.items():
-            sums[k] = sums.get(k, 0.0) + v * n
-            counts[k] = counts.get(k, 0) + n
-
-    return {k: sums[k] / max(counts[k], 1) for k in sums}
+def _penalties(out, batch, cfg):
+    # `batch` is unused here; the signature is shared so a term whose penalties need
+    # the labels (the electrostatics multipole loss) can use the same hook.
+    extra = {}
+    if cfg.corr_l2_weight > 0.0:
+        extra["corr_l2"] = cfg.corr_l2_weight * (
+            out.e_pair_corr / cfg.energy_scale
+        ).pow(2).mean()
+    # A *linear* penalty on r0 applies constant downward pressure: the optimizer only
+    # widens the neural region if the fit improves enough to pay for it.
+    if cfg.r0_weight > 0.0:
+        extra["r0"] = cfg.r0_weight * out.r0
+    return extra
 
 
-def _fmt(metrics: dict[str, float], keys) -> str:
-    return "  ".join(f"{k} {metrics[k]:.4g}" for k in keys if k in metrics)
+def _diagnostics(out, batch, target):
+    return {"r0": float(out.r0.detach())}
 
 
-_LOG_KEYS = ("loss", "mae", "rmse", "ff_mae", "corr_frac", "r0")
+_LOG_KEYS = ("loss", "mae", "rmse", "ff_mae", "corr_share", "r0")
 
 
 def train(config: Config):
@@ -200,48 +156,18 @@ def train(config: Config):
         f"{dcfg.energy_scale * KJMOL_PER_HARTREE:.3g} kJ/mol error)"
     )
 
-    # Baseline before any training: the FF backbone alone, which is the number every
-    # later epoch has to beat for the neural correction to be earning its place.
-    base = _run_epoch(model, dataset, val_idx, config, device)
-    print(f"untrained: {_fmt(base, _LOG_KEYS)}")
+    def report(m):
+        with torch.no_grad():
+            c6 = (m.params.log_c6_prior + m.params.d_log_c6).exp()
+            b = (m.params.log_b_prior + m.params.d_log_b).exp()
+        print(f"per-species C6 (Ha*bohr^6): {dict(zip(neighbor_types, c6.tolist()))}")
+        print(f"per-species b  (1/bohr):    {dict(zip(neighbor_types, b.tolist()))}")
+        print(f"r0 = {float(m.r0.detach()):.4f} A")
 
-    optimizer = torch.optim.Adam(
-        (p for p in model.parameters() if p.requires_grad),
-        lr=config.train.learning_rate, weight_decay=config.train.weight_decay,
+    fit(
+        model, dataset, config, dcfg, device, train_idx, val_idx,
+        log_keys=_LOG_KEYS, penalties=_penalties, diagnostics=_diagnostics, report=report,
     )
-    ckpt_dir = Path(config.checkpoint_root) / config.run_name
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    best_val = float("inf")
-
-    for epoch in range(config.train.epochs):
-        t0 = time.time()
-        tr = _run_epoch(model, dataset, train_idx, config, device,
-                        optimizer=optimizer, seed=config.data.seed + epoch)
-        do_eval = (
-            (epoch + 1) % config.train.eval_every == 0 or epoch == config.train.epochs - 1
-        )
-        line = f"epoch {epoch+1:4d}  train: {_fmt(tr, _LOG_KEYS)}  ({time.time()-t0:.1f}s)"
-        if do_eval and len(val_idx) > 0:
-            va = _run_epoch(model, dataset, val_idx, config, device)
-            print(line)
-            print(f"            val:   {_fmt(va, _LOG_KEYS)}")
-            if va["loss"] < best_val:
-                best_val = va["loss"]
-                torch.save(
-                    {"model_state": model.state_dict(), "neighbor_types": neighbor_types,
-                     "config": config, "epoch": epoch, "val_loss": best_val},
-                    ckpt_dir / "best.pt",
-                )
-        else:
-            print(line)
-
-    with torch.no_grad():
-        c6 = model.params.log_c6_prior + model.params.d_log_c6
-        b = model.params.log_b_prior + model.params.d_log_b
-    print(f"per-species C6 (Ha*bohr^6): {dict(zip(neighbor_types, c6.exp().tolist()))}")
-    print(f"per-species b  (1/bohr):    {dict(zip(neighbor_types, b.exp().tolist()))}")
-    print(f"r0 = {float(model.r0.detach()):.4f} A")
-    print(f"done; best val loss {best_val:.4e}; checkpoints in {ckpt_dir}")
     return model
 
 

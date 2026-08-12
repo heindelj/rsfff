@@ -1,0 +1,104 @@
+# Classical electrostatics against the Q-Chem ALMO-EDA `cls_elec` component.
+#
+#   python -m rsfff.train.train_elec configs/eda_water_elec.yaml
+#
+# This term is EXACTLY TWO-BODY by construction: `intra_fragment_features: true` makes the
+# response parameters functions of their own monomer alone, and the SQE solve is grouped by
+# fragment so charge cannot cross a fragment boundary. Every E^(k>=3) of the many-body
+# expansion is zero to round-off (checked in tests/test_ff_electrostatics.py). That is the
+# right physics here -- `cls_elec` is the Coulomb interaction of *frozen* monomer densities,
+# with polarization and charge transfer split off into their own components.
+#
+# Watch `q_res` above everything else: the per-fragment charge residual must stay at machine
+# zero. Anything else means the solve grouping broke.
+#
+# Charge penetration is explicit and carries an effective nuclear charge Z. It is not a small
+# correction: with pyCMM's fitted water multipoles, point multipoles alone reproduce only
+# ~53% of cls_elec (MAE 13.7 kJ/mol on dimers) against 3.25 with penetration included.
+#
+# `max_rank: 1` is what the response solve naturally gives (charges from chi/eta, dipoles
+# from mu = -alpha.chivec). Measured ceilings with pyCMM's parameters: rank 1 reaches
+# MAE 9.07 (w2) / 39.03 (w5) at regression slope 1.42, rank 2 reaches 3.25 / 14.19 at 0.89 --
+# a monopole+dipole expansion cannot reproduce water's quadrupolar field. See
+# configs/eda_water_elec_quad.yaml for the rank-2 comparison.
+run_name: eda_water_elec
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  # wB97M-V/def2-TZVPD, merged from the qchem_roundtrip eda+force outputs by
+  # scripts/parse_roundtrip.py. These carry analytic forces and the frozen-monomer
+  # dipole/second-moment labels that the older data/eda_data files do not.
+  path:
+    - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+  # Seeds the per-element chi/eta from the isolated-atom IP/EA (Mulliken electronegativity
+  # and chemical hardness are the free-atom limits of the SQE parameters). Without it chi is
+  # uniform, no atom is more electronegative than any other, and the solved charges are
+  # identically zero at initialization.
+  atomic_reference_states: data/atomic_reference_states.json
+  # The multipole anchor: 500 standalone water monomers at 300 K, whose r(O-H) and
+  # HOH ranges are measurably wider than the in-cluster monomer distribution. Kept
+  # out of `path` because it carries no eda_* components and does carry forces.
+  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd.xyz
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]  # lambda=1 for chivec, lambda=2 for alpha
+  backend: e3nn
+  density_channels: 8
+
+elec:
+  target: cls_elec
+  cutoff: 12.0                 # this is the one term with a genuine 1/r tail
+  taper_width: 1.0
+  max_rank: 1                  # charges + dipoles, both from the response solve
+  r0_init: 1.5                 # Fermi midpoint; gates point AND penetration, learnable
+  alpha: 8.0
+  learn_r0: true
+  r0_weight: 0.05              # dimensionless, per Angstrom handed to the network
+  environment_chi: true
+  environment_eta: true
+  eta_floor: 0.05
+  learn_dipole: true
+  learn_z: true
+  environment_z: false         # Z is a core property; environment dependence is opt-in
+  learn_b: true
+  environment_b: false
+  s_init: 0.5                  # initial channel compliance
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+  equiv_channels: 32
+  correction: true
+  corr_hidden: 64
+  corr_depth: 2
+  corr_r_on: 4.0
+  corr_r_off: 5.0              # must not exceed features.cutoff
+  corr_energy_scale: 3.0e-3
+  corr_l2_weight: 0.0
+  intra_fragment_features: true    # the two-body-exactness constraint; do not turn off
+  allow_environment: false
+  # Permanent multipoles against the frozen monomers. The interaction energy alone
+  # under-determines the individual multipoles; these are what pin the monomer. Errors
+  # are divided by their scale before squaring, so each term is 1.0 at one scale of
+  # error and the weights are plain dimensionless numbers.
+  dipole_weight: 1.0
+  dipole_scale: 0.05             # e*a0 (~0.13 D); monomer dipoles run ~0.75
+  quadrupole_weight: 0.0         # no atomic quadrupoles at max_rank 1
+
+
+train:
+  epochs: 60
+  batch_size: 32
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 2

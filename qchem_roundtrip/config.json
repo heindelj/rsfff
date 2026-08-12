@@ -2,27 +2,38 @@
   "defaults": {},
   "calculations": {
     "force": {
+      "priority": 20,
       "template": "templates/force.in",
       "molecule": {
         "mode": "plain"
       }
     },
     "opt": {
+      "priority": 10,
       "template": "templates/opt_and_freq.in",
       "molecule": {
         "mode": "plain"
       }
     },
     "polarizability": {
+      "priority": 20,
       "template": "templates/polarizability.in",
       "molecule": {
         "mode": "plain"
       }
     },
     "eda": {
+      "priority": 20,
       "template": "templates/eda.in",
       "molecule": {
         "mode": "fragments"
+      }
+    },
+    "atoms": {
+      "priority": 30,
+      "template": "templates/atom.in",
+      "molecule": {
+        "mode": "plain"
       }
     }
   }

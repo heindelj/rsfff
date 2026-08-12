@@ -93,6 +93,13 @@ def ensure_layout(root: Path, cfg: dict[str, Any]) -> None:
             (calc_dir / rel).mkdir(parents=True, exist_ok=True)
 
 
+def geometry_files(geom_dir: Path) -> list[Path]:
+    paths = []
+    for suffix in ("*.xyz", "*.extxyz"):
+        paths.extend(geom_dir.glob(suffix))
+    return sorted(set(paths))
+
+
 def read_xyz_frames(path: Path) -> list[XYZFrame]:
     lines = path.read_text().splitlines()
     frames: list[XYZFrame] = []
@@ -341,7 +348,7 @@ def generate_inputs(root: Path, cfg: dict[str, Any], *, overwrite: bool = False)
         template = template_path.read_text()
         molecule_cfg = dict(defaults.get("molecule", {}))
         molecule_cfg.update(calc_cfg.get("molecule", {}))
-        for geom in sorted((calc_dir / "geoms").glob("*.xyz")):
+        for geom in geometry_files(calc_dir / "geoms"):
             frames = read_xyz_frames(geom)
             for frame in frames:
                 stem = input_stem_for_frame(geom, len(frames), frame.index)
@@ -368,6 +375,11 @@ def generate_inputs(root: Path, cfg: dict[str, Any], *, overwrite: bool = False)
     return generated
 
 
+def calculation_priority(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
+    calc_name, calc_cfg = item
+    return (-int(calc_cfg.get("priority", 0)), calc_name)
+
+
 def lock_is_stale(lock_dir: Path, stale_seconds: int) -> bool:
     if stale_seconds <= 0:
         return False
@@ -385,8 +397,7 @@ def remove_lock(lock_dir: Path) -> None:
 
 def claim_next_job(root: Path, cfg: dict[str, Any], *, stale_lock_seconds: int = 172800) -> ClaimedJob | None:
     ensure_layout(root, cfg)
-    for calc_name in sorted(cfg["calculations"]):
-        calc_cfg = cfg["calculations"][calc_name]
+    for calc_name, calc_cfg in sorted(cfg["calculations"].items(), key=calculation_priority):
         if not calc_cfg.get("enabled", True):
             continue
         calc_dir = root / calc_name

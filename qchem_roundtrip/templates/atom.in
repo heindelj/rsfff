@@ -1,0 +1,18 @@
+$molecule
+0 2
+  H     0.0000000     0.0000000     0.0000000
+$end
+
+$rem
+   JOBTYPE          =  sp
+   METHOD           =  wB97M-V
+   BASIS            =  def2-TZVPD
+   UNRESTRICTED     =  true
+   SCF_CONVERGENCE  =  10
+   THRESH           =  14
+   XC_GRID          =  000099000590
+   NL_GRID          =  1
+   SYMMETRY         =  false
+   MEM_TOTAL        =  64000
+   MEM_STATIC       =  10000
+$end

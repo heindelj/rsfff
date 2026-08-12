@@ -87,6 +87,39 @@ def atomic_dipoles(
     return torch.einsum("nab,nb->na", alpha, drive)
 
 
+def atomic_quadrupoles(
+    chiquad: torch.Tensor,      # (N, 5) spherical l=2 "quadrupole electronegativity"
+    cquad: torch.Tensor,        # (N,) isotropic or (N, 5, 5) quadrupole polarizability
+    batch_idx: torch.Tensor,
+    field_gradient: torch.Tensor | None = None,   # (M, 5) spherical, per system
+) -> torch.Tensor:
+    """``Theta_i = C_i (gradF - chiquad_i)``; at zero field gradient, ``-C_i chiquad_i``.
+
+    The rank-2 mirror of :func:`atomic_dipoles`. ``C`` is accepted either as a scalar per
+    atom -- an isotropic ``c I_5``, which is manifestly PSD and manifestly equivariant
+    because a multiple of the identity commutes with every Wigner-D -- or as a full
+    ``(N, 5, 5)``, so an anisotropic ``0 + 2`` construction can be dropped in later without
+    touching any caller.
+
+    ``field_gradient`` is the conjugate of a quadrupole the way a uniform field is the
+    conjugate of a dipole. It is the slot polarization will fill; nothing supplies it yet.
+
+    **What this does and does not buy at zero field.** ``Theta = -C chiquad`` with a free
+    equivariant ``chiquad`` and invertible ``C`` is a bijection onto all 5-vectors, so the
+    reachable permanent quadrupoles are exactly those of an unconstrained head -- for *any*
+    ``C``. What is gained is that the sector now has an energy
+    (:func:`rsfff.mlip.sqe.atomic_quadrupole_energy`), which makes ``C`` a physical quantity
+    a 1-body energy target can identify, bounds ``||Theta|| <= ||C|| ||chiquad||``, and gives
+    the field gradient somewhere to enter. Until that energy is in a loss, ``(C, chiquad)``
+    carries an exact gauge -- ``(lambda C, chiquad / lambda)`` leaves ``Theta`` unchanged --
+    so those parameters are not identified and want weight decay.
+    """
+    drive = -chiquad if field_gradient is None else field_gradient[batch_idx] - chiquad
+    if cquad.dim() == 1:
+        return cquad.unsqueeze(-1) * drive
+    return torch.einsum("nab,nb->na", cquad, drive)
+
+
 def eem_energy(
     q: torch.Tensor,              # (N,) from eem_charges
     chi: torch.Tensor,

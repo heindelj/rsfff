@@ -12,7 +12,24 @@ Extracts, from a single ``eda.out``:
   * the EDA terms -- ``cls_elec``, ``mod_pauli``, ``disp``, ``pol``, ``ct`` --
     plus ``prp``/``frz``/``int`` for cross-checking,
   * the ground-state Mulliken charges and the Cartesian multipole moments
-    (charge through hexadecapole) printed at the end of the file.
+    (charge through hexadecapole) printed at the end of the file,
+  * and, when the job ran with ``SCF_PRINT_FRGM = true``, the same two
+    quantities for each **isolated fragment** -- see below.
+
+The per-fragment blocks are worth more than they look. Each frozen-fragment
+sub-job inherits the supersystem's coordinates verbatim (its
+``Standard Nuclear Orientation`` table is byte-identical to the corresponding
+rows of the supersystem's), so its multipoles are reported in the *same frame
+about the same origin*. That makes them directly comparable, and directly
+summable: for a water dimer the fragment dipoles sum to 88% of the relaxed
+supersystem dipole, the remainder being exactly the polarization and charge
+transfer the EDA quantifies. They are the frozen-monomer reference a
+distributed-multipole model wants, at every cluster geometry.
+
+Their origin is the *supersystem's* center of nuclear charge, not each
+fragment's, so the second moments are translation-dependent as written and have
+to be shifted before use. That shift is deliberately left to the consumer: this
+module reports what Q-Chem printed.
 
 Unit handling: Q-Chem prints EDA terms in kJ/mol and multipoles in
 Debye-Angstrom^(n-1). :func:`to_atomic_units` converts a parsed record in place
@@ -32,44 +49,52 @@ with a relative tolerance rather than pretending it away.
 
 from __future__ import annotations
 
-import itertools
 import re
 from dataclasses import dataclass, field
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Unit conversions (CODATA 2018)
-# ---------------------------------------------------------------------------
+from .qchem_out import (
+    BOHR_PER_ANGSTROM,
+    DEBYE_PER_AU_DIPOLE,
+    KJMOL_PER_HARTREE,
+    MULTIPOLE_LABELS,
+    SCF_ITER as _SCF_ITER,
+    SNO_HEADER as _SNO_HEADER,
+    QChemParseError,
+    find_all,
+    method_and_basis,
+    multipoles_to_atomic_units,
+    parse_geometry as _parse_geometry,
+    parse_molecule_block as _parse_molecule_block,
+    parse_mulliken as _parse_mulliken,
+    parse_multipoles as _parse_multipoles,
+    parse_rem as _parse_rem,
+    unique_components,
+)
 
-KJMOL_PER_HARTREE = 2625.4996394798254
-DEBYE_PER_AU_DIPOLE = 2.5417464519  # e*a0 -> Debye
-BOHR_PER_ANGSTROM = 1.0 / 0.529177210903
+#: The section readers live in :mod:`rsfff.qcgen.qchem_out` so a plain SCF job
+#: and an EDA job share one implementation. They are re-exported here because
+#: this module's public surface predates that split.
+__all__ = [
+    "BOHR_PER_ANGSTROM",
+    "DEBYE_PER_AU_DIPOLE",
+    "KJMOL_PER_HARTREE",
+    "MULTIPOLE_LABELS",
+    "REQUIRED_EDA_TERMS",
+    "EDARecord",
+    "QChemEDAParseError",
+    "check_consistency",
+    "parse_eda_output",
+    "to_atomic_units",
+    "unique_components",
+]
 
-#: Multipole ranks in print order, with their unique Cartesian component labels
-#: exactly as Q-Chem writes them.
-MULTIPOLE_LABELS = {
-    "dipole": ["X", "Y", "Z"],
-    "quadrupole": ["XX", "XY", "YY", "XZ", "YZ", "ZZ"],
-    "octopole": ["XXX", "XXY", "XYY", "YYY", "XXZ", "XYZ", "YYZ", "XZZ", "YZZ", "ZZZ"],
-    "hexadecapole": [
-        "XXXX", "XXXY", "XXYY", "XYYY", "YYYY", "XXXZ", "XXYZ", "XYYZ",
-        "YYYZ", "XXZZ", "XYZZ", "YYZZ", "XZZZ", "YZZZ", "ZZZZ",
-    ],
-}
-
-_MULTIPOLE_HEADINGS = {
-    "Dipole Moment": "dipole",
-    "Quadrupole Moments": "quadrupole",
-    "Octopole Moments": "octopole",
-    "Hexadecapole Moments": "hexadecapole",
-}
-
-_RANK = {"dipole": 1, "quadrupole": 2, "octopole": 3, "hexadecapole": 4}
-
-
-class QChemEDAParseError(RuntimeError):
-    """Raised when a required section is missing or malformed."""
+#: Alias rather than a subclass: callers (``scripts/parse_qchem_eda.py``,
+#: ``tests/test_qchem_eda.py``) catch this name, and the shared readers raise
+#: the base, so the two must be the same class or ``--skip-errors`` would stop
+#: catching half the failures.
+QChemEDAParseError = QChemParseError
 
 
 @dataclass
@@ -94,6 +119,13 @@ class EDARecord:
     mulliken_charges: np.ndarray = field(default_factory=lambda: np.zeros(0))
     #: Cartesian multipoles as full symmetric tensors: (3,), (3,3), (3,3,3), (3,)*4.
     multipoles: dict[str, np.ndarray] = field(default_factory=dict)
+    #: Isolated-fragment Mulliken charges, one array per fragment. Empty unless
+    #: the job ran with ``SCF_PRINT_FRGM = true``.
+    fragment_mulliken: list[np.ndarray] = field(default_factory=list)
+    #: Isolated-fragment Cartesian multipoles, one dict per fragment, **about the
+    #: supersystem's origin** (see the module docstring). Empty unless
+    #: ``SCF_PRINT_FRGM = true``.
+    fragment_multipoles: list[dict[str, np.ndarray]] = field(default_factory=list)
     method: str = ""
     basis: str = ""
     #: True when the final CT-allowed SCF printed "Convergence criterion met".
@@ -108,6 +140,11 @@ class EDARecord:
     def n_fragments(self) -> int:
         return len(self.fragment_charges)
 
+    @property
+    def has_fragment_blocks(self) -> bool:
+        """Whether the isolated-fragment Mulliken/multipole blocks were printed."""
+        return len(self.fragment_multipoles) == self.n_fragments > 0
+
     def interaction_energy(self) -> float:
         """``E_total - sum(E_fragment)``, in whatever units the record holds."""
         return self.energy - float(np.sum(self.fragment_energies))
@@ -117,12 +154,6 @@ class EDARecord:
 # Section parsers
 # ---------------------------------------------------------------------------
 
-_SNO_HEADER = "Standard Nuclear Orientation (Angstroms)"
-_GEOM_ROW = re.compile(r"^\s*(\d+)\s+([A-Za-z]{1,3})\s+" + r"\s+".join([r"(-?\d+\.\d+)"] * 3))
-#: One SCF iteration row: counter, energy, DIIS error. Q-Chem uses a fixed-width
-#: energy field, so a pathological (very large negative) energy runs straight
-#: into the counter with no separating space -- hence the ``(?=-)`` alternative.
-_SCF_ITER = re.compile(r"^\s*\d+(?:\s+|(?=-))(-?\d+\.\d+)\s+\d\.\d{2}e[+-]\d{2}")
 
 #: EDA terms and the substring that identifies their line. Order matters only for
 #: readability; ``E_cls_elec``/``E_cls_pauli`` must be matched before ``E_elec``
@@ -145,66 +176,6 @@ _EDA_PATTERNS = {
 
 #: The subset that must be present for a record to be usable.
 REQUIRED_EDA_TERMS = ("cls_elec", "mod_pauli", "disp", "pol", "ct", "int")
-
-
-def _parse_molecule_block(lines: list[str]) -> tuple[list[int], list[int], list[int], int, int]:
-    """Return ``(frag_charges, frag_mults, frag_natoms, total_charge, multiplicity)``.
-
-    Reads the ``$molecule`` block echoed under ``User input:``. A fragmented
-    block opens with the supersystem charge/multiplicity, then one ``--``
-    separated section per fragment. Unfragmented blocks are handled too (a
-    single implicit fragment).
-    """
-    try:
-        start = next(i for i, ln in enumerate(lines) if ln.strip().lower() == "$molecule")
-        end = next(i for i in range(start, len(lines)) if lines[i].strip().lower() == "$end")
-    except StopIteration:
-        raise QChemEDAParseError("no $molecule block in the User input echo")
-
-    body = [ln.strip() for ln in lines[start + 1 : end] if ln.strip()]
-    # Split on the "--" fragment separators.
-    sections: list[list[str]] = [[]]
-    for ln in body:
-        if ln.startswith("--"):
-            sections.append([])
-        else:
-            sections[-1].append(ln)
-
-    def charge_mult(tokens: list[str]) -> tuple[int, int]:
-        return int(tokens[0]), int(tokens[1])
-
-    if len(sections) == 1:  # unfragmented: one charge/mult line + atoms
-        head = sections[0]
-        chg, mult = charge_mult(head[0].split())
-        return [chg], [mult], [len(head) - 1], chg, mult
-
-    total_charge, multiplicity = charge_mult(sections[0][0].split())
-    frag_charges, frag_mults, frag_natoms = [], [], []
-    for sec in sections[1:]:
-        if not sec:
-            continue
-        chg, mult = charge_mult(sec[0].split())
-        frag_charges.append(chg)
-        frag_mults.append(mult)
-        frag_natoms.append(len(sec) - 1)
-    if not frag_charges:
-        raise QChemEDAParseError("$molecule block declares no fragments")
-    return frag_charges, frag_mults, frag_natoms, total_charge, multiplicity
-
-
-def _parse_geometry(lines: list[str], start: int) -> tuple[list[str], np.ndarray]:
-    """Parse the ``Standard Nuclear Orientation`` table whose header is at ``start``."""
-    symbols, coords = [], []
-    for ln in lines[start + 1 :]:
-        m = _GEOM_ROW.match(ln)
-        if m:
-            symbols.append(m.group(2))
-            coords.append([float(m.group(3)), float(m.group(4)), float(m.group(5))])
-        elif symbols:  # table ended
-            break
-    if not symbols:
-        raise QChemEDAParseError("empty Standard Nuclear Orientation table")
-    return symbols, np.array(coords)
 
 
 def _parse_ct_energy(lines: list[str]) -> tuple[float, bool]:
@@ -262,114 +233,57 @@ def _parse_eda_terms(text: str) -> dict[str, float]:
     return terms
 
 
-def _parse_mulliken(lines: list[str], n_atoms: int) -> np.ndarray:
-    """Parse the last ``Ground-State Mulliken Net Atomic Charges`` table."""
-    idx = [i for i, ln in enumerate(lines) if "Mulliken Net Atomic Charges" in ln]
-    if not idx:
-        return np.full(n_atoms, np.nan)
-    charges = []
-    for ln in lines[idx[-1] :]:
-        toks = ln.split()
-        if len(toks) == 3 and toks[0].isdigit() and toks[1].isalpha():
-            charges.append(float(toks[2]))
-        elif charges:
-            break
-    if len(charges) != n_atoms:
-        raise QChemEDAParseError(
-            f"Mulliken table has {len(charges)} rows but the system has {n_atoms} atoms"
-        )
-    return np.array(charges)
+def _parse_fragment_blocks(
+    lines: list[str], sno: list[int], frag_natoms: list[int]
+) -> tuple[list[np.ndarray], list[dict[str, np.ndarray]]]:
+    """Isolated-fragment Mulliken charges and multipoles, one entry per fragment.
 
+    With ``SCF_PRINT_FRGM = true`` the output holds ``1 + n_fragments``
+    ``Standard Nuclear Orientation`` tables: the supersystem first, then one per
+    frozen-fragment sub-job in fragment order. Each sub-job prints exactly one
+    Mulliken table and one multipole block before the next table appears, so
+    "the first of each after fragment *k*'s geometry" identifies them without
+    depending on Q-Chem's ``Spawning Job For Fragment`` wording.
 
-def _expand_multipole(unique: dict[str, float], rank: int) -> np.ndarray:
-    """Scatter unique Cartesian components into a full symmetric rank-n tensor."""
-    axis = {"X": 0, "Y": 1, "Z": 2}
-    tensor = np.zeros((3,) * rank)
-    for label, value in unique.items():
-        base = tuple(axis[c] for c in label)
-        for perm in set(itertools.permutations(base)):
-            tensor[perm] = value
-    return tensor
+    Returns two empty lists when the fragment blocks are absent, which is not an
+    error -- it just means the job ran without ``SCF_PRINT_FRGM``.
 
-
-def unique_components(tensor: np.ndarray, name: str) -> np.ndarray:
-    """Inverse of the symmetric expansion: pull the unique components back out.
-
-    Returns the independent Cartesian components in the order Q-Chem prints them
-    (``MULTIPOLE_LABELS[name]``): 3, 6, 10, 15 values for ranks 1--4.
+    Each fragment's geometry is checked against the corresponding slice of the
+    supersystem's. That check is what licenses treating the fragment multipoles
+    as living in the supersystem's frame; without it a future Q-Chem that
+    re-orients sub-jobs would silently produce moments in per-fragment frames
+    that still look entirely plausible.
     """
-    axis = {"X": 0, "Y": 1, "Z": 2}
-    return np.array(
-        [tensor[tuple(axis[c] for c in label)] for label in MULTIPOLE_LABELS[name]]
-    )
+    n_frag = len(frag_natoms)
+    if len(sno) != n_frag + 1:
+        return [], []
 
+    _, super_positions = _parse_geometry(lines, sno[0])
+    mulliken_idx = find_all(lines, "Mulliken Net Atomic Charges")
+    multipole_idx = find_all(lines, "Cartesian Multipole Moments")
 
-def _parse_multipoles(lines: list[str]) -> dict[str, np.ndarray]:
-    """Parse the last ``Cartesian Multipole Moments`` block into full tensors.
-
-    Components are read as ``LABEL value`` token pairs inside each rank's
-    subsection, which is layout-independent (Q-Chem wraps them across lines in a
-    width-dependent way). The ``Tot`` entry on the dipole line is skipped.
-    """
-    idx = [i for i, ln in enumerate(lines) if "Cartesian Multipole Moments" in ln]
-    if not idx:
-        raise QChemEDAParseError("no 'Cartesian Multipole Moments' block")
-
-    out: dict[str, np.ndarray] = {}
-    current, unique, started = None, {}, False
-
-    def flush():
-        if current is None:
-            return
-        expected = MULTIPOLE_LABELS[current]
-        if set(unique) != set(expected):
+    charges: list[np.ndarray] = []
+    multipoles: list[dict[str, np.ndarray]] = []
+    offset = 0
+    for k, n_at in enumerate(frag_natoms):
+        head = sno[k + 1]
+        _, positions = _parse_geometry(lines, head)
+        expected = super_positions[offset : offset + n_at]
+        if positions.shape != expected.shape or not np.allclose(positions, expected, atol=1e-8):
             raise QChemEDAParseError(
-                f"{current}: expected components {expected}, got {sorted(unique)}"
+                f"fragment {k} geometry does not match the supersystem rows "
+                f"{offset}:{offset + n_at}; the fragment sub-job was re-oriented, so its "
+                "multipoles are not in the supersystem frame"
             )
-        out[current] = _expand_multipole(unique, _RANK[current])
-
-    for ln in lines[idx[-1] + 1 :]:
-        stripped = ln.strip()
-        heading = next((v for k, v in _MULTIPOLE_HEADINGS.items() if stripped.startswith(k)), None)
-        if heading is not None:
-            flush()
-            current, unique, started = heading, {}, True
-            continue
-        if stripped.startswith("Charge ("):
-            flush()
-            current, unique, started = None, {}, True
-            continue
-        # The block opens and closes with a dashed rule; only the closing one
-        # ends the scan.
-        if started and stripped and set(stripped) <= set("- "):
-            break
-        if current is None:
-            continue
-        toks = stripped.split()
-        for label, value in zip(toks[0::2], toks[1::2]):
-            if label in MULTIPOLE_LABELS[current]:
-                unique[label] = float(value)
-    flush()
-
-    missing = [k for k in MULTIPOLE_LABELS if k not in out]
-    if missing:
-        raise QChemEDAParseError(f"multipole block missing: {', '.join(missing)}")
-    return out
-
-
-def _parse_rem(lines: list[str]) -> dict[str, str]:
-    """Return the ``$rem`` section as a lowercase-keyed dict."""
-    try:
-        start = next(i for i, ln in enumerate(lines) if ln.strip().lower() == "$rem")
-        end = next(i for i in range(start, len(lines)) if lines[i].strip().lower() == "$end")
-    except StopIteration:
-        return {}
-    rem = {}
-    for ln in lines[start + 1 : end]:
-        toks = ln.split()
-        if len(toks) >= 2:
-            rem[toks[0].lower()] = toks[1]
-    return rem
+        try:
+            m_at = next(i for i in mulliken_idx if i > head)
+            p_at = next(i for i in multipole_idx if i > head)
+        except StopIteration:
+            raise QChemEDAParseError(f"fragment {k} printed no Mulliken/multipole block")
+        charges.append(_parse_mulliken(lines, n_at, start=m_at))
+        multipoles.append(_parse_multipoles(lines, start=p_at))
+        offset += n_at
+    return charges, multipoles
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +322,8 @@ def parse_eda_output(path: str) -> EDARecord:
             f"{len(fragment_energies)} fragment energies for {len(frag_charges)} fragments"
         )
 
-    rem = _parse_rem(lines)
+    frag_mulliken, frag_multipoles = _parse_fragment_blocks(lines, sno, frag_natoms)
+    method, basis = method_and_basis(_parse_rem(lines))
     return EDARecord(
         path=path,
         symbols=symbols,
@@ -423,8 +338,10 @@ def parse_eda_output(path: str) -> EDARecord:
         eda=_parse_eda_terms(text),
         mulliken_charges=_parse_mulliken(lines, len(symbols)),
         multipoles=_parse_multipoles(lines),
-        method=rem.get("method") or rem.get("exchange", ""),
-        basis=rem.get("basis", ""),
+        fragment_mulliken=frag_mulliken,
+        fragment_multipoles=frag_multipoles,
+        method=method,
+        basis=basis,
         converged=converged,
         units="qchem",
     )
@@ -440,11 +357,8 @@ def to_atomic_units(rec: EDARecord) -> EDARecord:
     if rec.units == "atomic":
         raise ValueError("record is already in atomic units")
     rec.eda = {k: v / KJMOL_PER_HARTREE for k, v in rec.eda.items()}
-    for name, tensor in rec.multipoles.items():
-        rank = _RANK[name]
-        rec.multipoles[name] = tensor * (
-            BOHR_PER_ANGSTROM ** (rank - 1) / DEBYE_PER_AU_DIPOLE
-        )
+    rec.multipoles = multipoles_to_atomic_units(rec.multipoles)
+    rec.fragment_multipoles = [multipoles_to_atomic_units(m) for m in rec.fragment_multipoles]
     rec.units = "atomic"
     return rec
 
@@ -496,4 +410,27 @@ def check_consistency(
 
     if not rec.converged:
         msgs.append("final CT-allowed SCF did not report convergence")
+
+    # The frozen fragment dipoles must sum to roughly the relaxed supersystem
+    # dipole -- they differ by exactly the polarization and charge transfer, which
+    # for water clusters runs 10-25% of each monomer's own dipole. A gross mismatch
+    # means the per-fragment blocks were paired with the wrong sub-jobs, which
+    # nothing else here would notice because each block is individually well-formed.
+    #
+    # The tolerance is scaled by ``sum |mu_f|``, not by the supersystem dipole:
+    # in a near-symmetric cluster the fragment dipoles largely cancel, so a
+    # perfectly good frame can have a supersystem dipole *smaller* than the
+    # polarization correction to it. Scaling by the total dipole present is what
+    # makes this measure "are these the right monomers" rather than "is this
+    # cluster symmetric".
+    if rec.has_fragment_blocks:
+        per_fragment = np.array([m["dipole"] for m in rec.fragment_multipoles])
+        frozen = per_fragment.sum(axis=0)
+        relaxed = rec.multipoles["dipole"]
+        scale = float(np.linalg.norm(per_fragment, axis=-1).sum())
+        if scale > 1e-6 and float(np.linalg.norm(frozen - relaxed)) > 0.5 * scale:
+            msgs.append(
+                f"sum of fragment dipoles {frozen} is far from the supersystem "
+                f"dipole {relaxed}; the fragment blocks may be misaligned"
+            )
     return msgs

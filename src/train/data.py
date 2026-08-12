@@ -68,6 +68,21 @@ class Batch:
     fragment_charge     : (F,)      formal charge Q_a of each fragment
     fragment_two_s      : (F,)      2S_a of each fragment
     n_fragments         : number of fragments F in this batch
+    fragment_to_batch   : (F,)      long, frame id per fragment in [0, n_systems)
+
+    Isolated-fragment (frozen-monomer) labels, from the per-fragment SCF blocks a Q-Chem
+    EDA job prints with ``SCF_PRINT_FRGM = true``. All three are ``None`` unless the file
+    carries them:
+
+    fragment_energy        : (F,)      isolated-fragment SCF energy, Hartree
+    fragment_dipole        : (F, 3)    e*a0, about the coordinate origin
+    fragment_second_moment : (F, 3, 3) e*a0^2, **primitive** (traced), about the
+                                       coordinate origin
+
+    The last two are deliberately left unshifted and untraced -- Q-Chem reports them about
+    the *supersystem's* center of nuclear charge, and the consumer shifts prediction and
+    target through the same algebra so a convention error cancels rather than biasing a
+    fit. See :mod:`rsfff.ff.molecular_multipoles`.
 
     Channel-graph fields, available only from a state library (a distance-independent
     partition cannot supply them):
@@ -90,6 +105,10 @@ class Batch:
     fragment_idx: torch.Tensor | None = None
     fragment_charge: torch.Tensor | None = None
     fragment_two_s: torch.Tensor | None = None
+    fragment_to_batch: torch.Tensor | None = None
+    fragment_energy: torch.Tensor | None = None
+    fragment_dipole: torch.Tensor | None = None
+    fragment_second_moment: torch.Tensor | None = None
     n_fragments: int = 0
     bond_index: torch.Tensor | None = None
     bond_batch: torch.Tensor | None = None
@@ -115,6 +134,10 @@ class Batch:
             fragment_idx=opt(self.fragment_idx),
             fragment_charge=opt(self.fragment_charge),
             fragment_two_s=opt(self.fragment_two_s),
+            fragment_to_batch=opt(self.fragment_to_batch),
+            fragment_energy=opt(self.fragment_energy),
+            fragment_dipole=opt(self.fragment_dipole),
+            fragment_second_moment=opt(self.fragment_second_moment),
             n_fragments=self.n_fragments,
             bond_index=opt(self.bond_index),
             bond_batch=opt(self.bond_batch),
@@ -145,6 +168,9 @@ class MoleculeDataset:
         fragment_idx: torch.Tensor | None = None,        # (Ntot_all,) frame-local
         fragment_charge: torch.Tensor | None = None,     # (Nfrag_all,)
         fragment_two_s: torch.Tensor | None = None,      # (Nfrag_all,)
+        fragment_energy: torch.Tensor | None = None,     # (Nfrag_all,)
+        fragment_dipole: torch.Tensor | None = None,     # (Nfrag_all, 3)
+        fragment_second_moment: torch.Tensor | None = None,  # (Nfrag_all, 3, 3)
         fragment_counts: torch.Tensor | None = None,     # (n_frames,) fragments per frame
         bond_index: torch.Tensor | None = None,          # (2, Nbond_all) frame-local
         bond_counts: torch.Tensor | None = None,         # (n_frames,) channels per frame
@@ -170,6 +196,9 @@ class MoleculeDataset:
         self._fragment_idx = fragment_idx
         self._fragment_charge = fragment_charge
         self._fragment_two_s = fragment_two_s
+        self._fragment_energy = fragment_energy
+        self._fragment_dipole = fragment_dipole
+        self._fragment_second_moment = fragment_second_moment
         self._fragment_counts = fragment_counts.long() if fragment_counts is not None else None
         self._bond_index = bond_index
         self._bond_counts = bond_counts.long() if bond_counts is not None else None
@@ -177,6 +206,14 @@ class MoleculeDataset:
             self._frag_offsets = torch.cat(
                 (torch.zeros(1, dtype=torch.long), torch.cumsum(self._fragment_counts, 0))
             )
+            n_frag = int(self._fragment_counts.sum())
+            for name in ("energy", "dipole", "second_moment"):
+                value = getattr(self, f"_fragment_{name}")
+                if value is not None and value.shape[0] != n_frag:
+                    raise ValueError(
+                        f"fragment_{name} has {value.shape[0]} rows but the dataset holds "
+                        f"{n_frag} fragments"
+                    )
         if self._bond_counts is not None:
             self._bond_offsets = torch.cat(
                 (torch.zeros(1, dtype=torch.long), torch.cumsum(self._bond_counts, 0))
@@ -240,8 +277,15 @@ class MoleculeDataset:
                 ),
                 fragment_charge=self._fragment_charge[frag_rows],
                 fragment_two_s=self._fragment_two_s[frag_rows],
+                fragment_to_batch=torch.repeat_interleave(
+                    torch.arange(idx.shape[0]), frag_counts
+                ),
                 n_fragments=int(frag_counts.sum()),
             )
+            for name in ("energy", "dipole", "second_moment"):
+                value = getattr(self, f"_fragment_{name}")
+                if value is not None:
+                    fragments[f"fragment_{name}"] = value[frag_rows]
 
         channels: dict = {}
         if self.has_channels:
@@ -286,6 +330,25 @@ class MoleculeDataset:
         )
 
 
+def _expand_second_moments(flat: np.ndarray, n_frag: int) -> np.ndarray:
+    """``(F*6,)`` unique components in Q-Chem's order -> ``(F, 3, 3)`` symmetric tensors.
+
+    The print order is ``XX XY YY XZ YZ ZZ`` -- note it is *not* the diagonal-first
+    Voigt order used elsewhere in this repo, which is why this is spelled out rather
+    than routed through :func:`rsfff.mlip.response_heads.voigt_vector_to_symmetric_matrix`.
+    """
+    u = flat.reshape(n_frag, 6)
+    xx, xy, yy, xz, yz, zz = (u[:, i] for i in range(6))
+    return np.stack(
+        (
+            np.stack((xx, xy, xz), axis=-1),
+            np.stack((xy, yy, yz), axis=-1),
+            np.stack((xz, yz, zz), axis=-1),
+        ),
+        axis=-2,
+    )
+
+
 def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> MoleculeDataset:
     """Read every frame of an extended-XYZ file into a :class:`MoleculeDataset`.
 
@@ -325,6 +388,7 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
     charge_list, dip_list, pol_list, dmu_list = [], [], [], []
     eda_lists: dict[str, list[float]] = {}
     frag_idx_list, frag_q_list, frag_s_list, frag_counts = [], [], [], []
+    frag_e_list, frag_dip_list, frag_m2_list = [], [], []
     bond_list, bond_counts = [], []
     for atoms in iread(str(path), index=":"):
         n = len(atoms)
@@ -396,6 +460,24 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
                 else np.zeros(nf)
             )
 
+        # Isolated-fragment labels. Only reachable via the fragment_idx column path --
+        # a diabatic library supplies a partition, not reference values for it.
+        nf = frag_counts[-1] if frag_counts else 0
+        if "fragment_energies" in info:
+            frag_e_list.append(
+                np.asarray(info["fragment_energies"], dtype=np.float64).reshape(nf)
+            )
+        if "fragment_dipoles" in info:
+            frag_dip_list.append(
+                np.asarray(info["fragment_dipoles"], dtype=np.float64).reshape(nf, 3)
+            )
+        if "fragment_second_moments" in info:
+            frag_m2_list.append(
+                _expand_second_moments(
+                    np.asarray(info["fragment_second_moments"], dtype=np.float64), nf
+                )
+            )
+
     n_frames = len(counts)
     if len(dip_list) not in (0, n_frames) or len(pol_list) not in (0, n_frames) or len(
         dmu_list
@@ -423,6 +505,18 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
     energy = torch.tensor(energy_list, dtype=dtype)
     counts_t = torch.tensor(counts, dtype=torch.long)
 
+    frag_labels = {
+        "fragment_energy": frag_e_list,
+        "fragment_dipole": frag_dip_list,
+        "fragment_second_moment": frag_m2_list,
+    }
+    bad_frag = {k: len(v) for k, v in frag_labels.items() if len(v) not in (0, n_frames)}
+    if bad_frag:
+        raise ValueError(
+            f"{path}: isolated-fragment labels present on some frames but not all "
+            f"(of {n_frames} frames: {bad_frag})"
+        )
+
     partition: dict = {}
     if frag_counts:
         partition = dict(
@@ -431,6 +525,9 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
             fragment_two_s=torch.tensor(np.concatenate(frag_s_list), dtype=dtype),
             fragment_counts=torch.tensor(frag_counts, dtype=torch.long),
         )
+        for name, values in frag_labels.items():
+            if values:
+                partition[name] = torch.tensor(np.concatenate(values), dtype=dtype)
     if bond_counts:  # channel graph, from a state library only
         partition.update(
             bond_index=torch.tensor(np.concatenate(bond_list, axis=1), dtype=torch.long),
@@ -504,6 +601,9 @@ def concatenate_datasets(datasets: "list[MoleculeDataset]") -> MoleculeDataset:
         fragment_idx=_cat_optional("_fragment_idx"),
         fragment_charge=_cat_optional("_fragment_charge"),
         fragment_two_s=_cat_optional("_fragment_two_s"),
+        fragment_energy=_cat_optional("_fragment_energy"),
+        fragment_dipole=_cat_optional("_fragment_dipole"),
+        fragment_second_moment=_cat_optional("_fragment_second_moment"),
         fragment_counts=_cat_optional("_fragment_counts"),
         bond_index=_cat_optional("_bond_index", dim=1),
         bond_counts=_cat_optional("_bond_counts"),
@@ -620,3 +720,21 @@ def load_reference_energies(path, neighbor_types) -> torch.Tensor:
             )
         e0[i] = float(ref[sym])
     return e0
+
+
+def load_monomer_batch(path, dtype: torch.dtype = torch.float32, limit: int | None = None):
+    """One ragged :class:`Batch` of every frame in an isolated-monomer extxyz.
+
+    The multipole anchor for the electrostatics fit. These frames carry the
+    frozen-monomer dipole and second moment but no ``eda_*`` component, and they carry
+    forces where the cluster frames' EDA labels do not -- so they cannot be concatenated
+    with the training set (``concatenate_datasets`` refuses partial label presence, and
+    correctly). Loading them whole and evaluating them as an anchor is the same pattern
+    ``load_atomic_reference_batch`` uses; 500 water monomers is 1500 atoms, small enough
+    that batching them adds nothing.
+
+    ``limit`` truncates for smoke tests.
+    """
+    dataset = load_extxyz(path, dtype=dtype)
+    n = len(dataset) if limit is None else min(int(limit), len(dataset))
+    return dataset.flat_batch(range(n))

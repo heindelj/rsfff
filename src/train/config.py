@@ -39,6 +39,10 @@ class DataConfig:
     isolated_species: str | None = None   # extxyz of integer-charge anchor systems
     diabatic_states: str | None = None    # YAML fragment-state library (channel graphs)
     atomic_reference_states: str | None = None  # isolated-atom E/alpha grid at integer charge
+    # Isolated-monomer frames used as a multipole anchor by train_elec. Kept separate
+    # from `path` rather than concatenated: they carry no eda_* components and they do
+    # carry forces, so concatenate_datasets refuses the mix (rightly).
+    monomer_path: str | None = None
     holdout_fraction: float = 0.1
     seed: int = 0
 
@@ -194,6 +198,149 @@ class PauliConfig:
 
 
 @dataclass
+class ElectrostaticsConfig:
+    """Classical electrostatics: a local SQE solve, Slater penetration, a pair correction.
+
+    The defining constraint is ``intra_fragment_features: true``: the response parameters see
+    only their own monomer, so the interaction is **exactly two-body**, which is what
+    classical electrostatics between frozen densities has to be. Turning it off additionally
+    requires ``allow_environment``, because losing exactness would be invisible in the fit.
+
+    Penetration is explicit and carries an effective nuclear charge ``Z``. Measured on this
+    data, point multipoles alone reproduce only ~53% of ``eda_cls_elec`` (13.7 kJ/mol MAE on
+    dimers with pyCMM's fitted multipoles) against 3.25 with penetration -- it is half the
+    component, not a short-range correction.
+
+    ``max_rank: 1`` (charges + dipoles) is what the response solve naturally produces.
+    Measured ceilings with pyCMM's parameters: rank 1 gives MAE 9.07 (w2) / 39.03 (w5) with a
+    regression slope of 1.42, rank 2 gives 3.25 / 14.19 at slope 0.89 -- a monopole+dipole
+    expansion cannot reproduce water's quadrupolar field, so expect the correction head to
+    work harder at rank 1.
+    """
+
+    cutoff: float = 12.0            # pair-list cutoff, Angstrom; this term has a 1/r tail
+    taper_width: float = 1.0
+    max_rank: int = 1               # 0 = charges, 1 = +dipoles, 2 = +quadrupoles
+    r0_init: float = 1.5            # Fermi midpoint, Angstrom; gates point AND penetration
+    alpha: float = 8.0              # Fermi steepness, Angstrom^-1
+    learn_r0: bool = True
+    # Response heads
+    environment_chi: bool = True
+    environment_eta: bool = True
+    eta_floor: float = 0.05         # keeps the charge problem strictly convex
+    learn_dipole: bool = True       # mu_i = -alpha_i chivec_i; needs lambda=1 features
+    psd_floor: float = 1.0e-4
+    # Quadrupole sector, max_rank 2 only: Theta_i = -C_i chiquad_i with C_i = c_i I5.
+    # Isotropic because at zero field gradient an anisotropic C is exactly as expressive
+    # (Theta = -C chiquad is onto for any invertible C) while adding five unconstrained
+    # parameters per atom. Note the (C, chiquad) gauge: scaling one and inverse-scaling
+    # the other leaves Theta untouched, so these are identified only once
+    # `internal_energy` enters a loss -- until then leave weight_decay on.
+    learn_quadrupole: bool = True
+    cquad_init: float = 1.0         # e^2 a0^4 / Ha
+    cquad_floor: float = 1.0e-4
+    environment_cquad: bool = False
+    # Penetration heads
+    learn_z: bool = True
+    environment_z: bool = False
+    learn_b: bool = True
+    environment_b: bool = False
+    # SQE channels
+    s_init: float = 0.5             # initial channel compliance
+    compliance_hidden: int = 64
+    compliance_depth: int = 2
+    emb_dim: int = 16
+    hidden: int = 64
+    depth: int = 2
+    equiv_channels: int = 32
+    # Pair correction head
+    correction: bool = True
+    corr_hidden: int = 64
+    corr_depth: int = 2
+    corr_n_radial: int = 8
+    corr_r_on: float = 4.0
+    corr_r_off: float = 5.0
+    corr_energy_scale: float = 3.0e-3   # Hartree; cls_elec runs comparable to mod_pauli
+    # Loss
+    target: str = "cls_elec"
+    energy_scale: float = 3.8093e-4     # 1 kJ/mol in Hartree
+    corr_l2_weight: float = 0.0
+    r0_weight: float = 0.05             # per Angstrom handed to the network
+    intra_fragment_features: bool = True    # the two-body-exactness constraint
+    allow_environment: bool = False         # required to turn the above off
+    # Permanent-multipole supervision against the frozen-monomer reference values.
+    # The interaction energy alone under-determines the individual multipoles -- many
+    # (q, mu, Theta) sets give the same pair energies -- so these are what actually pin
+    # the monomer. Errors are divided by their scale before squaring, so the weights are
+    # dimensionless and each term is 1.0 at an error of one scale.
+    # `dipole_weight`/`quadrupole_weight` act on the isolated-monomer anchor batch
+    # (`data.monomer_path`); `fragment_multipole_weight` scales the *same* two terms
+    # applied to the in-batch cluster fragments instead. The anchor is the default source
+    # because those frames are standalone monomers at 300 K, whose r(O-H) and HOH ranges
+    # are measurably *wider* than the in-cluster monomer distribution -- so the cluster
+    # fragments add labels but no new geometry, and they cost a full multipole rebuild on
+    # every training batch.
+    dipole_weight: float = 0.0
+    quadrupole_weight: float = 0.0
+    dipole_scale: float = 0.05          # e*a0; monomer dipoles run ~0.75
+    quadrupole_scale: float = 0.2       # e*a0^2; Buckingham components of order 1
+    fragment_multipole_weight: float = 0.0
+
+
+@dataclass
+class OneBodyConfig:
+    """The 1-body term: frozen atomic references plus an intramolecular bond energy.
+
+    ``E_1body(f) = sum_{i in f} E0[Z_i] + sum_{i<j in f} W(r_ij) dE_ij``, fit per fragment
+    against the ``Fragment Energies (Ha)`` an EDA job prints, and against forces on the
+    isolated-monomer frames where the QC gradient *is* ``-dE_1body/dR``.
+
+    The pair-head defaults deliberately differ from every other term's. Those are tuned for
+    intermolecular corrections (1e-3 Ha over 4-5 Angstrom); a covalent bond is ~0.2 Ha over
+    1-1.7 Angstrom, so the scale is 200x larger and the envelope has to open where the bonds
+    actually are. See :mod:`rsfff.ff.onebody`.
+    """
+
+    # Bond-energy pair head
+    emb_dim: int = 16
+    bond_hidden: int = 64
+    bond_depth: int = 2
+    bond_n_radial: int = 8
+    bond_r_on: float = 2.5          # Angstrom; well past the 1.5 A intramolecular H-H
+    bond_r_off: float = 4.0         # must not exceed features.cutoff
+    bond_energy_scale: float = 0.2  # Hartree; water's two O-H bonds are ~-0.37 Ha
+    # Loss
+    energy_scale: float = 3.8093e-4     # 1 kJ/mol in Hartree; fit term is 1.0 at that error
+    force_weight: float = 0.0
+    force_scale: float = 1.0e-3         # Hartree/Angstrom
+    intra_fragment_features: bool = True
+    # `target` is unused -- the label is batch.fragment_energy, not an EDA component -- but
+    # term_loop's shared plumbing reads cfg.target when no fit_term is supplied.
+    target: str = "fragment_energy"
+
+
+@dataclass
+class JointConfig:
+    """Relative weights for the joint 1-body + electrostatics fit.
+
+    Everything else comes from the ``onebody:`` and ``elec:`` blocks, which the joint model
+    reuses verbatim -- there is one response solve and one set of heads, so duplicating
+    forty fields into a third block would only create ways for them to disagree.
+
+    Both energy terms are already normalized to "1.0 at one ``energy_scale`` of error", so
+    these weights are dimensionless. They are not equal by default because the two targets
+    are not: at initialization the fragment energy is off by ~960 kJ/mol (the bond energy,
+    which starts at zero) while ``cls_elec`` is off by ~14, so an equal weighting lets the
+    1-body term dominate the first few epochs by four orders of magnitude in the loss.
+    """
+
+    onebody_weight: float = 1.0
+    elec_weight: float = 30.0
+    #: The monomer anchor: energy, forces, and multipoles on the isolated-monomer frames.
+    anchor_weight: float = 1.0
+
+
+@dataclass
 class Config:
     run_name: str = "run"
     device: str = "auto"       # auto -> cuda > mps > cpu
@@ -206,6 +353,9 @@ class Config:
     sqe: SQEConfig = field(default_factory=SQEConfig)
     dispersion: DispersionConfig = field(default_factory=DispersionConfig)
     pauli: PauliConfig = field(default_factory=PauliConfig)
+    elec: ElectrostaticsConfig = field(default_factory=ElectrostaticsConfig)
+    onebody: OneBodyConfig = field(default_factory=OneBodyConfig)
+    joint: JointConfig = field(default_factory=JointConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
@@ -259,6 +409,7 @@ def load_config(path) -> Config:
             str(data["atomic_reference_states"])
             if data.get("atomic_reference_states") else None
         ),
+        monomer_path=(str(data["monomer_path"]) if data.get("monomer_path") else None),
         holdout_fraction=float(data.get("holdout_fraction", DataConfig.holdout_fraction)),
         seed=int(data.get("seed", DataConfig.seed)),
     )
@@ -275,6 +426,9 @@ def load_config(path) -> Config:
     sqe_cfg = _from_block(SQEConfig, raw.get("sqe", {}) or {})
     dispersion_cfg = _from_block(DispersionConfig, raw.get("dispersion", {}) or {})
     pauli_cfg = _from_block(PauliConfig, raw.get("pauli", {}) or {})
+    elec_cfg = _from_block(ElectrostaticsConfig, raw.get("elec", {}) or {})
+    onebody_cfg = _from_block(OneBodyConfig, raw.get("onebody", {}) or {})
+    joint_cfg = _from_block(JointConfig, raw.get("joint", {}) or {})
     train_cfg = TrainConfig(
         epochs=int(train.get("epochs", TrainConfig.epochs)),
         batch_size=int(train.get("batch_size", TrainConfig.batch_size)),
@@ -310,6 +464,9 @@ def load_config(path) -> Config:
         sqe=sqe_cfg,
         dispersion=dispersion_cfg,
         pauli=pauli_cfg,
+        elec=elec_cfg,
+        onebody=onebody_cfg,
+        joint=joint_cfg,
         data=data_cfg,
         train=train_cfg,
     )

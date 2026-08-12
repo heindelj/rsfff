@@ -46,7 +46,15 @@ class PairEnergyHead(nn.Module):
     energy_scale : output scale in Hartree. Targets here are ~3e-3 Ha while a freshly
                    initialized MLP emits O(1) activations, so without this the head's
                    effective learning rate is off by three orders of magnitude relative to
-                   the parameter heads it competes with.
+                   the parameter heads it competes with. A head used for something other
+                   than an intermolecular correction must reset it: covalent bond energies
+                   are ~0.2 Ha, two hundred times larger.
+    extra_dim    : width of an optional per-pair feature block appended to the input, for
+                   conditioning the head on something the atomic features do not carry
+                   (the post-solve electrostatic environment, in
+                   :class:`rsfff.ff.onebody.OneBodyEnergy`). At the default 0 the module is
+                   bit-identical to one built without it -- same parameter count, same
+                   initialization -- so the slot costs nothing until it is used.
 
     The readout is zero-initialized in both weight and bias, so ``dE == 0`` exactly at
     initialization and training starts from the pure force field.
@@ -64,6 +72,7 @@ class PairEnergyHead(nn.Module):
         r_on: float = 4.0,
         r_off: float = 5.0,
         energy_scale: float = 1e-3,
+        extra_dim: int = 0,
     ) -> None:
         super().__init__()
         if not r_off > r_on:
@@ -71,10 +80,11 @@ class PairEnergyHead(nn.Module):
         self.r_on = float(r_on)
         self.r_off = float(r_off)
         self.energy_scale = float(energy_scale)
+        self.extra_dim = int(extra_dim)
         self.species_emb = nn.Embedding(n_species, emb_dim)
         self.radial = BesselBasis(n_radial, r_off)
         h = p0 + emb_dim
-        self.net = mlp(2 * h + n_radial, hidden, depth, 1)
+        self.net = mlp(2 * h + n_radial + self.extra_dim, hidden, depth, 1)
         with torch.no_grad():
             self.net[-1].weight.zero_()
             self.net[-1].bias.zero_()
@@ -86,6 +96,7 @@ class PairEnergyHead(nn.Module):
         positions: torch.Tensor,      # (N, 3) Angstrom
         pair_index: torch.Tensor,     # (2, P)
         r: torch.Tensor | None = None,  # (P,) reuse the pair list's distances
+        extra_pair: torch.Tensor | None = None,  # (P, extra_dim)
     ) -> torch.Tensor:
         i, j = pair_index[0], pair_index[1]
         if r is None:
@@ -93,6 +104,16 @@ class PairEnergyHead(nn.Module):
         h = torch.cat((inv_feats, self.species_emb(species_idx)), dim=-1)   # (N, p0+emb)
         h_i, h_j = h[i], h[j]
         # sum and |difference| are both invariant under swapping i and j
-        x = torch.cat((h_i + h_j, (h_i - h_j).abs(), self.radial(r)), dim=-1)
-        raw = self.energy_scale * self.net(x).squeeze(-1)
+        blocks = [h_i + h_j, (h_i - h_j).abs(), self.radial(r)]
+        if self.extra_dim:
+            if extra_pair is None or extra_pair.shape[-1] != self.extra_dim:
+                raise ValueError(
+                    f"this head was built with extra_dim={self.extra_dim} and needs a "
+                    f"(P, {self.extra_dim}) extra_pair block; the caller must supply the "
+                    f"same per-pair invariants it was trained with"
+                )
+            blocks.append(extra_pair)
+        elif extra_pair is not None:
+            raise ValueError("extra_pair given but the head was built with extra_dim=0")
+        raw = self.energy_scale * self.net(torch.cat(blocks, dim=-1)).squeeze(-1)
         return raw * pairwise_switch(r, self.r_on, self.r_off)
