@@ -102,6 +102,49 @@ from .units import BOHR_ANG
 #: here because this module's public surface predates that split.
 
 
+def slater_elec_tensors(
+    dr_au: torch.Tensor,        # (P, 3) r_j - r_i, bohr
+    r_au: torch.Tensor,         # (P,) bohr
+    b: torch.Tensor,            # (N,) per-atom Slater penetration exponent, 1/bohr
+    pair_index: torch.Tensor,   # (2, P)
+    max_rank: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The four interaction tensors this component is built from: each ``(P, K, K)``.
+
+    ``(t_point, t_ss, t_1c_i, t_1c_j)`` -- the undamped tail, the two-center shell-shell
+    overlap, and the two one-center nucleus-shell terms. Split out from
+    :func:`slater_elec_pair_energy` because :mod:`rsfff.ff.polarization` needs the operator
+    itself rather than its contraction: the coupled solve minimizes over the multipoles, so
+    it has to apply the tensor to trial values instead of to converged ones.
+
+    Sharing this is what makes ``E_pol`` a *pure relaxation*. The polarized level and the
+    frozen ``cls_elec`` channel are then the same quadratic form evaluated at different
+    multipoles, so their difference is exactly zero when the multipoles do not move -- rather
+    than the residue of two independently written operators that nearly agree.
+
+    ``b`` is asymmetric across the pair on purpose: the one-center terms use the raw ``b[i]``
+    and ``b[j]``, not a combined exponent, because a nucleus sees the *other* atom's shell.
+
+    The leading minus on each damped tensor is pyCMM's sign convention:
+    :mod:`rsfff.ff.multipole` returns the overlap *complement*.
+    """
+    i, j = pair_index[0], pair_index[1]
+    r_inv = 1.0 / r_au
+    b_ij = (0.5 * (b[i].log() + b[j].log())).exp()
+    return (
+        damped_interaction_tensor(dr_au, None, r_inv, max_rank=max_rank),
+        damped_interaction_tensor(
+            dr_au, -slater_two_center_damp(b_ij * r_au, max_rank), r_inv, max_rank=max_rank,
+        ),
+        damped_interaction_tensor(
+            dr_au, -slater_one_center_damp(b[i] * r_au, max_rank), r_inv, max_rank=max_rank,
+        ),
+        damped_interaction_tensor(
+            dr_au, -slater_one_center_damp(b[j] * r_au, max_rank), r_inv, max_rank=max_rank,
+        ),
+    )
+
+
 def slater_elec_pair_energy(
     dr_au: torch.Tensor,        # (P, 3) r_j - r_i, bohr
     r_au: torch.Tensor,         # (P,) bohr
@@ -111,6 +154,7 @@ def slater_elec_pair_energy(
     b: torch.Tensor,            # (N,) per-atom Slater penetration exponent, 1/bohr
     pair_index: torch.Tensor,   # (2, P)
     max_rank: int = 1,
+    tensors: tuple | None = None,   # precomputed slater_elec_tensors, to avoid rebuilding
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``(e_point (P,), e_pen (P,))`` in Hartree: the undamped tail and its penetration.
 
@@ -128,22 +172,12 @@ def slater_elec_pair_energy(
     :mod:`rsfff.ff.multipole` returns the overlap *complement*.
     """
     i, j = pair_index[0], pair_index[1]
-    r_inv = 1.0 / r_au
-
+    t_point, t_ss, t_1c_i, t_1c_j = (
+        slater_elec_tensors(dr_au, r_au, b, pair_index, max_rank=max_rank)
+        if tensors is None else tensors
+    )
     # Point multipoles: the exact long-range interaction, undamped.
-    t_point = damped_interaction_tensor(dr_au, None, r_inv, max_rank=max_rank)
     e_point = multipole_pair_energy(m_real[i], m_real[j], t_point)
-
-    b_ij = (0.5 * (b[i].log() + b[j].log())).exp()
-    t_ss = damped_interaction_tensor(
-        dr_au, -slater_two_center_damp(b_ij * r_au, max_rank), r_inv, max_rank=max_rank,
-    )
-    t_1c_i = damped_interaction_tensor(
-        dr_au, -slater_one_center_damp(b[i] * r_au, max_rank), r_inv, max_rank=max_rank,
-    )
-    t_1c_j = damped_interaction_tensor(
-        dr_au, -slater_one_center_damp(b[j] * r_au, max_rank), r_inv, max_rank=max_rank,
-    )
     e_pen = (
         multipole_pair_energy(m_shell[i], m_shell[j], t_ss)
         + multipole_pair_energy(m_shell[i], m_nuc[j], t_1c_i)
@@ -376,5 +410,7 @@ __all__ = [
     "ElectrostaticsOutput",
     "SlaterElectrostatics",
     "ElectrostaticsModel",
+    "slater_elec_pair_energy",
+    "slater_elec_tensors",
     "irrep2_to_spherical",
 ]

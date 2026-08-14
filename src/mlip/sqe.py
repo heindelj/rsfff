@@ -259,12 +259,26 @@ class PairComplianceHead(nn.Module):
         h: torch.Tensor,             # (N, p0) per-atom invariant features
         positions: torch.Tensor,     # (N, 3)
         bond_index: torch.Tensor,    # (2, Nb)
+        envelope: torch.Tensor | None = None,   # (Nb,) multiplier, 1 where absent
     ) -> torch.Tensor:
+        """``envelope`` is applied **after** the floor, so ``s`` reaches exactly zero.
+
+        Charge-transfer channels come from a neighbor search
+        (:func:`rsfff.ff.pairs.union_channels`), and a channel that appears the instant two
+        molecules come within a cutoff makes the forces discontinuous there. Multiplying by a
+        compact switch removes that: the channel opens smoothly and closes to exactly ``s = 0``,
+        which is the bounded, well-conditioned limit this whole parameterization is built on.
+
+        The caller supplies it rather than the head computing it, because *which* channels need
+        enveloping is a routing question -- bonded channels are asserted to exist at any
+        distance and must never be switched off by a radius.
+        """
         i, j = bond_index[0], bond_index[1]
         h_i, h_j = h[i], h[j]
         r = (positions[i] - positions[j]).norm(dim=-1)
         x = torch.cat((h_i + h_j, (h_i - h_j).abs(), self.radial(r)), dim=-1)
-        return torch.nn.functional.softplus(self.net(x).squeeze(-1)) + self.s_floor
+        s = torch.nn.functional.softplus(self.net(x).squeeze(-1)) + self.s_floor
+        return s if envelope is None else s * envelope
 
 
 def atomic_dipole_energy(

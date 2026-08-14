@@ -287,6 +287,33 @@ class ElectrostaticParameterHeads(nn.Module):
 
 
 @dataclass
+class ResponseParameters:
+    """Everything the response solve needs, *before* any solve happens.
+
+    Split out from :meth:`FragmentResponse.forward` because the polarized and charge-transfer
+    levels need the parameters without the frozen solve that normally accompanies them: they
+    evaluate the same heads on the environment-aware descriptor and hand the result to
+    :func:`rsfff.ff.polarization.coupled_response`, which minimizes a *different* functional.
+    Re-running the whole ``forward`` and discarding its multipoles would be both wasteful and
+    misleading -- those multipoles are not the ones that level uses.
+
+    ``q0`` already carries the per-fragment shift that makes it sum exactly to the formal
+    charge, so SQE conserves that identically whatever the compliances do.
+    """
+
+    chi: torch.Tensor                  # (N,)
+    eta: torch.Tensor                  # (N,) strictly positive
+    q0: torch.Tensor                   # (N,)
+    compliance: torch.Tensor           # (Nb,)
+    chivec: torch.Tensor | None        # (N, 3) vector electronegativity
+    alpha: torch.Tensor | None         # (N, 3, 3) atomic polarizability, PSD
+    chiquad: torch.Tensor | None       # (N, 5)
+    cquad: torch.Tensor | None         # (N,) isotropic quadrupole polarizability
+    z: torch.Tensor                    # (N,) effective nuclear charge (penetration)
+    b: torch.Tensor                    # (N,) Slater exponent (penetration)
+
+
+@dataclass
 class FragmentResponseOutput:
     """The solved multipoles and the internal energy, per fragment."""
 
@@ -330,7 +357,21 @@ class FragmentResponse(nn.Module):
     def max_rank(self) -> int:
         return self.params.max_rank
 
-    def forward(self, batch, feats: LambdaFeatures) -> FragmentResponseOutput:
+    def response_parameters(
+        self,
+        batch,
+        feats: LambdaFeatures,
+        *,
+        bond_index: torch.Tensor | None = None,
+        envelope: torch.Tensor | None = None,
+    ) -> ResponseParameters:
+        """The heads' outputs plus ``q0`` and the compliances, with no solve.
+
+        ``bond_index`` defaults to the complete intra-fragment graph, which is the frozen and
+        polarized levels. The charge-transfer level passes
+        :func:`rsfff.ff.pairs.union_channels`' wider graph and the ``envelope`` that keeps its
+        radius-derived channels continuous.
+        """
         if batch.fragment_idx is None:
             raise ValueError(
                 "the response solve is per fragment but batch.fragment_idx is None; the "
@@ -341,9 +382,11 @@ class FragmentResponse(nn.Module):
         n_frag = int(batch.n_fragments)
 
         chi, eta, chivec, alpha_i, z, b, chiquad, cquad = self.params(feats)
-
-        bond_index, bond_batch = intra_fragment_channels(frag)
-        compliance = self.compliance_head(feats.inv_feats, positions, bond_index)
+        if bond_index is None:
+            bond_index, _ = intra_fragment_channels(frag)
+        compliance = self.compliance_head(
+            feats.inv_feats, positions, bond_index, envelope=envelope
+        )
 
         # Baseline charges: a per-element prior, then a uniform shift per fragment so that
         # sum_i q0_i is *exactly* the formal charge whatever the prior sums to. SQE then
@@ -357,6 +400,22 @@ class FragmentResponse(nn.Module):
         q0_species = self.params.q0_prior[feats.species_idx]
         prior_sum = q0_species.new_zeros(n_frag).index_add_(0, frag, q0_species)
         q0 = q0_species + ((frag_q - prior_sum) / counts.clamp(min=1))[frag]
+
+        return ResponseParameters(
+            chi=chi, eta=eta, q0=q0, compliance=compliance,
+            chivec=chivec, alpha=alpha_i, chiquad=chiquad, cquad=cquad, z=z, b=b,
+        )
+
+    def forward(self, batch, feats: LambdaFeatures) -> FragmentResponseOutput:
+        positions = batch.positions
+        frag = batch.fragment_idx
+        n_frag = int(batch.n_fragments)
+
+        rp = self.response_parameters(batch, feats)
+        chi, eta, chivec, alpha_i = rp.chi, rp.eta, rp.chivec, rp.alpha
+        z, b, chiquad, cquad = rp.z, rp.b, rp.chiquad, rp.cquad
+        q0, compliance = rp.q0, rp.compliance
+        bond_index, bond_batch = intra_fragment_channels(frag)
 
         sol = sqe_solve(
             chi, eta, compliance, q0, positions,

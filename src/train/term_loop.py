@@ -62,6 +62,61 @@ def eda_component_fit(out, batch, cfg):
     return loss, metrics, target
 
 
+def warm_start(model, path: str | None) -> None:
+    """Load what fits from an earlier checkpoint, and say exactly what did not.
+
+    Staged fits need this: the polarized level is meant to start from the frozen fit and the
+    charge-transfer level from the polarized one, because each label is defined as a
+    *difference* against the level below it. Fitting ``ct`` on top of a badly-fit ``pol``
+    makes the label meaningless rather than merely harder.
+
+    The load is deliberately non-strict, because a stage genuinely changes some shapes: the
+    correction trunk's input widens when the electrostatic environment starts feeding the bond
+    channel. A grown tensor is **zero-padded rather than reinitialized** -- the saved block is
+    copied into the leading slice and the new columns are set to zero, so the new input starts
+    inert and the model starts at exactly the checkpoint it was given.
+
+    That distinction is worth more than it looks. Dropping the tensor and reinitializing it
+    scrambles the *whole* shared trunk, not just the part the new input feeds: measured on the
+    frozen-to-polarized step, a reinitialized ``pair_head.trunk.0.weight`` took ``elst_mae``
+    from 0.46 to 3.2 kJ/mol and put -237 kJ/mol per fragment of intramolecular electrostatics
+    back, because the per-pair range separation is read from the same trunk. Zero-padding
+    leaves all of that untouched.
+
+    Everything skipped or left at initialization is counted and printed. A stage reporting far
+    more of either than the shape changes it introduced has loaded the wrong checkpoint.
+    """
+    if not path:
+        return
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    saved = ckpt.get("model_state", ckpt)
+    current = model.state_dict()
+    take, padded, dropped = {}, [], []
+    for k, v in saved.items():
+        if k not in current:
+            continue
+        want = current[k]
+        if want.shape == v.shape:
+            take[k] = v
+        elif v.dim() == want.dim() and all(a <= b for a, b in zip(v.shape, want.shape)):
+            grown = torch.zeros_like(want)
+            grown[tuple(slice(0, n) for n in v.shape)] = v
+            take[k] = grown
+            padded.append(f"{k} {tuple(v.shape)}->{tuple(want.shape)}")
+        else:
+            dropped.append(f"{k} {tuple(v.shape)} vs {tuple(want.shape)}")
+    missing = [k for k in current if k not in take]
+    model.load_state_dict(take, strict=False)
+    parts = [f"warm start from {path}: loaded {len(take)}/{len(current)} tensors"]
+    if padded:
+        parts.append(f"{len(padded)} zero-padded ({', '.join(padded[:3])})")
+    if dropped:
+        parts.append(f"{len(dropped)} DROPPED, incompatible ({', '.join(dropped[:3])})")
+    if missing:
+        parts.append(f"{len(missing)} left at initialization")
+    print("; ".join(parts))
+
+
 def run_epoch(
     model,
     dataset,
@@ -150,7 +205,9 @@ def fit(
 
     The untrained line is printed before anything is optimized on purpose: it is the number
     every later epoch has to beat for the learned parts to be earning their place, and for
-    these terms the physical backbone alone is often already close.
+    these terms the physical backbone alone is often already close. With ``train.init_from``
+    set it is the *warm-started* baseline, which is the number a staged fit actually starts
+    from.
     """
     def epoch(indices, **kw):
         return run_epoch(
@@ -158,6 +215,8 @@ def fit(
             fit_term=fit_term, penalties=penalties, diagnostics=diagnostics,
             grad_positions=grad_positions, **kw
         )
+
+    warm_start(model, config.train.init_from)
 
     base = epoch(val_idx)
     print(f"untrained: {fmt(base, log_keys)}")

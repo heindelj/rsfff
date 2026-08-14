@@ -1,0 +1,185 @@
+# Charge transfer: the third level, with every constraint lifted.
+#
+#   python -m rsfff.train.train_unified configs/water_ct.yaml
+#
+# Adds inter-fragment charge-flow channels to the polarized solve, so charge conserves per
+# *frame* while each fragment's charge is free to move. The bond channel additionally gains
+# the environment-aware descriptor, and `eda_ct` is the difference from the polarized level.
+#
+# Run this from the polarized checkpoint, not from scratch. `ct` is defined as E_ct - E_pol,
+# so a bad polarized level makes the CT label meaningless rather than merely harder.
+#
+# Extra readouts beyond the polarized run:
+#
+#   q_ct      charge actually crossing a fragment boundary, in e. Zero means the compliance
+#             head closed every channel and `ct` is being carried entirely by the correction.
+#   ct_ff     the classical part of ct.
+#   cg_ct     iterations for the wider solve; 6-8 at initialization.
+#
+# ct_compliance_scale is calibrated, not guessed. SQE has no structural reason to prefer an
+# intramolecular channel over an intermolecular one -- the electronegativity difference driving
+# an O-H transfer is the same whether the two atoms share a molecule -- so at a shared s_init
+# the model opens covalent-strength channels across every hydrogen bond. Measured on a freshly
+# initialized w2, unscaled ct starts at -52 kJ/mol against a true -8.2; at 0.1 it starts at
+# -7.1, with only 0.0005 e of net charge crossing. Softplus is unbounded, so this sets where
+# the head starts looking, not a ceiling.
+
+run_name: water_ct
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd.xyz
+  atomic_reference_states: data/atomic_reference_states.json
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]   # lambda=1 for chivec/Pauli dipoles, lambda=2 for alpha
+  backend: e3nn
+  density_channels: 8
+
+unified:
+  max_rank: 2                   # must match elec.max_rank
+  # Range separation. Per element (see src/ff/range_priors.py), per channel, learnable.
+  alpha_init: 40.0
+  learn_r0: true
+  environment_r0: false         # competes with the pair correction; leave off for the first fit
+  pair_range_separation: true   # per-pair r0 on top of the element prior; see UnifiedConfig
+  learn_alpha: true
+  # Fragment-state slot: identically zero for a neutral singlet, so inert on this data.
+  # Present so H5O2+ is an addition rather than a retrofit. Set 0 to drop it entirely.
+  fragment_state_dim: 4
+  # Environment-aware descriptor for the INTERACTION parameters: h_env = h_frag + g(h_full),
+  # g zero-initialized so this starts from exactly the fragment-confined model and env_norm
+  # measures how much environment the fit actually asks for. This is what lets C6 be quenched
+  # by the surroundings -- effective many-body dispersion.
+  #
+  # Intra-fragment pairs and the response solve stay on h_frag regardless: `fragment_energy`
+  # is an isolated-fragment label with no environment dependence to fit, so a 1-body term
+  # built on h_env would be fitting a function that cannot match its target. The cost is a
+  # second power spectrum per forward (one shared neighbor search) and the interaction
+  # channels ceasing to be rigorously two-body -- which is the intended trade, not a
+  # regression.
+  environment_features: true
+  env_hidden: 64
+  env_depth: 2
+  env_weight: 0.0
+  # Shared correction trunk
+  emb_dim: 16
+  corr_hidden: 64
+  corr_depth: 2
+  corr_n_radial: 8
+  corr_r_on: 4.0
+  corr_r_off: 5.0               # must not exceed features.cutoff
+  elst_energy_scale: 3.0e-3
+  pauli_energy_scale: 3.0e-3
+  disp_energy_scale: 1.0e-3
+  bond_energy_scale: 0.2        # Hartree; water's two O-H bonds are ~-0.37 Ha
+  bond_r_on: 2.5
+  bond_r_off: 4.0
+  # Classical reach. The largest sets the one shared pair list.
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+  # Loss. Each term is 1.0 at an error of one energy_scale, so these are dimensionless.
+  # The interaction channels are weighted up for the same reason as configs/
+  # water_onebody_elec.yaml: at init the fragment energy is off by ~960 kJ/mol against
+  # cls_elec's ~14, so equal weights let the 1-body term own the first several epochs.
+  energy_scale: 3.8093e-4
+  onebody_weight: 1.0
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  anchor_weight: 1.0
+  anchor_batch_size: 64        # the anchor force term is a 2nd-order backward; see UnifiedConfig
+  r0_weight: 0.05
+  intra_classical_weight: 0.05  # keep the classical forms out of the bond channel's region
+  r0_spread_weight: 0.0
+  # --- the polarized level ---
+  polarization: true
+  charge_transfer: true
+  pol_weight: 30.0
+  ct_weight: 30.0
+  ct_channel_cutoff: 5.0
+  ct_channel_taper: 1.0
+  ct_compliance_scale: 0.1
+  cg_rtol: 1.0e-9
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+
+# Reused verbatim by the unified model: the response solve and the two parameter heads.
+elec:
+  max_rank: 2
+  environment_chi: true
+  environment_eta: true
+  eta_floor: 0.05
+  learn_dipole: true
+  learn_quadrupole: true
+  learn_z: true
+  environment_z: false
+  learn_b: true
+  environment_b: false
+  s_init: 0.5
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+  equiv_channels: 32
+  # Frozen-monomer multipoles on the anchor. These pin q/mu/Theta themselves; the fragment
+  # energies then pin the response energy that produced them.
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+
+dispersion:
+  b_prior: per_element          # a uniform 2.0 over-binds badly; see build_log_priors
+  learn_c6: true
+  environment_c6: true
+  learn_b: true
+  environment_b: false
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+
+pauli:
+  learn_q: true
+  environment_q: true
+  learn_b: true
+  environment_b: false
+  learn_dipole: true
+  learn_quadrupole: true
+  emb_dim: 16
+  hidden: 64
+  depth: 2
+  equiv_channels: 32
+
+onebody:
+  # The unified model reads only force_weight/force_scale/energy_scale from this block, for
+  # the isolated-monomer anchor where the QC gradient really is -dE_1body/dR.
+  energy_scale: 3.8093e-4
+  force_weight: 1.0
+  force_scale: 1.0e-3
+
+train:
+  epochs: 150
+  batch_size: 32
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 2
+  # Staged: start from the level below. `water_ct`'s label is a *difference* against
+  # it, so fitting this from scratch makes a bad lower level and a bad new level
+  # indistinguishable. Tensors whose shape changed are reported, not dropped silently.
+  init_from: checkpoints/water_pol/best.pt

@@ -233,3 +233,80 @@ def intra_fragment_pairs(
     pair_index, pair_frag = intra_fragment_channels(fragment_idx)
     r = (positions[pair_index[0]] - positions[pair_index[1]]).norm(dim=-1)
     return pair_index, r, pair_frag
+
+
+def union_channels(
+    positions: torch.Tensor,               # (N, 3) Angstrom
+    batch_idx: torch.Tensor,               # (N,) long, frame id per atom
+    fragment_idx: torch.Tensor,            # (N,) long, batch-global, non-decreasing
+    cutoff: float,                         # Angstrom; 0 disables the radius half entirely
+    *,
+    max_num_neighbors: int = 512,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The charge-transfer channel graph: ``(bond_index (2,Nb), bond_batch (Nb,), from_radius (Nb,))``.
+
+    The channel-graph analogue of :func:`union_pairs`, and it exists for the same reason: at
+    the CT level there is no fragment distinction to make, because that is precisely the
+    constraint being lifted. So the complete intra-fragment enumeration is unioned with a
+    radius graph over *all* pairs, and charge is free to flow anywhere the compliance head
+    lets it.
+
+    ``bond_batch`` is the **frame**, not the fragment -- unlike
+    :func:`intra_fragment_channels`. With inter-fragment channels open, charge conserves per
+    frame and the connected component of the channel graph is the frame, so that is the block
+    the solve is grouped by. Passing ``cutoff = 0`` gives exactly the intra-fragment channels
+    with frame grouping, which is the polarized level: same edges, no charge crossing a
+    fragment boundary, but pooled where the coupled solve needs them.
+
+    ``from_radius`` marks the channels that entered through the neighbor search and **must**
+    therefore be enveloped to zero at the cutoff -- otherwise a channel appears
+    discontinuously as two molecules approach and the forces jump. Channels from the intra
+    enumeration are marked ``False`` even when the radius graph also found them, because they
+    are asserted to exist at any distance: enveloping one would let a stretched bond's channel
+    vanish, which is the property :func:`intra_fragment_channels` is built to protect.
+
+    Note this does *not* reintroduce a distance rule for bonds, the thing
+    :func:`intra_fragment_channels` warns against. The bonded channels still come from the
+    fragmentation. What the radius supplies is a candidate *set* for charge transfer, whose
+    members are then switched on or off by the learned compliance -- and closing a channel is
+    the bounded limit ``s -> 0``, so a generous set costs accuracy nothing.
+    """
+    if fragment_idx is None:
+        raise ValueError("union_channels needs a fragment partition to enumerate bonds from")
+    intra, _ = intra_fragment_channels(fragment_idx)
+    device = fragment_idx.device
+    if not cutoff > 0.0:
+        return (
+            intra,
+            batch_idx[intra[0]] if intra.shape[1] else torch.zeros(0, dtype=torch.long, device=device),
+            torch.zeros(intra.shape[1], dtype=torch.bool, device=device),
+        )
+
+    # Same MPS fallback as `union_pairs`: torch_cluster has no MPS kernel, and the list is
+    # built from detached positions because only the compliance carries gradient here.
+    if positions.device.type == "mps":
+        edge = radius_graph(
+            positions.detach().cpu(), r=cutoff, batch=batch_idx.cpu(), loop=False,
+            max_num_neighbors=max_num_neighbors,
+        ).to(device)
+    else:
+        edge = radius_graph(
+            positions.detach(), r=cutoff, batch=batch_idx, loop=False,
+            max_num_neighbors=max_num_neighbors,
+        )
+    edge = edge[:, edge[0] < edge[1]]
+
+    n_atoms = positions.shape[0]
+    both = torch.cat((edge, intra), dim=1)
+    keys = both[0] * n_atoms + both[1]
+    _, inverse = torch.unique(keys, return_inverse=True)
+    pick = torch.empty(
+        int(inverse.max()) + 1 if inverse.numel() else 0, dtype=torch.long, device=device
+    )
+    pick[inverse] = torch.arange(keys.numel(), device=device)
+    bond_index = both[:, pick]
+
+    intra_keys = intra[0] * n_atoms + intra[1]
+    final_keys = bond_index[0] * n_atoms + bond_index[1]
+    from_radius = ~torch.isin(final_keys, intra_keys)
+    return bond_index, batch_idx[bond_index[0]], from_radius

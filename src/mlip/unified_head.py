@@ -91,6 +91,7 @@ class UnifiedPairHead(nn.Module):
         channels: dict[str, ChannelSpec],
         *,
         range_channels: tuple[str, ...] = (),
+        extra_dim: int = 0,
         max_log_dev: float = 0.7,
         emb_dim: int = 16,
         hidden: int = 64,
@@ -102,6 +103,7 @@ class UnifiedPairHead(nn.Module):
             raise ValueError("UnifiedPairHead needs at least one channel")
         self.channels = dict(channels)
         self.range_channels = tuple(range_channels)
+        self.extra_dim = int(extra_dim)
         self.species_emb = nn.Embedding(n_species, emb_dim)
         # One radial basis for the shared trunk, so it has to span the widest channel. The
         # per-channel envelopes below still cut each channel off at its own r_off.
@@ -109,7 +111,7 @@ class UnifiedPairHead(nn.Module):
 
         h = p0 + emb_dim
         layers: list[nn.Module] = []
-        d = 2 * h + n_radial
+        d = 2 * h + n_radial + self.extra_dim
         for _ in range(depth):
             layers += [nn.Linear(d, hidden), nn.SiLU()]
             d = hidden
@@ -145,10 +147,20 @@ class UnifiedPairHead(nn.Module):
         species_i: torch.Tensor,      # (P,)
         species_j: torch.Tensor,      # (P,)
         r: torch.Tensor,              # (P,) Angstrom
+        extra: torch.Tensor | None = None,   # (P, extra_dim) pair-invariant side channel
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         """``({channel: dE (P,)}, {channel: log-r0 deviation (P,)})``.
 
         Features arrive **already gathered onto pairs**, not as per-atom arrays.
+
+        ``extra`` carries the electrostatic environment
+        (:func:`rsfff.ff.environment.environment_pair_invariants`) when the caller wants the
+        bond energy to respond to an external field. It must already be reduced to scalars that
+        are both rotation-invariant and symmetric under swapping ``i`` and ``j`` -- the trunk
+        below symmetrizes the *atomic* features but cannot fix an odd side channel, so a raw
+        ``F_i . rhat`` would silently make the output depend on pair storage order. Passing
+        zeros here is what defines the reference level each anchored correction is measured
+        against, so the same head serves both.
 
         The caller does the gathering because it partitions the pair list and calls this once
         per part: :class:`rsfff.ff.unified.UnifiedPairModel` scores intra-fragment pairs from
@@ -162,7 +174,16 @@ class UnifiedPairHead(nn.Module):
         h_j = torch.cat((inv_j, self.species_emb(species_j)), dim=-1)
         # sum and |difference| are both invariant under swapping i and j, so an undirected
         # i<j pair list is unambiguous and no channel can depend on the storage order.
-        u = self.trunk(torch.cat((h_i + h_j, (h_i - h_j).abs(), self.radial(r)), dim=-1))
+        parts = [h_i + h_j, (h_i - h_j).abs(), self.radial(r)]
+        if self.extra_dim:
+            if extra is None:
+                extra = r.new_zeros(r.shape[0], self.extra_dim)
+            elif extra.shape[-1] != self.extra_dim:
+                raise ValueError(
+                    f"extra has width {extra.shape[-1]}, head was built for {self.extra_dim}"
+                )
+            parts.append(extra)
+        u = self.trunk(torch.cat(parts, dim=-1))
         energies = {
             name: spec.energy_scale
             * self.readout[name](u).squeeze(-1)

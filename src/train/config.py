@@ -8,7 +8,7 @@ Top-level YAML blocks: ``features:`` (SOAP featurizer), ``mlip:`` (MLP head),
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -103,6 +103,12 @@ class TrainConfig:
                                     # level of theory (H-, O2-); 0 drops them from the anchors
     q_l2_weight: float = 0.0
     eval_every: int = 10
+    #: Checkpoint to warm start from, e.g. ``checkpoints/water_unified/best.pt``. Loaded
+    #: non-strictly, with every skipped and missing tensor reported -- see
+    #: :func:`rsfff.train.term_loop.warm_start`. Needed by the staged polarization/CT fits,
+    #: where each level's label is a *difference* against the level below and starting from
+    #: scratch would make the lower level's error indistinguishable from the new level's.
+    init_from: str = ""
 
 
 @dataclass
@@ -456,6 +462,58 @@ class UnifiedConfig:
     #: prior. Inert while ``environment_r0`` is off.
     r0_spread_weight: float = 0.0
 
+    # --- polarization and charge transfer (docs/range_separated_mlip.md §5.1) -------------
+    #: The two remaining EDA components, as constraint lifting at a fixed fragmentation. Each
+    #: level minimizes the *same* functional as the frozen one with one more freedom, and each
+    #: label is the difference between adjacent levels -- so with both off the model is
+    #: bit-identical to the frozen fit and ``checkpoints/water_unified`` still loads.
+    #:
+    #: ``polarization`` moves the inter-fragment electrostatics inside the response functional
+    #: so the multipoles relax against each other, lets the response parameters read ``h_env``,
+    #: and gives the bond channel the external field as a feature. ``charge_transfer`` then
+    #: opens inter-fragment charge-flow channels. CT requires polarization: ``ct`` is defined
+    #: as ``E_ct - E_pol``, so without the middle level it would absorb the polarization too.
+    polarization: bool = False
+    charge_transfer: bool = False
+    pol_weight: float = 30.0
+    ct_weight: float = 30.0
+    #: Candidate charge-transfer channels reach this far, Angstrom. Generous on purpose: a
+    #: channel is closed by the bounded limit ``s -> 0``, so an over-wide set costs accuracy
+    #: nothing while a too-narrow one cannot be recovered by learning.
+    ct_channel_cutoff: float = 5.0
+    #: Envelope width at that cutoff. **Not optional**: without it a channel appears the
+    #: instant two molecules come within range and the forces are discontinuous there.
+    ct_channel_taper: float = 1.0
+    #: Scale for the radius-derived channels' compliance -- the charge-transfer analogue of a
+    #: correction channel's ``energy_scale``, and there for the same reason. SQE has no
+    #: structural reason to prefer an intramolecular channel over an intermolecular one, so at
+    #: a shared ``s_init`` the model opens covalent-strength channels across every hydrogen
+    #: bond: a freshly initialized w2 starts at ``ct = -52`` kJ/mol against a true -8.2. At
+    #: 0.1 it starts at -7.1. Softplus is unbounded, so this sets where the head starts
+    #: looking rather than any ceiling.
+    ct_compliance_scale: float = 0.1
+    #: Conjugate-gradient tolerances for the coupled solve. ``cg_maxiter`` is a safety net,
+    #: not a working limit -- with the uncoupled response as preconditioner a water cluster
+    #: converges in 5-8 iterations, so a count that climbs is the early warning that the
+    #: polarization is running away, well before it becomes a NaN.
+    cg_rtol: float = 1.0e-9
+    cg_atol: float = 1.0e-12
+    cg_maxiter: int = 100
+
+
+@dataclass
+class StageConfig:
+    """One stage of a staged fit: a name plus per-block overrides of the parent config.
+
+    ``overrides`` is ``{block_name: {field: value}}`` using the same block names as the YAML
+    (``unified``, ``train``, ...). Applied with :func:`dataclasses.replace`, so an unknown
+    field raises rather than being silently ignored -- a typo'd override in a run that takes
+    hours is worth failing fast on.
+    """
+
+    name: str
+    overrides: dict = field(default_factory=dict)
+
 
 @dataclass
 class Config:
@@ -463,6 +521,9 @@ class Config:
     device: str = "auto"       # auto -> cuda > mps > cpu
     dtype: str = "float32"     # float32 | float64
     checkpoint_root: str = "checkpoints"
+    #: Sequential stages, each warm starting from the previous one's best checkpoint. Empty
+    #: means a single ordinary fit. See :func:`rsfff.train.config.stage_config`.
+    stages: list = field(default_factory=list)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     mlip: MLIPConfig = field(default_factory=MLIPConfig)
     eem: EEMConfig = field(default_factory=EEMConfig)
@@ -476,6 +537,46 @@ class Config:
     unified: UnifiedConfig = field(default_factory=UnifiedConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+
+
+def stage_config(config: "Config", stage: "StageConfig", init_from: str = "") -> "Config":
+    """The parent config with one stage's overrides applied, ready to hand to ``fit``.
+
+    ``run_name`` gains the stage's name so each stage checkpoints to its own directory and a
+    later stage can never overwrite the one it warm started from. ``init_from`` is filled in
+    with the previous stage's best checkpoint unless the stage sets it explicitly.
+
+    Overrides go through :func:`dataclasses.replace`, so a misspelled field raises here rather
+    than being dropped -- which matters when the mistake would otherwise surface as a stage
+    that quietly trained the wrong thing for several hours.
+    """
+    from dataclasses import replace as _replace
+
+    blocks = {}
+    for block_name, values in stage.overrides.items():
+        if not hasattr(config, block_name):
+            raise ValueError(
+                f"stage {stage.name!r} overrides unknown block {block_name!r}; "
+                f"valid blocks: {sorted(f.name for f in fields(config))}"
+            )
+        current = getattr(config, block_name)
+        if not is_dataclass(current):
+            raise ValueError(
+                f"stage {stage.name!r} overrides {block_name!r}, which is not a config block"
+            )
+        known = {f.name for f in fields(current)}
+        unknown = set(values) - known
+        if unknown:
+            raise ValueError(
+                f"stage {stage.name!r} sets unknown {block_name} field(s) "
+                f"{sorted(unknown)}; valid: {sorted(known)}"
+            )
+        blocks[block_name] = _replace(current, **values)
+
+    staged = _replace(config, run_name=f"{config.run_name}_{stage.name}", **blocks)
+    if not staged.train.init_from and init_from:
+        staged = _replace(staged, train=_replace(staged.train, init_from=init_from))
+    return staged
 
 
 def _from_block(cls, block: dict):
@@ -569,13 +670,21 @@ def load_config(path) -> Config:
         ),
         unbound_weight=float(train.get("unbound_weight", TrainConfig.unbound_weight)),
         q_l2_weight=float(train.get("q_l2_weight", TrainConfig.q_l2_weight)),
+        init_from=str(train.get("init_from", TrainConfig.init_from)),
         eval_every=int(train.get("eval_every", TrainConfig.eval_every)),
     )
+    stages = []
+    for i, block in enumerate(raw.get("stages", []) or []):
+        block = dict(block)
+        name = str(block.pop("name", f"stage{i + 1}"))
+        stages.append(StageConfig(name=name, overrides=block))
+
     return Config(
         run_name=str(raw.get("run_name", "run")),
         device=str(raw.get("device", "auto")),
         dtype=str(raw.get("dtype", "float32")),
         checkpoint_root=str(raw.get("checkpoint_root", "checkpoints")),
+        stages=stages,
         features=features_cfg,
         mlip=mlip_cfg,
         eem=eem_cfg,

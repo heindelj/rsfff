@@ -37,10 +37,12 @@ directly.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import torch
 
 from ..ff.dispersion import DispersionParameterHeads, build_log_priors
+from ..ff.environment import N_PAIR_INVARIANTS
 from ..ff.multipole import irrep2_to_spherical
 from ..ff.pauli import PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
@@ -55,7 +57,7 @@ from ..ff.units import KJMOL_PER_HARTREE
 from ..mlip.reference_states import AtomicStateReference
 from ..mlip.switch import pairwise_switch
 from ..mlip.unified_head import ChannelSpec, UnifiedPairHead
-from .config import Config, load_config
+from .config import Config, load_config, stage_config
 from .data import (
     load_datasets,
     load_extxyz,
@@ -67,17 +69,24 @@ from .term_loop import fit
 from .train_eem import resolve_device
 from .train_elec import build_featurizer, build_response
 
-#: EDA component fitted by each interaction channel.
+#: EDA component fitted by each interaction channel. ``pol``/``ct`` are added only when their
+#: levels are switched on, so a frozen-level config raises nothing about missing labels.
 _TARGETS = {"elst": "cls_elec", "pauli": "mod_pauli", "disp": "disp"}
+_LEVEL_TARGETS = {"pol": "pol", "ct": "ct"}
 
 _LOG_KEYS = (
-    "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae",
-    "a_mae", "f_mae", "dip_mae", "quad_mae",
+    "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae", "pol_mae", "ct_mae",
+    "a_mae", "f_mae", "dip_mae", "quad_mae", "e_tot_mae",
     "anchor_e", "anchor_f", "dipole", "quad", "intra_ff",
     "q_res", "qO", "dchi", "internal", "bond",
     "gate_inter_elst", "gate_intra_disp",
     "intra_elst", "intra_pauli", "intra_disp",
     "r0_elst", "r0_pauli", "r0_disp", "env_norm",
+    # The polarization/CT split and the solver's health. `pol_ff` is the classical relaxation
+    # and must stay <= 0 while the two levels share response parameters; `q_ct` is how much
+    # charge actually crossed a fragment boundary; a climbing `cg_ct` is the early warning
+    # that the coupled functional is losing positive definiteness.
+    "pol_ff", "ct_ff", "q_ct", "cg_pol", "cg_ct", "cg_fail",
 )
 
 
@@ -160,6 +169,9 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
             ),
         },
         range_channels=RANGE_CHANNELS if ucfg.pair_range_separation else (),
+        # The side channel the external field enters through. Zero unless polarization is on,
+        # which keeps the trunk's input width -- and hence the checkpoint -- unchanged.
+        extra_dim=N_PAIR_INVARIANTS if ucfg.polarization else 0,
         emb_dim=ucfg.emb_dim, hidden=ucfg.corr_hidden, depth=ucfg.corr_depth,
         n_radial=ucfg.corr_n_radial,
     )
@@ -181,6 +193,12 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
             "pauli": ClassicalSpec(ucfg.pauli_cutoff, ucfg.taper_width),
             "disp": ClassicalSpec(ucfg.disp_cutoff, ucfg.taper_width),
         },
+        polarization=ucfg.polarization,
+        charge_transfer=ucfg.charge_transfer,
+        ct_channel_cutoff=ucfg.ct_channel_cutoff,
+        ct_channel_taper=ucfg.ct_channel_taper,
+        ct_compliance_scale=ucfg.ct_compliance_scale,
+        cg_rtol=ucfg.cg_rtol, cg_atol=ucfg.cg_atol, cg_maxiter=ucfg.cg_maxiter,
     )
 
 
@@ -201,9 +219,15 @@ def unified_fit(out, batch, cfg: Config):
         "bond": float(out.energy_bond.detach().mean()),
     }
     weights = {
-        "elst": u.elst_weight, "pauli": u.pauli_weight, "disp": u.disp_weight
+        "elst": u.elst_weight, "pauli": u.pauli_weight, "disp": u.disp_weight,
+        "pol": u.pol_weight, "ct": u.ct_weight,
     }
-    for name, key in _TARGETS.items():
+    targets = dict(_TARGETS)
+    if u.polarization:
+        targets["pol"] = _LEVEL_TARGETS["pol"]
+    if u.charge_transfer:
+        targets["ct"] = _LEVEL_TARGETS["ct"]
+    for name, key in targets.items():
         if key not in batch.eda:
             raise KeyError(
                 f"the dataset has no eda_{key} label, which the {name} channel fits; "
@@ -212,6 +236,14 @@ def unified_fit(out, batch, cfg: Config):
         err = out.interaction[name] - batch.eda[key]
         loss = loss + weights[name] * (err / u.energy_scale).pow(2).mean()
         metrics[f"{name}_mae"] = float(err.detach().abs().mean()) * KJMOL_PER_HARTREE
+
+    # Diagnostics only -- deliberately not in the loss. Once pol and ct exist the
+    # decomposition is complete and `energy` is a real prediction, but supervising it now
+    # would give a wrong split between channels a way to fit well anyway.
+    if batch.energy is not None:
+        metrics["e_tot_mae"] = float(
+            (out.energy.detach() - batch.energy).abs().mean()
+        ) * KJMOL_PER_HARTREE
     return loss, metrics, batch.fragment_energy
 
 
@@ -375,6 +407,38 @@ class AnchorTerms:
             # construction, so any growth is the model asking for many-body content.
             metrics["env_norm"] = float(out.environment_norm.detach().mean())
 
+        # The polarization/CT split. `pol_ff`/`ct_ff` are the *classical* relaxations; the
+        # rest of each channel is its correction head. Watch the split, not the MAE: pol and
+        # ct are both "environment-dependent correction" and are separated only by their
+        # labels and by acting on disjoint pair sets, which is the same degeneracy shape as
+        # the intra-classical/bond leak that the fit did not police on its own.
+        #
+        # `pol_ff` must stay <= 0. It is a relaxation of one functional, so it is negative by
+        # the variational principle wherever the two levels share response parameters -- which
+        # they do exactly at initialization. A positive value means the environment-aware
+        # response parameters have drifted far enough to break that, and `env_weight` is the
+        # lever.
+        for name in ("pol", "ct"):
+            if name in out.interaction_ff:
+                metrics[f"{name}_ff"] = (
+                    float(out.interaction_ff[name].detach().mean()) * KJMOL_PER_HARTREE
+                )
+        if out.solver:
+            for name, (n_iter, converged, pd_fail) in out.solver.items():
+                metrics[f"cg_{name}"] = float(n_iter)
+                fails = int((~converged).sum()) + int(pd_fail.sum())
+                metrics["cg_fail"] = metrics.get("cg_fail", 0.0) + float(fails)
+        if out.level_ct is not None:
+            # How much charge actually crossed a fragment boundary -- the direct readout of
+            # what the CT level bought, and zero if the compliance head closed every channel.
+            q = out.level_ct.charges.detach()
+            per_frag = q.new_zeros(n_frag).index_add_(0, frag, q)
+            want = (
+                per_frag.new_zeros(n_frag) if batch.fragment_charge is None
+                else batch.fragment_charge.to(per_frag.dtype)
+            )
+            metrics["q_ct"] = float((per_frag - want).abs().max())
+
         z = batch.atomic_numbers
         oxygen, hydrogen = z == 8, z == 1
         if bool(oxygen.any()):
@@ -386,11 +450,63 @@ class AnchorTerms:
 
 
 def train(config: Config):
+    """One fit, or a sequence of them when the config declares ``stages:``.
+
+    Staged is the intended way to reach the full decomposition, because each higher level's
+    label is a **difference** against the level below it: ``pol`` is ``E_pol - E_frozen`` and
+    ``ct`` is ``E_ct - E_pol``. Fitting them all at once makes a badly fit lower level and a
+    badly fit new level indistinguishable, and fitting them by hand in three invocations
+    invites the stale-checkpoint mistake this loop removes -- each stage warm starts from the
+    previous stage's *best* checkpoint automatically, and checkpoints to its own directory so
+    it can never overwrite what it started from.
+
+    The model is rebuilt per stage rather than carried over, because turning polarization on
+    genuinely changes a shape: the correction trunk widens to take the electrostatic
+    environment. :func:`rsfff.train.term_loop.warm_start` zero-pads that tensor, so the new
+    input starts inert and the stage begins at exactly the checkpoint it was handed.
+    """
+    if config.stages:
+        return _train_staged(config)
+    return _train_once(config)
+
+
+def _train_staged(config: Config):
+    print(
+        f"[{config.run_name}] staged fit: "
+        + " -> ".join(s.name for s in config.stages)
+    )
+    result, previous = None, ""
+    for i, stage in enumerate(config.stages, 1):
+        staged = stage_config(config, stage, init_from=previous)
+        print(
+            f"\n{'=' * 78}\n"
+            f"stage {i}/{len(config.stages)}: {stage.name}  "
+            f"(epochs {staged.train.epochs}"
+            + (f", warm start {staged.train.init_from}" if staged.train.init_from else "")
+            + f")\n{'=' * 78}"
+        )
+        result = _train_once(staged)
+        previous = str(Path(staged.checkpoint_root) / staged.run_name / "best.pt")
+        if not Path(previous).exists():
+            raise RuntimeError(
+                f"stage {stage.name!r} wrote no checkpoint to {previous}, so the next stage "
+                f"has nothing to warm start from. This happens when a stage has no validation "
+                f"frames or its loss never improved on the untrained baseline."
+            )
+    return result
+
+
+def _train_once(config: Config):
     torch.set_default_dtype(torch.float64 if config.dtype == "float64" else torch.float32)
     device = resolve_device(config.device, config.dtype)
+    names = list(_TARGETS.values())
+    if config.unified.polarization:
+        names.append("pol")
+    if config.unified.charge_transfer:
+        names.append("ct")
     print(
         f"[{config.run_name}] device={device} dtype={config.dtype} "
-        f"targets=fragment_energy + {' + '.join('eda_' + v for v in _TARGETS.values())}"
+        f"targets=fragment_energy + {' + '.join('eda_' + v for v in names)}"
     )
 
     dataset = load_datasets(config.data.path, dtype=torch.get_default_dtype())

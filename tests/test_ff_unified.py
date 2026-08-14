@@ -99,7 +99,7 @@ def make_batch(positions, numbers, fragment_idx, batch_idx=None):
     )
 
 
-def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0):
+def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0, extra_dim=0):
     """Every submodule, so a test can hand the same instances to both model shapes."""
     torch.manual_seed(seed)
     featurizer = FlatLambdaSOAPFeaturizer(
@@ -148,6 +148,7 @@ def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0):
             "bond": ChannelSpec(r_on=2.5, r_off=4.0, energy_scale=0.2),
         },
         range_channels=RANGE_CHANNELS,
+        extra_dim=extra_dim,
         emb_dim=8, hidden=24, depth=1,
     )
     return dict(
@@ -157,9 +158,10 @@ def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0):
     )
 
 
-def make_model(parts=None, *, environment=False, **kw):
+def make_model(parts=None, *, environment=False, levels=None, **kw):
     p = parts or build_parts(**kw)
     del kw
+    levels = dict(levels or {})
     env = None
     if environment:
         f = p["featurizer"]
@@ -171,19 +173,26 @@ def make_model(parts=None, *, environment=False, **kw):
     return UnifiedPairModel(
         p["featurizer"], p["response"], p["disp_params"], p["pauli_params"],
         p["range_heads"], p["pair_head"], p["fragment_state"], E0,
-        environment=env, max_rank=MAX_RANK,
+        environment=env, max_rank=MAX_RANK, **levels,
     )
 
 
-def wake_environment(model, scale=0.3, seed=101):
-    """Move ``g`` off its zero initialization so the environment path is actually live."""
+def wake_environment(model, scale=1.0, seed=101):
+    """Move ``g`` off its zero initialization so the environment path is actually live.
+
+    Perturbs the **weights only**. ``EnvironmentResidual`` is anchored as
+    ``g(h_full) - g(h_frag)``, so the *invariant* readout's bias appears in both terms
+    additively and cancels -- perturbing it does nothing at all. The scale is larger than it
+    looks like it needs to be for the same reason: only the part of ``g`` that discriminates
+    between the two streams survives. See
+    :func:`test_environment_residual_is_anchored_at_the_isolated_fragment`.
+    """
     g = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for m in (model.environment.inv_mlp, model.environment.vec_gate,
                   model.environment.equiv_gate):
             if m is not None:
                 m[-1].weight.add_(scale * torch.randn(m[-1].weight.shape, generator=g))
-                m[-1].bias.add_(scale * torch.randn(m[-1].bias.shape, generator=g))
     return model
 
 
@@ -737,6 +746,48 @@ def test_environment_residual_is_inert_at_initialization():
     assert torch.allclose(off.energy, on.energy, atol=1e-12, rtol=0)
     assert float(on.environment_norm.abs().max()) == 0.0
     assert off.environment_norm is None
+
+
+def test_environment_residual_is_anchored_at_the_isolated_fragment():
+    """``h_env == h_frag`` exactly for a lone fragment, at any stage of training.
+
+    ``EnvironmentResidual`` is written as a *difference*, ``g(h_full) - g(h_frag)``, so for a
+    fragment whose only neighbors are its own atoms the two streams coincide -- not merely at
+    initialization, and not merely for small ``g``. Everything defined as a difference between
+    the streams (the polarization and charge-transfer corrections) is therefore zero on a
+    monomer, which is what their labels require.
+
+    **Zero to round-off, not bitwise.** ``h_full`` and ``h_frag`` are produced by two different
+    scatters over the same edges (masked and unmasked), and those sum in different orders, so
+    an isolated fragment's two descriptors agree to ~1e-16 rather than identically. The
+    anchoring is exact in exact arithmetic; what is measured here is float64 noise on features
+    of order 1, which reaches the energy at ~1e-16 Hartree.
+
+    The invariant readout's bias cancelling is the visible signature: it appears in both terms
+    additively, so perturbing it moves nothing. Note this does **not** extend to the
+    equivariant gates -- there the bias multiplies two different tensors
+    (``full.vec_feats`` against ``frag.vec_feats``), so it survives on a cluster and vanishes
+    only in the isolated-fragment limit, which is exactly the property being claimed.
+    """
+    model = wake_environment(randomize(make_model(build_parts(seed=11), environment=True), seed=13))
+    positions, numbers, frag = water_cluster(1, seed=7)
+    out = model(make_batch(positions, numbers, frag))
+    assert float(out.environment_norm.abs().max()) < 1e-13, (
+        "an isolated fragment must see no environment; the residual is not anchored"
+    )
+
+    # ... and the invariant readout's bias is structurally inert, even on a cluster where the
+    # residual is very much live.
+    positions, numbers, frag = water_cluster(3, seed=101)
+    batch = make_batch(positions, numbers, frag)
+    before = model(batch)
+    g = torch.Generator().manual_seed(5)
+    with torch.no_grad():
+        model.environment.inv_mlp[-1].bias.add_(
+            torch.randn(model.environment.inv_mlp[-1].bias.shape, generator=g)
+        )
+    after = model(batch)
+    assert torch.allclose(after.energy, before.energy, atol=1e-11, rtol=0.0)
 
 
 def test_environment_awareness_reaches_interactions_and_not_the_fragment_energy():

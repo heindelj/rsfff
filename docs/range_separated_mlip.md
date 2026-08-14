@@ -124,7 +124,21 @@ Two jobs rode on the old hard inter-fragment mask, and separating them is what m
 * A **multipolar electronegativity** producing the *permanent* multipoles.
 * **Charge-transfer variables** `q_AB` moving charge between pairs, conserving charge per channel by construction.
 
-The stationarity condition `∂E_pol/∂M = 0` is solved with the explicit range-separated Coulomb interactions, utilizing the pair-specific damping parameters predicted by the network. The output is the converged multipole set `M*`.
+The stationarity condition `∂E_pol/∂M = 0` is solved with the explicit range-separated Coulomb interactions, utilizing the pair-specific damping parameters predicted by the network. The output is the converged multipole set `M*`. Implemented in `rsfff.ff.coupled_solve` and `rsfff.ff.polarization`; three things about it are load-bearing.
+
+**The coupling operator is the frozen electrostatics channel's own.** `slater_elec_tensors` — point multipoles plus Slater penetration, under the same learned range separation `gate["elst"]` — not a separate polarization damper. Two consequences: `E_pol` is *exactly* zero when the multipoles do not move, so the label is a pure relaxation rather than the residue of two nearly-agreeing operators; and the polarization catastrophe is already handled, because the range separation switches off the short-range coupling that causes it. Measured on a water-like cluster, the smallest eigenvalue of the functional is `+0.13` gated and `−0.80` with the coupling ungated — in the second case the "solution" is a saddle and the energy is unbounded below.
+
+**The change of variables is required, not stylistic.** The coupled form contains `½ μᵀ α⁻¹ μ`, and this codebase deliberately never inverts `α`. So rescale, exactly as SQE rescales `p = S v`:
+
+```text
+q = q0 + B S v      μ = α u      Θ = c w      x = (v, u, w)
+```
+
+Every block of the **matvec** is then polynomial in `(s, α, c)`, and the unpolarizable limits `α → 0`, `c → 0`, `s → 0` are well-conditioned rather than singular — the same argument `rsfff.mlip.sqe` records for choosing `S` over `S^½`, and load-bearing for force training at a closed channel. In these variables the charge block is `S L S + S`, which is symmetric; the asymmetric `L S + I` that `sqe_solve` solves is that system left-divided by `S`, and CG needs the symmetric one. The **preconditioner** may invert freely, including `α⁻¹`, because it runs entirely under `no_grad` and never enters a gradient. The rule: *inverse-free in the differentiated matvec, inverses allowed in the undifferentiated preconditioner.*
+
+**The solver is preconditioned CG with the uncoupled response as the preconditioner**, adapted from `pyCMM/cmm/polarization.py`. That preconditioner captures all intra-fragment charge coupling exactly and leaves CG only the weak inter-fragment part, so a water cluster converges in 5–8 iterations. Two differences from pyCMM worth keeping: it enforces charge conservation with Lagrange multipliers, making its system an indefinite KKT saddle point that CG has no guarantee on, whereas SQE conserves charge by construction and is genuinely PSD; and every CG scalar here is **per frame**, so a frame's answer does not depend on which others shared its minibatch.
+
+The matvec is *derived from* the energy — `A x = grad_E(x) − grad_E(0)`, `b = grad_E(0)` — so a sign error in the interaction tensor cannot make the solver and the reported energy disagree. That identity is pinned against autograd in `tests/test_ff_coupled_solve.py`, and it is why no dense Hessian is assembled anywhere.
 
 ### 4.6 Correction network → short-range EDA & Bonding energies
 
@@ -153,7 +167,40 @@ The EDA data acts as a robust training strategy to explicitly well-define the di
 | **polarized** | *may* use environment-aware features, with field | grouped by fragment (no inter-fragment charge flow) | `eda_pol` = E_pol − E_frozen |
 | **CT** | environment-aware, features un-grouped | inter-fragment channels open | `eda_ct` = E_ct − E_pol |
 
-Only the **frozen** level is pinned: its multipoles are what `eda_cls_elec` means (frozen isolated-monomer densities) and its `E_internal` is what `fragment_energy` means, so its parameters cannot be environment-aware without breaking the 1-body label. That ceiling does **not** apply to the polarized level — environment-dependent response parameters are exactly what polarization *is*, and are how effective electrostatic interactions get absorbed into the response. `sqe_solve` already takes the `field` argument this needs.
+Only the **frozen** level is pinned: its multipoles are what `eda_cls_elec` means (frozen isolated-monomer densities) and its `E_internal` is what `fragment_energy` means, so its parameters cannot be environment-aware without breaking the 1-body label. That ceiling does **not** apply to the polarized level — environment-dependent response parameters are exactly what polarization *is*, and are how effective electrostatic interactions get absorbed into the response.
+
+#### Every new term is a difference of one function
+
+Implemented in `rsfff.ff.unified`. Each higher level is the *same* readout evaluated with one more constraint lifted, so it vanishes identically at the level below and adds no free parameters:
+
+```text
+ΔE_elst = W_elst(u(h_frag))                          → cls_elec
+ΔE_pol  = W_elst(u(h_env)) − W_elst(u(h_frag))       → pol
+             sum = W_elst(u(h_env))   ← one evaluation at inference
+
+E_bond⁰   = W_bond(u(h_frag), φ=0)                       → fragment_energy
+E_bond^pol= W_bond(u(h_frag), φ¹) − W_bond(u(h_frag),0)  → pol
+E_bond^ct = W_bond(u(h_env),  φ²) − W_bond(u(h_frag),φ¹) → ct
+             sum = W_bond(u(h_env), φ²)
+```
+
+The split is training-time bookkeeping and telescopes away at deployment. Three notes:
+
+* **`cls_elec` is rigorously two-body** — the classical Coulomb interaction between frozen monomer densities — so its correction must read the fragment-confined stream. The environment-dependent part is not discarded; it becomes the polarization correction.
+* **The frozen bond term takes `φ = 0`, not the frozen field.** `fragment_energy` is the *isolated* fragment, which feels nothing. So the whole field-dependent bond energy is polarization, including the part driven by the permanent field.
+* **`EnvironmentResidual` is anchored**, `h_env = h_frag + g(h_full) − g(h_frag)`. For an isolated fragment `h_full == h_frag`, so every difference above is zero on a monomer — which is what these labels require. Without the subtraction a lone water has a spurious CT energy. This changes what `h_env` means, so checkpoints trained before it do not transfer their environment-dependent half.
+
+#### Relaying the environment into the bonded region
+
+The bond energy takes the external potential, field and field gradient as *features* (`rsfff.ff.environment`), built from the **converged** multipoles at that level and weighted by the electrostatic range separation. Deliberately **not** AMOEBA's route of switching on intramolecular electrostatics for the induced moments: intramolecular point multipoles are a poor model of bond response, it would need separate range separations for the permanent and induced parts, and the final model should make no distinction between them.
+
+Because those features feed a head that is *not* variational in `M*`, the adjoint of §6.2 is mandatory here — see below.
+
+#### Charge transfer needs a compliance scale
+
+`ct` opens inter-fragment channels (`rsfff.ff.pairs.union_channels`), with the radius-derived ones enveloped to zero at the cutoff — without that a channel appears the instant two molecules come within range and the forces are discontinuous.
+
+SQE has no structural reason to prefer an intramolecular channel over an intermolecular one: the electronegativity difference driving an O–H transfer is the same whether the two atoms share a molecule. At a shared `s_init` the model therefore opens covalent-strength channels across every hydrogen bond — measured on a freshly initialized w2, `ct` starts at **−52 kJ/mol against a true −8.2**, with only 0.0005 e of net charge actually crossing. `ct_compliance_scale` is the fix, and it is the charge-transfer analogue of a correction channel's `energy_scale`: at 0.1 an untrained w2 starts at −7.1 kJ/mol. Softplus is unbounded, so it sets where the head starts looking, not a ceiling.
 
 ### 5.2 Cross-fragmentation consistency (required)
 
@@ -185,6 +232,12 @@ dM*/dR = − (H_MM)⁻¹ ( ∂g/∂R + (∂g/∂p)(dp/dR) )
 
 where `H_MM = ∂²E_pol/∂M²` is the polarization Hessian. This leaves the solver iterations off the computational graph while injecting the correct gradient.
 
+**Implemented** in `rsfff.ff.coupled_solve._CoupledSolve`. Forward runs CG under `no_grad` and returns the state; backward receives `∂L/∂x`, solves the adjoint `A λ = ∂L/∂x` with the same CG and preconditioner (`A` is symmetric), and contributes `−λᵀ ∂R/∂θ` where `R(x, θ) = grad_E(x; θ)` is the residual the forward drove to zero. One extra CG solve per backward, and memory flat in the iteration count.
+
+**Why it cannot be skipped here.** pyCMM detaches its solve entirely and recovers forces from stationarity: with `A x = −b` and `E = ½xᵀAx + bᵀx`, the derivative at fixed `x` is already the total derivative, because the missing term carries the factor `(A x + b) = 0`. That still holds and covers the *energy* for free — this arrangement gets it without special-casing, since `∂L/∂x` is then zero to CG tolerance and the adjoint exits immediately at no cost.
+
+It does **not** cover the bond correction. The electrostatic environment features are built from `M*` and feed a head that is not variational in them, which is exactly the §6.1 failure. Measured in `tests/test_ff_coupled_solve.py`: with the correction inactive, detaching the solve and running the adjoint give *identical* gradients; with it active they differ by more than a part in a thousand and only the adjoint matches central differences.
+
 ## 7. Recurring failure modes to guard against
 
 | Risk | Where it bites | Guard |
@@ -194,7 +247,10 @@ where `H_MM = ∂²E_pol/∂M²` is the polarization Hessian. This leaves the so
 | **Cross-fragmentation inconsistency** | Reactive window | Multi-fragmentation batches + total-E/F consistency loss |
 | **Slot-order dependence** | Variable fragmentation count | Masked permutation-invariant pool, not fixed-width concat |
 | **Equivariance breakage** | `E`/`∇E`/dipole/quadrupole channels | Correct irreps; CG products / gated nonlinearities only |
-| **Wrong forces** | Everywhere with `M*` in ΔE | IFT Jacobian on `M*`; never detach |
+| **Wrong forces** | Everywhere with `M*` in ΔE | IFT Jacobian on `M*`; never detach (§6.2, implemented) |
+| **Polarization catastrophe** | Coupled solve at short range | Reuse the electrostatic range separation as the coupling's gate — measured min eigenvalue `+0.13` gated against `−0.80` ungated. Watch `cg_pol`/`cg_ct`: a climbing iteration count is the early warning, well before a NaN. Note CG only reports negative curvature if it happens to probe that direction, so this is protected structurally, not detected reliably |
+| **`pol` and `ct` corrections competing** | Both are "environment-dependent correction" | They are separated only by their labels and by acting on disjoint pair sets. Same degeneracy shape as the intra-classical/bond leak, which the fit did **not** police on its own — watch the classical/correction split (`pol_ff`, `ct_ff`) from epoch one, not the MAE |
+| **`E_pol` losing its sign guarantee** | Once `g` trains the levels' response parameters apart | Exact only while the levels share parameters. Log `pol_ff`; `env_weight` is the lever |
 
 ## 8. What the design buys
 
