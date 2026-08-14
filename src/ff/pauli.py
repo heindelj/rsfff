@@ -286,6 +286,29 @@ class PauliMultipoleHeads(nn.Module):
         return log_q.exp(), log_b.exp(), mu, quad_s
 
 
+def slater_pauli_pair_energy(
+    dr_au: torch.Tensor,        # (P, 3) r_j - r_i, bohr
+    r_au: torch.Tensor,         # (P,) bohr
+    poly_i: torch.Tensor,       # (P, K) Pauli polytensor on i
+    poly_j: torch.Tensor,       # (P, K) Pauli polytensor on j
+    b_ij: torch.Tensor,         # (P,) combined Slater exponent, 1/bohr
+    max_rank: int = 1,
+) -> torch.Tensor:
+    """Undamped-by-distance Slater multipole repulsion per pair: ``(P,)`` Hartree.
+
+    The analytic core of :meth:`SlaterPauli.forward`, factored out so a caller that owns its
+    own pair list and gating -- :class:`rsfff.ff.unified.UnifiedPairModel` -- gets bit-identical
+    energies without duplicating the contraction. Everything here is atomic units and pure:
+    no neighbor search, no taper, no switch, no module state.
+
+    ``poly_i``/``poly_j`` are already gathered onto pairs (``poly[i]``, ``poly[j]``), because
+    the unified model builds them from a different feature stream than this module does.
+    """
+    damp = slater_two_center_damp(b_ij * r_au, max_rank)
+    tensor = damped_interaction_tensor(dr_au, damp, 1.0 / r_au, max_rank=max_rank)
+    return multipole_pair_energy(poly_i, poly_j, tensor)
+
+
 @dataclass
 class PauliOutput:
     """Per-system energies plus the per-pair breakdown the diagnostics need."""
@@ -377,12 +400,12 @@ class SlaterPauli(nn.Module):
         # The one Angstrom -> bohr conversion; everything below is atomic units.
         dr_au = (positions[j] - positions[i]) / BOHR_ANG
         r_au = r / BOHR_ANG
-        damp = slater_two_center_damp(b_ij * r_au, self.max_rank)
-        tensor = damped_interaction_tensor(dr_au, damp, 1.0 / r_au, max_rank=self.max_rank)
         # Spherical -> Cartesian happens here, once, at the boundary of the contraction.
         quad_c = None if quad_s is None else spherical_to_cartesian_quadrupole(quad_s)
         poly = build_polytensor(q, mu, quad_c, max_rank=self.max_rank)
-        e_mult = multipole_pair_energy(poly[i], poly[j], tensor)
+        e_mult = slater_pauli_pair_energy(
+            dr_au, r_au, poly[i], poly[j], b_ij, max_rank=self.max_rank
+        )
 
         taper = pairwise_switch(r, self.cutoff - self.taper_width, self.cutoff)
         e_pair_ff = taper * e_mult

@@ -31,7 +31,7 @@ from .multipole import (
 )
 from .onebody import OneBodyEnergy, OneBodyModel, OneBodyOutput
 from .onebody_elec import OneBodyElecModel, OneBodyElecOutput
-from .pairs import inter_fragment_pairs, intra_fragment_pairs
+from .pairs import inter_fragment_pairs, intra_fragment_pairs, union_pairs
 from .response import FragmentResponse, FragmentResponseOutput
 from .pauli import (
     DEFAULT_PAULI_DIPOLE_SCALE,
@@ -49,6 +49,7 @@ __all__ = [
     "tang_toennies",
     "inter_fragment_pairs",
     "intra_fragment_pairs",
+    "union_pairs",
     "FragmentResponse",
     "FragmentResponseOutput",
     "OneBodyEnergy",

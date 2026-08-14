@@ -103,16 +103,23 @@ def tang_toennies(
 def fermi_switch(
     r: torch.Tensor,
     r0: torch.Tensor | float,
-    alpha: float,
+    alpha: torch.Tensor | float,
 ) -> torch.Tensor:
     """Range-separation switch ``S(r) = 1 / (1 + exp(-alpha (r - r0)))``: 0 short, 1 long.
 
     Multiplies an explicit force-field term to switch it **off** below ``r0``, so the
     short-range network carries that region instead. ``r`` and ``r0`` are in Angstrom;
-    ``alpha`` (Angstrom^-1) sets the width of the crossover. ``r0`` may be a tensor so
-    the crossover can be learned (``docs/range_separated_mlip.md`` §4.2: "the crossover
-    should be learned, not hard-coded at a fixed cutoff") -- with a penalty biasing it
-    small, so the model must justify handing energy to the network.
+    ``alpha`` (Angstrom^-1) sets the width of the crossover. Both ``r0`` and ``alpha``
+    may be tensors so the crossover can be learned (``docs/range_separated_mlip.md``
+    §4.2: "the crossover should be learned, not hard-coded at a fixed cutoff") -- with a
+    penalty biasing ``r0`` small, so the model must justify handing energy to the network.
+
+    A tensor ``alpha`` is **not** checked for positivity: the check below is a
+    construction-time guard on a Python float, and a learned ``alpha`` is kept positive by
+    its own parameterization (``softplus`` in
+    :class:`rsfff.ff.unified.RangeSeparationHeads`) rather than by a runtime assertion on
+    every forward pass. A negative ``alpha`` would invert the switch, turning the term off
+    at long range instead of short -- so whatever produces it owes that guarantee.
 
     Implemented with :func:`torch.sigmoid` rather than a hand-rolled ``1/(1+exp(...))``:
     sigmoid is the branch-stable formulation at large ``|alpha (r - r0)|``, where the
@@ -123,6 +130,6 @@ def fermi_switch(
     to zero linearly in ``r``, and at long range the exact zero is supplied by the
     neighbor-list taper, not by ``S``.
     """
-    if not alpha > 0:
+    if not isinstance(alpha, torch.Tensor) and not alpha > 0:
         raise ValueError(f"fermi_switch needs alpha > 0, got {alpha}")
     return torch.sigmoid(alpha * (r - r0))

@@ -341,6 +341,77 @@ class JointConfig:
 
 
 @dataclass
+class UnifiedConfig:
+    """The unified pair model: one pair list, learned range separation, one shared trunk.
+
+    Reuses the ``elec:`` block for the response solve and the ``dispersion:`` / ``pauli:``
+    blocks for their parameter heads, exactly as ``joint:`` reuses ``onebody:`` and ``elec:``.
+    Only what is genuinely new to the unified arrangement lives here: the range-separation
+    priors, the per-channel correction envelopes, and the routing weights.
+
+    The range separation replaces both the per-term global scalar ``r0`` and the hard
+    inter-fragment mask. ``r0`` is per atom and per channel, combined across a pair as the
+    geometric mean, and it now has to cover a case the per-term modules never saw: a
+    **covalent** pair, which :func:`rsfff.ff.pairs.union_pairs` no longer drops. See
+    :mod:`rsfff.ff.range_priors` for the measured distance gaps the defaults come from --
+    ``alpha`` is 40 rather than the per-term modules' 8 because it now has to cross the
+    1.07 -> 1.54 Angstrom O-H gap rather than taper a mid-range handoff.
+    """
+
+    max_rank: int = 1               # must match elec.max_rank
+    # Range separation. Priors are per element (see rsfff.ff.range_priors); these knobs say
+    # how much freedom the fit gets on top of them.
+    alpha_init: float = 40.0        # Angstrom^-1, per channel, learnable
+    learn_r0: bool = True           # per-species log-r0 deviation, per channel
+    environment_r0: bool = False    # off by default: competes with the pair correction
+    learn_alpha: bool = True
+    r0_emb_dim: int = 16
+    r0_hidden: int = 64
+    r0_depth: int = 2
+    # Fragment-state block: (Q_f, 2S_f) per atom. Identically zero for a neutral singlet, so
+    # inert on water-only data; 0 disables it and is bit-identical to a model without it.
+    fragment_state_dim: int = 4
+    fragment_state_hidden: int = 32
+    fragment_state_depth: int = 1
+    # Shared correction trunk
+    emb_dim: int = 16
+    corr_hidden: int = 64
+    corr_depth: int = 2
+    corr_n_radial: int = 8
+    corr_r_on: float = 4.0          # Angstrom; envelope full strength below this
+    corr_r_off: float = 5.0         # must not exceed features.cutoff
+    # Per-channel output scale, Hartree. Unequal because the targets are: a covalent bond is
+    # ~0.2 Ha, two hundred times an intermolecular correction. One shared scale would let the
+    # bond channel's gradient set the effective learning rate for all four.
+    elst_energy_scale: float = 3.0e-3
+    pauli_energy_scale: float = 3.0e-3
+    disp_energy_scale: float = 1.0e-3
+    bond_energy_scale: float = 0.2
+    bond_r_on: float = 2.5          # the bond channel opens where the bonds are
+    bond_r_off: float = 4.0
+    # Classical reach per channel, Angstrom. The largest sets the one shared pair list.
+    elst_cutoff: float = 12.0       # the one term with a genuine 1/r tail
+    pauli_cutoff: float = 7.0
+    disp_cutoff: float = 10.0
+    taper_width: float = 1.0
+    # Loss. Errors are divided by `energy_scale` before squaring, so every weight below is a
+    # plain dimensionless number and each term is 1.0 at an error of one scale.
+    energy_scale: float = 3.8093e-4     # 1 kJ/mol in Hartree
+    onebody_weight: float = 1.0
+    elst_weight: float = 30.0       # see JointConfig: the 1-body term starts ~70x further off
+    pauli_weight: float = 30.0
+    disp_weight: float = 30.0
+    anchor_weight: float = 1.0
+    corr_l2_weight: float = 0.0
+    #: Linear pull on the mean per-atom ``r0``, per Angstrom handed to the network. Same
+    #: meaning as the per-term ``r0_weight``, now averaged over atoms rather than a scalar.
+    r0_weight: float = 0.05
+    #: Quadratic pull on the environment residual, keeping per-atom ``r0`` near its element
+    #: prior. Inert while ``environment_r0`` is off.
+    r0_spread_weight: float = 0.0
+
+
+@dataclass
 class Config:
     run_name: str = "run"
     device: str = "auto"       # auto -> cuda > mps > cpu
@@ -356,6 +427,7 @@ class Config:
     elec: ElectrostaticsConfig = field(default_factory=ElectrostaticsConfig)
     onebody: OneBodyConfig = field(default_factory=OneBodyConfig)
     joint: JointConfig = field(default_factory=JointConfig)
+    unified: UnifiedConfig = field(default_factory=UnifiedConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
@@ -429,6 +501,7 @@ def load_config(path) -> Config:
     elec_cfg = _from_block(ElectrostaticsConfig, raw.get("elec", {}) or {})
     onebody_cfg = _from_block(OneBodyConfig, raw.get("onebody", {}) or {})
     joint_cfg = _from_block(JointConfig, raw.get("joint", {}) or {})
+    unified_cfg = _from_block(UnifiedConfig, raw.get("unified", {}) or {})
     train_cfg = TrainConfig(
         epochs=int(train.get("epochs", TrainConfig.epochs)),
         batch_size=int(train.get("batch_size", TrainConfig.batch_size)),
@@ -467,6 +540,7 @@ def load_config(path) -> Config:
         elec=elec_cfg,
         onebody=onebody_cfg,
         joint=joint_cfg,
+        unified=unified_cfg,
         data=data_cfg,
         train=train_cfg,
     )

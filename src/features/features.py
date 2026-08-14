@@ -137,6 +137,35 @@ class DensityExpansion(nn.Module):
         A = RY.new_zeros(num_atoms, k_w, self.n_max, self.sph_dim)
         return A.index_add_(0, i, contrib)
 
+    def scatter_species(
+        self,
+        RY: torch.Tensor,            # (E, n_max, sph_dim) from edge_expansion
+        edge_index: torch.Tensor,    # (2, E)
+        species_idx: torch.Tensor,   # (N,) ints in [0, n_species)
+        num_atoms: int,
+        edge_mask: torch.Tensor | None = None,   # (E,) bool, which edges contribute
+    ) -> torch.Tensor:
+        """Species-resolved density from a prebuilt ``RY``: (N, n_species, n_max, sph).
+
+        ``edge_mask`` drops edges from the sum *without* rebuilding the geometry. That is what
+        lets a fragment-confined and an environment-aware descriptor share one basis: the
+        fragment-grouped neighbor list is a strict **subset** of the frame-grouped one, so
+        both come from one ``radius_graph`` and one set of spherical harmonics, differing only
+        in this mask. Masking rather than re-searching is not merely an optimization -- it
+        guarantees the two descriptors see identical geometry, so their difference is
+        attributable to the environment and nothing else.
+
+        Only the scatter and whatever consumes ``A`` are duplicated; the power spectrum is
+        still O(Kc^2) per call, so this halves the geometric work, not the total.
+        """
+        i, j = edge_index[0], edge_index[1]
+        if edge_mask is not None:
+            i, j, RY = i[edge_mask], j[edge_mask], RY[edge_mask]
+        flat_idx = i * self.n_species + species_idx[j]
+        A_flat = RY.new_zeros(num_atoms * self.n_species, self.n_max, self.sph_dim)
+        A_flat.index_add_(0, flat_idx, RY)
+        return A_flat.view(num_atoms, self.n_species, self.n_max, self.sph_dim)
+
     def forward(
         self,
         positions: torch.Tensor,     # (N, 3)
@@ -145,12 +174,7 @@ class DensityExpansion(nn.Module):
         num_atoms: int,
     ) -> torch.Tensor:
         RY = self.edge_expansion(positions, edge_index)                    # (E, n_max, sph_dim)
-        i, j = edge_index[0], edge_index[1]
-        z_j = species_idx[j]
-        flat_idx = i * self.n_species + z_j
-        A_flat = positions.new_zeros(num_atoms * self.n_species, self.n_max, self.sph_dim)
-        A_flat.index_add_(0, flat_idx, RY)
-        return A_flat.view(num_atoms, self.n_species, self.n_max, self.sph_dim)
+        return self.scatter_species(RY, edge_index, species_idx, num_atoms)
 
 
 # --------------------------------------------------------------------------

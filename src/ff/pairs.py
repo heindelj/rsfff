@@ -8,14 +8,19 @@ Distinct from two other neighbor structures already in the repo, and deliberatel
 - ``Batch.bond_index`` is the SQE charge-transfer channel graph, which comes from the
   diabatic assignment and never from a distance rule.
 
-The list here is **undirected** (``i < j``, each pair once) so a pair energy can be
-summed without a factor of a half, and optionally **inter-fragment only**, which is what
-makes the sum an interaction energy comparable to an EDA component.
+Every list here is **undirected** (``i < j``, each pair once) so a pair energy can be summed
+without a factor of a half. Three builders, for two different eras of the model:
 
-:func:`intra_fragment_channels` builds a channel graph too, and does *not* violate the rule
-above: it is a complete **enumeration** of the pairs inside each fragment, with no distance
-test anywhere. See its docstring for why enumerating is equivalent to supplying the covalent
-graph.
+- :func:`inter_fragment_pairs` drops same-fragment pairs at construction, which is what makes
+  the sum an interaction energy directly comparable to an EDA component. Used by the
+  per-term modules (:mod:`rsfff.ff.dispersion`, :mod:`rsfff.ff.pauli`,
+  :mod:`rsfff.ff.electrostatics`).
+- :func:`union_pairs` drops nothing, and hands the intra/inter question to a *learned*
+  per-pair range separation instead of a boolean mask. Used by :mod:`rsfff.ff.unified`.
+- :func:`intra_fragment_pairs` / :func:`intra_fragment_channels` enumerate inside each
+  fragment with no distance test anywhere, which does *not* violate the rule above -- see
+  :func:`intra_fragment_channels` for why enumerating is equivalent to supplying the covalent
+  graph.
 """
 
 from __future__ import annotations
@@ -76,6 +81,86 @@ def inter_fragment_pairs(
 
     r = (positions[pair_index[0]] - positions[pair_index[1]]).norm(dim=-1)
     return pair_index, r
+
+
+def union_pairs(
+    positions: torch.Tensor,               # (N, 3) Angstrom
+    batch_idx: torch.Tensor,               # (N,) long, frame id per atom
+    fragment_idx: torch.Tensor,            # (N,) long, batch-global, non-decreasing
+    cutoff: float,                         # Angstrom, the largest any channel needs
+    *,
+    max_num_neighbors: int = 512,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """One pair list for every channel: ``(pair_index (2,P), r (P,), is_intra (P,), pair_frag (P,))``.
+
+    The neighbor search within ``cutoff`` **with no fragment mask**, unioned with the
+    complete intra-fragment enumeration. Two properties this buys, each of which the
+    unified model depends on:
+
+    1. **Every pair carries the classical backbone.** :func:`inter_fragment_pairs` drops
+       same-fragment pairs at construction, which means a same-fragment pair at 8 Angstrom
+       gets no electrostatics at all -- fine for water, wrong for any fragment bigger than a
+       monomer. Here nothing is dropped; how much of the classical form is switched on is
+       decided downstream by the learned range separation, per pair and per channel.
+    2. **The intra pairs still have no pair-list radius.** They come from
+       :func:`intra_fragment_channels`, not from the neighbor search, so a stretched bond can
+       never be dropped by ``cutoff`` or silently truncated by ``max_num_neighbors``. That is
+       the same argument :func:`intra_fragment_pairs` makes, preserved through the union.
+
+    ``is_intra`` and ``pair_frag`` are **routing**, not physics: they say which training label
+    a pair's energy is compared against (``fragment_energy`` for intra, the ``eda_*``
+    components for inter), because that is what those labels mean. They never gate the
+    functional form. ``pair_frag`` is the fragment id for intra pairs and ``-1`` for inter
+    pairs, so a per-fragment pool must mask on ``is_intra`` first.
+
+    Output is sorted lexicographically by ``(i, j)`` and each pair appears exactly once with
+    ``i < j``, so a pair energy sums without a factor of a half.
+    """
+    if fragment_idx is None:
+        raise ValueError(
+            "union_pairs needs a fragment partition to route pairs to their labels; "
+            "the extxyz needs a `fragment_idx` column or a diabatic state library"
+        )
+    if not bool(torch.all(fragment_idx[1:] >= fragment_idx[:-1])):
+        raise ValueError(
+            "union_pairs needs a non-decreasing fragment_idx (atoms grouped by fragment); "
+            "got an interleaved ordering, which intra_fragment_channels cannot enumerate"
+        )
+
+    # torch_cluster has CPU+CUDA kernels but no MPS kernel; fall back to CPU on MPS. The
+    # list is built from detached positions -- only `r` below carries gradient.
+    if positions.device.type == "mps":
+        edge = radius_graph(
+            positions.detach().cpu(), r=cutoff, batch=batch_idx.cpu(), loop=False,
+            max_num_neighbors=max_num_neighbors,
+        ).to(positions.device)
+    else:
+        edge = radius_graph(
+            positions.detach(), r=cutoff, batch=batch_idx, loop=False,
+            max_num_neighbors=max_num_neighbors,
+        )
+    edge = edge[:, edge[0] < edge[1]]          # radius_graph is directed; keep i < j
+    intra, _ = intra_fragment_channels(fragment_idx)
+
+    # Union by a single integer key per pair. n_atoms^2 stays far inside int64 for any
+    # batch that fits in memory, and `unique` sorts, so the output order is deterministic
+    # and independent of how radius_graph happened to emit its edges.
+    n_atoms = positions.shape[0]
+    both = torch.cat((edge, intra), dim=1)
+    keys = both[0] * n_atoms + both[1]
+    _, inverse = torch.unique(keys, return_inverse=True)
+    # Scatter an arange through `inverse`: whichever source row lands last wins, and any
+    # representative of a duplicated key is as good as another since the pairs are equal.
+    pick = torch.empty(int(inverse.max()) + 1 if inverse.numel() else 0,
+                       dtype=torch.long, device=keys.device)
+    pick[inverse] = torch.arange(keys.numel(), device=keys.device)
+    pair_index = both[:, pick]
+
+    i, j = pair_index[0], pair_index[1]
+    r = (positions[i] - positions[j]).norm(dim=-1)
+    is_intra = fragment_idx[i] == fragment_idx[j]
+    pair_frag = torch.where(is_intra, fragment_idx[i], torch.full_like(fragment_idx[i], -1))
+    return pair_index, r, is_intra, pair_frag
 
 
 def intra_fragment_channels(

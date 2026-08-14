@@ -102,6 +102,56 @@ from .units import BOHR_ANG
 #: here because this module's public surface predates that split.
 
 
+def slater_elec_pair_energy(
+    dr_au: torch.Tensor,        # (P, 3) r_j - r_i, bohr
+    r_au: torch.Tensor,         # (P,) bohr
+    m_real: torch.Tensor,       # (N, K) full multipoles
+    m_shell: torch.Tensor,      # (N, K) multipoles minus the nuclear point charge
+    m_nuc: torch.Tensor,        # (N, K) nuclear point charge only
+    b: torch.Tensor,            # (N,) per-atom Slater penetration exponent, 1/bohr
+    pair_index: torch.Tensor,   # (2, P)
+    max_rank: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(e_point (P,), e_pen (P,))`` in Hartree: the undamped tail and its penetration.
+
+    The analytic core of :meth:`SlaterElectrostatics.forward`, factored out so a caller that
+    owns its own pair list and gating -- :class:`rsfff.ff.unified.UnifiedPairModel` -- gets
+    bit-identical energies without duplicating the three-tensor contraction. Pure and in
+    atomic units: no neighbor search, no switch, no taper, no module state.
+
+    Unlike :func:`rsfff.ff.pauli.slater_pauli_pair_energy` this takes the **ungathered**
+    multipoles plus ``pair_index``, because the penetration needs the *raw* per-atom ``b[i]``
+    and ``b[j]`` for its two one-center terms, not a combined exponent -- the damping here is
+    genuinely asymmetric across the pair.
+
+    The leading minus on each damped tensor is pyCMM's sign convention:
+    :mod:`rsfff.ff.multipole` returns the overlap *complement*.
+    """
+    i, j = pair_index[0], pair_index[1]
+    r_inv = 1.0 / r_au
+
+    # Point multipoles: the exact long-range interaction, undamped.
+    t_point = damped_interaction_tensor(dr_au, None, r_inv, max_rank=max_rank)
+    e_point = multipole_pair_energy(m_real[i], m_real[j], t_point)
+
+    b_ij = (0.5 * (b[i].log() + b[j].log())).exp()
+    t_ss = damped_interaction_tensor(
+        dr_au, -slater_two_center_damp(b_ij * r_au, max_rank), r_inv, max_rank=max_rank,
+    )
+    t_1c_i = damped_interaction_tensor(
+        dr_au, -slater_one_center_damp(b[i] * r_au, max_rank), r_inv, max_rank=max_rank,
+    )
+    t_1c_j = damped_interaction_tensor(
+        dr_au, -slater_one_center_damp(b[j] * r_au, max_rank), r_inv, max_rank=max_rank,
+    )
+    e_pen = (
+        multipole_pair_energy(m_shell[i], m_shell[j], t_ss)
+        + multipole_pair_energy(m_shell[i], m_nuc[j], t_1c_i)
+        + multipole_pair_energy(m_nuc[i], m_shell[j], t_1c_j)
+    )
+    return e_point, e_pen
+
+
 @dataclass
 class ElectrostaticsOutput:
     """Per-system energies, the solved multipoles, and the per-pair breakdown."""
@@ -214,36 +264,14 @@ class SlaterElectrostatics(nn.Module):
         # The one Angstrom -> bohr conversion; everything below is atomic units.
         dr_au = (positions[j] - positions[i]) / BOHR_ANG
         r_au = r / BOHR_ANG
-        r_inv = 1.0 / r_au
 
         quad_c = None if quad_s is None else spherical_to_cartesian_quadrupole(quad_s)
         m_real = build_polytensor(q, mu, quad_c, max_rank=self.max_rank)
         m_shell = build_polytensor(q - z, mu, quad_c, max_rank=self.max_rank)
         m_nuc = build_polytensor(z, None, None, max_rank=self.max_rank)
 
-        # Point multipoles: the exact long-range interaction, undamped.
-        t_point = damped_interaction_tensor(dr_au, None, r_inv, max_rank=self.max_rank)
-        e_point = multipole_pair_energy(m_real[i], m_real[j], t_point)
-
-        # Penetration. The leading minus is pyCMM's sign convention (rsfff.ff.multipole
-        # returns the *overlap complement*), so the damped tensors are built from -f.
-        b_ij = (0.5 * (b[i].log() + b[j].log())).exp()
-        t_ss = damped_interaction_tensor(
-            dr_au, -slater_two_center_damp(b_ij * r_au, self.max_rank), r_inv,
-            max_rank=self.max_rank,
-        )
-        t_1c_i = damped_interaction_tensor(
-            dr_au, -slater_one_center_damp(b[i] * r_au, self.max_rank), r_inv,
-            max_rank=self.max_rank,
-        )
-        t_1c_j = damped_interaction_tensor(
-            dr_au, -slater_one_center_damp(b[j] * r_au, self.max_rank), r_inv,
-            max_rank=self.max_rank,
-        )
-        e_pen = (
-            multipole_pair_energy(m_shell[i], m_shell[j], t_ss)
-            + multipole_pair_energy(m_shell[i], m_nuc[j], t_1c_i)
-            + multipole_pair_energy(m_nuc[i], m_shell[j], t_1c_j)
+        e_point, e_pen = slater_elec_pair_energy(
+            dr_au, r_au, m_real, m_shell, m_nuc, b, pair_index, max_rank=self.max_rank
         )
 
         switch = fermi_switch(r, self.r0, self.alpha)

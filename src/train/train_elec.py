@@ -116,13 +116,21 @@ def build_featurizer(features_cfg, ecfg, neighbor_types):
     )
 
 
-def build_response(featurizer, features_cfg, ecfg, neighbor_types, atomic_states=None):
+def build_response(
+    featurizer, features_cfg, ecfg, neighbor_types, atomic_states=None, *, p0_extra=0
+):
     """The per-fragment response solve, seeded from the atomic IP/EA data.
 
     Built separately from the electrostatics because the 1-body term shares it: see
     :mod:`rsfff.ff.onebody_elec`. One instance, two consumers.
+
+    ``p0_extra`` widens the invariant input beyond ``featurizer.feature_dims[0]``, for a
+    caller that augments the descriptor before handing it over --
+    :class:`rsfff.ff.unified.UnifiedPairModel` appends a fragment-state block, and the
+    response parameters need to see fragment charge every bit as much as the pair head does.
+    At the default 0 this is the plain featurizer width.
     """
-    p0 = featurizer.feature_dims[0]
+    p0 = featurizer.feature_dims[0] + int(p0_extra)
     p1, p2 = featurizer.feature_dims.get(1), featurizer.feature_dims.get(2)
     log_z, log_b, q0 = build_elec_priors(neighbor_types)
 

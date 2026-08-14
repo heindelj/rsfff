@@ -6,7 +6,15 @@ The goal is a reactive machine-learned interatomic potential (MLIP) that reprodu
 
 The model does **not** attempt to represent true diabatic states. Instead, it uses energy-decomposition-analysis (EDA) data as a training strategy to ensure the physical components of the force field remain well-defined. The total energy is partitioned into five conceptual components: **Electrostatics, Polarization, Pauli repulsion, Dispersion, and Bonding (deformation)**.
 
-Reactivity is recovered through a smooth, learned mixing over candidate fragmentations combined with a self-consistent polarizable electrostatic solve. Charge Transfer (CT) is not treated as an explicit pairwise interaction; rather, it emerges naturally as the learned correction to the bond energy and other interactions when features change across mixed partitionings.
+Reactivity is recovered through a smooth, learned mixing over candidate fragmentations combined with a self-consistent polarizable electrostatic solve. Charge Transfer (CT) is not treated as an explicit pairwise interaction; it emerges as the learned correction to the bond energy and the other interactions when the fragmentation constraints are lifted.
+
+### Two mechanisms that must not be conflated
+
+**Constraint lifting gives CT. Fragmentation mixing gives reactivity.** These are different and an earlier version of this document collapsed them.
+
+Water has exactly one sensible fragmentation and a nonzero CT energy, which is enough to show that mixing cannot be what produces CT. ALMO-EDA defines CT as the relaxation obtained by lifting the constraint that MO coefficients stay within fragment blocks, at a *fixed* fragmentation. The model's analogue is the staged fit of §5.1: fit the polarization surface with inter-fragment charge transfer disallowed and features fragment-confined, then lift both. What CT *is*, in this decomposition, is the energy change that appears when a pair's bonding channel and classical channels are re-evaluated without those constraints.
+
+Fragmentation mixing answers a different question — which molecule an atom belongs to — and is what carries the model through a bond breaking or forming.
 
 Two physically distinct pieces of information are carried for every atom:
 
@@ -73,6 +81,10 @@ From the approximate charge distribution, compute the electrostatic potential `�
 
 Each atom participates in a variable number of candidate fragmentations. The mixing must be **permutation-invariant** over the fragmentation slot and handle a padded/variable count via masking.
 
+> **Feature invariant.** *Atomic* features may and should depend on the fragmentation — that is how the model tells an H₃O⁺ from an H₂O, and how EDA data is usable at all. *Pair* features must be functions of the **mixture over** fragmentations, never of one selected fragmentation. Under a single fragmentation the mixture is that fragmentation and the two coincide, so water is the degenerate limit of the rule rather than an exception to it. Because mixing happens at the atomic level and pair features are built downstream of it, `β_ij` and `ΔE_ij` become functions of the mixture for free.
+>
+> One gap this exposes in the current code: `FlatLambdaSOAPFeaturizer`, which every force-field term uses, carries species and geometry only — no fragment charge, no multiplicity. Invisible on water; fatal for H₅O₂⁺, where the two fragmentations differ precisely in which fragment carries the charge. `rsfff.ff.unified.FragmentStateEmbedding` is the slot for it, identically zero at the neutral singlet so it stays inert until charged-fragment data arrives.
+
 Use attention pooling where:
 
 * **weights are invariant scalars** (built only from l=0 channels or invariant contractions of equivariant ones),
@@ -88,6 +100,22 @@ The softmax partition of unity provides the smooth transition between regions wh
 The mixed features `f_i` are mapped to the **effective polarization parameters** `p` (multipolar electronegativities, hardnesses, split-charge stiffnesses) and **pair-specific range-separation parameters** `β_ij`.
 
 Allowing the range-separation to be pair-specific ensures that as the features change under feature-mixing, the classical FF interactions can be rigorously switched off or modulated at short range depending on whether the pair is acting strictly intermolecularly or transitioning into an intramolecular bond.
+
+### 4.4.1 Range separation vs. routing
+
+Two jobs rode on the old hard inter-fragment mask, and separating them is what makes the range separation learnable at all (implemented in `rsfff.ff.unified`):
+
+* **Functional form** — is the classical multipole / Slater / Tang–Toennies form switched on for this pair? Learned per pair and per channel, with **no explicit same-fragment indicator**; it depends on the fragmentation only through the atomic features, per the invariant in §4.3.
+* **Routing** — which training label does a pair's energy answer to? `eda_cls_elec` *is defined* over inter-fragment pairs and `fragment_energy` *is defined* over one fragment's atoms. This follows from what the labels mean and is not learned. A free network deciding it could move energy between the buckets at zero loss, and all four targets would stop being well-posed.
+
+`r0` is per **atom** and per channel, combined across a pair as a geometric mean. A per-atom `r0` cannot distinguish an intramolecular O–H from an intermolecular one — it is the same hydrogen in both — and does not need to: the discrimination comes from `r`, which is what a range separation is for. One `r0` per channel because the channels are not descriptions of equal fidelity.
+
+**Consequences of dropping the mask**, both real:
+
+1. Every pair now carries the classical backbone, including covalent ones, so a range separation is *required* rather than optional — including for Pauli, which previously had none because bonded pairs were masked out of its pair list. At 0.96 Å the Slater Pauli form between O and H is ~1000 kJ/mol. See `rsfff.ff.range_priors` for the measured intra/inter distance gaps the priors sit in.
+2. Intra-fragment pairs get real electrostatics routed into `fragment_energy`. This is a capability the per-term stack lacks entirely — its bond head dies at 4 Å, so two atoms of one fragment 8 Å apart interacted not at all.
+
+**Routing is not a no-op on the total.** Relabelling a dimer as a single fragment changes the predicted energy, for two measurable reasons: the bond channel has no inter-fragment counterpart, so pairs that switch buckets gain a channel; and fragment-confined descriptors are partition-dependent themselves. Both are correct — relabelling asserts that two molecules are one. The first is where a CT energy should surface. What *is* exact is the accounting: every pair appears once, in one bucket, with no double counting and no gap.
 
 ### 4.5 SCEQ polarizable solve → converged multipoles
 
@@ -117,7 +145,15 @@ The EDA data acts as a robust training strategy to explicitly well-define the di
 
 ### 5.1 Emergent Charge Transfer
 
-Because we propose several partitionings of the system and compute those features at inference, **Charge Transfer (CT) is not modeled as an explicit interaction term.** Instead, the learned combination of features provides the CT energy. It emerges naturally as the learned correction to the bond energy, alongside the changes to the classical interactions that arise when the local features (and pair-specific damping parameters) update during the mixing process.
+**CT is not modeled as an explicit interaction term.** It emerges as the correction to the bond energy, alongside the changes to the classical interactions, when the fragmentation constraints are lifted — *not* from fragmentation mixing (see §1). The route is a staged fit that mirrors what ALMO-EDA actually does, and each stage relaxes exactly one constraint:
+
+| stage | response parameters | solve | label |
+| --- | --- | --- | --- |
+| **frozen** | fragment-confined features, no field | grouped by fragment | `eda_cls_elec`, `fragment_energy` |
+| **polarized** | *may* use environment-aware features, with field | grouped by fragment (no inter-fragment charge flow) | `eda_pol` = E_pol − E_frozen |
+| **CT** | environment-aware, features un-grouped | inter-fragment channels open | `eda_ct` = E_ct − E_pol |
+
+Only the **frozen** level is pinned: its multipoles are what `eda_cls_elec` means (frozen isolated-monomer densities) and its `E_internal` is what `fragment_energy` means, so its parameters cannot be environment-aware without breaking the 1-body label. That ceiling does **not** apply to the polarized level — environment-dependent response parameters are exactly what polarization *is*, and are how effective electrostatic interactions get absorbed into the response. `sqe_solve` already takes the `field` argument this needs.
 
 ### 5.2 Cross-fragmentation consistency (required)
 
@@ -153,7 +189,8 @@ where `H_MM = ∂²E_pol/∂M²` is the polarization Hessian. This leaves the so
 
 | Risk | Where it bites | Guard |
 | --- | --- | --- |
-| **Gauge leakage** | Polar / mid-range regions | Ensure pair-specific damping properly shifts mid-range dominance between explicit Coulomb and MLIP heads |
+| **Gauge leakage** | Polar / mid-range regions | Compact support on every correction channel (exactly zero past `r_off`, so only the classical form survives at long range), the per-channel EDA targets, and a linear penalty on mean `r0` |
+| **Range separation asked to do routing's job** | Everywhere | Keep them separate (§4.4.1). Note that intra/inter H–H genuinely overlap in distance (intra reaches 1.729 Å, inter starts at 1.611), so no switch can separate *those* — routing keeps the EDA channels clean regardless |
 | **Cross-fragmentation inconsistency** | Reactive window | Multi-fragmentation batches + total-E/F consistency loss |
 | **Slot-order dependence** | Variable fragmentation count | Masked permutation-invariant pool, not fixed-width concat |
 | **Equivariance breakage** | `E`/`∇E`/dipole/quadrupole channels | Correct irreps; CG products / gated nonlinearities only |
