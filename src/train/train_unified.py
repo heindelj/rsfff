@@ -18,19 +18,20 @@ the pair list, and every one of those is under-determined by any single target.
 
 What to watch
 -------------
-``gate_intra`` and ``gate_inter`` per channel are the diagnostic that tests the central claim
-of this arrangement -- that a *learned* range separation can do what the hard fragment mask
-used to. ``gate_intra`` should sit near zero for elst and pauli (the covalent region, where
-the classical forms are meaningless) while ``gate_inter`` stays near one. If those collapse
-together the range separation has failed and the channel energies are contaminated, which the
-per-channel MAEs alone would not tell you.
+``intra_elst`` / ``intra_pauli`` / ``intra_disp`` are the readouts that matter: classical
+energy, in kJ/mol per fragment, sitting inside ``fragment_energy``. They should be small --
+the bond channel is supposed to be doing that job.
 
-``r0`` per element per channel is small enough to print in full and worth reading directly.
+**Read the energies, not the gates.** ``gate_intra`` was the original diagnostic and it is
+actively misleading: a gate of 1e-5 on the Pauli channel is nothing, while a gate of 0.98 on
+dispersion was quietly routing -28 kJ/mol per fragment of "dispersion" between covalently
+bonded atoms -- ten times the ``ob_mae`` it was being judged on -- and the gate readout gave
+no sense of the difference. That leak is what ``unified.intra_classical_weight`` guards
+against; the fit will not find it on its own, because the bond channel absorbs whatever
+appears and the two are exactly degenerate.
 
-Note the H-H caveat from :mod:`rsfff.ff.range_priors`: intramolecular H-H reaches 1.729 while
-intermolecular H-H starts at 1.611, so no switch separates *those* and none is asked to.
-``gate_intra`` therefore does not go to zero -- it is an average over element pairs, and the
-H-H contribution stays on by design. Read it against the O-H behaviour, not against zero.
+``gate_inter_elst`` should sit at 1.0, and ``r0`` per channel is small enough to read
+directly.
 """
 
 from __future__ import annotations
@@ -45,17 +46,19 @@ from ..ff.pauli import PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
 from ..ff.unified import (
     ClassicalSpec,
+    EnvironmentResidual,
     FragmentStateEmbedding,
     RangeSeparationHeads,
     UnifiedPairModel,
 )
 from ..ff.units import KJMOL_PER_HARTREE
 from ..mlip.reference_states import AtomicStateReference
+from ..mlip.switch import pairwise_switch
 from ..mlip.unified_head import ChannelSpec, UnifiedPairHead
 from .config import Config, load_config
 from .data import (
     load_datasets,
-    load_monomer_batch,
+    load_extxyz,
     load_reference_energies,
     split_indices,
 )
@@ -70,10 +73,11 @@ _TARGETS = {"elst": "cls_elec", "pauli": "mod_pauli", "disp": "disp"}
 _LOG_KEYS = (
     "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae",
     "a_mae", "f_mae", "dip_mae", "quad_mae",
-    "anchor_e", "anchor_f", "dipole", "quad",
+    "anchor_e", "anchor_f", "dipole", "quad", "intra_ff",
     "q_res", "qO", "dchi", "internal", "bond",
-    "gate_intra_elst", "gate_inter_elst", "gate_intra_pauli", "gate_intra_disp",
-    "r0_elst", "r0_pauli", "r0_disp",
+    "gate_inter_elst", "gate_intra_disp",
+    "intra_elst", "intra_pauli", "intra_disp",
+    "r0_elst", "r0_pauli", "r0_disp", "env_norm",
 )
 
 
@@ -155,13 +159,22 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
                 energy_scale=ucfg.bond_energy_scale,
             ),
         },
+        range_channels=RANGE_CHANNELS if ucfg.pair_range_separation else (),
         emb_dim=ucfg.emb_dim, hidden=ucfg.corr_hidden, depth=ucfg.corr_depth,
         n_radial=ucfg.corr_n_radial,
     )
 
+    environment = None
+    if ucfg.environment_features:
+        environment = EnvironmentResidual(
+            p0, p1, p2, n_species,
+            emb_dim=ucfg.emb_dim, hidden=ucfg.env_hidden, depth=ucfg.env_depth,
+        )
+
     return UnifiedPairModel(
         featurizer, response, disp_params, pauli_params, range_heads, pair_head,
         fragment_state, reference_energies,
+        environment=environment,
         max_rank=ucfg.max_rank,
         classical={
             "elst": ClassicalSpec(ucfg.elst_cutoff, ucfg.taper_width),
@@ -208,12 +221,43 @@ class AnchorTerms:
     One object rather than separate closures so the anchor's forward -- which includes a
     backward pass for the forces -- happens once per step and its metrics are reused by the
     logging callback, exactly as in :mod:`rsfff.train.train_onebody_elec`.
+
+    Unlike that module the anchor is **minibatched**. Its force term makes each evaluation a
+    second-order backward, and at the full 500 monomer frames that measured at ~95% of a
+    training step's wall time -- the same computation repeated once per minibatch of the
+    training set, 269 times an epoch. Drawing a fresh subset per step is plain SGD on that
+    term. Evaluation draws a fixed leading slice instead, so the validation metric is not
+    itself a random variable.
     """
 
-    def __init__(self, model, anchor_batch):
+    def __init__(self, model, anchor, device, batch_size=0, seed=0):
         self.model = model
-        self.batch = anchor_batch
+        self.anchor = anchor            # MoleculeDataset, or None
+        self.device = device
+        self.batch_size = int(batch_size)
+        self._gen = torch.Generator().manual_seed(int(seed))
         self._metrics: dict[str, float] = {}
+        self._eval_batch = None
+
+    def _anchor_batch(self, training: bool):
+        """A monomer batch with positions ready for the force term, or None."""
+        if self.anchor is None:
+            return None
+        n = len(self.anchor)
+        take = n if not self.batch_size else min(self.batch_size, n)
+        if take == n and self._eval_batch is not None:
+            return self._eval_batch
+        if not training:
+            if self._eval_batch is None:
+                self._eval_batch = self._make(range(take))
+            return self._eval_batch
+        idx = torch.randperm(n, generator=self._gen)[:take].tolist()
+        return self._make(idx)
+
+    def _make(self, indices):
+        batch = self.anchor.flat_batch(indices).to(self.device)
+        batch.positions.requires_grad_(True)
+        return batch
 
     def penalties(self, out, batch, cfg: Config):
         u = cfg.unified
@@ -224,12 +268,23 @@ class AnchorTerms:
             )
             extra["corr_l2"] = u.corr_l2_weight * (corr / u.energy_scale).pow(2).mean()
         if u.r0_weight > 0.0:
-            # A linear pull on the mean per-atom r0, per channel: moving energy out of the
-            # physical backbone and into the network has to be earned. Same meaning as the
-            # per-term modules' scalar `r0_weight`, now averaged over atoms.
-            extra["r0"] = u.r0_weight * torch.stack(
-                [v.mean() for v in out.r0.values()]
-            ).sum()
+            # A linear pull on r0, per channel: moving energy out of the physical backbone
+            # and into the network has to be earned.
+            #
+            # Restricted to **inter-fragment** pairs, and that restriction is load-bearing.
+            # Applied to every pair it pulls the *intra* r0 down too, and there is nothing to
+            # push back: whatever intramolecular classical energy appears is absorbed by the
+            # bond channel, which can represent it equally well either way. The two are
+            # degenerate, so the penalty alone decides -- and it decides in favour of dragging
+            # the classical form into the bonding region, which is gauge leakage running
+            # backwards. Measured with the unrestricted version: the dispersion channel slid
+            # its r0 down until it was putting -29 kJ/mol per fragment of "intramolecular
+            # dispersion" between bonded atoms, ten times the ob_mae it was being judged on.
+            inter = ~out.is_intra
+            if bool(inter.any()):
+                extra["r0"] = u.r0_weight * torch.stack(
+                    [v[inter].mean() for v in out.r0_pair.values()]
+                ).sum()
         if u.r0_spread_weight > 0.0:
             # Keeps a per-atom r0 near its element prior, so no single atom can run away
             # while the mean above stays put. Quadratic in log space, which is where the
@@ -238,8 +293,25 @@ class AnchorTerms:
                 [(v.log() - out.log_r0_prior).pow(2).mean() for v in out.r0.values()]
             )
             extra["r0_spread"] = u.r0_spread_weight * spread.sum()
+        if u.intra_classical_weight > 0.0 and bool(out.is_intra.any()):
+            # Keep the classical forms out of the region the bond channel is describing.
+            # The weight is that channel's own envelope, so this says "do not put classical
+            # energy where the bond term already is" rather than "do not put classical energy
+            # between same-fragment atoms" -- an intra pair past bond_r_off is left alone, and
+            # same-fragment electrostatics at range survives untouched.
+            spec = self.model.pair_head.channels["bond"]
+            w = pairwise_switch(out.r[out.is_intra], spec.r_on, spec.r_off)
+            extra["intra_ff"] = u.intra_classical_weight * torch.stack([
+                (w * e[out.is_intra] / u.energy_scale).pow(2).mean()
+                for e in out.e_pair_ff.values()
+            ]).sum()
+        if u.env_weight > 0.0 and out.environment_norm is not None:
+            # Bias back toward the fragment-confined description, so environment dependence
+            # has to be earned rather than drifted into.
+            extra["env"] = u.env_weight * out.environment_norm.pow(2).mean()
 
-        if self.batch is None:
+        anchor_batch = self._anchor_batch(torch.is_grad_enabled())
+        if anchor_batch is None:
             self._metrics = {}
             return extra
 
@@ -247,15 +319,15 @@ class AnchorTerms:
         # Grad is forced on because the force term is itself a backward pass and this runs on
         # evaluation epochs too.
         with torch.enable_grad():
-            anchor_out = self.model(self.batch)
+            anchor_out = self.model(anchor_batch)
         w = u.anchor_weight
         terms, self._metrics = onebody_anchor_loss(
-            self.model, self.batch, cfg.onebody, out=anchor_out
+            self.model, anchor_batch, cfg.onebody, out=anchor_out
         )
         extra.update({k: w * v for k, v in terms.items()})
 
         mm, mm_metrics = fragment_multipole_loss(
-            anchor_out, self.batch,
+            anchor_out, anchor_batch,
             dipole_weight=cfg.elec.dipole_weight,
             quadrupole_weight=cfg.elec.quadrupole_weight,
             dipole_scale=cfg.elec.dipole_scale,
@@ -287,6 +359,21 @@ class AnchorTerms:
             if bool(inter.any()):
                 metrics[f"gate_inter_{name}"] = float(g[inter].mean())
             metrics[f"r0_{name}"] = float(out.r0[name].detach().mean())
+
+        # `gate_intra` alone is misleading and cost real time to learn: a gate of 1e-5 on the
+        # Pauli channel is nothing, while a gate of 0.99 on dispersion was quietly routing
+        # -29 kJ/mol per fragment of "dispersion" between bonded atoms. What matters is the
+        # energy, so log the energy. This is intramolecular classical energy sitting inside
+        # `fragment_energy`; it should be small, and the bond channel should be doing that job.
+        if bool(intra.any()):
+            per_frag = KJMOL_PER_HARTREE / max(int(batch.n_fragments), 1)
+            for name, e in out.e_pair_ff.items():
+                metrics[f"intra_{name}"] = float(e.detach()[intra].sum()) * per_frag
+
+        if out.environment_norm is not None:
+            # How much of its surroundings the model has decided it needs. Zero at init by
+            # construction, so any growth is the model asking for many-body content.
+            metrics["env_norm"] = float(out.environment_norm.detach().mean())
 
         z = batch.atomic_numbers
         oxygen, hydrogen = z == 8, z == 1
@@ -331,11 +418,12 @@ def train(config: Config):
 
     anchor = None
     if config.data.monomer_path:
-        anchor = load_monomer_batch(
-            config.data.monomer_path, dtype=torch.get_default_dtype()
-        ).to(device)
-        anchor.positions.requires_grad_(config.onebody.force_weight > 0.0)
-        print(f"monomer anchor: {anchor.n_fragments} frames from {config.data.monomer_path}")
+        anchor = load_extxyz(config.data.monomer_path, dtype=torch.get_default_dtype())
+        drawn = config.unified.anchor_batch_size or len(anchor)
+        print(
+            f"monomer anchor: {len(anchor)} frames from {config.data.monomer_path}, "
+            f"{min(drawn, len(anchor))} drawn per step"
+        )
 
     model = build_unified_model(
         config, neighbor_types, reference_energies, atomic_states
@@ -355,7 +443,10 @@ def train(config: Config):
         f"alpha init {config.unified.alpha_init} 1/A"
     )
 
-    anchor_terms = AnchorTerms(model, anchor)
+    anchor_terms = AnchorTerms(
+        model, anchor, device,
+        batch_size=config.unified.anchor_batch_size, seed=config.data.seed,
+    )
     fit(
         model, dataset, config, config, device, train_idx, val_idx,
         log_keys=_LOG_KEYS, fit_term=unified_fit,

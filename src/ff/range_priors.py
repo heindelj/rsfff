@@ -11,23 +11,31 @@ Measured, not guessed
 Over the 9579 frames of ``data/wb97mv_tzvpd/w{2,3,4,5}``, the intra- and inter-fragment
 distance ranges per element pair are::
 
-    pair    intra min  intra max  inter min  inter max
-    H-H         1.355      1.729      1.611      8.268     <- OVERLAP
-    O-H         0.890      1.072      1.538      7.951     <- clean gap
+    pair    intra min  intra max  inter min  inter max   pairs (intra / inter)
+    H-H         1.355      1.729      1.608      8.268    33,522 / 191,536
+    O-H         0.890      1.072      1.538      7.951
     O-O            --         --      2.487      7.729
 
-**O-H separates cleanly** and that is the pair that matters: the gap 1.072 -> 1.538 is where
-the switch goes, and it is the only pair whose classical form is dangerous at bonded range.
+**Read the populations, not the extremes.** The H-H ranges appear to overlap on
+``intra max 1.729 > inter min 1.608``, and an earlier version of this module concluded from
+exactly that that H-H could not be separated and should be left switched on. That was wrong:
+min and max over 225,000 pairs are the tails, not the distribution. The actual contamination
+is **19 inter pairs out of 191,536 (0.01%)** below the intra maximum, and the intra
+distribution's 99.9th percentile is 1.679. A threshold placed at ~1.75 separates the two
+classes essentially perfectly.
 
-**H-H does not separate, and must not be made to.** An intramolecular H-H reaches 1.729 while
-an intermolecular one starts at 1.611, so no distance threshold divides them -- see
-``docs/range_separated_mlip.md`` and :func:`rsfff.ff.pairs.union_pairs`. This is not a
-problem to engineer around, because the *routing* keeps the EDA channels clean on its own: an
-intra H-H's energy is pooled into ``fragment_energy``, never into ``eda_cls_elec``, whatever
-the switch does. So H-H is simply left switched **on** everywhere it physically occurs, and an
-H-H at 1.6 Angstrom is treated as an H-H at 1.6 Angstrom whether or not the two atoms share a
-fragment. That is the honest treatment, and it is only available because the switch is not
-being asked to do the mask's old job.
+So all three element pairs are separable and all three are separated. Measured on the same
+data, per frame, with ``alpha = 40``::
+
+    r0(H,H)   intra gate   leaks into fragment_energy   removed from the inter sum
+    1.30         0.9996             122.02 kJ/mol                0.00 kJ/mol
+    1.75         0.0006               0.07 kJ/mol                0.13 kJ/mol
+
+The old 1.30 left every intramolecular H-H fully switched on, pushing 122 kJ/mol per frame of
+intramolecular electrostatics into ``fragment_energy`` for the bond head to absorb. That is
+not wrong in the sense of breaking an invariant -- routing keeps the EDA channels clean either
+way -- but it is a needlessly poor decomposition, and it costs 0.13 kJ/mol per frame of real
+inter-fragment energy to fix.
 
 Combination rule
 ----------------
@@ -39,11 +47,16 @@ an inter O-H -- it is the *same* hydrogen in both -- and does not need to: the d
 comes from ``r``, which is what a range separation is for. The parameter only sets *where* the
 handoff sits for that element pair.
 
-Solving the geometric mean for the two targets above::
+Two constraints fix both numbers: ``r0(H,H)`` lands above the intramolecular H-H
+distribution, and ``r0(O,H)`` lands in the 1.072 -> 1.538 gap::
 
-    r0(H) = 1.30                  ->  r0(H,H) = 1.30      on for every real H-H
-    r0(O) = 1.20                  ->  r0(O,H) = 1.249     inside the 1.072 -> 1.538 gap
-                                  ->  r0(O,O) = 1.20      well under the 2.487 minimum
+    r0(H) = 1.75                  ->  r0(H,H) = 1.75      above intra max 1.729
+    r0(O) = 0.893                 ->  r0(O,H) = 1.250     inside the 1.072 -> 1.538 gap
+                                  ->  r0(O,O) = 0.893     well under the 2.487 minimum
+
+``r0(O)`` is not a physical radius and should not be read as one -- only the pairwise
+combinations are constrained by anything, and the geometric mean has one free scale per
+element that the data does not fix.
 
 Width
 -----
@@ -66,7 +79,7 @@ import torch
 
 #: Per-element range-separation midpoint in Angstrom, before the geometric-mean combination.
 #: See the module docstring for how these were solved for from the measured distance gaps.
-DEFAULT_R0_PRIOR: dict[int, float] = {8: 1.20, 1: 1.30}
+DEFAULT_R0_PRIOR: dict[int, float] = {8: 0.893, 1: 1.75}
 
 #: Crossover width in Angstrom^-1, shared by every channel at initialization.
 DEFAULT_ALPHA_PRIOR: float = 40.0

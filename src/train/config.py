@@ -365,6 +365,16 @@ class UnifiedConfig:
     learn_r0: bool = True           # per-species log-r0 deviation, per channel
     environment_r0: bool = False    # off by default: competes with the pair correction
     learn_alpha: bool = True
+    #: Learn a per-**pair** deviation of ``r0`` on top of the per-element base, from the
+    #: correction trunk. A per-atom ``r0`` gives one threshold per element pair, which cannot
+    #: separate topologically distinct pairs of the same elements: an ethane geminal H-H sits
+    #: at 1.78 Angstrom and an H-H across the C-C bond at 2.27, and only the second should be
+    #: carried by the classical form. Water cannot show this -- its geminal H-H is at 1.51,
+    #: where distance alone happens to decide -- so expect no metric movement on this data.
+    #: Zero-initialized, so it starts at exactly the per-element result. For intra-fragment
+    #: pairs the deviation is read from the fragment-confined trunk, which is what keeps the
+    #: within-fragment range separation independent of the surroundings.
+    pair_range_separation: bool = True
     r0_emb_dim: int = 16
     r0_hidden: int = 64
     r0_depth: int = 2
@@ -373,6 +383,19 @@ class UnifiedConfig:
     fragment_state_dim: int = 4
     fragment_state_hidden: int = 32
     fragment_state_depth: int = 1
+    # Environment-aware descriptor: h_env = h_frag + g(h_full), with g zero-initialized so
+    # this starts from exactly the fragment-confined model. Only *inter*-fragment pairs read
+    # h_env; intra pairs and the response solve stay on h_frag, because `fragment_energy` is
+    # an isolated-fragment label with no environment dependence to fit. Turning it on is what
+    # lets C6 be quenched by the surroundings -- effective many-body dispersion -- at the cost
+    # of the interaction channels no longer being rigorously two-body, and roughly a second
+    # power spectrum per forward.
+    environment_features: bool = False
+    env_hidden: int = 64
+    env_depth: int = 2
+    #: Penalty on ``||h_env - h_frag||``, biasing the model back toward the fragment-confined
+    #: description so environment dependence has to be earned. Same spirit as `r0_weight`.
+    env_weight: float = 0.0
     # Shared correction trunk
     emb_dim: int = 16
     corr_hidden: int = 64
@@ -402,6 +425,29 @@ class UnifiedConfig:
     pauli_weight: float = 30.0
     disp_weight: float = 30.0
     anchor_weight: float = 1.0
+    #: Monomer frames drawn per step for the anchor term; 0 uses the whole file every step.
+    #: The anchor carries a force term, so evaluating it is a second-order backward, and at
+    #: the full 500 frames that is ~95% of the wall time of a training step -- the identical
+    #: computation repeated for every minibatch of the actual training set. Sampling a fresh
+    #: subset each step is plain SGD on that term: the same expected gradient, ~8x cheaper,
+    #: and over an epoch it still sees every monomer. Evaluation uses a fixed leading slice
+    #: so the validation number stays comparable across epochs.
+    anchor_batch_size: int = 64
+    #: Penalty on classical energy between pairs the **bond channel** is already describing.
+    #:
+    #: Dispersion between covalently bonded atoms is not dispersion -- that correlation
+    #: energy is already in the bond -- but the Tang-Toennies factor alone does not remove
+    #: it: at 0.96 Angstrom ``f6(b r)`` is ~0.025 against a large ``C6``, leaving -15.7 kJ/mol
+    #: per O-H pair. Left unpenalized the fit is indifferent, because the bond channel absorbs
+    #: whatever appears; a measured run parked -28 kJ/mol per fragment there and oscillated.
+    #:
+    #: Weighted by the bond channel's own envelope, so it asks only that the classical form
+    #: stay out of the region the bond term is covering. An intra pair beyond ``bond_r_off``
+    #: is untouched -- which is what preserves same-fragment electrostatics at range, the
+    #: capability the union pair list exists for. Quadratic, so it self-extinguishes as the
+    #: leak closes rather than continuing to push. Applied per channel rather than to their
+    #: sum, so channels cannot cancel each other and call it clean.
+    intra_classical_weight: float = 0.05
     corr_l2_weight: float = 0.0
     #: Linear pull on the mean per-atom ``r0``, per Angstrom handed to the network. Same
     #: meaning as the per-term ``r0_weight``, now averaged over atoms rather than a scalar.

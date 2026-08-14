@@ -90,6 +90,8 @@ class UnifiedPairHead(nn.Module):
         n_species: int,
         channels: dict[str, ChannelSpec],
         *,
+        range_channels: tuple[str, ...] = (),
+        max_log_dev: float = 0.7,
         emb_dim: int = 16,
         hidden: int = 64,
         depth: int = 2,
@@ -99,6 +101,7 @@ class UnifiedPairHead(nn.Module):
         if not channels:
             raise ValueError("UnifiedPairHead needs at least one channel")
         self.channels = dict(channels)
+        self.range_channels = tuple(range_channels)
         self.species_emb = nn.Embedding(n_species, emb_dim)
         # One radial basis for the shared trunk, so it has to span the widest channel. The
         # per-channel envelopes below still cut each channel off at its own r_off.
@@ -114,30 +117,63 @@ class UnifiedPairHead(nn.Module):
         self.readout = nn.ModuleDict(
             {name: nn.Linear(hidden, 1) for name in self.channels}
         )
+        # Per-pair range-separation deviation, in log space so it composes with the per-atom
+        # geometric mean by addition. This is what a per-atom r0 cannot express: an ethane
+        # geminal H-H (1.78 A) and an H-H across the C-C bond (2.27 A) are the same element
+        # pair, so one threshold cannot put the first in the bonding term and leave the second
+        # to the classical form. The trunk sees both atoms' environments and can tell that the
+        # first pair shares a bonded carbon.
+        #
+        # Bounded by `max_log_dev * tanh(.)`, so the element prior stays the anchor and the
+        # network supplies a correction within a fixed factor of it. Unbounded, an exponential
+        # of an MLP output is a runaway: a perturbed head produced r0 of 1533 Angstrom in
+        # testing, which switches the classical form off everywhere and cannot recover,
+        # because past saturation the gate has no gradient to come back on.
+        self.max_log_dev = float(max_log_dev)
+        self.range_readout = nn.ModuleDict(
+            {name: nn.Linear(hidden, 1) for name in self.range_channels}
+        )
         with torch.no_grad():
-            for lin in self.readout.values():
+            for lin in list(self.readout.values()) + list(self.range_readout.values()):
                 lin.weight.zero_()
                 lin.bias.zero_()
 
     def forward(
         self,
-        inv_feats: torch.Tensor,      # (N, p0)
-        species_idx: torch.Tensor,    # (N,)
-        pair_index: torch.Tensor,     # (2, P)
+        inv_i: torch.Tensor,          # (P, p0) invariants of each pair's first atom
+        inv_j: torch.Tensor,          # (P, p0) ... and its second
+        species_i: torch.Tensor,      # (P,)
+        species_j: torch.Tensor,      # (P,)
         r: torch.Tensor,              # (P,) Angstrom
-    ) -> dict[str, torch.Tensor]:
-        i, j = pair_index[0], pair_index[1]
-        h = torch.cat((inv_feats, self.species_emb(species_idx)), dim=-1)
-        h_i, h_j = h[i], h[j]
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """``({channel: dE (P,)}, {channel: log-r0 deviation (P,)})``.
+
+        Features arrive **already gathered onto pairs**, not as per-atom arrays.
+
+        The caller does the gathering because it partitions the pair list and calls this once
+        per part: :class:`rsfff.ff.unified.UnifiedPairModel` scores intra-fragment pairs from
+        the fragment-confined descriptor (for the bond channel) and inter-fragment pairs from
+        the environment-aware one (for the three interaction corrections). That keeps the
+        1-body term matchable against an isolated-fragment label while the interactions carry
+        many-body content, and because the parts are disjoint it costs one evaluation's worth
+        of work in total. Gathering here would force one stream on every pair.
+        """
+        h_i = torch.cat((inv_i, self.species_emb(species_i)), dim=-1)
+        h_j = torch.cat((inv_j, self.species_emb(species_j)), dim=-1)
         # sum and |difference| are both invariant under swapping i and j, so an undirected
         # i<j pair list is unambiguous and no channel can depend on the storage order.
         u = self.trunk(torch.cat((h_i + h_j, (h_i - h_j).abs(), self.radial(r)), dim=-1))
-        return {
+        energies = {
             name: spec.energy_scale
             * self.readout[name](u).squeeze(-1)
             * pairwise_switch(r, spec.r_on, spec.r_off)
             for name, spec in self.channels.items()
         }
+        log_r0_dev = {
+            name: self.max_log_dev * torch.tanh(self.range_readout[name](u).squeeze(-1))
+            for name in self.range_channels
+        }
+        return energies, log_r0_dev
 
 
 __all__ = ["ChannelSpec", "UnifiedPairHead"]

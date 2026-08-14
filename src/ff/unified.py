@@ -66,12 +66,36 @@ plan called for a size-1 fragmentation axis on every output tensor; that is a de
 that would obscure every shape for no present benefit, so the forward-compatibility lives in
 where the routing is *computed* instead.)
 
+Two feature streams, one split
+-----------------------------
+With :class:`EnvironmentResidual` attached, an atom carries two descriptors: ``h_frag``,
+confined to its own fragment, and ``h_env = h_frag + g(h_full)``. Only **one** consumer needs
+the fragment-confined one:
+
+* ``h_frag`` -> the response solve and the **bond channel**. Together those are
+  ``fragment_energy`` up to a kilojoule, and that label is Q-Chem's *isolated*-fragment
+  energy, which has no environment dependence to fit.
+* ``h_env`` -> everything else: the interaction parameters (``C6``, the Slater exponents, the
+  Pauli multipoles, ``r0``) and the three correction channels, which is where effective
+  many-body physics such as environment-quenched ``C6`` belongs.
+
+An earlier version evaluated every interaction parameter head on *both* streams and selected
+per pair, so that an intra-fragment pair's classical energy used isolated-fragment parameters.
+That was over-built. The range separation already switches the intra classical contribution
+down to **under 1 kJ/mol per fragment** (:mod:`rsfff.ff.range_priors`), so there is no
+meaningful path from the environment into an isolated-fragment label through it -- while the
+term that *does* carry that label, the bond channel at ~-640 kJ/mol per fragment, is
+unaffected by any gate and is exactly what the split now protects.
+
+The residual cost is that ``fragment_energy`` is no longer environment-independent *by
+construction*, only to within that switched-off remainder; ``tests/test_ff_unified.py``
+measures it rather than asserting it away.
+
 What is deliberately not here
 -----------------------------
-Environment-aware descriptors (``h_env``), the polarized and CT response levels, and the
-electrostatic-environment features of ``docs/range_separated_mlip.md`` §4.2. ``h_env`` is
-plumbed as a separate name that currently aliases ``h_frag``, so wiring it later is an
-addition; see :class:`UnifiedPairModel.forward`.
+The polarized and CT response levels, and the electrostatic-environment features of
+``docs/range_separated_mlip.md`` §4.2. The response parameters stay fragment-confined and no
+external field enters the solve; see §5.1 for why that ceiling binds on the frozen level only.
 """
 
 from __future__ import annotations
@@ -168,6 +192,81 @@ class FragmentStateEmbedding(nn.Module):
         x = torch.stack((q, s), dim=-1)
         ref = self.net(torch.zeros_like(x[:1]))
         return (self.net(x) - ref)[fragment_idx]
+
+
+class EnvironmentResidual(nn.Module):
+    """``h_env = h_frag + g(h_full)``: what an atom's parameters learn from its surroundings.
+
+    A fragment-confined descriptor cannot express environment screening -- an isolated water's
+    C6 and a water's C6 inside a cluster are the same number by construction, and the
+    dispersion term is then rigorously two-body with *exactly* zero many-body content
+    (``tests/test_many_body.py``). That is a useful ablation and the wrong physics: effective
+    atomic C6 really is quenched by the environment.
+
+    Written as a **residual on the fragment-confined features** rather than as a straight swap
+    to the environment-aware ones, for three reasons:
+
+    * ``g`` is zero-initialized, so ``h_env == h_frag`` exactly at initialization and turning
+      environment awareness on starts from the validated fragment-confined model rather than
+      from a different one;
+    * ``||g(h_full)||`` is then a direct measurable of how much many-body content the model
+      actually wants, rather than something that has to be inferred from a fit quality
+      difference;
+    * both descriptors come from one neighbor search and one set of spherical harmonics
+      (:meth:`rsfff.features.features.FlatLambdaSOAPFeaturizer.forward` with
+      ``also_ungrouped=True``), so the difference is attributable to the environment and not
+      to two independently-built geometries.
+
+    Equivariance: the invariant channel gets a plain MLP residual, and each equivariant
+    channel is gated by an **invariant** function of the environment times the environment's
+    own equivariant features. A scalar gate times an ``l``-equivariant tensor is
+    ``l``-equivariant, which is the same construction :class:`rsfff.mlip.adiabatic.
+    AdiabaticCorrection` uses -- never a scalar MLP on concatenated components, which would
+    break rotation equivariance outright (``docs/range_separated_mlip.md`` §7).
+
+    **What must not consume this.** The response solve and the bond channel must stay on
+    ``h_frag``: ``fragment_energy`` is Q-Chem's isolated-fragment energy, which has no
+    environment dependence *by construction*, so a 1-body term built on ``h_env`` is fitting a
+    function that cannot match its target. Those two are the whole of the restriction --
+    everything else reads ``h_env``, because the range separation already switches the intra
+    classical contribution below a kilojoule per fragment.
+    """
+
+    def __init__(
+        self,
+        p0: int,
+        p1: int | None,
+        p2: int | None,
+        n_species: int,
+        *,
+        emb_dim: int = 16,
+        hidden: int = 64,
+        depth: int = 2,
+    ) -> None:
+        super().__init__()
+        self.species_emb = nn.Embedding(n_species, emb_dim)
+        self.inv_mlp = mlp(p0 + emb_dim, hidden, depth, p0)
+        self.vec_gate = mlp(p0 + emb_dim, hidden, depth, p1) if p1 else None
+        self.equiv_gate = mlp(p0 + emb_dim, hidden, depth, p2) if p2 else None
+        with torch.no_grad():
+            for m in (self.inv_mlp, self.vec_gate, self.equiv_gate):
+                if m is not None:
+                    m[-1].weight.zero_()
+                    m[-1].bias.zero_()
+
+    def forward(self, frag: LambdaFeatures, full: LambdaFeatures) -> LambdaFeatures:
+        x = torch.cat((full.inv_feats, self.species_emb(full.species_idx)), dim=-1)
+        inv = frag.inv_feats + self.inv_mlp(x)
+        vec, equiv = frag.vec_feats, frag.equiv_feats
+        if self.vec_gate is not None and vec is not None and full.vec_feats is not None:
+            vec = vec + self.vec_gate(x).unsqueeze(1) * full.vec_feats
+        if self.equiv_gate is not None and equiv is not None and full.equiv_feats is not None:
+            equiv = equiv + self.equiv_gate(x).unsqueeze(1) * full.equiv_feats
+        return replace(frag, inv_feats=inv, vec_feats=vec, equiv_feats=equiv)
+
+    def magnitude(self, frag: LambdaFeatures, env: LambdaFeatures) -> torch.Tensor:
+        """``||h_env - h_frag||`` per atom: how much environment the model is using."""
+        return (env.inv_feats - frag.inv_feats).norm(dim=-1)
 
 
 class RangeSeparationHeads(nn.Module):
@@ -285,7 +384,11 @@ class UnifiedOutput:
     e_pair_ff: dict[str, torch.Tensor]        # each (P,)
     e_pair_corr: dict[str, torch.Tensor]      # each (P,)
     gate: dict[str, torch.Tensor]             # (P,) fermi * taper, per classical channel
-    r0: dict[str, torch.Tensor]               # (N,) per-atom midpoint, per channel
+    r0: dict[str, torch.Tensor]               # (N,) per-atom base midpoint, per channel
+    #: (P,) the midpoint each pair actually used: the per-atom base combined by geometric
+    #: mean, times the learned per-pair correction. This is the one to read when asking what
+    #: the range separation decided -- ``r0`` above is only its per-element starting point.
+    r0_pair: dict[str, torch.Tensor]
     alpha: dict[str, torch.Tensor]            # () per-channel width
     species_idx: torch.Tensor                 # (N,) index into neighbor_types
     #: (N,) ``log r0`` each atom would have from its element prior alone. The penalty that
@@ -294,6 +397,10 @@ class UnifiedOutput:
     #: The **frozen** response: parameters from fragment-confined features, no external
     #: field. Named so the polarized solve lands beside it rather than on top of it.
     response: FragmentResponseOutput
+    #: (N,) ``||h_env - h_frag||`` per atom, or None when environment awareness is off. How
+    #: much of its surroundings the model has decided each atom's parameters need; zero at
+    #: initialization by construction.
+    environment_norm: torch.Tensor | None = None
 
     # The solved multipoles, forwarded from the frozen response so this output satisfies the
     # same duck type as `ElectrostaticsOutput` and can be handed straight to
@@ -341,6 +448,7 @@ class UnifiedPairModel(nn.Module):
         fragment_state: FragmentStateEmbedding,
         reference_energies: torch.Tensor,
         *,
+        environment: "EnvironmentResidual | None" = None,
         max_rank: int = 1,
         classical: dict[str, ClassicalSpec] | None = None,
         max_num_neighbors: int = 512,
@@ -368,10 +476,32 @@ class UnifiedPairModel(nn.Module):
         self.range_heads = range_heads
         self.pair_head = pair_head
         self.fragment_state = fragment_state
+        self.environment = environment
         self.max_rank = int(max_rank)
         self.max_num_neighbors = int(max_num_neighbors)
         self.cutoff_max = max(c.cutoff for c in self.classical.values())
         self.register_buffer("reference_energies", reference_energies.clone())
+
+    def _augment(self, feats: LambdaFeatures, batch, frag) -> LambdaFeatures:
+        """Concatenate the fragment-state block onto a descriptor's invariants."""
+        state = self.fragment_state(
+            batch, frag, feats.inv_feats.dtype, feats.inv_feats.device
+        )
+        if state is None:
+            return feats
+        return replace(feats, inv_feats=torch.cat((feats.inv_feats, state), dim=-1))
+
+    def _pauli_multipoles(self, feats: LambdaFeatures):
+        """``(polytensor (N, K), b (N,))`` for the Slater Pauli term."""
+        q, b, mu, quad_s = self.pauli_params(
+            feats.inv_feats, feats.species_idx, feats.vec_feats, feats.equiv_feats
+        )
+        poly = build_polytensor(
+            q, mu,
+            None if quad_s is None else spherical_to_cartesian_quadrupole(quad_s),
+            max_rank=self.max_rank,
+        )
+        return poly, b
 
     def forward(self, batch) -> UnifiedOutput:
         if batch.fragment_idx is None:
@@ -385,17 +515,18 @@ class UnifiedPairModel(nn.Module):
         n_sys = int(batch.n_systems)
 
         # --- features ------------------------------------------------------------------
-        # Fragment-confined, which is what keeps the 1-body term exactly one-body and the
-        # elst channel exactly two-body. `h_env` is the hook for the environment-aware
-        # descriptor (one extra unmasked scatter over the same geometric basis, plus a
-        # zero-init residual); it aliases `h_frag` until that is wired, so the split costs
-        # nothing today but the consumers are already separated.
-        feats = self.featurizer(batch, frag)
-        state = self.fragment_state(batch, frag, positions.dtype, positions.device)
-        if state is not None:
-            feats = replace(feats, inv_feats=torch.cat((feats.inv_feats, state), dim=-1))
-        h_frag = feats
-        h_env = feats
+        # `h_frag` is fragment-confined and is what the response solve and the bond channel
+        # read: `fragment_energy` is an isolated-fragment label, so a 1-body term built on
+        # anything else is fitting a function that cannot match its target. `h_env` adds the
+        # zero-initialized environment residual and is what the *interaction* parameters
+        # read. With `environment` off the two are the same object and everything below runs
+        # once.
+        if self.environment is None:
+            h_frag = h_env = self._augment(self.featurizer(batch, frag), batch, frag)
+        else:
+            grouped, full = self.featurizer(batch, frag, also_ungrouped=True)
+            h_frag = self._augment(grouped, batch, frag)
+            h_env = self.environment(h_frag, self._augment(full, batch, frag))
 
         # --- the frozen response solve, shared by the 1-body and elst channels -----------
         res = self.response(batch, h_frag)
@@ -409,15 +540,54 @@ class UnifiedPairModel(nn.Module):
         dr_au = (positions[j] - positions[i]) / BOHR_ANG
         r_au = r / BOHR_ANG
 
-        # --- classical backbones, every pair --------------------------------------------
+        # --- the correction trunk, partitioned by routing --------------------------------
+        # Each pair is scored once, on the stream its label demands. Intra pairs read
+        # `h_frag` and take the bond channel; inter pairs read `h_env` and take the three
+        # interaction corrections. Both partitions also emit a per-pair range-separation
+        # deviation, so the *within-fragment* range separation is a function of
+        # fragment-confined features alone.
+        #
+        # Intra pairs deliberately do *not* get the interaction corrections. Their classical
+        # counterpart is what the range separation is deciding about, and a correction there
+        # would be an unconstrained second bond term, degenerate with the real one.
+        sp = h_frag.species_idx
+        e_corr = {name: torch.zeros_like(r) for name in self.pair_head.channels}
+        d_log_r0 = {name: torch.zeros_like(r) for name in self.classical}
+        intra_idx = is_intra.nonzero().squeeze(-1)
+        inter_idx = (~is_intra).nonzero().squeeze(-1)
+        for idx, feats, want in (
+            (intra_idx, h_frag, ("bond",)),
+            (inter_idx, h_env, tuple(self.classical)),
+        ):
+            if not idx.numel():
+                continue
+            a, b_ = i[idx], j[idx]
+            energies, devs = self.pair_head(
+                feats.inv_feats[a], feats.inv_feats[b_], sp[a], sp[b_], r[idx]
+            )
+            for name in want:
+                e_corr[name] = e_corr[name].index_copy(0, idx, energies[name])
+            for name in devs:
+                d_log_r0[name] = d_log_r0[name].index_copy(0, idx, devs[name])
+
+        # --- classical backbones, every pair ---------------------------------------------
+        # ``r0`` is a per-element base (the covalent-distance knowledge of
+        # :mod:`rsfff.ff.range_priors`) times a learned per-pair correction. The base cannot
+        # tell topologically distinct pairs of the same elements apart; the correction can,
+        # and that is the whole reason it exists -- see :class:`UnifiedPairHead`.
         r0_atom, alpha = self.range_heads(h_env.inv_feats, h_env.species_idx)
-        gate = {}
+        gate, r0_pair = {}, {}
         for name, spec in self.classical.items():
-            r0_ij = (0.5 * (r0_atom[name][i].log() + r0_atom[name][j].log())).exp()
-            gate[name] = fermi_switch(r, r0_ij, alpha[name]) * pairwise_switch(
+            log_r0_ij = (
+                0.5 * (r0_atom[name][i].log() + r0_atom[name][j].log()) + d_log_r0[name]
+            )
+            r0_pair[name] = log_r0_ij.exp()
+            gate[name] = fermi_switch(r, r0_pair[name], alpha[name]) * pairwise_switch(
                 r, spec.cutoff - spec.taper_width, spec.cutoff
             )
 
+        # The multipoles come from the frozen response, which is fragment-confined -- see the
+        # module docstring on the ceiling that binds there.
         quad_c = None if res.quad_s is None else spherical_to_cartesian_quadrupole(res.quad_s)
         m_real = build_polytensor(res.charges, res.mu, quad_c, max_rank=self.max_rank)
         m_shell = build_polytensor(res.charges - res.z, res.mu, quad_c, max_rank=self.max_rank)
@@ -426,22 +596,47 @@ class UnifiedPairModel(nn.Module):
             dr_au, r_au, m_real, m_shell, m_nuc, res.b, pair_index, max_rank=self.max_rank
         )
 
-        q_p, b_p, mu_p, quad_p = self.pauli_params(
-            h_env.inv_feats, h_env.species_idx, h_env.vec_feats, h_env.equiv_feats
+        # The Pauli and dispersion parameters are the *only* remaining path by which the
+        # environment could reach an isolated-fragment label, so they are the only ones
+        # evaluated on both streams. Everything else is already safe: the electrostatic
+        # multipoles come from the fragment-confined response, the per-atom `r0` base has no
+        # environment dependence unless `environment_r0` is on, and the per-pair `r0`
+        # correction for intra pairs is read from the fragment-confined trunk.
+        #
+        # This costs two per-atom MLP evaluations and it is worth it. Left on `h_env` alone,
+        # a fragment's energy inside a cluster differs from that fragment alone by ~1.1 kJ/mol
+        # at the environment strength this model actually trains to -- roughly half the target
+        # `ob_mae`, i.e. a systematic error large enough to be mistaken for fit error.
+        def _select(frag_side, env_side, index):
+            if frag_side is env_side:
+                return frag_side[index]
+            wide = is_intra.reshape((-1,) + (1,) * (frag_side.dim() - 1))
+            return torch.where(wide, frag_side[index], env_side[index])
+
+        poly_f, b_p_f = self._pauli_multipoles(h_frag)
+        poly_e, b_p_e = (
+            (poly_f, b_p_f) if h_env is h_frag else self._pauli_multipoles(h_env)
         )
-        poly_p = build_polytensor(
-            q_p, mu_p,
-            None if quad_p is None else spherical_to_cartesian_quadrupole(quad_p),
-            max_rank=self.max_rank,
-        )
-        b_p_ij = (0.5 * (b_p[i].log() + b_p[j].log())).exp()
+        b_p_ij = (0.5 * (
+            _select(b_p_f, b_p_e, i).log() + _select(b_p_f, b_p_e, j).log()
+        )).exp()
         e_pauli = slater_pauli_pair_energy(
-            dr_au, r_au, poly_p[i], poly_p[j], b_p_ij, max_rank=self.max_rank
+            dr_au, r_au,
+            _select(poly_f, poly_e, i), _select(poly_f, poly_e, j),
+            b_p_ij, max_rank=self.max_rank,
         )
 
-        c6, b_d = self.disp_params(h_env.inv_feats, h_env.species_idx)
-        c6_ij = (0.5 * (c6[i].log() + c6[j].log())).exp()
-        b_d_ij = (0.5 * (b_d[i].log() + b_d[j].log())).exp()
+        c6_f, b_d_f = self.disp_params(h_frag.inv_feats, h_frag.species_idx)
+        c6_e, b_d_e = (
+            (c6_f, b_d_f) if h_env is h_frag
+            else self.disp_params(h_env.inv_feats, h_env.species_idx)
+        )
+        c6_ij = (0.5 * (
+            _select(c6_f, c6_e, i).log() + _select(c6_f, c6_e, j).log()
+        )).exp()
+        b_d_ij = (0.5 * (
+            _select(b_d_f, b_d_e, i).log() + _select(b_d_f, b_d_e, j).log()
+        )).exp()
         e_disp = tt_damped_c6_energy(r, c6_ij, b_d_ij)
 
         e_ff = {
@@ -449,9 +644,6 @@ class UnifiedPairModel(nn.Module):
             "pauli": gate["pauli"] * e_pauli,
             "disp": gate["disp"] * e_disp,
         }
-
-        # --- the shared correction trunk, every pair, every channel ----------------------
-        e_corr = self.pair_head(h_env.inv_feats, h_env.species_idx, pair_index, r)
 
         # --- routing: which label does each pair answer to? ------------------------------
         inter = (~is_intra).to(r.dtype)
@@ -467,13 +659,13 @@ class UnifiedPairModel(nn.Module):
             interaction_corr[name] = pool_batch(inter * e_corr[name])
             interaction[name] = interaction_ff[name] + interaction_corr[name]
 
-        # The intra bucket takes the same classical channels plus the bond correction. This
-        # is the term that does not exist in the per-term stack, and it is why a same-fragment
-        # pair at 8 Angstrom is no longer inert.
-        e_intra = e_corr["bond"] + sum(e_ff[n] + e_corr[n] for n in e_ff)
-        sel = is_intra.nonzero().squeeze(-1)
+        # The intra bucket: the bond channel plus whatever classical energy survives the
+        # range separation. The latter is the term that does not exist in the per-term stack,
+        # and it is why a same-fragment pair at 8 Angstrom is no longer inert -- while at
+        # bonded range it is switched off to under a kJ/mol per fragment.
+        e_intra = e_corr["bond"] + sum(e_ff.values())
         energy_bond = r.new_zeros(n_frag).index_add_(
-            0, pair_frag[sel], (intra * e_intra)[sel]
+            0, pair_frag[intra_idx], (intra * e_intra)[intra_idx]
         )
 
         e_atom = self.reference_energies[h_frag.species_idx]
@@ -504,9 +696,14 @@ class UnifiedPairModel(nn.Module):
             e_pair_corr=e_corr,
             gate=gate,
             r0=r0_atom,
+            r0_pair=r0_pair,
             alpha=alpha,
             species_idx=h_frag.species_idx,
             log_r0_prior=self.range_heads.log_r0_prior[h_frag.species_idx],
+            environment_norm=(
+                None if self.environment is None
+                else self.environment.magnitude(h_frag, h_env)
+            ),
             response=res,
         )
 
@@ -514,6 +711,7 @@ class UnifiedPairModel(nn.Module):
 __all__ = [
     "DEFAULT_CLASSICAL",
     "ClassicalSpec",
+    "EnvironmentResidual",
     "FragmentStateEmbedding",
     "RangeSeparationHeads",
     "UnifiedOutput",

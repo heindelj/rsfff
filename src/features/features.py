@@ -597,32 +597,8 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
     # recompile storm. Excluding it from the graph is cheap (radius build is fast, the
     # power-spectrum is already efficient cuBLAS bmm) and lets inductor cleanly compile
     # the dense readout in `pf_model`, which is where fusion actually helps.
-    @torch.compiler.disable
-    def forward(self, batch: "Batch", group_idx: torch.Tensor | None = None) -> LambdaFeatures:
-        """``group_idx`` restricts which atoms may be neighbors (default: the frame).
-
-        Passing ``batch.fragment_idx`` makes every atom's descriptor a function of its own
-        fragment only, so any per-atom parameter derived from it is independent of the
-        surroundings and a pair sum built on it is rigorously two-body. The default keeps
-        the full supersystem environment, which lets parameters respond to neighboring
-        molecules (real physics, e.g. environment quenching of atomic C6) at the cost of
-        that strict separability. ``FlatStateSOAPFeaturizer`` takes the same argument.
-        """
-        positions = batch.positions
-        species_idx = self._species_lut[batch.atomic_numbers]
-        edge_index = self._build_edges(
-            positions, batch.batch_idx if group_idx is None else group_idx
-        )
-        # radius_graph returns directed edges; DensityExpansion treats edge_index[0]
-        # as the center i and [1] as the neighbor j. The graph is symmetric so either
-        # orientation yields the same density.
-        A = self.density(positions, species_idx, edge_index, int(positions.shape[0]))
-        # Optional learnable channel compression: (N, n_species, n_max, L2) -> (N, Kc, 1, L2)
-        # before the O(Kc^2) power spectrum / bispectrum.
-        if self.density_channels is not None:
-            n_atoms, _, _, l2 = A.shape
-            A = torch.einsum("ncl,ck->nkl", A.reshape(n_atoms, -1, l2), self.channel_proj)
-            A = A.unsqueeze(2)                                        # (N, Kc, 1, L2)
+    def _features_from_density(self, A, species_idx, batch_idx, edge_index) -> LambdaFeatures:
+        """Power spectrum (+ optional bispectrum) of a prebuilt density."""
         per_lambda = equivariant_power_spectrum(
             A,
             self.l_max,
@@ -648,10 +624,83 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
             inv_feats=inv,
             equiv_feats=equiv,
             species_idx=species_idx,
-            batch_idx=batch.batch_idx,
+            batch_idx=batch_idx,
             vec_feats=vec,
             edge_index=edge_index,
         )
+
+    def _compress(self, A):
+        """Optional learnable channel compression before the O(Kc^2) power spectrum."""
+        if self.density_channels is None:
+            return A
+        n_atoms, _, _, l2 = A.shape
+        A = torch.einsum("ncl,ck->nkl", A.reshape(n_atoms, -1, l2), self.channel_proj)
+        return A.unsqueeze(2)                                        # (N, Kc, 1, L2)
+
+    @torch.compiler.disable
+    def forward(
+        self,
+        batch: "Batch",
+        group_idx: torch.Tensor | None = None,
+        *,
+        also_ungrouped: bool = False,
+    ) -> "LambdaFeatures | tuple[LambdaFeatures, LambdaFeatures]":
+        """``group_idx`` restricts which atoms may be neighbors (default: the frame).
+
+        Passing ``batch.fragment_idx`` makes every atom's descriptor a function of its own
+        fragment only, so any per-atom parameter derived from it is independent of the
+        surroundings and a pair sum built on it is rigorously two-body. The default keeps
+        the full supersystem environment, which lets parameters respond to neighboring
+        molecules (real physics, e.g. environment quenching of atomic C6) at the cost of
+        that strict separability. ``FlatStateSOAPFeaturizer`` takes the same argument.
+
+        ``also_ungrouped=True`` returns **both** descriptors as ``(grouped, ungrouped)``,
+        sharing one neighbor search and one set of spherical harmonics. The grouped neighbor
+        list is a strict *subset* of the ungrouped one, so the two differ only by a mask over
+        the same edges -- which is what makes their difference attributable to the environment
+        and nothing else. Only the scatter and the power spectrum are duplicated; see
+        :meth:`DensityExpansion.scatter_species`.
+
+        The default path is untouched and takes exactly the code it always did, so nothing
+        that does not ask for the pair pays for it -- including in the last bits, since the
+        two paths sum edges in different orders.
+        """
+        positions = batch.positions
+        species_idx = self._species_lut[batch.atomic_numbers]
+        n_atoms = int(positions.shape[0])
+
+        if not also_ungrouped:
+            edge_index = self._build_edges(
+                positions, batch.batch_idx if group_idx is None else group_idx
+            )
+            # radius_graph returns directed edges; DensityExpansion treats edge_index[0]
+            # as the center i and [1] as the neighbor j. The graph is symmetric so either
+            # orientation yields the same density.
+            A = self._compress(self.density(positions, species_idx, edge_index, n_atoms))
+            return self._features_from_density(
+                A, species_idx, batch.batch_idx, edge_index
+            )
+
+        edge_index = self._build_edges(positions, batch.batch_idx)
+        RY = self.density.edge_expansion(positions, edge_index)
+        full = self._features_from_density(
+            self._compress(
+                self.density.scatter_species(RY, edge_index, species_idx, n_atoms)
+            ),
+            species_idx, batch.batch_idx, edge_index,
+        )
+        if group_idx is None:
+            return full, full
+        mask = group_idx[edge_index[0]] == group_idx[edge_index[1]]
+        grouped = self._features_from_density(
+            self._compress(
+                self.density.scatter_species(
+                    RY, edge_index, species_idx, n_atoms, edge_mask=mask
+                )
+            ),
+            species_idx, batch.batch_idx, edge_index[:, mask],
+        )
+        return grouped, full
 
 
 class FlatStateSOAPFeaturizer(nn.Module):

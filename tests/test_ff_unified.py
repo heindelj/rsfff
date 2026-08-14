@@ -38,6 +38,7 @@ from rsfff.ff.response import (
 )
 from rsfff.ff.unified import (
     ClassicalSpec,
+    EnvironmentResidual,
     FragmentStateEmbedding,
     RangeSeparationHeads,
     UnifiedPairModel,
@@ -52,6 +53,18 @@ torch.set_default_dtype(torch.float64)
 NEIGHBOR_TYPES = [1, 8]
 E0 = torch.tensor([-0.4941110651, -75.0780656005])   # H, O at wB97M-V/def2-TZVPD
 MAX_RANK = 2
+
+
+def call_pair_head(model, feats, pair_index, r, which=0):
+    """``UnifiedPairHead`` takes features already gathered onto pairs; do that here.
+
+    ``which`` selects the energies (0) or the per-pair log-r0 deviations (1).
+    """
+    i, j = pair_index[0], pair_index[1]
+    return model.pair_head(
+        feats.inv_feats[i], feats.inv_feats[j],
+        feats.species_idx[i], feats.species_idx[j], r,
+    )[which]
 
 _WATER = np.array([[0.0, 0.0, 0.117], [0.0, 0.757, -0.469], [0.0, -0.757, -0.469]])
 
@@ -134,6 +147,7 @@ def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0):
             "disp": ChannelSpec(**corr, energy_scale=1e-3),
             "bond": ChannelSpec(r_on=2.5, r_off=4.0, energy_scale=0.2),
         },
+        range_channels=RANGE_CHANNELS,
         emb_dim=8, hidden=24, depth=1,
     )
     return dict(
@@ -143,12 +157,34 @@ def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0):
     )
 
 
-def make_model(parts=None, **kw):
+def make_model(parts=None, *, environment=False, **kw):
     p = parts or build_parts(**kw)
+    del kw
+    env = None
+    if environment:
+        f = p["featurizer"]
+        env = EnvironmentResidual(
+            f.feature_dims[0] + p["fragment_state"].dim,
+            f.feature_dims.get(1), f.feature_dims.get(2), len(NEIGHBOR_TYPES),
+            emb_dim=8, hidden=24, depth=1,
+        )
     return UnifiedPairModel(
         p["featurizer"], p["response"], p["disp_params"], p["pauli_params"],
-        p["range_heads"], p["pair_head"], p["fragment_state"], E0, max_rank=MAX_RANK,
+        p["range_heads"], p["pair_head"], p["fragment_state"], E0,
+        environment=env, max_rank=MAX_RANK,
     )
+
+
+def wake_environment(model, scale=0.3, seed=101):
+    """Move ``g`` off its zero initialization so the environment path is actually live."""
+    g = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for m in (model.environment.inv_mlp, model.environment.vec_gate,
+                  model.environment.equiv_gate):
+            if m is not None:
+                m[-1].weight.add_(scale * torch.randn(m[-1].weight.shape, generator=g))
+                m[-1].bias.add_(scale * torch.randn(m[-1].bias.shape, generator=g))
+    return model
 
 
 def randomize(model, scale=0.05, seed=1):
@@ -190,6 +226,11 @@ def test_init_matches_existing_terms():
     elst_r0, elst_alpha = 1.5, 8.0
     disp_r0, disp_alpha = 2.0, 8.0
     with torch.no_grad():
+        # The per-term modules have one global scalar r0, so the per-pair correction has to
+        # be off for the two gatings to describe the same function at all.
+        for lin in model.pair_head.range_readout.values():
+            lin.weight.zero_()
+            lin.bias.zero_()
         model.range_heads.d_log_r0["elst"].zero_()
         model.range_heads.d_log_r0["pauli"].zero_()
         model.range_heads.d_log_r0["disp"].zero_()
@@ -250,9 +291,26 @@ def test_intra_classical_leak_is_small_at_init():
         leak = (out.e_pair_ff[name][intra_oh].detach().abs().max()) * KJMOL_PER_HARTREE
         assert float(leak) < 1.0, f"{name} leaks {float(leak):.3f} kJ/mol into a covalent O-H"
 
-    # The H-H case does NOT separate (see rsfff.ff.range_priors) and is deliberately left on.
+    # Intramolecular H-H is switched off too. An earlier prior left it fully on, on the
+    # grounds that intra/inter H-H "overlap" -- true of the min/max over 225k pairs, false of
+    # the distributions (0.01% contamination). See rsfff.ff.range_priors.
+    #
+    # Asserted in aggregate rather than per pair: the intra H-H distribution has a tail that
+    # reaches into the switch (its 99.9th percentile is 1.679 against r0 1.75), so a bound on
+    # the worst single gate is a bound on the tail, not on the physics. What matters is the
+    # total classical energy this routes into `fragment_energy`, which was ~165 kJ/mol per
+    # trimer under the old prior.
     hh = (z[i] == 1) & (z[j] == 1)
-    assert float(out.gate["elst"][out.is_intra & hh].detach().min()) > 0.5
+    assert bool((out.is_intra & hh).any())
+    total = sum(
+        float(out.e_pair_ff[c][out.is_intra].detach().sum()) for c in out.e_pair_ff
+    ) * KJMOL_PER_HARTREE
+    assert abs(total) < 1.0, f"{total:+.2f} kJ/mol of classical energy leaking into a fragment"
+
+    # ... while inter-fragment pairs stay fully on, which is what makes the H-H threshold a
+    # real trade rather than a free one.
+    inter = ~out.is_intra
+    assert float(out.gate["elst"][inter & (out.r < 6.0)].detach().min()) > 0.98
 
 
 def test_accounting_identity_no_double_count_no_gap():
@@ -271,18 +329,22 @@ def test_accounting_identity_no_double_count_no_gap():
         out.energy_ref + out.energy_internal + out.energy_bond,
         atol=0, rtol=0,
     )
-    every_pair = sum(
-        (out.e_pair_ff[c] + out.e_pair_corr[c]).sum() for c in out.e_pair_ff
-    )
-    bond = out.e_pair_corr["bond"][out.is_intra].sum()
+    # Every channel is structurally zero wherever it does not belong, so the identity is
+    # simply "classical everywhere + every correction that exists".
     total = (
-        out.energy_ref.sum() + out.energy_internal.sum() + every_pair + bond
+        out.energy_ref.sum()
+        + out.energy_internal.sum()
+        + sum(v.sum() for v in out.e_pair_ff.values())
+        + sum(v.sum() for v in out.e_pair_corr.values())
     )
     assert torch.allclose(out.energy.sum(), total, atol=1e-12), (
         f"accounting identity off by {float(out.energy.sum() - total):.3e} Ha"
     )
-    # The bond channel is intra-only, which is exactly why relabelling is not a no-op.
-    assert float(out.e_pair_corr["bond"][~out.is_intra].abs().sum()) > 0.0
+    # The partition: bond only on intra pairs, interaction corrections only on inter pairs.
+    assert float(out.e_pair_corr["bond"][~out.is_intra].detach().abs().max()) == 0.0
+    for name in ("elst", "pauli", "disp"):
+        assert float(out.e_pair_corr[name][out.is_intra].detach().abs().max()) == 0.0, name
+    assert float(out.e_pair_corr["bond"][out.is_intra].detach().abs().max()) > 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +374,7 @@ def test_same_fragment_pair_at_range_gets_electrostatics():
 
     # The bond channel really is silent there, so the energy can only be classical.
     feats = model.featurizer(batch, frag)
-    dE = model.pair_head(feats.inv_feats, feats.species_idx, out.pair_index, out.r)
+    dE = call_pair_head(model, feats, out.pair_index, out.r)
     assert float(dE["bond"][far].abs().max()) == 0.0
 
 
@@ -450,18 +512,67 @@ def test_forces_match_central_differences():
 # Range separation and the correction trunk
 # ---------------------------------------------------------------------------
 
-def test_r0_and_alpha_stay_positive_and_carry_gradient():
+def test_r0_and_alpha_stay_positive_and_are_connected_to_the_graph():
+    """Positive by construction, and reachable by autograd.
+
+    Deliberately *not* asserting the gradient is large. At ``alpha = 40`` the Fermi switch is
+    exactly saturated on ~97% of pairs, so ``r0`` receives gradients of order 1e-14: the
+    classes are cleanly separated and there is nothing in the crossover to learn from. That is
+    an absence of signal in this data, not a broken connection, and
+    :func:`test_range_separation_is_saturated_on_water` measures it directly rather than
+    letting it hide behind a threshold here.
+    """
     model = randomize(make_model(), scale=0.3, seed=29)
     positions, numbers, frag = water_cluster(2, seed=31)
     out = model(make_batch(positions, numbers, frag))
     for name in RANGE_CHANNELS:
         assert float(out.r0[name].min()) > 0.0
+        assert float(out.r0_pair[name].min()) > 0.0
         assert float(out.alpha[name]) > 0.0
     out.energy.sum().backward()
     for name in RANGE_CHANNELS:
-        assert model.range_heads.d_log_r0[name].grad is not None
-        assert float(model.range_heads.d_log_r0[name].grad.abs().sum()) > 0.0
-        assert float(model.range_heads.alpha_raw[name].grad.abs()) > 0.0
+        for p in (model.range_heads.d_log_r0[name],
+                  model.range_heads.alpha_raw[name],
+                  model.pair_head.range_readout[name].weight):
+            assert p.grad is not None, name
+            assert torch.isfinite(p.grad).all(), name
+
+
+def test_range_separation_has_a_populated_crossover_and_so_can_learn():
+    """A switch only learns from pairs sitting on its shoulder, and the priors put some there.
+
+    This is a real constraint on where a prior may be placed, not a formality. A decisive
+    switch is flat on both sides, so ``r0`` receives gradient *only* from pairs inside the
+    crossover. The superseded ``r0(H,H) = 1.30`` sat below the entire intramolecular H-H
+    range (1.355-1.729), leaving every H-H pair saturated at gate 1 and every O-H saturated
+    at 0 -- which is exactly why a 60-epoch training run reported ``gate_intra`` pinned at
+    0.3333 to four decimal places and never moved. That constancy was an absence of gradient,
+    not agreement.
+
+    At ``r0(H,H) = 1.75`` the intramolecular H-H tail straddles the crossover, so the
+    parameter is reachable. Asserted here so that a future prior change cannot silently
+    re-freeze it.
+    """
+    model = make_model()
+    positions, numbers, frag = water_cluster(4, seed=151)
+    out = model(make_batch(positions, numbers, frag))
+
+    transition = (out.gate["elst"] > 1e-6) & (out.gate["elst"] < 1 - 1e-6)
+    assert int(transition.sum()) > 0, (
+        "no pair lies in the crossover, so r0 has no gradient anywhere and the 'learned' "
+        "range separation is a fixed hyperparameter"
+    )
+    # Those pairs are the intramolecular ones, which is the population the switch is deciding
+    # about; the intermolecular pairs should be firmly switched on.
+    assert bool(out.is_intra[transition].all())
+
+    out.energy.sum().backward()
+    for param, label in (
+        (model.range_heads.d_log_r0["elst"], "per-element r0"),
+        (model.pair_head.range_readout["elst"].weight, "per-pair r0"),
+    ):
+        grad = float(param.grad.abs().sum())
+        assert grad > 1e-8, f"{label} gradient is {grad:.3e}; the parameter cannot move"
 
 
 def test_pairwise_r0_combination_is_symmetric_and_reduces_to_r0_i():
@@ -476,6 +587,64 @@ def test_pairwise_r0_combination_is_symmetric_and_reduces_to_r0_i():
         ), name
 
 
+def test_pair_r0_starts_at_the_per_element_value_and_can_leave_it():
+    """Zero-init, so the pair correction begins at exactly the per-element combination."""
+    model = make_model()
+    positions, numbers, frag = water_cluster(3, seed=131)
+    out = model(make_batch(positions, numbers, frag))
+    i, j = out.pair_index
+    for name in RANGE_CHANNELS:
+        base = (0.5 * (out.r0[name][i].log() + out.r0[name][j].log())).exp()
+        assert torch.allclose(out.r0_pair[name], base, atol=1e-12, rtol=0), name
+
+    # ... and once the trunk is live it is genuinely per pair, not a per-element constant.
+    # The perturbation is gentle on purpose: `max_log_dev * tanh(.)` saturates for large
+    # readout outputs, and a saturated tanh is as constant -- and as gradient-free -- as no
+    # correction at all. A scale of 0.4 here was enough to pin every pair at the bound.
+    live = randomize(make_model(), scale=0.05, seed=137)
+    out = live(make_batch(positions, numbers, frag))
+    i, j = out.pair_index
+    hh = (numbers[i] == 1) & (numbers[j] == 1)
+    spread = out.r0_pair["elst"][hh].detach()
+    assert float(spread.max() - spread.min()) > 1e-6, (
+        "r0 is constant across all H-H pairs; the pair correction is not reaching it"
+    )
+    # and it stays within the bound the prior anchors it to
+    base = live.range_heads.log_r0_prior.exp().max()
+    assert float(spread.max()) < float(base) * 2.1
+
+
+def test_pair_r0_separates_same_element_pairs_that_per_atom_r0_cannot():
+    """The reason this exists: topology, not distance.
+
+    Two H-H pairs of the *same* element pair at the *same* separation but in different
+    bonding environments must be able to receive different range separations. A per-atom
+    ``r0`` gives one threshold per element pair and cannot; a pair-level one can, because the
+    trunk sees both atoms' descriptors. (Water's own geminal H-H sits at 1.51 A where
+    distance alone decides, which is why this data cannot exhibit the problem -- so it is
+    constructed here.)
+    """
+    model = randomize(make_model(), scale=0.05, seed=139)
+    positions, numbers, frag = water_cluster(2, seed=149)
+    out = model(make_batch(positions, numbers, frag))
+    i, j = out.pair_index
+    hh = ((numbers[i] == 1) & (numbers[j] == 1)).nonzero().squeeze(-1)
+    assert hh.numel() >= 2
+
+    # Same element pair, and we compare at a *fixed* distance so only the environment can
+    # be responsible for any difference.
+    feats = model.featurizer(make_batch(positions, numbers, frag), frag)
+    fixed_r = torch.full((hh.numel(),), 1.9, dtype=positions.dtype)
+    dev = model.pair_head(
+        feats.inv_feats[i[hh]], feats.inv_feats[j[hh]],
+        feats.species_idx[i[hh]], feats.species_idx[j[hh]], fixed_r,
+    )[1]["elst"]
+    assert float(dev.max() - dev.min()) > 1e-6, (
+        "at fixed r and fixed elements the range separation is constant; it can only be a "
+        "function of distance and species, which is what a per-atom r0 already was"
+    )
+
+
 def test_corrections_are_exactly_zero_beyond_r_off():
     """Compact support: past ``r_off`` only the classical form exists.
 
@@ -487,7 +656,7 @@ def test_corrections_are_exactly_zero_beyond_r_off():
     batch = make_batch(positions, numbers, frag)
     feats = model.featurizer(batch, frag)
     out = model(batch)
-    dE = model.pair_head(feats.inv_feats, feats.species_idx, out.pair_index, out.r)
+    dE = call_pair_head(model, feats, out.pair_index, out.r)
     for name, spec in model.pair_head.channels.items():
         beyond = out.r >= spec.r_off
         if bool(beyond.any()):
@@ -501,10 +670,11 @@ def test_pair_head_is_symmetric_under_swap():
     feats = model.featurizer(batch, frag)
     out = model(batch)
     flipped = out.pair_index.flip(0)
-    a = model.pair_head(feats.inv_feats, feats.species_idx, out.pair_index, out.r)
-    b = model.pair_head(feats.inv_feats, feats.species_idx, flipped, out.r)
-    for name in a:
-        assert torch.allclose(a[name], b[name], atol=0, rtol=0), name
+    for which in (0, 1):        # energies, then the per-pair r0 deviations
+        a = call_pair_head(model, feats, out.pair_index, out.r, which)
+        b = call_pair_head(model, feats, flipped, out.r, which)
+        for name in a:
+            assert torch.allclose(a[name], b[name], atol=0, rtol=0), (which, name)
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +721,164 @@ def test_fragment_state_dim_zero_changes_nothing():
     b = make_model(build_parts(fragment_state_dim=4, seed=5))(batch).energy
     # Same seed, and the block contributes an exactly-zero column, so the two agree.
     assert torch.allclose(a, b, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Environment-aware descriptors
+# ---------------------------------------------------------------------------
+
+def test_environment_residual_is_inert_at_initialization():
+    """``g`` is zero-init, so turning environment awareness on starts from exactly the
+    fragment-confined model rather than from a different one."""
+    positions, numbers, frag = water_cluster(3, seed=97)
+    batch = make_batch(positions, numbers, frag)
+    off = make_model(build_parts(seed=9))(batch)
+    on = make_model(build_parts(seed=9), environment=True)(batch)
+    assert torch.allclose(off.energy, on.energy, atol=1e-12, rtol=0)
+    assert float(on.environment_norm.abs().max()) == 0.0
+    assert off.environment_norm is None
+
+
+def test_environment_awareness_reaches_interactions_and_not_the_fragment_energy():
+    """The whole point of the split.
+
+    A live ``g`` must move the interaction channels -- that is the effective many-body
+    physics -- while leaving ``fragment_energy`` bitwise untouched, because that label is an
+    isolated-fragment energy with no environment dependence to fit.
+
+    Getting this to be *exactly* zero rather than merely small is why the Pauli and dispersion
+    parameter heads are evaluated on both feature streams. Left on ``h_env`` alone the
+    violation was ~1.1 kJ/mol at the environment strength this model trains to -- about half
+    the target ``ob_mae``, which is a systematic error comfortably large enough to be
+    mistaken for fit error.
+    """
+    parts = build_parts(seed=11)
+    base = randomize(make_model(parts, environment=True), seed=13)
+    positions, numbers, frag = water_cluster(3, seed=101)
+    batch = make_batch(positions, numbers, frag)
+    before = base(batch)
+
+    after = wake_environment(base)(batch)
+    assert float(after.environment_norm.mean()) > 0.0
+    moved_interaction = float(
+        (after.interaction["disp"] - before.interaction["disp"]).abs().max()
+    ) * KJMOL_PER_HARTREE
+    moved_fragment = float(
+        (after.fragment_energy - before.fragment_energy).abs().max()
+    ) * KJMOL_PER_HARTREE
+    assert moved_interaction > 0.1, (
+        f"g barely reached the interactions ({moved_interaction:.4f} kJ/mol); the test is "
+        f"not exercising the environment path"
+    )
+    assert moved_fragment == 0.0, (
+        f"{moved_fragment:.6f} kJ/mol of environment reached an isolated-fragment label"
+    )
+
+
+def test_fragment_energy_is_exactly_one_body_with_environment_on():
+    """Environment awareness costs nothing in the 1-body term's exactness.
+
+    Every route by which the surroundings could reach an isolated-fragment label is closed:
+    the response solve and the bond channel read the fragment-confined stream, and the Pauli
+    and dispersion parameters are evaluated on it too for intra-fragment pairs. Asserted at
+    both environment settings, so a regression in either path is caught.
+    """
+    positions, numbers, frag = water_cluster(4, seed=103)
+    cluster_b = make_batch(positions, numbers, frag)
+    alone_b = make_batch(positions[:3], numbers[:3], frag[:3])
+
+    off = randomize(make_model(environment=False), seed=17)
+    assert torch.allclose(
+        off(cluster_b).fragment_energy[0], off(alone_b).fragment_energy[0],
+        atol=1e-12, rtol=0,
+    ), "the fragment-confined path must stay exactly one-body"
+
+    on = wake_environment(randomize(make_model(environment=True), seed=17))
+    violation = float(
+        (on(cluster_b).fragment_energy[0] - on(alone_b).fragment_energy[0]).abs()
+    ) * KJMOL_PER_HARTREE
+    assert violation == 0.0, f"one-body violation of {violation:.6f} kJ/mol with g live"
+
+
+def test_environment_gives_the_dispersion_channel_many_body_content():
+    """Fragment-confined dispersion is rigorously two-body; environment-aware is not.
+
+    That is the trade being made, so assert both halves of it rather than only the gain.
+    """
+    positions, numbers, frag = water_cluster(3, seed=107)
+
+    class ChannelOnly(torch.nn.Module):
+        def __init__(self, inner, name):
+            super().__init__()
+            self.inner, self.name = inner, name
+
+        def forward(self, batch):
+            out = self.inner(batch)
+            return type("O", (), {
+                "energy": out.interaction[self.name],
+                "energy_ff": out.interaction_ff[self.name],
+                "energy_corr": out.interaction_corr[self.name],
+            })()
+
+    confined = randomize(make_model(build_parts(seed=19)), seed=23)
+    aware = wake_environment(randomize(make_model(build_parts(seed=19), environment=True), seed=23))
+    three = [
+        abs(mbe_decompose(ChannelOnly(m, "disp"), positions, numbers, frag,
+                          split_components=False).by_order.get(3, 0.0))
+        for m in (confined, aware)
+    ]
+    assert three[0] < 1e-12, "fragment-confined dispersion must have no 3-body content"
+    assert three[1] > 1e-9, "environment-aware dispersion should have some"
+
+
+def test_environment_path_keeps_rotation_invariance():
+    """``g`` gates equivariant channels with invariant scalars; a scalar MLP on components
+    would break this silently."""
+    model = wake_environment(randomize(make_model(environment=True), seed=29))
+    positions, numbers, frag = water_cluster(3, seed=109)
+    base = model(make_batch(positions, numbers, frag))
+    theta = torch.tensor(0.9)
+    c, s = torch.cos(theta), torch.sin(theta)
+    rot = torch.tensor([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+    other = model(make_batch(positions @ rot.T + torch.tensor([0.4, 1.1, -0.6]), numbers, frag))
+    assert torch.allclose(base.energy, other.energy, atol=1e-10)
+    for name in base.interaction:
+        assert torch.allclose(base.interaction[name], other.interaction[name], atol=1e-10), name
+
+
+def test_environment_forces_match_central_differences():
+    model = wake_environment(randomize(make_model(environment=True), seed=31), scale=0.15)
+    positions, numbers, frag = water_cluster(2, seed=113)
+    batch = make_batch(positions, numbers, frag)
+    batch.positions.requires_grad_(True)
+    (grad,) = torch.autograd.grad(model(batch).energy.sum(), batch.positions)
+    h = 1e-5
+    for atom, comp in ((0, 1), (3, 0)):
+        shifted = []
+        for sign in (+1, -1):
+            p = positions.clone()
+            p[atom, comp] += sign * h
+            shifted.append(float(model(make_batch(p, numbers, frag)).energy.sum()))
+        fd = (shifted[0] - shifted[1]) / (2 * h)
+        assert float(grad[atom, comp]) == pytest.approx(fd, abs=1e-6, rel=1e-6)
+
+
+def test_featurizer_pair_path_matches_independent_builds():
+    """``also_ungrouped=True`` returns the same two descriptors as two separate calls."""
+    positions, numbers, frag = water_cluster(3, seed=127)
+    batch = make_batch(positions, numbers, frag)
+    f = FlatLambdaSOAPFeaturizer(
+        cutoff=5.0, n_max=4, l_max=3, neighbor_types=NEIGHBOR_TYPES,
+        selected_lambdas=(0, 1, 2), backend="e3nn", density_channels=8,
+    )
+    grouped, full = f(batch, frag, also_ungrouped=True)
+    assert torch.allclose(grouped.inv_feats, f(batch, frag).inv_feats, atol=1e-12)
+    assert torch.allclose(full.inv_feats, f(batch).inv_feats, atol=1e-12)
+    # and they are genuinely different descriptors
+    assert float((grouped.inv_feats - full.inv_feats).abs().max()) > 1e-3
+    # group_idx=None makes the pair degenerate rather than raising
+    a, b = f(batch, None, also_ungrouped=True)
+    assert a is b
 
 
 def test_masked_scatter_shares_one_geometric_basis():
