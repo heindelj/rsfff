@@ -199,6 +199,97 @@ class AtomicVectorHead(nn.Module):
         return torch.einsum("nmk,nk->nm", vec_k, gate)                     # (N, 3)
 
 
+class AxialQuadrupolePolarizabilityHead(nn.Module):
+    """Axially anisotropic quadrupole polarizability ``C``: ``(N, 5, 5)``, PSD.
+
+    The isotropic ``C = c I5`` this replaces is one positive number per atom. The general
+    symmetric map on the ``l=2`` space is fifteen (``Sym^2(l=2) = 0 + 2 + 4``, i.e.
+    ``1 + 5 + 9``), which is far more freedom than any current target constrains. The middle
+    ground taken here is the physically motivated one: an atom in a bond has an axis, and an
+    operator with axial symmetry about ``n`` has eigenvalues depending only on ``|m|`` --
+    so exactly **three** distinct values, for ``m = 0``, ``|m| = 1`` and ``|m| = 2``::
+
+        C_i = c_0 P_0(n_i) + c_1 P_1(n_i) + c_2 P_2(n_i)
+
+    with ``P_k`` the spectral projectors of ``M = -L(n)^2`` (eigenvalues ``m^2 = 0, 1, 4``),
+    obtained by Lagrange interpolation on those three nodes. Three positive scalars plus a
+    direction, against one scalar before.
+
+    Three properties are structural rather than penalised:
+
+    * **Equivariance.** ``n`` is an ``l=1`` head output and ``L`` are the ``l=2`` generators
+      (:func:`rsfff.ff.multipole.l2_rotation_generators`), so ``C`` rotates correctly by
+      construction. No fixed lab direction enters -- which is why the axis is normalised with
+      ``v / sqrt(|v|^2 + eps^2)`` rather than by adding a bias vector.
+    * **Positive semi-definiteness**, via the Gram form ``C = S S^T`` with
+      ``S = sum_k sqrt(c_k) P_k``. When ``|n| = 1`` the ``P_k`` are exact orthogonal
+      projectors and ``S S^T`` *is* ``sum_k c_k P_k``; when it is not -- the soft
+      normalisation leaves ``|n| < 1`` near ``v = 0`` -- ``S`` is still symmetric, so the Gram
+      form is still PSD. Writing it this way means PSD does not depend on the normalisation
+      being exact, which a direct ``sum_k c_k P_k`` does: the Lagrange basis is built for
+      eigenvalues ``{0, 1, 4}``, so off the unit sphere its "projectors" stop being positive.
+      Measured at ``|n| = 0.9`` with ``c = (10, 0.01, 0.01)``, the naive sum has smallest
+      eigenvalue ``-4.24`` where the Gram form gives ``+0.32``; both agree exactly at
+      ``|n| = 1``. The failure needs ``c_0`` to dominate and ``|n|`` in roughly ``0.7-0.95``,
+      which is precisely the regime a vector head passes through on its way off zero.
+    * **The isotropic model is the ``c_0 = c_1 = c_2`` special case, exactly.** The Lagrange
+      basis is a partition of unity for *any* ``M``, so equal ``c_k`` give ``C = c I5``
+      independently of the axis. Initializing the three scalars equal therefore reproduces the
+      previous head bit-for-bit, and leaves the axis inert until the fit separates them.
+
+    ``axis_eps`` bounds the gradient of the normalisation at ``v = 0`` (where a bare
+    ``v / |v|`` is NaN, and would poison the backward pass even though ``C`` does not depend
+    on the axis there). Small enough not to distort a trained axis, large enough not to
+    produce a ``1/eps`` spike while the vector head is still near its zero initialization.
+    """
+
+    def __init__(
+        self,
+        p0: int,
+        p1: int,
+        emb_dim: int,
+        l2_generators: torch.Tensor,      # (3, 5, 5)
+        *,
+        hidden: int = 64,
+        depth: int = 2,
+        equiv_channels: int = 32,
+        axis_eps: float = 1.0e-3,
+    ) -> None:
+        super().__init__()
+        if l2_generators.shape != (3, 5, 5):
+            raise ValueError(
+                f"l2_generators must be (3, 5, 5), got {tuple(l2_generators.shape)}"
+            )
+        self.axis = AtomicVectorHead(
+            p0, p1, emb_dim, hidden=hidden, depth=depth, equiv_channels=equiv_channels
+        )
+        self.axis_eps = float(axis_eps)
+        self.register_buffer("_gen", l2_generators, persistent=False)
+
+    def forward(
+        self,
+        inv_feats: torch.Tensor,    # (N, P0)
+        emb: torch.Tensor,          # (N, emb_dim)
+        vec_feats: torch.Tensor,    # (N, 3, P1)
+        c: torch.Tensor,            # (N, 3) strictly positive eigenvalues, m = 0, 1, 2
+    ) -> torch.Tensor:
+        v = self.axis(inv_feats, emb, vec_feats)                          # (N, 3)
+        n = v / torch.sqrt((v * v).sum(-1, keepdim=True) + self.axis_eps ** 2)
+        gen = torch.einsum("na,aij->nij", n, self._gen.to(v.dtype))       # (N, 5, 5)
+        m = -torch.bmm(gen, gen)                                          # symmetric PSD
+        eye = torch.eye(5, dtype=v.dtype, device=v.device).expand_as(m)
+
+        # Lagrange basis on the nodes {0, 1, 4}; sums to the identity for any M.
+        m1, m4 = m - eye, m - 4.0 * eye
+        p0 = torch.bmm(m1, m4) / 4.0
+        p1 = torch.bmm(m, m4) / -3.0
+        p2 = torch.bmm(m, m1) / 12.0
+
+        root = c.clamp_min(0.0).sqrt()[:, :, None, None]                  # (N, 3, 1, 1)
+        s = root[:, 0] * p0 + root[:, 1] * p1 + root[:, 2] * p2
+        return torch.bmm(s, s)
+
+
 class AtomicQuadrupoleHead(nn.Module):
     """Per-atom traceless quadrupole as **spherical** components ``(N, 5)``.
 

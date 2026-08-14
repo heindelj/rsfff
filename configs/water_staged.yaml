@@ -63,9 +63,9 @@ checkpoint_root: checkpoints
 data:
   path:
     - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
-    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
-    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
-    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+    #- data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+    #- data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+    #- data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
   reference_energies: data/atomic_references_wb97mv_tzvpd.json
   monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd.xyz
   atomic_reference_states: data/atomic_reference_states.json
@@ -154,6 +154,13 @@ elec:
   eta_floor: 0.05
   learn_dipole: true
   learn_quadrupole: true
+  # Axially anisotropic quadrupole polarizability: three positive eigenvalues
+  # (m = 0, |m| = 1, |m| = 2) about a learned axis, instead of one isotropic scalar.
+  # Initialized with the three equal, so stage 1 is unaffected -- and at zero field
+  # gradient it is genuinely redundant (every Theta is reachable either way). It
+  # starts doing work at stage 2, where Theta = C (gradF - chiquad) makes the
+  # response directional.
+  anisotropic_cquad: true
   learn_z: true
   environment_z: false
   learn_b: true
@@ -212,14 +219,14 @@ train:
 stages:
   - name: frozen
     train:
-      epochs: 150
+      epochs: 5
     unified:
       polarization: false
       charge_transfer: false
 
   - name: pol
     train:
-      epochs: 100
+      epochs: 5
     unified:
       polarization: true
       charge_transfer: false
@@ -227,7 +234,7 @@ stages:
 
   - name: ct
     train:
-      epochs: 100
+      epochs: 5
     unified:
       polarization: true
       charge_transfer: true

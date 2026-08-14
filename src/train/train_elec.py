@@ -159,6 +159,7 @@ def build_response(
         learn_dipole=ecfg.learn_dipole,
         learn_quadrupole=ecfg.learn_quadrupole, cquad_init=ecfg.cquad_init,
         cquad_floor=ecfg.cquad_floor, environment_cquad=ecfg.environment_cquad,
+        anisotropic_cquad=ecfg.anisotropic_cquad,
     )
     compliance = PairComplianceHead(
         p0, hidden=ecfg.compliance_hidden, depth=ecfg.compliance_depth,

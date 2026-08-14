@@ -544,3 +544,125 @@ def test_kjmol_scale_is_sane(w2_dataset):
         out = model(w2_dataset.flat_batch(range(30)))
     mean = float(out.energy.mean()) * KJMOL_PER_HARTREE
     assert -300.0 < mean < 100.0, f"{mean} kJ/mol"
+
+
+# ---------------------------------------------------------------------------
+# axially anisotropic quadrupole polarizability
+# ---------------------------------------------------------------------------
+
+def _axial_head(seed=0, awake=True):
+    from rsfff.ff.multipole import l2_rotation_generators
+    from rsfff.mlip.response_heads import AxialQuadrupolePolarizabilityHead
+
+    torch.manual_seed(seed)
+    head = AxialQuadrupolePolarizabilityHead(
+        6, 4, 3, l2_rotation_generators(), hidden=8, depth=1, equiv_channels=4
+    )
+    if awake:
+        # the axis head is zero-initialized; move it off zero so the axis is real
+        with torch.no_grad():
+            head.axis.gate_mlp[-1].weight.normal_(0.0, 0.5)
+            head.axis.gate_mlp[-1].bias.normal_(0.0, 0.5)
+    return head
+
+
+def _axial_inputs(n=5, seed=1):
+    g = torch.Generator().manual_seed(seed)
+    return (
+        torch.randn(n, 6, generator=g),
+        torch.randn(n, 3, generator=g),
+        torch.randn(n, 3, 4, generator=g),
+    )
+
+
+def test_axial_quadrupole_polarizability_has_the_three_intended_eigenvalues():
+    """``C`` is PSD with spectrum ``(c_0, c_1, c_1, c_2, c_2)`` -- three distinct values.
+
+    That degeneracy pattern *is* axial symmetry: an operator invariant under rotations about
+    ``n`` can only depend on ``|m|``, so ``|m| = 1`` and ``|m| = 2`` come in pairs. Three
+    numbers where the isotropic model had one.
+    """
+    head = _axial_head()
+    inv, emb, vec = _axial_inputs()
+    c = torch.rand(inv.shape[0], 3) + 0.2
+    quad_c = head(inv, emb, vec, c)
+
+    assert torch.allclose(quad_c, quad_c.transpose(1, 2), atol=1e-12)
+    got = torch.linalg.eigvalsh(quad_c).sort(-1).values
+    want = torch.stack([c[:, 0], c[:, 1], c[:, 1], c[:, 2], c[:, 2]], -1).sort(-1).values
+    # the soft axis normalization leaves |n| a hair under 1, hence 1e-5 rather than 1e-12
+    assert torch.allclose(got, want, atol=1e-5)
+
+
+def test_equal_eigenvalues_reproduce_the_isotropic_head_exactly():
+    """``c_0 = c_1 = c_2`` gives ``C = c I5`` bitwise, whatever the axis does.
+
+    The Lagrange basis is a partition of unity for *any* ``M``, so this holds even where the
+    axis is ill-conditioned. It is what lets the anisotropic head be initialized as a drop-in
+    replacement for the isotropic one -- the axis stays inert until the fit separates the
+    three scalars, so turning the flag on cannot move a converged model at step zero.
+    """
+    head = _axial_head()
+    inv, emb, vec = _axial_inputs()
+    c = (torch.rand(inv.shape[0], 1) + 0.5).expand(-1, 3).contiguous()
+    quad_c = head(inv, emb, vec, c)
+    expected = c[:, 0, None, None] * torch.eye(5)
+    assert torch.allclose(quad_c, expected, atol=1e-14)
+
+    # ... and with the axis head asleep (its zero initialization) there is no NaN either
+    asleep = _axial_head(awake=False)
+    quiet = asleep(inv, emb, vec, c)
+    assert torch.isfinite(quiet).all()
+    assert torch.allclose(quiet, expected, atol=1e-14)
+
+
+def test_axial_quadrupole_polarizability_is_equivariant():
+    """Rotating the l=1 features must rotate ``C`` by the l=2 Wigner D, not merely preserve it."""
+    from rsfff.ff.multipole import cartesian_to_spherical_quadrupole
+
+    head = _axial_head()
+    inv, emb, vec = _axial_inputs()
+    c = torch.rand(inv.shape[0], 3) + 0.2
+
+    q, _ = torch.linalg.qr(torch.randn(3, 3, generator=torch.Generator().manual_seed(4)))
+    q = q * torch.sign(torch.det(q))
+    wigner = cartesian_to_spherical_quadrupole(
+        q @ spherical_to_cartesian_quadrupole(torch.eye(5)) @ q.t()
+    ).transpose(0, 1)
+
+    before = head(inv, emb, vec, c)
+    after = head(inv, emb, torch.einsum("ab,nbp->nap", q, vec), c)
+    assert torch.allclose(after, wigner @ before @ wigner.t(), atol=1e-11)
+
+
+def test_gram_form_keeps_psd_where_the_naive_sum_loses_it():
+    """Why ``C = S S^T`` rather than ``sum_k c_k P_k``.
+
+    The Lagrange projectors are built for eigenvalues ``{0, 1, 4}``, so away from the unit
+    sphere they stop being positive and the naive sum can leave the PSD cone -- exactly in the
+    band a vector head crosses on its way off its zero initialization. The Gram form is a
+    product of a symmetric matrix with itself, so it cannot.
+    """
+    from rsfff.ff.multipole import l2_rotation_generators
+
+    gen = l2_rotation_generators()
+    eye = torch.eye(5)
+    c = torch.tensor([[10.0, 0.01, 0.01]])
+    saw_failure = False
+    for length in (1.0, 0.95, 0.9, 0.8, 0.707):
+        axis = torch.tensor([[length, 0.0, 0.0]])
+        m = -torch.einsum("na,aij->nij", axis, gen) @ torch.einsum("na,aij->nij", axis, gen)
+        proj = [(m - eye) @ (m - 4 * eye) / 4, m @ (m - 4 * eye) / -3, m @ (m - eye) / 12]
+        naive = sum(c[:, k, None, None] * proj[k] for k in range(3))
+        root = c.sqrt()[:, :, None, None]
+        s = sum(root[:, k] * proj[k] for k in range(3))
+        gram = s @ s
+        assert float(torch.linalg.eigvalsh(gram).min()) > 0.0, length
+        if float(torch.linalg.eigvalsh(naive).min()) < -1e-9:
+            saw_failure = True
+        if length == 1.0:
+            assert torch.allclose(naive, gram, atol=1e-12), "the two must agree on |n| = 1"
+    assert saw_failure, (
+        "the naive sum stayed PSD everywhere sampled, so this test is no longer showing why "
+        "the Gram form is used"
+    )

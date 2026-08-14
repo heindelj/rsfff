@@ -127,6 +127,13 @@ elec:
   eta_floor: 0.05
   learn_dipole: true
   learn_quadrupole: true
+  # Axially anisotropic quadrupole polarizability: three positive eigenvalues
+  # (m = 0, |m| = 1, |m| = 2) about a learned axis, instead of one isotropic scalar.
+  # Initialized with the three equal, so stage 1 is unaffected -- and at zero field
+  # gradient it is genuinely redundant (every Theta is reachable either way). It
+  # starts doing work at stage 2, where Theta = C (gradF - chiquad) makes the
+  # response directional.
+  anisotropic_cquad: true
   learn_z: true
   environment_z: false
   learn_b: true

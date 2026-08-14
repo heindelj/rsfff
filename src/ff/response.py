@@ -41,6 +41,7 @@ from ..mlip.response_heads import (
     AtomicAlphaHead,
     AtomicQuadrupoleHead,
     AtomicVectorHead,
+    AxialQuadrupolePolarizabilityHead,
     voigt_vector_to_symmetric_matrix,
 )
 from ..mlip.sqe import (
@@ -49,6 +50,7 @@ from ..mlip.sqe import (
     atomic_quadrupole_energy,
     sqe_solve,
 )
+from .multipole import l2_rotation_generators
 from .pairs import intra_fragment_channels
 
 #: Per-element ``(Z_cp [e], b_elec [1/bohr])`` charge-penetration priors from the fitted CMM
@@ -166,6 +168,7 @@ class ElectrostaticParameterHeads(nn.Module):
         cquad_init: float = 1.0,
         cquad_floor: float = 1.0e-4,
         environment_cquad: bool = False,
+        anisotropic_cquad: bool = False,
     ) -> None:
         super().__init__()
         self.max_rank = int(max_rank)
@@ -217,18 +220,25 @@ class ElectrostaticParameterHeads(nn.Module):
             )
 
         # --- quadrupole sector: Theta_i = -C_i chiquad_i, C_i = c_i I5 ------------------
-        # `c` follows the `eta` construction rather than getting its own head class: an
-        # isotropic C on the l=2 space is one positive scalar, and softplus + floor makes
-        # both the positivity and the equivariance structural (a multiple of the identity
-        # commutes with every Wigner-D). The anisotropic 0+2 extension would build
-        # `A = sum_m a2_m W[:,:,m]` from the backend's wigner_3j(2,2,2), rotate its matrix
-        # indices into the spherical basis with `irrep2_to_spherical` (whose map satisfies
-        # `M M^T = (2/3) I`, so the congruence is a similarity and PSD carries over), and
-        # keep PSD via `C = A + (softplus(a0) + floor + sqrt(|A|_F^2 + eps)) I5` using the
-        # Wolkowicz bound sqrt(4/5) on |lambda_min|/|A|_F for a traceless symmetric 5x5.
-        # It is not built: at zero field gradient it is exactly as expressive as this, and
-        # it would add five per-atom parameters that no current target constrains.
+        # The isotropic `c` follows the `eta` construction: one positive scalar, with
+        # softplus + floor making both the positivity and the equivariance structural (a
+        # multiple of the identity commutes with every Wigner-D).
+        #
+        # `anisotropic_cquad` replaces it with the axial form of
+        # `AxialQuadrupolePolarizabilityHead`: three positive eigenvalues (m = 0, |m| = 1,
+        # |m| = 2) about a learned axis. Not the general symmetric map on the l=2 space,
+        # which is fifteen numbers (Sym^2(l=2) = 0 + 2 + 4) and would need lambda=4 features.
+        #
+        # **It only earns its place once there is a field gradient.** At zero field the
+        # quadrupole is `Theta = -C chiquad` with `chiquad` a free equivariant vector and `C`
+        # invertible, so *every* Theta is reachable either way and the multipole labels cannot
+        # tell the two apart -- only the internal energy `-1/2 chiquad^T C chiquad` differs,
+        # and that is degenerate with the rest of the 1-body term. With a field gradient the
+        # response `Theta = C (gradF - chiquad)` is genuinely directional, so the anisotropy
+        # becomes a real degree of freedom. That is why it arrives with polarization and not
+        # before.
         self.chiquad_head = None
+        self.cquad_axis_head = None
         if self.max_rank >= 2 and learn_quadrupole:
             if p2 is None or irrep2_to_spherical_map is None:
                 raise ValueError(
@@ -239,15 +249,35 @@ class ElectrostaticParameterHeads(nn.Module):
                 hidden=hidden, depth=depth, equiv_channels=equiv_channels,
             )
             self.cquad_floor = float(cquad_floor)
-            c0 = torch.full((n_species,), max(float(cquad_init) - self.cquad_floor, 1e-6))
+            # Three eigenvalues (m = 0, |m| = 1, |m| = 2) when anisotropic, one when not.
+            # Initialized equal, so the anisotropic head reproduces the isotropic one exactly
+            # at initialization and the axis stays inert until the fit separates them.
+            self.anisotropic_cquad = bool(anisotropic_cquad)
+            # The isotropic table keeps its original ``(n_species,)`` shape rather than
+            # becoming ``(n_species, 1)``: a trailing axis of size one would be cosmetic here
+            # and would make every existing checkpoint's `cquad0_raw` shape-incompatible, so
+            # `warm_start` would drop it and silently reset a trained parameter.
+            n_c = 3 if self.anisotropic_cquad else 1
+            shape = (n_species, n_c) if self.anisotropic_cquad else (n_species,)
+            c0 = torch.full(shape, max(float(cquad_init) - self.cquad_floor, 1e-6))
             self.cquad0_raw = nn.Parameter(torch.log(torch.expm1(c0)))
             self.cquad_mlp = (
-                mlp(p0 + emb_dim, hidden, depth, 1) if environment_cquad else None
+                mlp(p0 + emb_dim, hidden, depth, n_c) if environment_cquad else None
             )
             if self.cquad_mlp is not None:
                 with torch.no_grad():
                     self.cquad_mlp[-1].weight.zero_()
                     self.cquad_mlp[-1].bias.zero_()
+            if self.anisotropic_cquad:
+                if p1 is None:
+                    raise ValueError(
+                        "anisotropic_cquad needs lambda=1 features for the polarizability "
+                        "axis; set features.selected_lambdas: [0, 1, 2]"
+                    )
+                self.cquad_axis_head = AxialQuadrupolePolarizabilityHead(
+                    p0, p1, emb_dim, l2_rotation_generators(),
+                    hidden=hidden, depth=depth, equiv_channels=equiv_channels,
+                )
 
     def forward(self, feats: LambdaFeatures):
         """``(chi, eta, chivec, alpha, Z, b, chiquad, cquad)`` per atom."""
@@ -279,10 +309,21 @@ class ElectrostaticParameterHeads(nn.Module):
         chiquad = cquad = None
         if self.chiquad_head is not None:
             chiquad = self.chiquad_head(feats.inv_feats, emb, feats.equiv_feats)
-            cquad_raw = self.cquad0_raw[s]
+            cquad_raw = self.cquad0_raw[s]                       # (N,) or (N, 3)
             if self.cquad_mlp is not None:
-                cquad_raw = cquad_raw + self.cquad_mlp(x).squeeze(-1)
-            cquad = torch.nn.functional.softplus(cquad_raw) + self.cquad_floor
+                delta = self.cquad_mlp(x)                        # (N, 1) or (N, 3)
+                cquad_raw = cquad_raw + (
+                    delta if self.anisotropic_cquad else delta.squeeze(-1)
+                )
+            c = torch.nn.functional.softplus(cquad_raw) + self.cquad_floor
+            if self.cquad_axis_head is None:
+                cquad = c                                        # (N,) isotropic
+            else:
+                # (N, 5, 5): three eigenvalues about a learned axis. `atomic_quadrupoles` and
+                # `atomic_quadrupole_energy` already accept either shape.
+                cquad = self.cquad_axis_head(
+                    feats.inv_feats, emb, feats.vec_feats, c
+                )
         return chi, eta, chivec, alpha, log_z.exp(), log_b.exp(), chiquad, cquad
 
 

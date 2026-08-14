@@ -85,6 +85,14 @@ def warm_start(model, path: str | None) -> None:
 
     Everything skipped or left at initialization is counted and printed. A stage reporting far
     more of either than the shape changes it introduced has loaded the wrong checkpoint.
+
+    **Zero-padding is right for a weight and wrong for a parameter table.** Growing the input
+    of a linear layer should leave the new input inert, which zero does. Growing a per-species
+    bias table -- ``cquad0_raw`` from one column to three when ``elec.anisotropic_cquad`` is
+    switched on -- should *replicate* the trained value, because equal entries are what make
+    the anisotropic head reduce to the isotropic one; zeroing gives ``softplus(0) + floor``
+    for the new eigenvalues and jumps the model. Nothing in the staged configs changes that
+    flag mid-chain for exactly this reason. If you ever need to, replicate rather than pad.
     """
     if not path:
         return

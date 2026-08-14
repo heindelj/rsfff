@@ -18,6 +18,7 @@ from rsfff.ff.multipole import (
     cartesian_to_spherical_quadrupole,
     damped_interaction_tensor,
     irrep2_to_spherical,
+    l2_rotation_generators,
     multipole_pair_energy,
     slater_one_center_damp,
     slater_two_center_damp,
@@ -442,3 +443,56 @@ def test_irrep2_to_spherical_is_not_a_permutation():
     C = irrep2_to_spherical(_resolve_backend("e3nn").irrep6_to_voigt())
     nonzero_per_slot = (C.abs() > 1e-9).sum(dim=1)
     assert int((nonzero_per_slot > 1).sum()) == 2, C
+
+
+# ---------------------------------------------------------------------------
+# l=2 rotation generators
+# ---------------------------------------------------------------------------
+
+def _wigner_d_l2(rotation: torch.Tensor) -> torch.Tensor:
+    """The l=2 representation of a Cartesian rotation, by round-tripping through Cartesian."""
+    basis = spherical_to_cartesian_quadrupole(torch.eye(5, dtype=torch.float64))
+    turned = rotation @ basis @ rotation.transpose(-1, -2)
+    return cartesian_to_spherical_quadrupole(turned).transpose(0, 1)
+
+
+def test_l2_generators_are_antisymmetric_with_the_right_spectrum():
+    """``L(n)`` must have eigenvalues ``0, +-i, +-2i`` -- the ``m`` spectrum.
+
+    That is what makes ``-L(n)^2`` have eigenvalues ``m^2 = 0, 1, 1, 4, 4``, which is the
+    whole basis of the axial quadrupole polarizability's three spectral projectors.
+    """
+    gen = l2_rotation_generators(dtype=torch.float64)
+    assert gen.shape == (3, 5, 5)
+    for a in range(3):
+        assert torch.allclose(gen[a], -gen[a].t(), atol=1e-13)
+
+    n = torch.tensor([0.3, -0.7, 0.5], dtype=torch.float64)
+    n = n / n.norm()
+    l_n = torch.einsum("a,aij->ij", n, gen)
+    imag = sorted(float(e.imag) for e in torch.linalg.eigvals(l_n))
+    assert imag == pytest.approx([-2.0, -1.0, 0.0, 1.0, 2.0], abs=1e-10)
+    m_sq = torch.linalg.eigvalsh(-(l_n @ l_n))
+    assert sorted(float(v) for v in m_sq) == pytest.approx([0.0, 1.0, 1.0, 4.0, 4.0], abs=1e-10)
+
+
+def test_l2_generators_exponentiate_to_the_rotation_representation():
+    """``expm(theta L(n))`` against a finite rotation pushed through Cartesian.
+
+    This is what makes the generators *derived* rather than transcribed: they are pinned to
+    the same spherical convention :func:`spherical_to_cartesian_quadrupole` defines, so the
+    two cannot drift apart.
+    """
+    gen = l2_rotation_generators(dtype=torch.float64)
+    axis = torch.tensor([0.3, -0.7, 0.5], dtype=torch.float64)
+    axis = axis / axis.norm()
+    l_n = torch.einsum("a,aij->ij", axis, gen)
+    for theta in (0.11, 0.83, 2.4):
+        k = torch.tensor(
+            [[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]],
+            dtype=torch.float64,
+        )
+        rotation = torch.matrix_exp(theta * k)
+        assert torch.allclose(
+            torch.matrix_exp(theta * l_n), _wigner_d_l2(rotation), atol=1e-12
+        )

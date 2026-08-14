@@ -351,6 +351,46 @@ def cartesian_to_spherical_quadrupole(q_c: torch.Tensor) -> torch.Tensor:
     )
 
 
+def l2_rotation_generators(dtype=None, device=None) -> torch.Tensor:
+    """The three ``l=2`` rotation generators in the spherical basis: ``(3, 5, 5)``.
+
+    ``L[a]`` is the derivative of the ``l=2`` representation with respect to a rotation about
+    Cartesian axis ``a``, acting on ``(q20, q21c, q21s, q22c, q22s)``. Each is real and
+    antisymmetric, and ``L(n) = sum_a n_a L[a]`` for a unit ``n`` has eigenvalues
+    ``0, +-i, +-2i`` -- so ``-L(n)^2`` is symmetric PSD with eigenvalues ``m^2 = 0, 1, 1, 4, 4``.
+    That spectrum is what :class:`rsfff.mlip.response_heads.AxialQuadrupolePolarizabilityHead`
+    builds its three spectral projectors from.
+
+    **Derived, not transcribed.** A Cartesian symmetric tensor rotates as ``Theta -> R Theta
+    R^T``, so an infinitesimal rotation gives ``dTheta = [A_a, Theta]`` with
+    ``(A_a)_bc = -eps_abc``. Pushing that through the *existing*
+    :func:`spherical_to_cartesian_quadrupole` and :func:`cartesian_to_spherical_quadrupole`
+    means the generators cannot drift from the spherical convention the rest of the multipole
+    code uses -- the same reason :func:`irrep2_to_spherical` is derived from the backend's own
+    constant rather than hand-written. ``tests/test_ff_multipole.py`` checks
+    ``expm(theta L(n))`` against a finite rotation round-tripped through Cartesian.
+    """
+    dtype = torch.float64 if dtype is None else dtype
+    device = torch.device("cpu") if device is None else device
+    # Levi-Civita, then A_a = -eps_a
+    eps = torch.zeros(3, 3, 3, dtype=dtype, device=device)
+    for a, b, c in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
+        eps[a, b, c] = 1.0
+        eps[a, c, b] = -1.0
+    a_gen = -eps                                                     # (3, 3, 3)
+
+    basis = spherical_to_cartesian_quadrupole(
+        torch.eye(5, dtype=dtype, device=device)
+    )                                                                 # (5, 3, 3)
+    out = torch.zeros(3, 5, 5, dtype=dtype, device=device)
+    for a in range(3):
+        commutator = a_gen[a] @ basis - basis @ a_gen[a]              # (5, 3, 3)
+        # row m holds the spherical image of basis vector m, so transpose to get a matrix
+        # acting on component vectors
+        out[a] = cartesian_to_spherical_quadrupole(commutator).transpose(0, 1)
+    return out
+
+
 def irrep2_to_spherical(irrep6_to_voigt: torch.Tensor) -> torch.Tensor:
     """``(5, 5)`` map from the backend's lambda=2 slots to ``(q20, q21c, q21s, q22c, q22s)``.
 

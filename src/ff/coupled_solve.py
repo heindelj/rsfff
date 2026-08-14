@@ -132,7 +132,10 @@ class CoupledSystem:
     chivec: torch.Tensor | None    # (N, 3)
     alpha: torch.Tensor | None     # (N, 3, 3) PSD
     chiquad: torch.Tensor | None   # (N, 5)
-    cquad: torch.Tensor | None     # (N,) > 0
+    #: (N,) isotropic ``c I5``, or (N, 5, 5) PSD -- the axially anisotropic form of
+    #: :class:`rsfff.mlip.response_heads.AxialQuadrupolePolarizabilityHead`. Both are
+    #: applied, never inverted, so the rescaling ``Theta = C w`` works unchanged.
+    cquad: torch.Tensor | None     # (N,) or (N, 5, 5), PSD
     t_point: torch.Tensor          # (P, K, K), gate-scaled
     t_ss: torch.Tensor             # (P, K, K), gate-scaled
     t_1c_i: torch.Tensor           # (P, K, K), gate-scaled
@@ -248,6 +251,18 @@ def _from_polytensor(g, max_rank, d_map):
     return q, mu, theta
 
 
+def _apply_cquad(cquad: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """``C w`` for either shape of quadrupole polarizability: ``(N,)`` or ``(N, 5, 5)``.
+
+    The isotropic and axially anisotropic forms differ only here. Both *apply* ``C``; neither
+    inverts it, which is what keeps the ``c -> 0`` limit well conditioned -- the same reason
+    the dipole sector is rescaled as ``mu = alpha u``.
+    """
+    if cquad.dim() == 1:
+        return cquad.unsqueeze(-1) * w
+    return torch.einsum("nab,nb->na", cquad, w)
+
+
 def _incidence_apply(bond_index, p, n_atoms) -> torch.Tensor:
     """``B p``: +1 on the head atom of a channel, -1 on the tail (matching ``sqe_solve``)."""
     out = p.new_zeros(n_atoms)
@@ -277,7 +292,7 @@ def multipoles_from_state(sys: CoupledSystem, x: State, d_map=None):
         if sys.has_dipole and u.numel() else u.new_zeros(0, 3)
     )
     theta = (
-        sys.cquad.unsqueeze(-1) * w
+        _apply_cquad(sys.cquad, w)
         if sys.has_quad and w.numel() else w.new_zeros(0, 5)
     )
     return q, mu, theta
@@ -350,7 +365,7 @@ def _grad_state(sys: CoupledSystem, x: State, d_map) -> State:
 
     # quadrupole sector: chiquad.Theta + 1/2 c |w|^2, pulled back through Theta = c w
     if sys.has_quad and x[2].numel():
-        g_w = sys.cquad.unsqueeze(-1) * (sys.chiquad + g_theta) + theta
+        g_w = _apply_cquad(sys.cquad, sys.chiquad + g_theta) + theta
     else:
         g_w = x[2]
 
@@ -453,7 +468,11 @@ class _Preconditioner:
             self.alpha_inv = torch.linalg.inv(sys.alpha + floor * eye3)
         self.cquad_inv = None
         if sys.has_quad:
-            self.cquad_inv = 1.0 / (sys.cquad + floor)
+            if sys.cquad.dim() == 1:
+                self.cquad_inv = 1.0 / (sys.cquad + floor)
+            else:
+                eye5 = torch.eye(5, dtype=dtype, device=device)
+                self.cquad_inv = torch.linalg.inv(sys.cquad + floor * eye5)
 
     def __call__(self, r: State) -> State:
         sys = self.sys
@@ -470,7 +489,7 @@ class _Preconditioner:
             if self.alpha_inv is not None and r[1].numel() else r[1]
         )
         z_w = (
-            self.cquad_inv.unsqueeze(-1) * r[2]
+            _apply_cquad(self.cquad_inv, r[2])
             if self.cquad_inv is not None and r[2].numel() else r[2]
         )
         return z_v, z_u, z_w

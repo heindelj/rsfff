@@ -246,6 +246,14 @@ class ElectrostaticsConfig:
     cquad_init: float = 1.0         # e^2 a0^4 / Ha
     cquad_floor: float = 1.0e-4
     environment_cquad: bool = False
+    #: Axially anisotropic quadrupole polarizability: three positive eigenvalues
+    #: (m = 0, |m| = 1, |m| = 2) about a learned axis, instead of one isotropic scalar.
+    #: The general symmetric map on the l=2 space has fifteen components
+    #: (Sym^2(l=2) = 0 + 2 + 4); the axial form is the physically motivated middle ground
+    #: and costs three scalars plus a direction. Needs lambda=1 features for the axis.
+    #: Initialized with the three equal, so it reproduces the isotropic head exactly at
+    #: initialization and the axis stays inert until the fit separates them.
+    anisotropic_cquad: bool = False
     # Penetration heads
     learn_z: bool = True
     environment_z: bool = False
