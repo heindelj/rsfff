@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -48,6 +49,14 @@ class ClaimedJob:
     input_path: Path
     output_path: Path
     lock_dir: Path
+
+
+@dataclass(frozen=True)
+class AIMDFrame:
+    step: int
+    ordinal: int
+    symbols: list[str]
+    coords: list[tuple[float, float, float]]
 
 
 class RoundtripError(RuntimeError):
@@ -335,12 +344,20 @@ def frame_metadata_summary(frame: XYZFrame) -> dict[str, str]:
     return {key: frame.info[key] for key in keys if key in frame.info}
 
 
-def generate_inputs(root: Path, cfg: dict[str, Any], *, overwrite: bool = False) -> list[GeneratedInput]:
+def generate_inputs(
+    root: Path,
+    cfg: dict[str, Any],
+    *,
+    overwrite: bool = False,
+    calculations: set[str] | None = None,
+) -> list[GeneratedInput]:
     config_path = Path(cfg["_config_path"])
     ensure_layout(root, cfg)
     generated: list[GeneratedInput] = []
     defaults = cfg.get("defaults", {})
     for calc_name, calc_cfg in cfg["calculations"].items():
+        if calculations is not None and calc_name not in calculations:
+            continue
         if not calc_cfg.get("enabled", True):
             continue
         calc_dir = root / calc_name
@@ -373,6 +390,187 @@ def generate_inputs(root: Path, cfg: dict[str, Any], *, overwrite: bool = False)
                 )
                 generated.append(GeneratedInput(calc_name, geom, input_path, frame.index, False))
     return generated
+
+
+_TIMESTEP_RE = re.compile(r"^TIME STEP #(\d+)")
+_ORIENTATION_ROW_RE = re.compile(
+    r"^\s*\d+\s+([A-Za-z]{1,3})\s+"
+    r"(-?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)\s+"
+    r"(-?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)\s+"
+    r"(-?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)"
+)
+
+
+def parse_aimd_output(path: Path) -> list[AIMDFrame]:
+    lines = path.read_text(errors="replace").splitlines()
+    frames: list[AIMDFrame] = []
+    current_step: int | None = None
+    i = 0
+    while i < len(lines):
+        step_match = _TIMESTEP_RE.match(lines[i])
+        if step_match:
+            current_step = int(step_match.group(1))
+            i += 1
+            continue
+        if current_step is not None and "Standard Nuclear Orientation (Angstroms)" in lines[i]:
+            symbols: list[str] = []
+            coords: list[tuple[float, float, float]] = []
+            j = i + 1
+            while j < len(lines):
+                row_match = _ORIENTATION_ROW_RE.match(lines[j])
+                if row_match:
+                    symbols.append(row_match.group(1))
+                    coords.append((float(row_match.group(2)), float(row_match.group(3)), float(row_match.group(4))))
+                elif symbols:
+                    break
+                j += 1
+            if symbols:
+                frames.append(AIMDFrame(step=current_step, ordinal=len(frames), symbols=symbols, coords=coords))
+            i = j
+            continue
+        i += 1
+    return frames
+
+
+def generated_marker(root: Path, calculation: str, stem: str) -> Path:
+    return root / calculation / "state" / "generated" / f"{stem}.json"
+
+
+def source_frame_for_aimd_output(root: Path, source_calculation: str, output_path: Path) -> XYZFrame:
+    stem = output_path.stem
+    marker_path = generated_marker(root, source_calculation, stem)
+    candidates: list[tuple[Path, int]] = []
+    if marker_path.exists():
+        marker = json.loads(marker_path.read_text())
+        candidates.append((Path(marker["geometry"]), int(marker.get("frame_index", 0))))
+    for ext in (".extxyz", ".xyz"):
+        candidates.append((root / source_calculation / "geoms" / f"{stem}{ext}", 0))
+    for geom_path, frame_index in candidates:
+        if geom_path.exists():
+            frames = read_xyz_frames(geom_path)
+            if frame_index >= len(frames):
+                raise RoundtripError(f"{geom_path}: no frame {frame_index} for {output_path.name}")
+            frame = frames[frame_index]
+            if frame.fragment_idx is None:
+                raise RoundtripError(f"{geom_path}: AIMD harvesting requires fragment_idx in the starting extxyz")
+            return frame
+    raise RoundtripError(f"{output_path}: no starting extxyz found in {source_calculation}/geoms")
+
+
+def fragment_multiplicities_for(frame: XYZFrame, geom_path: Path, n_fragments: int) -> list[int]:
+    if "fragment_multiplicities" in frame.info:
+        values = required_int_list(frame, "fragment_multiplicities", geom_path)
+        if len(values) != n_fragments:
+            raise RoundtripError(f"{geom_path}: fragment_multiplicities length must match fragment_idx values")
+        return values
+    return [1] * n_fragments
+
+
+def charge_assignments(total_charge: int, n_fragments: int) -> list[tuple[str, list[int]]]:
+    if n_fragments == 1:
+        return [("frag0", [total_charge])]
+    if total_charge == 0:
+        return [("neutral", [0] * n_fragments)]
+    return [
+        (f"qfrag{charged_fragment}", [total_charge if idx == charged_fragment else 0 for idx in range(n_fragments)])
+        for charged_fragment in range(n_fragments)
+    ]
+
+
+def harvested_frame_molecule(
+    aimd_frame: AIMDFrame,
+    source_frame: XYZFrame,
+    total_charge: int,
+    total_mult: int,
+    fragment_charges: list[int],
+    fragment_mults: list[int],
+) -> XYZFrame:
+    info = {
+        "charge": str(total_charge),
+        "multiplicity": str(total_mult),
+        "n_fragments": str(len(fragment_charges)),
+        "fragment_charges": " ".join(str(v) for v in fragment_charges),
+        "fragment_multiplicities": " ".join(str(v) for v in fragment_mults),
+    }
+    return XYZFrame(
+        symbols=aimd_frame.symbols,
+        coords=aimd_frame.coords,
+        comment="",
+        info=info,
+        fragment_idx=source_frame.fragment_idx,
+        index=aimd_frame.ordinal,
+    )
+
+
+def harvest_aimd_outputs(
+    root: Path,
+    cfg: dict[str, Any],
+    *,
+    source_calculation: str = "aimd",
+    dest_calculation: str = "aimd_eda",
+    stride: int = 50,
+    overwrite: bool = False,
+) -> tuple[int, int]:
+    if stride <= 0:
+        raise RoundtripError("AIMD harvest stride must be positive")
+    if dest_calculation not in cfg["calculations"]:
+        raise RoundtripError(f"config has no destination calculation {dest_calculation!r}")
+    config_path = Path(cfg["_config_path"])
+    ensure_layout(root, cfg)
+    source_dir = root / source_calculation
+    dest_dir = root / dest_calculation
+    template_path = resolve_config_path(config_path, cfg["calculations"][dest_calculation]["template"])
+    template = template_path.read_text()
+    n_frames = 0
+    n_inputs = 0
+    for output_path in sorted((source_dir / "outputs").glob("*.out")):
+        source_frame = source_frame_for_aimd_output(root, source_calculation, output_path)
+        total_charge = required_int(source_frame, "charge", output_path)
+        total_mult = required_int(source_frame, "multiplicity", output_path)
+        if source_frame.fragment_idx is None:
+            raise RoundtripError(f"{output_path}: source frame has no fragment_idx")
+        fragment_ids = sorted(set(source_frame.fragment_idx))
+        if fragment_ids != list(range(len(fragment_ids))):
+            raise RoundtripError(f"{output_path}: fragment_idx values must be contiguous from 0")
+        fragment_mults = fragment_multiplicities_for(source_frame, output_path, len(fragment_ids))
+        for aimd_frame in parse_aimd_output(output_path):
+            if aimd_frame.ordinal % stride != 0:
+                continue
+            if len(aimd_frame.symbols) != len(source_frame.symbols):
+                raise RoundtripError(f"{output_path}: AIMD frame atom count differs from starting geometry")
+            n_frames += 1
+            for assignment_name, fragment_charges in charge_assignments(total_charge, len(fragment_ids)):
+                input_stem = f"{output_path.stem}_step{aimd_frame.step:05d}_frame{aimd_frame.ordinal:05d}_{assignment_name}"
+                input_path = dest_dir / "inputs" / f"{input_stem}.in"
+                marker_path = dest_dir / "state" / "generated" / f"{input_stem}.json"
+                if input_path.exists() and not overwrite:
+                    continue
+                harvested_frame = harvested_frame_molecule(
+                    aimd_frame,
+                    source_frame,
+                    total_charge,
+                    total_mult,
+                    fragment_charges,
+                    fragment_mults,
+                )
+                molecule = build_fragmented_molecule(harvested_frame, output_path)
+                atomic_write(input_path, replace_molecule_block(template, molecule))
+                write_json_atomic(
+                    marker_path,
+                    {
+                        "source_output": str(output_path),
+                        "source_calculation": source_calculation,
+                        "destination_calculation": dest_calculation,
+                        "step": aimd_frame.step,
+                        "frame_ordinal": aimd_frame.ordinal,
+                        "assignment": assignment_name,
+                        "fragment_charges": fragment_charges,
+                        "fragment_multiplicities": fragment_mults,
+                        "generated_at": time.time(),
+                    },
+                )
+                n_inputs += 1
+    return n_frames, n_inputs
 
 
 def calculation_priority(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
@@ -508,9 +706,22 @@ def build_parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init", help="Create calculation directories.")
     init.set_defaults(func=cmd_init)
 
-    gen = sub.add_parser("generate", help="Generate Q-Chem inputs from geoms/*.xyz.")
+    gen = sub.add_parser("generate", help="Generate Q-Chem inputs from geometry files.")
     gen.add_argument("--overwrite", action="store_true", help="Regenerate existing inputs.")
+    gen.add_argument(
+        "--calculation",
+        action="append",
+        default=[],
+        help="Only generate this calculation type. May be passed more than once.",
+    )
     gen.set_defaults(func=cmd_generate)
+
+    harvest = sub.add_parser("harvest-aimd", help="Harvest AIMD frames into fragmented EDA inputs.")
+    harvest.add_argument("--source-calculation", default="aimd")
+    harvest.add_argument("--dest-calculation", default="aimd_eda")
+    harvest.add_argument("--stride", type=int, default=50)
+    harvest.add_argument("--overwrite", action="store_true")
+    harvest.set_defaults(func=cmd_harvest_aimd)
 
     worker = sub.add_parser("worker", help="Run the polling Q-Chem worker.")
     worker.add_argument("--qchem-command", default="qchem")
@@ -540,10 +751,25 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_generate(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
-    generated = generate_inputs(args.root, cfg, overwrite=args.overwrite)
+    calculations = set(args.calculation) if args.calculation else None
+    generated = generate_inputs(args.root, cfg, overwrite=args.overwrite, calculations=calculations)
     n_new = sum(1 for item in generated if not item.skipped)
     n_skipped = sum(1 for item in generated if item.skipped)
     print(f"[generate] wrote {n_new} input(s); skipped {n_skipped} existing input(s)")
+    return 0
+
+
+def cmd_harvest_aimd(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    n_frames, n_inputs = harvest_aimd_outputs(
+        args.root,
+        cfg,
+        source_calculation=args.source_calculation,
+        dest_calculation=args.dest_calculation,
+        stride=args.stride,
+        overwrite=args.overwrite,
+    )
+    print(f"[harvest-aimd] sampled {n_frames} AIMD frame(s); wrote {n_inputs} EDA input(s)")
     return 0
 
 

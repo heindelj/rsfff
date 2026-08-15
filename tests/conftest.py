@@ -22,13 +22,22 @@ import torch  # noqa: E402
 from rsfff.mlip import build_eem_model
 from rsfff.train.data import Batch
 
-DATA_H2O = "data/labels/h2o.extxyz"
-DATA_H3O = "data/labels/h3o+.extxyz"
+# One level of theory in `data/` now: wB97M-V/def2-TZVPD, written by
+# scripts/parse_roundtrip.py. The b3lyp/def2-svpd monomer labels and the wB97X-V/def2-QZVPPD
+# CMM_Data EDA clusters these fixtures used to point at have been deleted, so the fixtures
+# point at the files that remain. Two consequences worth knowing when a number moves:
+#
+#   * these frames carry **forces** as well as the eda_* components, which the CMM_Data files
+#     never did -- `has_forces` is now True on the cluster fixtures;
+#   * the 7 VV10-collapsed frames that the CMM_Data set carried are absent here, so any
+#     assertion re-baselined against these files is running on cleaner data, not merely
+#     different data.
+DATA_H2O = "data/wb97mv_tzvpd/h2o_wb97mv_tzvpd.xyz"
 
-# Q-Chem ALMO-EDA water clusters (scripts/parse_qchem_eda.py): no forces, a per-atom
-# fragment_idx column, and eda_* component labels on the header line.
-DATA_W2 = "data/eda_data/w2_wb97xv_qzvppd.xyz"
-DATA_W3 = "data/eda_data/w3_wb97xv_qzvppd.xyz"
+# There is no H3O+ at this level of theory. The tests that needed a charged monomer belonged
+# to the Phase-1/2 diabatic stack, which went with `data/diabatic_states.yaml`.
+DATA_W2 = "data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz"
+DATA_W3 = "data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz"
 
 
 @pytest.fixture(autouse=True)

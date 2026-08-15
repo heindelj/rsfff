@@ -1,8 +1,15 @@
 """Loading the Q-Chem ALMO-EDA water-cluster labels.
 
-These frames differ from the psi4 labels in three ways the loader has to handle: no
-nuclear gradient, a fragment partition supplied as a per-atom column rather than by a
-diabatic state library, and per-component EDA energies on the header line.
+These frames differ from a plain energy dataset in two ways the loader has to handle: a
+fragment partition supplied as a per-atom column rather than by a diabatic state library, and
+per-component EDA energies on the header line.
+
+They used to differ in a third way -- no nuclear gradient -- and that is no longer true. The
+CMM_Data files these tests ran on were EDA single points; ``data/wb97mv_tzvpd/*`` are the
+merged output of ``scripts/parse_roundtrip.py``, where the EDA job and a separate ``force``
+job on the *identical* geometry are combined into one frame. So the EDA components and the
+analytic forces now arrive together, which is what lets the CT stage supervise the total
+energy and its gradient without giving up the component targets.
 """
 
 import pytest
@@ -20,11 +27,12 @@ def w2():
     return load_extxyz(DATA_W2, dtype=torch.float64)
 
 
-def test_loads_without_forces(w2):
-    """EDA single points carry no gradient -- None, not a block of zeros."""
-    assert not w2.has_forces
+def test_loads_with_forces_alongside_the_components(w2):
+    """The merged frames carry both, and the forces are real rather than a block of zeros."""
+    assert w2.has_forces
     batch = w2.flat_batch([0, 1, 2])
-    assert batch.forces is None
+    assert batch.forces.shape == (18, 3)
+    assert float(batch.forces.abs().max()) > 1e-6
     assert batch.positions.shape == (18, 3)
     assert batch.energy.shape == (3,)
 
@@ -83,7 +91,7 @@ def test_concatenate_preserves_eda(w2):
     both = concatenate_datasets([w2, w3])
     assert len(both) == len(w2) + len(w3)
     assert set(both.flat_batch([0]).eda) == set(w2.flat_batch([0]).eda)
-    assert not both.has_forces
+    assert both.has_forces
     # w3 frames still carry 3 fragments after the concatenation re-offsets them
     batch = both.flat_batch([len(w2)])
     assert batch.n_fragments == 3
@@ -102,6 +110,6 @@ def test_concatenate_rejects_mismatched_eda(w2):
 def test_to_device_roundtrip(w2):
     """Batch.to enumerates fields by hand; the new ones must be listed."""
     batch = w2.flat_batch([0, 1]).to("cpu")
-    assert batch.forces is None
+    assert batch.forces.shape == (batch.positions.shape[0], 3)
     assert batch.eda is not None and "disp" in batch.eda
     assert batch.fragment_idx is not None

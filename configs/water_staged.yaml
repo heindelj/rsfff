@@ -70,9 +70,9 @@ checkpoint_root: checkpoints
 data:
   path:
     - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
-    #- data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
-    #- data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
-    #- data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
   reference_energies: data/atomic_references_wb97mv_tzvpd.json
   # The monomer anchor, with the def2-TZVPD molecular polarizability tensors folded in by
   # scripts/parse_polarizability.py (499 of 500 frames; one Q-Chem job did not finish).
@@ -194,13 +194,6 @@ elec:
   dipole_scale: 0.05
   quadrupole_weight: 1.0
   quadrupole_scale: 0.2
-  # Molecular polarizability of the anchor monomers. The multipole labels above say where the
-  # charges and dipoles *sit*; this is the only label that says how they *move*, which is what
-  # chi, eta, the compliances and alpha_i parameterize and what the pol channel is made of.
-  # Measured before it was added: the trained frozen model's monomer polarizability was
-  # 3.87 a0^3 against a true 9.89 -- under-polarizable by 2.6x, with the off-diagonal the wrong
-  # sign, and nothing in the fit had been in a position to notice.
-  # Watch `alpha_mae` (max tensor component, e^2*Ang^2/Ha; 1 a0^3 = 0.28).
   polarizability_weight: 1.0
   polarizability_scale: 0.5
 
@@ -246,14 +239,14 @@ train:
 stages:
   - name: frozen
     train:
-      epochs: 5
+      epochs: 100
     unified:
       polarization: false
       charge_transfer: false
 
   - name: pol
     train:
-      epochs: 5
+      epochs: 60
     unified:
       polarization: true
       charge_transfer: false
@@ -261,9 +254,13 @@ stages:
 
   - name: ct
     train:
-      epochs: 5
+      epochs: 40
     unified:
       polarization: true
       charge_transfer: true
       pol_weight: 30.0
       ct_weight: 30.0
+
+      total_energy_weight: 10.0
+      force_weight: 0.0
+      force_scale: 1.0e-3         # Ha/Angstrom

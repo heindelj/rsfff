@@ -65,6 +65,7 @@ from .data import (
     split_indices,
 )
 from .loss import (
+    compute_forces,
     fragment_multipole_loss,
     fragment_polarizability_loss,
     onebody_anchor_loss,
@@ -81,7 +82,7 @@ _LEVEL_TARGETS = {"pol": "pol", "ct": "ct"}
 _LOG_KEYS = (
     "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae", "pol_mae", "ct_mae",
     "a_mae", "f_mae", "dip_mae", "quad_mae", "e_tot_mae",
-    "anchor_e", "anchor_f", "dipole", "quad", "alpha_mae", "intra_ff",
+    "anchor_e", "anchor_f", "dipole", "quad", "alpha_mae", "f_clu", "intra_ff",
     "q_res", "qO", "dchi", "internal", "bond",
     "gate_inter_elst", "gate_intra_disp",
     "intra_elst", "intra_pauli", "intra_disp",
@@ -241,13 +242,44 @@ def unified_fit(out, batch, cfg: Config):
         loss = loss + weights[name] * (err / u.energy_scale).pow(2).mean()
         metrics[f"{name}_mae"] = float(err.detach().abs().mean()) * KJMOL_PER_HARTREE
 
-    # Diagnostics only -- deliberately not in the loss. Once pol and ct exist the
-    # decomposition is complete and `energy` is a real prediction, but supervising it now
-    # would give a wrong split between channels a way to fit well anyway.
+    # The cluster total and its gradient. Diagnostics until `total_energy_weight` /
+    # `force_weight` are turned on, which should only happen once `pol` and `ct` are on:
+    # below that level the decomposition is incomplete by construction, so `energy` is short
+    # two channels and fitting it pushes the deficit into whichever channel distorts cheapest.
+    #
+    # **The EDA component weights stay up when these come on.** The total is one number per
+    # frame against six well-posed component targets, and supervised alone it admits every
+    # wrong split that happens to sum correctly -- the same degeneracy the pol/ct corrections
+    # already have with each other, but now spanning all six channels at once. The components
+    # are what keep the decomposition meaningful; the total is what makes it a force field.
     if batch.energy is not None:
-        metrics["e_tot_mae"] = float(
-            (out.energy.detach() - batch.energy).abs().mean()
-        ) * KJMOL_PER_HARTREE
+        e_err = out.energy - batch.energy
+        metrics["e_tot_mae"] = float(e_err.detach().abs().mean()) * KJMOL_PER_HARTREE
+        if u.total_energy_weight > 0.0:
+            loss = loss + u.total_energy_weight * (e_err / u.energy_scale).pow(2).mean()
+
+    if u.force_weight > 0.0:
+        if batch.forces is None:
+            raise ValueError(
+                "unified.force_weight > 0 but the dataset carries no forces; the merged "
+                "eda+force files from scripts/parse_roundtrip.py do (data/wb97mv_tzvpd/*)"
+            )
+        if not batch.positions.requires_grad:
+            raise ValueError(
+                "unified.force_weight > 0 but batch.positions is not a leaf; the training "
+                "loop must be entered with grad_positions=True"
+            )
+        # `create_graph` from the context: a training step needs the second-order graph, an
+        # evaluation epoch does not and should not pay for one. See UnifiedConfig.force_weight
+        # for the measured bias this carries at the pol/CT levels -- the forces are exact, the
+        # derivative of the force with respect to the parameters is ~1e-4 relative off,
+        # because the coupled solve's adjoint is not itself double-differentiable.
+        forces = compute_forces(
+            out.energy, batch.positions, create_graph=torch.is_grad_enabled()
+        )
+        f_err = (forces - batch.forces) / u.force_scale
+        loss = loss + u.force_weight * f_err.pow(2).sum(-1).mean()
+        metrics["f_clu"] = float((forces - batch.forces).detach().abs().mean())
     return loss, metrics, batch.fragment_energy
 
 
@@ -593,6 +625,9 @@ def _train_once(config: Config):
         model, dataset, config, config, device, train_idx, val_idx,
         log_keys=_LOG_KEYS, fit_term=unified_fit,
         penalties=anchor_terms.penalties, diagnostics=anchor_terms.diagnostics,
+        # A cluster force is a backward pass through the whole model, so positions have to be
+        # leaves and autograd has to stay on even during evaluation.
+        grad_positions=config.unified.force_weight > 0.0,
     )
     return model
 

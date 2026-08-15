@@ -1,0 +1,24 @@
+$molecule
+0 1
+  O         0.00000000       0.00000000       0.00000000
+  H         0.00000000       0.00000000       0.96430000
+$end
+
+$rem
+   JOBTYPE                  aimd
+   METHOD           =  wB97M-V
+   BASIS            =  def2-tzvpd
+   SCF_CONVERGENCE  =  8
+   THRESH           =  14
+   XC_GRID          =  000099000590
+   NL_GRID          =  1
+   SYMMETRY         =  false
+   MEM_TOTAL        =  64000
+   MEM_STATIC       =  10000
+   AIMD_TIME_STEP           20      !in au
+   AIMD_STEPS               5000
+   AIMD_THERMOSTAT          langevin
+   AIMD_INIT_VELOC          thermal
+   AIMD_TEMP                400     !in K - initial conditions AND thermostat
+   AIMD_LANGEVIN_TIMESCALE  100     !in fs
+$end

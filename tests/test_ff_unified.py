@@ -1320,3 +1320,170 @@ def test_polarizability_weight_zero_costs_nothing():
     out = model(batch, with_polarizability=True)
     batch.polarizability = torch.zeros(1, 3, 3, dtype=positions.dtype)
     assert fragment_polarizability_loss(out=out, batch=batch, weight=0.0) == ({}, {})
+
+
+# ---------------------------------------------------------------------------
+# Cluster forces and the total energy: what the CT stage adds
+# ---------------------------------------------------------------------------
+
+def _weighted_force_loss(model, batch):
+    """A scalar built from the forces, so its parameter gradient exercises double backward."""
+    from rsfff.train.loss import compute_forces
+
+    batch.positions.requires_grad_(True)
+    forces = compute_forces(
+        model(batch).energy, batch.positions, create_graph=torch.is_grad_enabled()
+    )
+    w = torch.linspace(0.3, 1.7, forces.numel(), dtype=forces.dtype).reshape(forces.shape)
+    return (forces * w).pow(2).sum()
+
+
+def _grad_vs_fd(model, batch_fn, loss_fn, names, h=1.0e-6):
+    """``{name: relative error}`` between the autograd and finite-difference gradients."""
+    named = dict(model.named_parameters())
+    model.zero_grad()
+    loss_fn(model, batch_fn()).backward()
+    out = {}
+    for name in names:
+        p = named[name]
+        analytic = float(p.grad.reshape(-1)[0])
+        with torch.no_grad():
+            p.reshape(-1)[0] += h
+        hi = float(loss_fn(model, batch_fn()).detach())
+        with torch.no_grad():
+            p.reshape(-1)[0] -= 2 * h
+        lo = float(loss_fn(model, batch_fn()).detach())
+        with torch.no_grad():
+            p.reshape(-1)[0] += h
+        fd = (hi - lo) / (2 * h)
+        out[name] = abs(analytic - fd) / max(abs(fd), 1e-12)
+    return out
+
+
+_FD_PARAMS = (
+    "response.params.chi0",
+    "response.params.eta0_raw",
+    "response.params.cquad0_raw",
+)
+
+
+def test_cluster_force_gradient_is_exact_at_the_frozen_level():
+    """No coupled solve, so the double backward is an ordinary one and must be exact."""
+    model = randomize(make_model(environment=True), scale=0.02, seed=5)
+    positions, numbers, frag = water_cluster(2, seed=3)
+    errs = _grad_vs_fd(
+        model, lambda: make_batch(positions, numbers, frag),
+        _weighted_force_loss, _FD_PARAMS,
+    )
+    assert max(errs.values()) < 1e-8, errs
+
+
+def test_energy_gradient_stays_exact_once_the_coupled_solve_is_on():
+    """The adjoint is correct: a loss on the *energy* still matches finite differences.
+
+    This is the pairing that makes the next test's failure interpretable. The first backward
+    through :class:`rsfff.ff.coupled_solve._CoupledSolve` is the implemented adjoint and it is
+    right; what is missing is only its own derivative.
+    """
+    def energy_loss(model, batch):
+        out = model(batch)
+        return out.energy.pow(2).sum() + sum(v.pow(2).sum() for v in out.interaction.values())
+
+    positions, numbers, frag = water_cluster(2, seed=3)
+    for levels in (dict(polarization=True),
+                   dict(polarization=True, charge_transfer=True)):
+        model = randomize(
+            make_model(environment=True, extra_dim=9, levels=levels), scale=0.02, seed=5
+        )
+        errs = _grad_vs_fd(
+            model, lambda: make_batch(positions, numbers, frag), energy_loss, _FD_PARAMS,
+        )
+        assert max(errs.values()) < 1e-4, (levels, errs)
+
+
+def test_cluster_force_gradient_carries_a_known_bias_at_the_coupled_levels():
+    """The measurement behind ``UnifiedConfig.force_weight``'s warning, pinned.
+
+    ``_CoupledSolve.backward`` runs its adjoint CG under ``no_grad`` and detaches the
+    parameters, so it is not double-differentiable and the second-order path through
+    ``lambda`` is dropped. A force loss needs exactly that path.
+
+    The bounds below are deliberately two-sided. The lower bound says the bias is still there,
+    so that making the adjoint differentiable in its own right (a nested implicit solve for
+    ``d lambda / d theta``) shows up here as a *failure* rather than passing silently -- at
+    which point the fix is to tighten this test, not to widen it. The upper bound says the
+    bias has not grown into something that would actually corrupt a fit.
+
+    It is not a convergence artifact: sweeping ``cg_rtol`` over 1e-8 to 1e-14 leaves these
+    numbers unchanged to three digits.
+    """
+    positions, numbers, frag = water_cluster(2, seed=3)
+    model = randomize(
+        make_model(environment=True, extra_dim=9, levels=dict(polarization=True)),
+        scale=0.02, seed=5,
+    )
+    errs = _grad_vs_fd(
+        model, lambda: make_batch(positions, numbers, frag),
+        _weighted_force_loss, _FD_PARAMS,
+    )
+    worst = max(errs.values())
+    assert 1e-6 < worst < 1e-2, (
+        f"the force-gradient bias moved: {errs}. If it shrank, the adjoint became "
+        f"double-differentiable and this test and UnifiedConfig.force_weight should say so."
+    )
+
+
+def test_total_energy_and_force_terms_enter_the_loss_only_when_weighted():
+    from rsfff.train.config import Config
+    from rsfff.train.train_unified import unified_fit
+
+    model = make_model()
+    positions, numbers, frag = water_cluster(2, seed=61)
+    n_sys = 1
+
+    def fresh():
+        b = make_batch(positions.clone(), numbers, frag)
+        b.fragment_energy = torch.zeros(int(b.n_fragments), dtype=positions.dtype)
+        b.energy = torch.zeros(n_sys, dtype=positions.dtype)
+        b.forces = torch.zeros_like(positions)
+        b.eda = {k: torch.zeros(n_sys, dtype=positions.dtype)
+                 for k in ("cls_elec", "mod_pauli", "disp")}
+        return b
+
+    cfg = Config()
+    off, m_off, _ = unified_fit(model(fresh()), fresh(), cfg)
+    assert "e_tot_mae" in m_off and "f_clu" not in m_off
+
+    cfg.unified.total_energy_weight = 1.0
+    on, _, _ = unified_fit(model(fresh()), fresh(), cfg)
+    assert float(on) > float(off), "the total-energy term did not reach the loss"
+
+    # Forces need positions to be leaves; the loop arranges that via grad_positions.
+    cfg.unified.total_energy_weight = 0.0
+    cfg.unified.force_weight = 1.0
+    batch = fresh()
+    with pytest.raises(ValueError, match="grad_positions"):
+        unified_fit(model(batch), batch, cfg)
+
+    batch = fresh()
+    batch.positions.requires_grad_(True)
+    loss, metrics, _ = unified_fit(model(batch), batch, cfg)
+    assert "f_clu" in metrics and float(loss) > float(off)
+
+
+def test_force_term_requires_force_labels():
+    from rsfff.train.config import Config
+    from rsfff.train.train_unified import unified_fit
+
+    model = make_model()
+    positions, numbers, frag = water_cluster(2, seed=63)
+    batch = make_batch(positions, numbers, frag)
+    batch.fragment_energy = torch.zeros(int(batch.n_fragments), dtype=positions.dtype)
+    batch.eda = {k: torch.zeros(1, dtype=positions.dtype)
+                 for k in ("cls_elec", "mod_pauli", "disp")}
+    batch.forces = None
+    batch.positions.requires_grad_(True)
+    cfg = Config()
+    cfg.unified.force_weight = 1.0
+    with pytest.raises(ValueError, match="carries no forces"):
+        unified_fit(model(batch), batch, cfg)

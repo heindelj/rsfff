@@ -34,7 +34,7 @@ class MLIPConfig:
 
 @dataclass
 class DataConfig:
-    path: str | list[str] = "data/labels/h2o.extxyz"
+    path: str | list[str] = "data/wb97mv_tzvpd/h2o_wb97mv_tzvpd.xyz"
     reference_energies: str = "data/atomic_references.json"
     isolated_species: str | None = None   # extxyz of integer-charge anchor systems
     diabatic_states: str | None = None    # YAML fragment-state library (channel graphs)
@@ -446,6 +446,36 @@ class UnifiedConfig:
     pauli_weight: float = 30.0
     disp_weight: float = 30.0
     anchor_weight: float = 1.0
+    #: Supervision on the **cluster total energy** and its gradient. Both default off and both
+    #: only mean anything once ``pol`` and ``ct`` are on: below that level the decomposition is
+    #: incomplete by construction, so ``energy`` is missing two channels and fitting it would
+    #: push that deficit into whichever channel is cheapest to distort.
+    #:
+    #: Turn them on for the CT stage **without dropping the EDA component weights**. The total
+    #: is one number per frame against six well-posed component targets; supervised alone it
+    #: admits every wrong split that happens to sum correctly, and the components collapse into
+    #: each other while ``e_tot_mae`` looks fine. The components are what keep the
+    #: decomposition meaningful, the total is what makes it a force field.
+    total_energy_weight: float = 0.0
+    force_weight: float = 0.0
+    force_scale: float = 1.0e-3         # Hartree/Angstrom
+    #: **Known bias in the force gradient at the pol/CT levels.** ``rsfff.ff.coupled_solve``
+    #: solves the response with a custom ``autograd.Function`` whose backward is the adjoint of
+    #: docs §6.2. That adjoint is correct -- checked against the dense oracle, and an *energy*
+    #: loss reproduces finite differences to CG tolerance (5e-8 relative). It is not, however,
+    #: **double**-differentiable: the adjoint CG runs under ``no_grad`` and detaches its
+    #: parameters, so the second-order path through ``lambda`` is dropped. A force loss needs
+    #: exactly that path, and its parameter gradient measures 1e-5 to 6e-4 wrong in relative
+    #: terms -- independent of ``cg_rtol``, which is what proves it is a missing term and not
+    #: convergence. At the frozen level, where no coupled solve runs, the same check agrees to
+    #: 4e-12.
+    #:
+    #: The *forces themselves* are exact; only the derivative of the force with respect to the
+    #: parameters is biased. A relative bias of 1e-4 is well under minibatch noise, so this is
+    #: a real but small systematic pull, not a broken fit. Removing it means making the adjoint
+    #: solve differentiable in its own right (a nested implicit solve for ``d lambda / d
+    #: theta``), which is not implemented. ``tests/test_ff_unified.py`` pins the measurement so
+    #: the number moves if that changes.
     #: Monomer frames drawn per step for the anchor term; 0 uses the whole file every step.
     #: The anchor carries a force term, so evaluating it is a second-order backward, and at
     #: the full 500 frames that is ~95% of the wall time of a training step -- the identical

@@ -117,6 +117,48 @@ Missing priorities default to `0`. Existing running workers keep the script and
 config they loaded when they started, so priority changes apply to newly started
 workers after the updated bundle is synced.
 
+## AIMD And Harvested EDA
+
+`aimd` is a normal Q-Chem calculation type using `templates/aimd.in`. The
+starting geometries in `aimd/geoms/` are extxyz files with `fragment_idx`
+metadata. The AIMD input generator ignores those fragment indices when writing
+the AIMD `$molecule` block, but the harvester uses them later to build EDA
+fragment blocks from AIMD output frames.
+
+Generate only AIMD inputs:
+
+```bash
+python3 scripts/qchem_roundtrip.py \
+  --root . \
+  --config config.json \
+  generate \
+  --calculation aimd
+```
+
+After AIMD outputs are present in `aimd/outputs/`, harvest every 50th parsed
+AIMD frame into the `aimd_eda/inputs/` pool:
+
+```bash
+bash scripts/harvest_aimd.sh
+```
+
+or directly:
+
+```bash
+python3 scripts/qchem_roundtrip.py \
+  --root . \
+  --config config.json \
+  harvest-aimd \
+  --source-calculation aimd \
+  --dest-calculation aimd_eda \
+  --stride 50
+```
+
+For a charged cluster with multiple molecular groups, the harvester creates one
+EDA input for each possible assignment of the total charge to a group. For
+example, an `H3O+(H2O)` AIMD frame produces both `H3O+/H2O` and `H2O/H3O+`
+fragment-charge assignments.
+
 ## Rsync Setup
 
 Add a normal SSH alias for Perlmutter if you do not already have one:
@@ -153,6 +195,21 @@ If you generate inputs locally, push the bundle plus `inputs/`:
 bash qchem_roundtrip/scripts/sync_inputs_up.sh
 ```
 
+By default this stages and uploads only locally runnable inputs. An input is
+considered already handled when a matching local `outputs/<stem>.out`,
+`state/done/<stem>.json`, or `state/failed/<stem>.json` exists. To force the old
+behavior and upload every input, set `SYNC_COMPLETED_INPUTS=1`.
+
+If completed inputs were uploaded earlier, clean the remote `inputs/` folders
+down to the current staged runnable set:
+
+```bash
+SYNC_DELETE_STALE_INPUTS=1 bash qchem_roundtrip/scripts/sync_inputs_up.sh
+```
+
+This only deletes remote files that are in the synced `inputs/` trees and absent
+from the staged upload; it does not delete remote `outputs/`.
+
 If you want Perlmutter to generate inputs from extxyz geometries, push
 geometries instead and run the generator or worker remotely:
 
@@ -168,6 +225,12 @@ bash qchem_roundtrip/scripts/sync_outputs_down.sh
 
 The rsync helpers intentionally sync only their target folders. They do not
 delete remote outputs or local outputs.
+
+To see what workers will run or skip on the current machine:
+
+```bash
+python3 scripts/audit_inputs.py
+```
 
 ## EDA Fragments
 
