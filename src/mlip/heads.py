@@ -24,6 +24,55 @@ def mlp(in_dim: int, hidden: int, depth: int, out_dim: int) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
+def zero_init_readout(module: nn.Module, *, bias: bool = True) -> nn.Module:
+    """Zero a block's readout **and** exempt the block from weight decay. Both, always.
+
+    Zero-initializing the last layer is how nearly every head here starts at its per-species
+    prior: the residual it predicts begins at exactly zero, so turning a feature dependence on
+    starts from the validated feature-free model instead of a different one.
+
+    That device has a failure mode, and it is not obvious enough to leave to each caller. With
+    the readout at zero, **every layer behind it has a gradient proportional to zero** -- not
+    small, exactly zero, on the first step. Weight decay is then the only force acting on those
+    layers and it wins uncontested; by the time the readout has grown enough to send a real
+    gradient back, the hidden layers it would send it to have been flattened, and the block is
+    left as a constant. Once flat it stays flat: the readout's own gradient carries the hidden
+    activations, which no longer vary with the input.
+
+    Measured across a 24-epoch staged fit (first-layer weight norm, init -> frozen -> pol ->
+    ct), the blocks that lost the race and what each one silently stopped doing::
+
+        cquad_axis_head.axis.gate_mlp  4.64 -> 2e-05 -> 3e-10 -> 4e-22   quadrupole anisotropy
+        disp_params.c6_mlp             4.60 -> 3e-04 -> 3e-09 -> 7e-18   environment-quenched C6
+        compliance_head.net            4.63 -> 0.16  -> 8e-05 -> 7e-05   per-channel compliance
+        pauli_params.q_mlp             4.58 -> 0.59  -> 0.031 -> 1e-04   Pauli monopole
+        environment.inv_mlp            4.62 -> 6e-07 -> 1e-13 -> 4e-20   all many-body content
+
+    None of it raised anything. ``C6`` simply became a per-species constant again, the
+    dispersion silently reverted to rigorously two-body, the compliance head gave every channel
+    the same answer, and the anisotropic quadrupole axis this model was extended to carry could
+    not be predicted at all. The blocks that survived (``chi_mlp``, the equivariant gates, the
+    correction trunk) did so only because their readouts grow fast enough to beat the decay --
+    it is a race, and nothing about the design says which blocks should win it.
+
+    So the two go together and this function is the only place either happens. What replaces
+    weight decay is the penalty that names the quantity it wants small -- ``env_weight`` on
+    ``||h_env - h_frag||``, ``r0_spread_weight`` on the range separation -- rather than the raw
+    weights of a block that is meant to start at zero.
+
+    ``bias=False`` for a readout whose bias carries the block's initial value (a compliance
+    head starting at ``s_init``); the exemption is unconditional either way.
+    """
+    last = module[-1] if isinstance(module, nn.Sequential) else module
+    with torch.no_grad():
+        last.weight.zero_()
+        if bias:
+            last.bias.zero_()
+    # Read by `rsfff.train.term_loop.parameter_groups`, which walks `model.modules()`.
+    module.no_weight_decay = True
+    return module
+
+
 class AtomicEnergyHead(nn.Module):
     """Per-atom scalar energy from invariant features + a learned species embedding.
 
@@ -53,12 +102,10 @@ class AtomicEnergyHead(nn.Module):
     ) -> None:
         super().__init__()
         self.species_emb = nn.Embedding(n_species, emb_dim)
-        self.mlp = mlp(p0 + emb_dim, hidden, depth, 1)
-        # Zero-init the readout so the model starts at the per-species E0 reference
-        # (the residual it predicts begins at ~0) -- a numerically gentle start.
-        with torch.no_grad():
-            self.mlp[-1].weight.zero_()
-            self.mlp[-1].bias.zero_()
+        # Zero-init readout: the model starts at the per-species E0 reference because the
+        # residual it predicts begins at exactly 0. See `zero_init_readout` for why that also
+        # means this block must not see weight decay.
+        self.mlp = zero_init_readout(mlp(p0 + emb_dim, hidden, depth, 1))
 
     def forward(self, inv_feats: torch.Tensor, species_idx: torch.Tensor) -> torch.Tensor:
         emb = self.species_emb(species_idx)                      # (N, emb_dim)

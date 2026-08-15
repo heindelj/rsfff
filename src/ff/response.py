@@ -36,7 +36,7 @@ import torch.nn as nn
 
 from ..features.features import LambdaFeatures
 from ..mlip.eem import atomic_dipoles, atomic_quadrupoles
-from ..mlip.heads import mlp
+from ..mlip.heads import mlp, zero_init_readout
 from ..mlip.response_heads import (
     AtomicAlphaHead,
     AtomicQuadrupoleHead,
@@ -52,6 +52,7 @@ from ..mlip.sqe import (
 )
 from .multipole import l2_rotation_generators
 from .pairs import intra_fragment_channels
+from .units import BOHR_ANG
 
 #: Per-element ``(Z_cp [e], b_elec [1/bohr])`` charge-penetration priors from the fitted CMM
 #: water model (``pyCMM/tests/data/water.xml``, the ``<ChargePenetration>`` block). ``Z_cp``
@@ -198,9 +199,7 @@ class ElectrostaticParameterHeads(nn.Module):
 
         for m in (self.chi_mlp, self.eta_mlp, self.z_mlp, self.b_mlp):
             if m is not None:   # start at exactly the per-species value
-                with torch.no_grad():
-                    m[-1].weight.zero_()
-                    m[-1].bias.zero_()
+                zero_init_readout(m)
 
         # --- dipole sector: mu_i = -alpha_i chivec_i ------------------------------------
         self.chivec_head = None
@@ -265,9 +264,7 @@ class ElectrostaticParameterHeads(nn.Module):
                 mlp(p0 + emb_dim, hidden, depth, n_c) if environment_cquad else None
             )
             if self.cquad_mlp is not None:
-                with torch.no_grad():
-                    self.cquad_mlp[-1].weight.zero_()
-                    self.cquad_mlp[-1].bias.zero_()
+                zero_init_readout(self.cquad_mlp)
             if self.anisotropic_cquad:
                 if p1 is None:
                     raise ValueError(
@@ -373,6 +370,54 @@ class FragmentResponseOutput:
     cquad: torch.Tensor | None         # (N,) isotropic quadrupole polarizability
     z: torch.Tensor                    # (N,) effective nuclear charge (penetration)
     b: torch.Tensor                    # (N,) Slater exponent (penetration)
+    #: (F, 3, 3) the fragment's molecular dipole polarizability, ``-d^2 E / dF dF`` under a
+    #: uniform field, in ``e^2 Angstrom^2 / Hartree`` -- the unit
+    #: :attr:`rsfff.train.data.Batch.polarizability` is loaded into. ``None`` when the solve
+    #: was asked not to compute it. See :func:`fragment_polarizability`.
+    polarizability: torch.Tensor | None = None
+
+
+def fragment_polarizability(
+    alpha_flow: torch.Tensor,             # (F, 3, 3) e^2*Angstrom^2/Ha, from sqe_solve
+    alpha_atom: torch.Tensor | None,      # (N, 3, 3) a0^3, the on-site dipole polarizability
+    fragment_idx: torch.Tensor,           # (N,)
+    n_fragments: int,
+) -> torch.Tensor:
+    """The molecular polarizability of each fragment: charge flow plus on-site dipoles.
+
+    It really is just a sum, and that is worth spelling out because it looks too easy. Under a
+    uniform field ``F`` the internal energy is
+
+        E(F) = [ chi.q + 1/2 q.eta.q + 1/2 s v^2 - sum_i q_i r_i . F ]      charge sector
+             + [ 1/2 mu.alpha^-1.mu + chivec.mu - mu . F ]                  dipole sector
+             + [ quadrupole sector, which couples to grad F and not to F ]
+
+    and the two sectors share no term -- the Phase-1 functional carries no intra-fragment
+    Coulomb block, so nothing couples ``q`` to ``mu``. Minimizing each independently gives
+    ``-d^2E/dFdF = alpha_flow + sum_i alpha_i``, with no cross term to miss. The quadrupole
+    sector responds to the field *gradient*, so a uniform field never touches it.
+
+    Both sectors carry the *same* answer at every level of the model, which is what makes this
+    a well-posed target rather than a level-dependent one: the coupled solves of
+    :mod:`rsfff.ff.polarization` add the inter-fragment electrostatic operator under
+    ``gate["elst"]``, and that gate is ~0 between bonded atoms, so an isolated monomer's
+    response is the frozen response. The label is an isolated monomer's, so it is the frozen
+    response it should be compared against.
+
+    **Units are not uniform across the two sectors and this is where an error would hide.**
+    ``alpha_flow`` comes out of :func:`rsfff.mlip.sqe.sqe_solve`, whose positions are in
+    Angstrom, so it is ``e^2 Angstrom^2 / Hartree``. The on-site ``alpha_i`` multiplies a field
+    conjugate to ``mu`` in ``e*bohr``, so it is ``a0^3 = e^2 bohr^2 / Hartree``. The factor
+    below is that conversion, and getting it wrong is a 3.6x error that no symmetry or
+    invariance check would catch.
+    """
+    total = alpha_flow
+    if alpha_atom is not None:
+        summed = alpha_flow.new_zeros(n_fragments, 3, 3).index_add_(
+            0, fragment_idx, alpha_atom * (BOHR_ANG ** 2)
+        )
+        total = total + summed
+    return total
 
 
 class FragmentResponse(nn.Module):
@@ -447,7 +492,16 @@ class FragmentResponse(nn.Module):
             chivec=chivec, alpha=alpha_i, chiquad=chiquad, cquad=cquad, z=z, b=b,
         )
 
-    def forward(self, batch, feats: LambdaFeatures) -> FragmentResponseOutput:
+    def forward(
+        self, batch, feats: LambdaFeatures, *, with_polarizability: bool = False
+    ) -> FragmentResponseOutput:
+        """The frozen solve. ``with_polarizability`` adds the molecular polarizability.
+
+        Off by default because it is only ever compared against a label, and only the isolated
+        monomer anchor carries one. It costs three extra right-hand sides in a factorization
+        that already happened, so it is cheap -- but it is not free, and every cluster forward
+        would pay it for a number nothing reads.
+        """
         positions = batch.positions
         frag = batch.fragment_idx
         n_frag = int(batch.n_fragments)
@@ -461,7 +515,11 @@ class FragmentResponse(nn.Module):
         sol = sqe_solve(
             chi, eta, compliance, q0, positions,
             bond_index, frag, bond_batch, n_frag,
-            field=None, with_polarizability=False,
+            field=None, with_polarizability=with_polarizability,
+        )
+        polarizability = (
+            None if sol.alpha_flow is None
+            else fragment_polarizability(sol.alpha_flow, alpha_i, frag, n_frag)
         )
 
         mu = None
@@ -488,6 +546,7 @@ class FragmentResponse(nn.Module):
             cquad=cquad,
             z=z,
             b=b,
+            polarizability=polarizability,
         )
 
 
@@ -503,4 +562,5 @@ __all__ = [
     "FragmentResponse",
     "FragmentResponseOutput",
     "build_elec_priors",
+    "fragment_polarizability",
 ]

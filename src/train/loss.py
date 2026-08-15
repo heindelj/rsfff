@@ -323,6 +323,75 @@ def fragment_multipole_loss(
     return terms, metrics
 
 
+def fragment_polarizability_loss(
+    out,
+    batch,
+    *,
+    weight: float = 0.0,
+    scale: float = 0.5,
+):
+    """Fit each fragment's molecular polarizability to the isolated-monomer reference.
+
+    ``out.polarizability`` is ``alpha_flow + sum_i alpha_i`` from
+    :func:`rsfff.ff.response.fragment_polarizability`; the label is ``batch.polarizability``,
+    written by ``scripts/parse_polarizability.py`` from a Q-Chem ``JOBTYPE = polarizability``
+    job and converted to ``e^2 Angstrom^2 / Hartree`` at load time.
+
+    **This is the only label in the fit that constrains the response parameters directly.**
+    Everything else reaches them through an energy: the fragment energy pins
+    ``E_internal``, the multipole labels pin ``q``, ``mu`` and ``Theta`` at zero field, and
+    the EDA components pin what those multipoles do to each other. None of them says how the
+    charges and dipoles are supposed to *move*, which is exactly what ``chi``, ``eta``, the
+    compliances and ``alpha_i`` parameterize -- and what the polarization energy is made of.
+    Without this the induction physics is inferred entirely from inter-fragment energies at
+    the geometries that happen to be in the training set.
+
+    It is also the only thing separating the two sectors' *sum* from their split. It does not
+    separate them: ``alpha_flow`` and ``sum_i alpha_i`` are degenerate against this target and
+    only the total is constrained. That is a real limitation and the honest reading of a good
+    ``alpha_mae`` -- a distributed polarizability target would be needed to break it.
+
+    The whole 3x3 tensor is fitted, not the isotropic average: it is a genuine tensor label in
+    the same frame as the prediction, and the anisotropy is what the ``lambda=2`` features and
+    the PSD ``alpha_i`` head exist to represent. Reducing it to a trace would leave them
+    unconstrained while the metric looked fine.
+
+    **One fragment per frame is required**, and checked rather than assumed. The label is a
+    whole-frame property; a cluster's polarizability is *not* the sum of its isolated
+    fragments' -- that difference is mutual polarization, which is the ``pol`` channel's job --
+    so silently summing would fit the wrong quantity. The monomer anchor satisfies this;
+    nothing else should be handed to it.
+
+    Errors are divided by ``scale`` before squaring, so the weight is dimensionless and the
+    term equals 1.0 at an error of one scale. The default 0.5 e^2*Ang^2/Ha is ~0.18 a0^3
+    against monomer polarizabilities of ~9.9 a0^3.
+
+    Returns ``(dict[str, Tensor], dict[str, float])``, both empty when the weight is zero,
+    the label is absent, or the model was not asked for the polarizability.
+    """
+    terms: dict[str, torch.Tensor] = {}
+    metrics: dict[str, float] = {}
+    pred = getattr(out, "polarizability", None)
+    if weight <= 0.0 or batch.polarizability is None or pred is None:
+        return terms, metrics
+
+    n_frag = int(batch.n_fragments)
+    if n_frag != int(batch.n_systems):
+        raise ValueError(
+            f"the polarizability label is per frame but this batch has {n_frag} fragments in "
+            f"{int(batch.n_systems)} frames; a cluster's polarizability is not the sum of its "
+            f"fragments' isolated ones, so this term only applies to single-fragment frames"
+        )
+    err = (pred - batch.polarizability) / scale
+    # Frobenius over the 3x3 double-counts the off-diagonals, a uniform factor on a symmetric
+    # tensor that only rescales the weight -- the same convention as the quadrupole term.
+    terms["alpha"] = weight * err.pow(2).sum((-1, -2)).mean()
+    metrics["alpha_mae"] = float(
+        (pred - batch.polarizability).detach().abs().amax(dim=(-1, -2)).mean()
+    )
+    return terms, metrics
+
+
 def onebody_fit(out, batch, cfg):
     """Fit term for the 1-body head: per-fragment energy.
 

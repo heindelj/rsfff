@@ -44,7 +44,7 @@ import torch.nn as nn
 
 from ..features import FlatStateSOAPFeaturizer, LambdaFeatures
 from .eem import atomic_dipoles
-from .heads import mlp
+from .heads import mlp, zero_init_readout
 from .reference_states import AtomicStateReference, AtomWeightNet, ReferenceEmbedding
 from .response_heads import (
     AtomicAlphaHead,
@@ -97,9 +97,7 @@ class MonomerParameterHeads(nn.Module):
         self.chi_mlp = mlp(p0 + emb_dim, hidden, depth, 1)
         self.eta_mlp = mlp(p0 + emb_dim, hidden, depth, 1)
         for m in (self.energy_mlp, self.chi_mlp, self.eta_mlp):
-            with torch.no_grad():
-                m[-1].weight.zero_()
-                m[-1].bias.zero_()
+            zero_init_readout(m)
 
         # Per-element biases. eta is passed through softplus + floor to stay strictly positive
         # (a convex charge problem), so the stored parameter is the pre-softplus value.

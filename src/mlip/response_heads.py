@@ -25,7 +25,7 @@ import math
 import torch
 import torch.nn as nn
 
-from .heads import mlp
+from .heads import mlp, zero_init_readout
 
 
 def voigt_vector_to_symmetric_matrix(values: torch.Tensor) -> torch.Tensor:
@@ -183,10 +183,7 @@ class AtomicVectorHead(nn.Module):
         super().__init__()
         self.equiv_channels = equiv_channels
         self.equiv_reduce = nn.Parameter(torch.randn(p1, equiv_channels) / (p1 ** 0.5))
-        self.gate_mlp = mlp(p0 + emb_dim, hidden, depth, equiv_channels)
-        with torch.no_grad():
-            self.gate_mlp[-1].weight.zero_()
-            self.gate_mlp[-1].bias.zero_()
+        self.gate_mlp = zero_init_readout(mlp(p0 + emb_dim, hidden, depth, equiv_channels))
 
     def forward(
         self,
@@ -328,11 +325,8 @@ class AtomicQuadrupoleHead(nn.Module):
             )
         self.equiv_channels = equiv_channels
         self.equiv_reduce = nn.Parameter(torch.randn(p2, equiv_channels) / (p2 ** 0.5))
-        self.gate_mlp = mlp(p0 + emb_dim, hidden, depth, equiv_channels)
+        self.gate_mlp = zero_init_readout(mlp(p0 + emb_dim, hidden, depth, equiv_channels))
         self.register_buffer("_to_spherical", irrep2_to_spherical, persistent=False)
-        with torch.no_grad():
-            self.gate_mlp[-1].weight.zero_()
-            self.gate_mlp[-1].bias.zero_()
 
     def forward(
         self,

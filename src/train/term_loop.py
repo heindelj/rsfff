@@ -62,6 +62,38 @@ def eda_component_fit(out, batch, cfg):
     return loss, metrics, target
 
 
+def parameter_groups(model, weight_decay: float) -> list[dict]:
+    """Optimizer groups, exempting modules that declare ``no_weight_decay``.
+
+    The flag is set in exactly one place, :func:`rsfff.mlip.heads.zero_init_readout`, which is
+    also where the reasoning and the measurements live: a block whose readout starts at zero
+    gets *no loss gradient at all* on the first step, weight decay is then the only force
+    acting on it, and it does not recover -- five such blocks in this model were measured going
+    to zero over a staged fit, taking the many-body dispersion, the per-channel compliance and
+    the quadrupole anisotropy with them, silently.
+
+    Nothing else is exempt. Per-species tables, the featurizer and the plainly-initialized
+    heads all keep decaying, because they have live gradients to push back with.
+    """
+    decayed, exempt = [], []
+    seen: set[int] = set()
+    for module in model.modules():
+        if not getattr(module, "no_weight_decay", False):
+            continue
+        for p in module.parameters():
+            if p.requires_grad and id(p) not in seen:
+                seen.add(id(p))
+                exempt.append(p)
+    for p in model.parameters():
+        if p.requires_grad and id(p) not in seen:
+            seen.add(id(p))
+            decayed.append(p)
+    groups = [{"params": decayed, "weight_decay": float(weight_decay)}]
+    if exempt:
+        groups.append({"params": exempt, "weight_decay": 0.0})
+    return groups
+
+
 def warm_start(model, path: str | None) -> None:
     """Load what fits from an earlier checkpoint, and say exactly what did not.
 
@@ -229,10 +261,11 @@ def fit(
     base = epoch(val_idx)
     print(f"untrained: {fmt(base, log_keys)}")
 
-    optimizer = torch.optim.Adam(
-        (p for p in model.parameters() if p.requires_grad),
-        lr=config.train.learning_rate, weight_decay=config.train.weight_decay,
-    )
+    groups = parameter_groups(model, config.train.weight_decay)
+    optimizer = torch.optim.Adam(groups, lr=config.train.learning_rate)
+    if len(groups) > 1:
+        n = sum(p.numel() for p in groups[1]["params"])
+        print(f"weight decay {config.train.weight_decay} on all but {n} exempt parameters")
     ckpt_dir = Path(config.checkpoint_root) / config.run_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_val = float("inf")

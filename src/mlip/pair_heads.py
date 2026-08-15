@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 
 from ..features.features import BesselBasis
-from .heads import mlp
+from .heads import mlp, zero_init_readout
 from .switch import pairwise_switch
 
 
@@ -84,10 +84,9 @@ class PairEnergyHead(nn.Module):
         self.species_emb = nn.Embedding(n_species, emb_dim)
         self.radial = BesselBasis(n_radial, r_off)
         h = p0 + emb_dim
-        self.net = mlp(2 * h + n_radial + self.extra_dim, hidden, depth, 1)
-        with torch.no_grad():
-            self.net[-1].weight.zero_()
-            self.net[-1].bias.zero_()
+        self.net = zero_init_readout(
+            mlp(2 * h + n_radial + self.extra_dim, hidden, depth, 1)
+        )
 
     def forward(
         self,

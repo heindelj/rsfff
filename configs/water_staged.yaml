@@ -45,8 +45,15 @@
 #   q_ct            charge actually crossing a fragment boundary (e). Zero means the compliance
 #                   head closed every channel and `ct` is carried entirely by its correction.
 #   env_norm        how much environment the model asks for. Anchoring makes g's gradient a
-#                   difference between streams, so it may wake slowly; still pinned at 0 after
-#                   ~30 epochs of stage 2 means the environment path is not earning its place.
+#                   difference between streams, so it wakes slowly -- but it must wake. In the
+#                   previous run it went to *identically* zero and stayed there, which was not
+#                   the model declining the environment but weight decay deleting a block that
+#                   gets no gradient at initialization (rsfff.mlip.heads.zero_init_readout).
+#                   Four other blocks went the same way. If env_norm reads exactly 0.0 rather
+#                   than merely small, that is the failure, not a preference.
+#   alpha_mae       monomer polarizability error, max tensor component in e^2*Ang^2/Ha
+#                   (1 a0^3 = 0.28). Starts ~2.1; the previous model sat at an isotropic
+#                   3.87 a0^3 against a true 9.89, so this has real ground to make up.
 #
 # Stage 1 must hold its frozen-level numbers through stages 2 and 3: elst_mae, pauli_mae,
 # disp_mae and the intra_* leaks are not allowed to regress while pol_mae and ct_mae come down.
@@ -67,7 +74,9 @@ data:
     #- data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
     #- data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
   reference_energies: data/atomic_references_wb97mv_tzvpd.json
-  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd.xyz
+  # The monomer anchor, with the def2-TZVPD molecular polarizability tensors folded in by
+  # scripts/parse_polarizability.py (499 of 500 frames; one Q-Chem job did not finish).
+  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
   atomic_reference_states: data/atomic_reference_states.json
   holdout_fraction: 0.1
   seed: 0
@@ -135,9 +144,18 @@ unified:
   disp_weight: 30.0
   anchor_weight: 1.0
   anchor_batch_size: 64        # the anchor force term is a 2nd-order backward; see UnifiedConfig
+  # A one-sided barrier holding r0_pair at or below its element prior, not the unbounded
+  # downward pull this used to be. That pull is what put -39 kJ/mol per fragment of
+  # "intramolecular dispersion" between bonded atoms in the last run: it drove the *shared
+  # trunk's* per-pair deviation to -0.42 on intra and inter O-H alike, so restricting the
+  # penalty to inter pairs protected nothing. See AnchorTerms.penalties.
   r0_weight: 0.05
   intra_classical_weight: 0.05  # keep the classical forms out of the bond channel's region
-  r0_spread_weight: 0.0
+  # Holds each per-atom r0 near its element prior, in log space. Nonzero now because the
+  # barrier above is one-sided and so does not oppose a downward drift of the per-element
+  # base: in the last run r0(H) and r0(O) on the dispersion channel effectively swapped
+  # (1.75 -> 0.87, 0.89 -> 1.70) with nothing pushing back. Watch r0_elst/r0_pauli/r0_disp.
+  r0_spread_weight: 1.0
   # Level settings shared by every stage; the stages below flip the two switches.
   ct_channel_cutoff: 5.0
   ct_channel_taper: 1.0
@@ -176,6 +194,15 @@ elec:
   dipole_scale: 0.05
   quadrupole_weight: 1.0
   quadrupole_scale: 0.2
+  # Molecular polarizability of the anchor monomers. The multipole labels above say where the
+  # charges and dipoles *sit*; this is the only label that says how they *move*, which is what
+  # chi, eta, the compliances and alpha_i parameterize and what the pol channel is made of.
+  # Measured before it was added: the trained frozen model's monomer polarizability was
+  # 3.87 a0^3 against a true 9.89 -- under-polarizable by 2.6x, with the off-diagonal the wrong
+  # sign, and nothing in the fit had been in a position to notice.
+  # Watch `alpha_mae` (max tensor component, e^2*Ang^2/Ha; 1 a0^3 = 0.28).
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
 
 dispersion:
   b_prior: per_element          # a uniform 2.0 over-binds badly; see build_log_priors

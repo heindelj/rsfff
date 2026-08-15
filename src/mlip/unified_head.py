@@ -37,6 +37,7 @@ import torch
 import torch.nn as nn
 
 from ..features.features import BesselBasis
+from .heads import zero_init_readout
 from .switch import pairwise_switch
 
 
@@ -135,10 +136,14 @@ class UnifiedPairHead(nn.Module):
         self.range_readout = nn.ModuleDict(
             {name: nn.Linear(hidden, 1) for name in self.range_channels}
         )
-        with torch.no_grad():
-            for lin in list(self.readout.values()) + list(self.range_readout.values()):
-                lin.weight.zero_()
-                lin.bias.zero_()
+        # The trunk is exempted along with the readouts, not only the readouts: it sits
+        # *behind* them, so at initialization its gradient is proportional to zero too. It
+        # happens to survive weight decay here because eight readouts pull on it at once and
+        # they grow fast -- but that is a race it should not have to run. See
+        # `zero_init_readout` for the blocks that lost the same race.
+        for lin in list(self.readout.values()) + list(self.range_readout.values()):
+            zero_init_readout(lin)
+        self.trunk.no_weight_decay = True
 
     def forward(
         self,

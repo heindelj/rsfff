@@ -65,7 +65,7 @@ import torch
 import torch.nn as nn
 
 from ..features import BesselBasis
-from .heads import mlp
+from .heads import mlp, zero_init_readout
 
 
 def _local_index(group_idx: torch.Tensor, n_groups: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -248,10 +248,11 @@ class PairComplianceHead(nn.Module):
         super().__init__()
         self.s_floor = float(s_floor)
         self.radial = BesselBasis(n_radial, cutoff)
-        self.net = mlp(2 * p0 + n_radial, hidden, depth, 1)
+        # `bias=False`: this readout's bias *is* the initial compliance `s_init`, so zeroing
+        # it would close every channel. The weight-decay exemption applies either way.
+        self.net = zero_init_readout(mlp(2 * p0 + n_radial, hidden, depth, 1), bias=False)
         raw = torch.log(torch.expm1(torch.tensor(max(float(s_init) - self.s_floor, 1e-6))))
         with torch.no_grad():
-            self.net[-1].weight.zero_()
             self.net[-1].bias.fill_(raw.item())
 
     def forward(

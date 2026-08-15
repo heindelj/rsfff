@@ -106,7 +106,7 @@ import torch
 import torch.nn as nn
 
 from ..features.features import LambdaFeatures
-from ..mlip.heads import mlp
+from ..mlip.heads import mlp, zero_init_readout
 from ..mlip.switch import pairwise_switch
 from ..mlip.unified_head import ChannelSpec, UnifiedPairHead
 from .damping import fermi_switch
@@ -185,7 +185,19 @@ class FragmentStateEmbedding(nn.Module):
     force-field stack at the same time as the fragmentation mixture.
 
     ``dim=0`` disables it entirely and is bit-identical to a model built without it.
+
+    **Exempt from weight decay**, for the same reason :class:`EnvironmentResidual` is and with
+    the same evidence. Anchoring makes the block's gradient a *difference*, water-only data
+    holds its input at the constant ``(0, 0)`` so that difference is exactly zero, and decay is
+    then unopposed: measured over a staged fit its first-layer weight norm went 3.17 -> 1.96 ->
+    0.24 -> 9e-13. Nothing was wrong with that while the input stays constant -- but the whole
+    point of the block is to be ready when charged-fragment data arrives, and a flattened block
+    is not ready. Left alone it sits at its initialization instead, which is.
     """
+
+    #: See the note above. Weight decay would flatten a block that water-only data cannot
+    #: train, leaving nothing for H5O2+ data to start from.
+    no_weight_decay = True
 
     def __init__(self, dim: int = 4, *, hidden: int = 32, depth: int = 1) -> None:
         super().__init__()
@@ -242,7 +254,20 @@ class EnvironmentResidual(nn.Module):
     function that cannot match its target. Those two are the whole of the restriction --
     everything else reads ``h_env``, because the range separation already switches the intra
     classical contribution below a kilojoule per fragment.
+
+    **This block must never see weight decay.** Its three MLPs go through
+    :func:`rsfff.mlip.heads.zero_init_readout`, which exempts them; the class attribute below
+    extends that to ``species_emb``, which exists only to feed them and so shares their fate.
+    Left decaying, the invariant stream collapsed to *identically* zero over a staged fit --
+    ``h_env == h_frag`` exactly, ``dC6/dR`` for an atom in another fragment at 7e-64, the
+    dispersion silently back to rigorously two-body, and ``env_norm`` reading a true zero that
+    looked like a model choosing not to use its environment. ``unified.env_weight`` is the
+    regularizer that belongs here: it penalizes ``||h_env - h_frag||``, which is the quantity
+    that should be small.
     """
+
+    #: Extends the readouts' exemption to ``species_emb``. See the note above.
+    no_weight_decay = True
 
     def __init__(
         self,
@@ -260,11 +285,9 @@ class EnvironmentResidual(nn.Module):
         self.inv_mlp = mlp(p0 + emb_dim, hidden, depth, p0)
         self.vec_gate = mlp(p0 + emb_dim, hidden, depth, p1) if p1 else None
         self.equiv_gate = mlp(p0 + emb_dim, hidden, depth, p2) if p2 else None
-        with torch.no_grad():
-            for m in (self.inv_mlp, self.vec_gate, self.equiv_gate):
-                if m is not None:
-                    m[-1].weight.zero_()
-                    m[-1].bias.zero_()
+        for m in (self.inv_mlp, self.vec_gate, self.equiv_gate):
+            if m is not None:
+                zero_init_readout(m)
 
     def forward(self, frag: LambdaFeatures, full: LambdaFeatures) -> LambdaFeatures:
         """``h_env = h_frag + g(h_full) - g(h_frag)``, anchored at the isolated fragment.
@@ -341,7 +364,7 @@ class RangeSeparationHeads(nn.Module):
         p0: int,
         n_species: int,
         *,
-        log_r0_prior: torch.Tensor,          # (n_species,)
+        log_r0_prior: torch.Tensor,          # (n_channels, n_species), rows like `channels`
         alpha_init: float,
         channels: tuple[str, ...] = RANGE_CHANNELS,
         emb_dim: int = 16,
@@ -355,7 +378,16 @@ class RangeSeparationHeads(nn.Module):
         if not alpha_init > 0.0:
             raise ValueError(f"RangeSeparationHeads needs alpha_init > 0, got {alpha_init}")
         self.channel_names = tuple(channels)
-        self.register_buffer("log_r0_prior", log_r0_prior.clone())
+        if log_r0_prior.dim() == 1:      # one row broadcast to every channel
+            log_r0_prior = log_r0_prior.expand(len(self.channel_names), -1)
+        if log_r0_prior.shape[0] != len(self.channel_names):
+            raise ValueError(
+                f"log_r0_prior has {log_r0_prior.shape[0]} rows for "
+                f"{len(self.channel_names)} channels {self.channel_names}; the dispersion "
+                f"prior differs from the others (see rsfff.ff.range_priors.CHANNEL_R0_PRIOR) "
+                f"so the rows are not interchangeable"
+            )
+        self.register_buffer("log_r0_prior", log_r0_prior.clone().contiguous())
         self.species_emb = nn.Embedding(n_species, emb_dim)
         alpha_raw = float(torch.log(torch.expm1(torch.tensor(float(alpha_init)))))
 
@@ -376,10 +408,8 @@ class RangeSeparationHeads(nn.Module):
             self.r0_mlp = nn.ModuleDict(
                 {name: mlp(p0 + emb_dim, hidden, depth, 1) for name in self.channel_names}
             )
-            with torch.no_grad():   # start at exactly the per-element value
-                for m in self.r0_mlp.values():
-                    m[-1].weight.zero_()
-                    m[-1].bias.zero_()
+            for m in self.r0_mlp.values():   # start at exactly the per-element value
+                zero_init_readout(m)
 
     def forward(
         self,
@@ -392,8 +422,8 @@ class RangeSeparationHeads(nn.Module):
         if self.r0_mlp is not None:
             x = torch.cat((inv_feats, self.species_emb(s)), dim=-1)
         r0, alpha = {}, {}
-        for name in self.channel_names:
-            log_r0 = self.log_r0_prior[s] + self.d_log_r0[name][s]
+        for c, name in enumerate(self.channel_names):
+            log_r0 = self.log_r0_prior[c][s] + self.d_log_r0[name][s]
             if self.r0_mlp is not None:
                 log_r0 = log_r0 + self.r0_mlp[name](x).squeeze(-1)
             r0[name] = log_r0.exp()
@@ -431,9 +461,15 @@ class UnifiedOutput:
     r0_pair: dict[str, torch.Tensor]
     alpha: dict[str, torch.Tensor]            # () per-channel width
     species_idx: torch.Tensor                 # (N,) index into neighbor_types
-    #: (N,) ``log r0`` each atom would have from its element prior alone. The penalty that
-    #: keeps a learned ``r0`` near its element value is the residual against this.
-    log_r0_prior: torch.Tensor
+    #: Per channel, (N,) ``log r0`` each atom would have from its element prior alone -- and
+    #: per channel because dispersion's prior is not the others' (see
+    #: :data:`rsfff.ff.range_priors.CHANNEL_R0_PRIOR`). The penalty that keeps a learned ``r0``
+    #: near its element value is the residual against this.
+    log_r0_prior: dict[str, torch.Tensor]
+    #: Per channel, (P,) the element prior combined across each pair by geometric mean. This is
+    #: the floor the ``r0`` barrier is measured against, and it is the pair-level quantity --
+    #: what escaped the old penalty was the *per-pair* deviation, not the per-element value.
+    log_r0_prior_pair: dict[str, torch.Tensor]
     #: The **frozen** response: parameters from fragment-confined features, no external
     #: field. Named so the polarized solve lands beside it rather than on top of it.
     response: FragmentResponseOutput
@@ -476,6 +512,15 @@ class UnifiedOutput:
     @property
     def quad_s(self) -> torch.Tensor | None:
         return self.response.quad_s
+
+    @property
+    def polarizability(self) -> torch.Tensor | None:
+        """(F, 3, 3) the **frozen** molecular polarizability, or None if it was not asked for.
+
+        Frozen for the same reason the multipoles above are: the label is an isolated
+        monomer's, and an isolated monomer's response is the frozen one at every level.
+        """
+        return self.response.polarizability
 
 
 class UnifiedPairModel(nn.Module):
@@ -589,7 +634,9 @@ class UnifiedPairModel(nn.Module):
         )
         return poly, b
 
-    def forward(self, batch) -> UnifiedOutput:
+    def forward(self, batch, *, with_polarizability: bool = False) -> UnifiedOutput:
+        """``with_polarizability`` asks the frozen solve for each fragment's molecular
+        polarizability as well, which only the isolated-monomer anchor has a label for."""
         if batch.fragment_idx is None:
             raise ValueError(
                 "the unified model routes pair energies to per-fragment and per-frame labels "
@@ -615,7 +662,7 @@ class UnifiedPairModel(nn.Module):
             h_env = self.environment(h_frag, self._augment(full, batch, frag))
 
         # --- the frozen response solve, shared by the 1-body and elst channels -----------
-        res = self.response(batch, h_frag)
+        res = self.response(batch, h_frag, with_polarizability=with_polarizability)
 
         # --- one pair list, nothing dropped ---------------------------------------------
         pair_index, r, is_intra, pair_frag = union_pairs(
@@ -690,12 +737,20 @@ class UnifiedPairModel(nn.Module):
         # tell topologically distinct pairs of the same elements apart; the correction can,
         # and that is the whole reason it exists -- see :class:`UnifiedPairHead`.
         r0_atom, alpha = self.range_heads(h_env.inv_feats, h_env.species_idx)
-        gate, r0_pair = {}, {}
+        log_r0_prior = {
+            name: self.range_heads.log_r0_prior[c][h_frag.species_idx]
+            for c, name in enumerate(self.range_heads.channel_names)
+        }
+        gate, r0_pair, log_r0_prior_pair = {}, {}, {}
         for name, spec in self.classical.items():
             log_r0_ij = (
                 0.5 * (r0_atom[name][i].log() + r0_atom[name][j].log()) + d_log_r0[name]
             )
             r0_pair[name] = log_r0_ij.exp()
+            if name in log_r0_prior:
+                log_r0_prior_pair[name] = 0.5 * (
+                    log_r0_prior[name][i] + log_r0_prior[name][j]
+                )
             gate[name] = fermi_switch(r, r0_pair[name], alpha[name]) * pairwise_switch(
                 r, spec.cutoff - spec.taper_width, spec.cutoff
             )
@@ -934,7 +989,8 @@ class UnifiedPairModel(nn.Module):
             r0_pair=r0_pair,
             alpha=alpha,
             species_idx=h_frag.species_idx,
-            log_r0_prior=self.range_heads.log_r0_prior[h_frag.species_idx],
+            log_r0_prior=log_r0_prior,
+            log_r0_prior_pair=log_r0_prior_pair,
             environment_norm=(
                 None if self.environment is None
                 else self.environment.magnitude(h_frag, h_env)

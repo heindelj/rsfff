@@ -64,7 +64,11 @@ from .data import (
     load_reference_energies,
     split_indices,
 )
-from .loss import fragment_multipole_loss, onebody_anchor_loss
+from .loss import (
+    fragment_multipole_loss,
+    fragment_polarizability_loss,
+    onebody_anchor_loss,
+)
 from .term_loop import fit
 from .train_eem import resolve_device
 from .train_elec import build_featurizer, build_response
@@ -77,7 +81,7 @@ _LEVEL_TARGETS = {"pol": "pol", "ct": "ct"}
 _LOG_KEYS = (
     "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae", "pol_mae", "ct_mae",
     "a_mae", "f_mae", "dip_mae", "quad_mae", "e_tot_mae",
-    "anchor_e", "anchor_f", "dipole", "quad", "intra_ff",
+    "anchor_e", "anchor_f", "dipole", "quad", "alpha_mae", "intra_ff",
     "q_res", "qO", "dchi", "internal", "bond",
     "gate_inter_elst", "gate_intra_disp",
     "intra_elst", "intra_pauli", "intra_disp",
@@ -300,30 +304,39 @@ class AnchorTerms:
             )
             extra["corr_l2"] = u.corr_l2_weight * (corr / u.energy_scale).pow(2).mean()
         if u.r0_weight > 0.0:
-            # A linear pull on r0, per channel: moving energy out of the physical backbone
-            # and into the network has to be earned.
+            # A one-sided barrier holding r0 at or below its element prior, per channel:
+            # moving energy out of the physical backbone and into the network has to be
+            # earned. Zero, with zero gradient, wherever r0 already sits at the prior.
             #
-            # Restricted to **inter-fragment** pairs, and that restriction is load-bearing.
-            # Applied to every pair it pulls the *intra* r0 down too, and there is nothing to
-            # push back: whatever intramolecular classical energy appears is absorbed by the
-            # bond channel, which can represent it equally well either way. The two are
-            # degenerate, so the penalty alone decides -- and it decides in favour of dragging
-            # the classical form into the bonding region, which is gauge leakage running
-            # backwards. Measured with the unrestricted version: the dispersion channel slid
-            # its r0 down until it was putting -29 kJ/mol per fragment of "intramolecular
-            # dispersion" between bonded atoms, ten times the ob_mae it was being judged on.
+            # **This used to be an unbounded linear pull downward and that was the bug.** The
+            # restriction to inter-fragment pairs was supposed to keep it out of the bonded
+            # region, and it does not: `r0_pair` is the per-element base times a *shared trunk*
+            # deviation, and the trunk applies one deviation to intra and inter alike. Measured
+            # on a trained frozen checkpoint, the dispersion channel's `d_log_r0` had reached
+            # -0.42 on intra and inter O-H equally -- a uniform shift, not a discrimination --
+            # dropping the pair r0 from 1.22 to 0.79, opening the bonded gate to 0.999 and
+            # putting **-39 kJ/mol per fragment** of dispersion between covalently bonded
+            # atoms. Nothing opposed it: intramolecular classical energy is exactly degenerate
+            # with the bond channel, so the fit is indifferent and the penalty alone decides.
+            #
+            # As a barrier there is no force pushing r0 below the prior at all, and the prior
+            # becomes the floor it is written as. Restricted to inter pairs still, for the
+            # original reason -- an intra pair has no business being pulled either way -- but
+            # the restriction is no longer what the bonded region is relying on.
             inter = ~out.is_intra
             if bool(inter.any()):
-                extra["r0"] = u.r0_weight * torch.stack(
-                    [v[inter].mean() for v in out.r0_pair.values()]
-                ).sum()
+                extra["r0"] = u.r0_weight * torch.stack([
+                    (out.r0_pair[name][inter] - floor[inter].exp()).clamp(min=0.0).mean()
+                    for name, floor in out.log_r0_prior_pair.items()
+                ]).sum()
         if u.r0_spread_weight > 0.0:
             # Keeps a per-atom r0 near its element prior, so no single atom can run away
             # while the mean above stays put. Quadratic in log space, which is where the
             # geometric-mean combination is linear.
-            spread = torch.stack(
-                [(v.log() - out.log_r0_prior).pow(2).mean() for v in out.r0.values()]
-            )
+            spread = torch.stack([
+                (out.r0[name].log() - prior).pow(2).mean()
+                for name, prior in out.log_r0_prior.items()
+            ])
             extra["r0_spread"] = u.r0_spread_weight * spread.sum()
         if u.intra_classical_weight > 0.0 and bool(out.is_intra.any()):
             # Keep the classical forms out of the region the bond channel is describing.
@@ -351,7 +364,9 @@ class AnchorTerms:
         # Grad is forced on because the force term is itself a backward pass and this runs on
         # evaluation epochs too.
         with torch.enable_grad():
-            anchor_out = self.model(anchor_batch)
+            anchor_out = self.model(
+                anchor_batch, with_polarizability=cfg.elec.polarizability_weight > 0.0
+            )
         w = u.anchor_weight
         terms, self._metrics = onebody_anchor_loss(
             self.model, anchor_batch, cfg.onebody, out=anchor_out
@@ -367,6 +382,17 @@ class AnchorTerms:
         )
         extra.update({k: w * v for k, v in mm.items()})
         self._metrics.update(mm_metrics)
+
+        # The only label that constrains how the charges and dipoles *move* rather than where
+        # they sit. See `fragment_polarizability_loss` for why that gap matters and for what
+        # this still cannot separate.
+        ap, ap_metrics = fragment_polarizability_loss(
+            anchor_out, anchor_batch,
+            weight=cfg.elec.polarizability_weight,
+            scale=cfg.elec.polarizability_scale,
+        )
+        extra.update({k: w * v for k, v in ap.items()})
+        self._metrics.update(ap_metrics)
         return extra
 
     def diagnostics(self, out, batch, target):
@@ -549,13 +575,13 @@ def _train_once(config: Config):
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     r0_table = {
-        name: dict(zip(neighbor_types, model.range_heads.log_r0_prior.exp().tolist()))
-        for name in model.range_heads.channel_names
+        name: dict(zip(neighbor_types, model.range_heads.log_r0_prior[c].exp().tolist()))
+        for c, name in enumerate(model.range_heads.channel_names)
     }
     print(
         f"train/val = {len(train_idx)}/{len(val_idx)}; trainable params = {n_params}; "
         f"max_rank {config.unified.max_rank}; pair list to {model.cutoff_max} A "
-        f"(no fragment mask); r0 priors {r0_table['elst']} A, "
+        f"(no fragment mask); r0 priors {r0_table} A, "
         f"alpha init {config.unified.alpha_init} 1/A"
     )
 

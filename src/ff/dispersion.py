@@ -45,7 +45,7 @@ import torch
 import torch.nn as nn
 
 from ..features.features import LambdaFeatures
-from ..mlip.heads import mlp
+from ..mlip.heads import mlp, zero_init_readout
 from ..mlip.pair_heads import PairEnergyHead
 from ..mlip.switch import pairwise_switch
 from .damping import fermi_switch, tang_toennies
@@ -185,9 +185,7 @@ class DispersionParameterHeads(nn.Module):
         self.b_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_b else None
         for m in (self.c6_mlp, self.b_mlp):
             if m is not None:   # start at exactly the per-species prior
-                with torch.no_grad():
-                    m[-1].weight.zero_()
-                    m[-1].bias.zero_()
+                zero_init_readout(m)
 
     def forward(
         self,

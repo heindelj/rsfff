@@ -38,7 +38,7 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 
-from .heads import mlp
+from .heads import mlp, zero_init_readout
 
 
 def _fragment_mean(x: torch.Tensor, fragment_idx: torch.Tensor, n_fragments: int):
@@ -97,9 +97,7 @@ class ReferenceEmbedding(nn.Module):
         # FiLM: [q0, 2S, N_a, composition pool (n_species)] -> (gamma, beta)
         self.film_mlp = mlp(3 + n_species, hidden, depth, 2 * emb_dim)
         for m in (self.q0_mlp, self.film_mlp):
-            with torch.no_grad():
-                m[-1].weight.zero_()
-                m[-1].bias.zero_()
+            zero_init_readout(m)
 
     def forward(
         self,

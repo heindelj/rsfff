@@ -33,7 +33,7 @@ import torch.nn as nn
 
 from ..features import FlatLambdaSOAPFeaturizer, LambdaFeatures
 from .eem import atomic_dipoles, charge_flow_polarizability, eem_charges, eem_energy
-from .heads import AtomicEnergyHead, mlp
+from .heads import AtomicEnergyHead, mlp, zero_init_readout
 from .response_heads import (
     AtomicAlphaHead,
     AtomicVectorHead,
@@ -77,9 +77,7 @@ class EEMParameterHeads(nn.Module):
         self.eta0_raw = nn.Parameter(torch.full((n_species,), raw.item()))
         self.eta_mlp = mlp(p0 + emb_dim, hidden, depth, 1)
         for m in (self.chi_mlp, self.eta_mlp):
-            with torch.no_grad():
-                m[-1].weight.zero_()
-                m[-1].bias.zero_()
+            zero_init_readout(m)
 
         self.chivec_head = AtomicVectorHead(
             p0, p1, emb_dim, hidden=hidden, depth=depth, equiv_channels=equiv_channels

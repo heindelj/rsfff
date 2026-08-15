@@ -992,3 +992,331 @@ def test_missing_partition_raises():
     batch.fragment_idx = None
     with pytest.raises(ValueError, match="fragment_idx"):
         model(batch)
+
+
+# ---------------------------------------------------------------------------
+# The environment residual's bootstrap, and what destroyed it
+# ---------------------------------------------------------------------------
+
+def test_environment_residual_hidden_layers_get_no_gradient_at_initialization():
+    """The hazard behind ``no_weight_decay``, pinned as a fact rather than a warning.
+
+    ``EnvironmentResidual``'s readout is zero-initialized, so every hidden layer's gradient is
+    proportional to it and is *exactly* zero on the first step -- there is nothing for weight
+    decay to compete with, and the block is destroyed rather than regularized (see
+    :func:`rsfff.train.term_loop.parameter_groups` for the measured collapse).
+
+    The readout itself is the escape: its gradient carries
+    ``hidden(x_full) - hidden(x_frag)``, which is nonzero at the random initialization the
+    hidden layers still hold. That is the whole bootstrap, and it only works if those layers
+    are left where they started.
+    """
+    model = make_model(environment=True)
+    randomize(model, scale=0.05, seed=3)      # wake the consumers, not the residual
+    with torch.no_grad():                     # ...but put the residual back at zero
+        for m in (model.environment.inv_mlp, model.environment.vec_gate,
+                  model.environment.equiv_gate):
+            m[-1].weight.zero_()
+            m[-1].bias.zero_()
+    positions, numbers, frag = water_cluster(3, seed=11)
+    model(make_batch(positions, numbers, frag)).energy.sum().backward()
+
+    inv = model.environment.inv_mlp
+    for k, layer in enumerate(inv[:-1]):
+        if hasattr(layer, "weight"):
+            assert float(layer.weight.grad.abs().max()) == 0.0, f"inv_mlp[{k}] gradient"
+    assert float(inv[-1].weight.grad.abs().max()) > 1e-9, (
+        "the readout has no gradient either, so nothing can bootstrap the block"
+    )
+
+
+def test_every_zero_initialized_readout_block_is_exempt_from_weight_decay():
+    """The blocks that cannot recover from weight decay are all exempt. Named, deliberately.
+
+    A parameter with **exactly zero** loss gradient at initialization has nothing competing
+    with weight decay, so decay does not regularize it, it deletes it. Many parameters are in
+    that position at step 0 -- with every readout at zero, even the featurizer's
+    ``channel_proj`` gets no gradient -- and most of them recover the instant the readouts move
+    (measured over a staged fit: ``channel_proj`` 3.14 -> 3.10, ``alpha_head.base_mlp``
+    2.67 -> 1.62, both healthy). So "zero gradient at init" is not the criterion.
+
+    The criterion is whether the block can *get back*, and a zero-initialized readout block
+    cannot: its own readout's gradient carries the hidden activations, so once decay has
+    flattened the hidden layers there is no signal left to regrow them. Those blocks lost the
+    race and went to zero -- see :func:`rsfff.mlip.heads.zero_init_readout` for the numbers and
+    for what each one silently stopped doing. This pins the exemption on the measured casualties
+    by name, because that list is the record of what went wrong.
+    """
+    from rsfff.train.term_loop import parameter_groups
+
+    model = make_model(environment=True)
+    exempt = {
+        id(p) for g in parameter_groups(model, 1.0e-4) if g["weight_decay"] == 0.0
+        for p in g["params"]
+    }
+    named = dict(model.named_parameters())
+    casualties = [
+        "environment.inv_mlp", "environment.vec_gate", "environment.equiv_gate",
+        "disp_params.c6_mlp", "pauli_params.q_mlp",
+        "response.compliance_head.net", "response.params.chi_mlp", "response.params.eta_mlp",
+        "response.params.chivec_head.gate_mlp", "response.params.chiquad_head.gate_mlp",
+        "pauli_params.dipole_head.gate_mlp", "pauli_params.quadrupole_head.gate_mlp",
+        "pair_head.trunk", "pair_head.readout", "pair_head.range_readout",
+    ]
+    for prefix in casualties:
+        block = [n for n in named if n.startswith(prefix + ".")]
+        assert block, f"{prefix} is not in this model; the list is stale"
+        missed = [n for n in block if id(named[n]) not in exempt]
+        assert not missed, f"{prefix} would still be decayed: {missed}"
+
+
+def test_per_species_tables_and_the_featurizer_still_see_weight_decay():
+    """The exemption is a scalpel, not a blanket. What recovers on its own keeps decaying."""
+    from rsfff.train.term_loop import parameter_groups
+
+    model = make_model(environment=True)
+    decayed = {
+        id(p) for g in parameter_groups(model, 1.0e-4) if g["weight_decay"] > 0.0
+        for p in g["params"]
+    }
+    named = dict(model.named_parameters())
+    for name in ("disp_params.d_log_c6", "response.params.chi0", "response.params.d_log_z",
+                 "response.params.alpha_head.base_mlp.0.weight", "featurizer.channel_proj"):
+        if name in named:
+            assert id(named[name]) in decayed, f"{name} should still be decayed"
+
+
+def test_parameter_groups_partition_every_trainable_parameter_exactly_once():
+    from rsfff.train.term_loop import parameter_groups
+
+    model = make_model(environment=True)
+    groups = parameter_groups(model, 1.0e-4)
+    ids = [id(p) for g in groups for p in g["params"]]
+    want = {id(p) for p in model.parameters() if p.requires_grad}
+    assert len(ids) == len(set(ids)) == len(want)
+    assert set(ids) == want
+    assert {g["weight_decay"] for g in groups} == {1.0e-4, 0.0}
+
+
+def test_weight_decay_still_reaches_the_parameters_that_do_get_gradient():
+    """The exemption is not a blanket opt-out: the per-species tables still decay."""
+    from rsfff.train.term_loop import parameter_groups
+
+    model = make_model(environment=True)
+    groups = parameter_groups(model, 1.0e-4)
+    decayed = {id(p) for g in groups if g["weight_decay"] > 0.0 for p in g["params"]}
+    for name in ("disp_params.d_log_c6", "response.params.chi0", "range_heads.log_r0_prior"):
+        p = dict(model.named_parameters()).get(name)
+        if p is not None:
+            assert id(p) in decayed, f"{name} should still be decayed"
+
+
+# ---------------------------------------------------------------------------
+# Per-channel range-separation priors
+# ---------------------------------------------------------------------------
+
+def test_dispersion_prior_is_higher_than_the_others_and_reaches_the_gate():
+    """The dispersion channel starts with a wider bonded exclusion than elst and pauli.
+
+    A per-channel prior is only meaningful if it reaches ``r0`` rather than being averaged
+    away, so this checks the ordering at both ends: the stored prior and the per-atom ``r0``
+    the model actually gates with.
+    """
+    from rsfff.ff.range_priors import CHANNEL_R0_PRIOR
+
+    assert "disp" in CHANNEL_R0_PRIOR
+    model = make_model()
+    prior = model.range_heads.log_r0_prior.exp()
+    assert prior.shape == (len(RANGE_CHANNELS), len(NEIGHBOR_TYPES))
+    d = RANGE_CHANNELS.index("disp")
+    for c, name in enumerate(RANGE_CHANNELS):
+        if name != "disp":
+            assert bool((prior[d] > prior[c]).all()), f"disp prior not above {name}"
+
+    positions, numbers, frag = water_cluster(2, seed=5)
+    out = model(make_batch(positions, numbers, frag))
+    # Per atom, not per set: r0(O) on the dispersion channel is 1.30 and r0(H) on the
+    # electrostatic one is 1.75, so the two *sets* interleave while every atom still moves up.
+    assert bool((out.r0["disp"] > out.r0["elst"]).all())
+    assert torch.allclose(out.log_r0_prior["disp"].exp(), out.r0["disp"])
+
+
+def test_intra_dispersion_leak_is_smaller_under_the_dispersion_prior():
+    """The point of the higher prior: less classical dispersion inside the bonded region.
+
+    Measured against the shared prior on the same geometry and the same ``C6``, so the only
+    difference is where the gate sits.
+    """
+    from rsfff.ff.range_priors import DEFAULT_R0_PRIOR, build_range_priors
+
+    positions, numbers, frag = water_cluster(3, seed=17)
+    batch = make_batch(positions, numbers, frag)
+
+    def leak(prior):
+        parts = build_parts(seed=0)
+        with torch.no_grad():
+            parts["range_heads"].log_r0_prior.copy_(prior)
+        out = make_model(parts)(batch)
+        return float(out.e_pair_ff["disp"][out.is_intra].sum())
+
+    shared = build_range_priors(NEIGHBOR_TYPES, r0_prior=DEFAULT_R0_PRIOR)
+    channelled = build_range_priors(NEIGHBOR_TYPES)
+    assert abs(leak(channelled)) < abs(leak(shared))
+    assert abs(leak(channelled)) < 1e-8
+
+
+def test_r0_barrier_is_one_sided_about_the_prior():
+    """The ``r0`` penalty is a floor, not a pull. Below the prior it must be exactly inert.
+
+    As an unbounded downward pull it drove the shared trunk's per-pair deviation to -0.42 on
+    intra and inter pairs alike, opening the bonded dispersion gate to 0.999. Restricting it
+    to inter pairs did not help, because one trunk serves both.
+    """
+    from rsfff.train.config import Config
+    from rsfff.train.train_unified import AnchorTerms
+
+    model = make_model()
+    positions, numbers, frag = water_cluster(3, seed=23)
+    batch = make_batch(positions, numbers, frag)
+    cfg = Config()
+    cfg.unified.r0_weight = 1.0
+    for w in ("corr_l2_weight", "r0_spread_weight", "intra_classical_weight", "env_weight"):
+        setattr(cfg.unified, w, 0.0)
+    terms = AnchorTerms(model, None, "cpu")
+
+    at_prior = terms.penalties(model(batch), batch, cfg)
+    assert float(at_prior["r0"]) == 0.0
+
+    with torch.no_grad():   # push every r0 above its prior; the barrier must now bite
+        for name in RANGE_CHANNELS:
+            model.range_heads.d_log_r0[name].fill_(0.5)
+    above = terms.penalties(model(batch), batch, cfg)
+    assert float(above["r0"]) > 0.0
+
+    with torch.no_grad():   # ...and below it, inert again, with no gradient to follow
+        for name in RANGE_CHANNELS:
+            model.range_heads.d_log_r0[name].fill_(-0.5)
+    below = terms.penalties(model(batch), batch, cfg)
+    assert float(below["r0"]) == 0.0
+    assert below["r0"].grad_fn is not None      # still a live tensor, just a flat one
+
+
+# ---------------------------------------------------------------------------
+# Molecular polarizability: the response target
+# ---------------------------------------------------------------------------
+
+def test_polarizability_is_the_second_field_derivative_of_the_internal_energy():
+    """The definitional check, and the one that pins the unit conversion.
+
+    ``fragment_polarizability`` adds two sectors that are carried in *different* units --
+    ``alpha_flow`` in ``e^2 Angstrom^2 / Ha`` because ``sqe_solve`` works in Angstrom, and the
+    on-site ``alpha_i`` in ``a0^3`` because it multiplies a field conjugate to ``mu`` in
+    ``e*bohr``. A missing ``BOHR_ANG**2`` there is a factor of 3.6 that no symmetry, PSD or
+    rotation-covariance test would notice, so the claim is checked against what it means:
+    ``-d^2 E / dF dF`` of the fragment's own internal energy under a uniform field, by central
+    differences.
+    """
+    from rsfff.ff.pairs import intra_fragment_channels
+    from rsfff.ff.units import BOHR_ANG
+    from rsfff.mlip.sqe import atomic_dipole_energy, sqe_solve
+
+    model = randomize(make_model(), scale=0.05, seed=7)
+    positions, numbers, frag = water_cluster(2, seed=31)
+    batch = make_batch(positions, numbers, frag)
+    n_frag = int(batch.n_fragments)
+
+    feats = model._augment(model.featurizer(batch, frag), batch, frag)
+    rp = model.response.response_parameters(batch, feats)
+    bond_index, bond_batch = intra_fragment_channels(frag)
+
+    def energy(field):
+        """Fragment internal energy under a uniform field, in Hartree.
+
+        The two sectors take the *same physical field* in different units: ``sqe_solve``
+        contracts it with positions in Angstrom, the dipole sector with ``mu`` in ``e*bohr``.
+        """
+        sol = sqe_solve(
+            rp.chi, rp.eta, rp.compliance, rp.q0, positions, bond_index, frag,
+            bond_batch, n_frag, field=field, with_polarizability=False,
+        )
+        return sol.energy + atomic_dipole_energy(
+            rp.chivec, rp.alpha, frag, n_frag, field * BOHR_ANG
+        )
+
+    h = 1.0e-4
+    zero = torch.zeros(n_frag, 3, dtype=positions.dtype)
+    fd = torch.zeros(n_frag, 3, 3, dtype=positions.dtype)
+    for a in range(3):
+        for b in range(3):
+            def shift(sa, sb):
+                f = zero.clone()
+                f[:, a] += sa * h
+                f[:, b] += sb * h
+                return energy(f)
+            fd[:, a, b] = -(
+                shift(1, 1) - shift(1, -1) - shift(-1, 1) + shift(-1, -1)
+            ) / (4 * h * h)
+
+    out = model(batch, with_polarizability=True)
+    assert out.polarizability.shape == (n_frag, 3, 3)
+    assert torch.allclose(out.polarizability, fd, atol=1e-6, rtol=1e-6)
+
+
+def test_polarizability_is_symmetric_positive_semidefinite_and_rotation_covariant():
+    model = randomize(make_model(), scale=0.05, seed=9)
+    positions, numbers, frag = water_cluster(2, seed=37)
+    a = model(make_batch(positions, numbers, frag), with_polarizability=True).polarizability
+    assert torch.allclose(a, a.transpose(-1, -2), atol=1e-12)
+    assert float(torch.linalg.eigvalsh(a).min()) > -1e-12
+
+    rot = torch.linalg.qr(torch.randn(3, 3, generator=torch.Generator().manual_seed(4)))[0]
+    rot = rot * torch.sign(torch.det(rot))
+    b = model(
+        make_batch(positions @ rot.T, numbers, frag), with_polarizability=True
+    ).polarizability
+    assert torch.allclose(b, rot @ a @ rot.T, atol=1e-8)
+
+
+def test_polarizability_is_not_computed_unless_asked_for():
+    model = make_model()
+    positions, numbers, frag = water_cluster(2, seed=41)
+    assert model(make_batch(positions, numbers, frag)).polarizability is None
+
+
+def test_polarizability_loss_is_zero_at_the_label_and_refuses_clusters():
+    from rsfff.train.loss import fragment_polarizability_loss
+
+    model = randomize(make_model(), scale=0.05, seed=13)
+    positions, numbers, frag = water_cluster(1, seed=43)
+    batch = make_batch(positions, numbers, frag)
+    out = model(batch, with_polarizability=True)
+
+    batch.polarizability = out.polarizability.detach().clone()
+    terms, metrics = fragment_polarizability_loss(batch=batch, out=out, weight=1.0)
+    assert float(terms["alpha"]) == pytest.approx(0.0, abs=1e-20)
+    assert metrics["alpha_mae"] == pytest.approx(0.0, abs=1e-12)
+
+    batch.polarizability = batch.polarizability + 0.5      # one scale off, every component
+    terms, _ = fragment_polarizability_loss(batch=batch, out=out, weight=1.0, scale=0.5)
+    assert float(terms["alpha"]) == pytest.approx(9.0)     # nine components, 1.0 each
+
+    # A cluster label is a different quantity; summing isolated fragments would fit the wrong
+    # thing, so it raises rather than doing it quietly.
+    positions, numbers, frag = water_cluster(3, seed=47)
+    cluster = make_batch(positions, numbers, frag)
+    cluster.polarizability = torch.zeros(1, 3, 3, dtype=positions.dtype)
+    with pytest.raises(ValueError, match="not the sum of its fragments"):
+        fragment_polarizability_loss(
+            out=model(cluster, with_polarizability=True), batch=cluster, weight=1.0
+        )
+
+
+def test_polarizability_weight_zero_costs_nothing():
+    from rsfff.train.loss import fragment_polarizability_loss
+
+    model = make_model()
+    positions, numbers, frag = water_cluster(1, seed=51)
+    batch = make_batch(positions, numbers, frag)
+    out = model(batch, with_polarizability=True)
+    batch.polarizability = torch.zeros(1, 3, 3, dtype=positions.dtype)
+    assert fragment_polarizability_loss(out=out, batch=batch, weight=0.0) == ({}, {})

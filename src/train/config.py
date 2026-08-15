@@ -299,6 +299,13 @@ class ElectrostaticsConfig:
     dipole_scale: float = 0.05          # e*a0; monomer dipoles run ~0.75
     quadrupole_scale: float = 0.2       # e*a0^2; Buckingham components of order 1
     fragment_multipole_weight: float = 0.0
+    # Molecular polarizability of each anchor monomer, from a Q-Chem
+    # `JOBTYPE = polarizability` job (scripts/parse_polarizability.py). The only label in the
+    # fit that says how the charges and dipoles *move* rather than where they sit -- see
+    # `rsfff.train.loss.fragment_polarizability_loss`. Requires one fragment per frame, which
+    # the monomer anchor satisfies and nothing else does.
+    polarizability_weight: float = 0.0
+    polarizability_scale: float = 0.5   # e^2*Ang^2/Ha ~ 0.18 a0^3; monomer alpha runs ~9.9
 
 
 @dataclass
