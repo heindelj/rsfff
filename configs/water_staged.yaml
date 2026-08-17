@@ -184,8 +184,8 @@ elec:
   learn_b: true
   environment_b: false
   s_init: 0.5
-  emb_dim: 16
-  hidden: 64
+  emb_dim: 8
+  hidden: 32
   depth: 2
   equiv_channels: 32
   # Frozen-monomer multipoles on the anchor. These pin q/mu/Theta themselves; the fragment
@@ -203,8 +203,8 @@ dispersion:
   environment_c6: true
   learn_b: true
   environment_b: false
-  emb_dim: 16
-  hidden: 64
+  emb_dim: 8
+  hidden: 32
   depth: 2
 
 pauli:
@@ -214,8 +214,8 @@ pauli:
   environment_b: false
   learn_dipole: true
   learn_quadrupole: true
-  emb_dim: 16
-  hidden: 64
+  emb_dim: 8
+  hidden: 32
   depth: 2
   equiv_channels: 32
 
@@ -254,7 +254,7 @@ stages:
 
   - name: ct
     train:
-      epochs: 40
+      epochs: 50
     unified:
       polarization: true
       charge_transfer: true

@@ -10,8 +10,8 @@ REMOTE="${REMOTE:-perlmutter}"
 REMOTE_DIR="${REMOTE_DIR:?Set REMOTE_DIR to the absolute qchem_roundtrip path on Perlmutter}"
 
 rsync -av \
-    --include='/*/' \
-    --include='/*/outputs/***' \
+    --include='/**/' \
+    --include='/**/outputs/***' \
     --exclude='*' \
     "$REMOTE:$REMOTE_DIR/" \
     "$ROUNDTRIP_ROOT/"

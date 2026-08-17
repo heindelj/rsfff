@@ -29,13 +29,6 @@
         "mode": "plain"
       }
     },
-    "aimd_eda": {
-      "priority": 20,
-      "template": "templates/eda.in",
-      "molecule": {
-        "mode": "fragments"
-      }
-    },
     "eda": {
       "priority": 20,
       "template": "templates/eda.in",

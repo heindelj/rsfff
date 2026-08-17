@@ -1,9 +1,9 @@
-*/geoms/*
-*/inputs/*
-*/outputs/*
-*/state/*
+**/geoms/*
+**/inputs/*
+**/outputs/*
+**/state/*
 *.error
 *.stdout
-!*/geoms/.gitkeep
-!*/inputs/.gitkeep
-!*/outputs/.gitkeep
+!**/geoms/.gitkeep
+!**/inputs/.gitkeep
+!**/outputs/.gitkeep

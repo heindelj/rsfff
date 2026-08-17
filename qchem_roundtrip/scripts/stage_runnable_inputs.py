@@ -42,11 +42,10 @@ def stage_tree(root: Path, dest: Path) -> tuple[int, int]:
 
     n_inputs = 0
     n_skipped = 0
-    for calc_dir in sorted(path for path in root.iterdir() if path.is_dir()):
-        inputs_dir = calc_dir / "inputs"
-        if not inputs_dir.is_dir():
-            continue
-        staged_inputs = dest / calc_dir.name / "inputs"
+    for inputs_dir in sorted(path for path in root.rglob("inputs") if path.is_dir()):
+        calc_dir = inputs_dir.parent
+        rel_inputs = inputs_dir.relative_to(root)
+        staged_inputs = dest / rel_inputs
         staged_inputs.mkdir(parents=True, exist_ok=True)
         for keep in inputs_dir.glob(".gitkeep"):
             copy_file(keep, staged_inputs / keep.name)

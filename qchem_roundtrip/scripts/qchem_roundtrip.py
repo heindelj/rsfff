@@ -59,6 +59,17 @@ class AIMDFrame:
     coords: list[tuple[float, float, float]]
 
 
+@dataclass(frozen=True)
+class FragmentAssignment:
+    rank: int
+    charge_fragment: int
+    fragment_idx: list[int]
+    fragment_charges: list[int]
+    fragment_multiplicities: list[int]
+    total_distance: float
+    excess_distance: float
+
+
 class RoundtripError(RuntimeError):
     """Raised when the round-trip configuration or data is malformed."""
 
@@ -100,6 +111,16 @@ def ensure_layout(root: Path, cfg: dict[str, Any]) -> None:
             "state/failed",
         ):
             (calc_dir / rel).mkdir(parents=True, exist_ok=True)
+
+
+def ensure_job_layout(job_dir: Path) -> None:
+    for rel in ("inputs", "outputs", "state/generated", "state/locks", "state/done", "state/failed"):
+        (job_dir / rel).mkdir(parents=True, exist_ok=True)
+
+
+def job_dirs_for_calculation(calc_dir: Path) -> list[Path]:
+    job_dirs = [inputs_dir.parent for inputs_dir in calc_dir.rglob("inputs") if inputs_dir.is_dir()]
+    return sorted(set(job_dirs), key=lambda path: path.relative_to(calc_dir).parts)
 
 
 def geometry_files(geom_dir: Path) -> list[Path]:
@@ -330,6 +351,10 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     atomic_write(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
 def frame_metadata_summary(frame: XYZFrame) -> dict[str, str]:
     keys = (
         "charge",
@@ -477,29 +502,194 @@ def charge_assignments(total_charge: int, n_fragments: int) -> list[tuple[str, l
     ]
 
 
+def h_counts_for_charge_state(total_charge: int, n_oxygen: int, charge_fragment: int, n_hydrogen: int) -> list[int]:
+    counts = [2] * n_oxygen
+    if total_charge > 0:
+        counts[charge_fragment] += abs(total_charge)
+    elif total_charge < 0:
+        counts[charge_fragment] -= abs(total_charge)
+    if any(count < 0 for count in counts) or sum(counts) != n_hydrogen:
+        raise RoundtripError(
+            "cannot infer O-H fragment counts from charge, oxygen count, and hydrogen count "
+            f"(charge={total_charge}, n_oxygen={n_oxygen}, n_hydrogen={n_hydrogen})"
+        )
+    return counts
+
+
+def minimized_oh_assignment(
+    symbols: list[str],
+    coords: list[tuple[float, float, float]],
+    h_counts: list[int],
+) -> tuple[list[int], float]:
+    oxygen_indices = [idx for idx, sym in enumerate(symbols) if sym.upper() == "O"]
+    hydrogen_indices = [idx for idx, sym in enumerate(symbols) if sym.upper() == "H"]
+    if len(oxygen_indices) != len(h_counts):
+        raise RoundtripError("number of oxygen atoms does not match fragment count")
+    if sum(h_counts) != len(hydrogen_indices):
+        raise RoundtripError("hydrogen assignment capacities do not sum to hydrogen count")
+
+    pair_dist = {
+        (h_pos, o_pos): distance(coords[h_idx], coords[o_idx])
+        for h_pos, h_idx in enumerate(hydrogen_indices)
+        for o_pos, o_idx in enumerate(oxygen_indices)
+    }
+    # These clusters are small enough to solve the O-H distance objective exactly;
+    # the ordering only improves pruning and does not affect the optimum.
+    h_order = sorted(
+        range(len(hydrogen_indices)),
+        key=lambda h_pos: sorted(pair_dist[(h_pos, o_pos)] for o_pos in range(len(oxygen_indices)))[1]
+        - sorted(pair_dist[(h_pos, o_pos)] for o_pos in range(len(oxygen_indices)))[0]
+        if len(oxygen_indices) > 1
+        else 0.0,
+        reverse=True,
+    )
+    best_cost = float("inf")
+    best_h_assignment: dict[int, int] = {}
+
+    def search(order_idx: int, remaining: list[int], current: dict[int, int], cost: float) -> None:
+        nonlocal best_cost, best_h_assignment
+        if cost >= best_cost:
+            return
+        if order_idx == len(h_order):
+            best_cost = cost
+            best_h_assignment = dict(current)
+            return
+        h_pos = h_order[order_idx]
+        oxygen_by_distance = sorted(range(len(oxygen_indices)), key=lambda o_pos: pair_dist[(h_pos, o_pos)])
+        for o_pos in oxygen_by_distance:
+            if remaining[o_pos] <= 0:
+                continue
+            remaining[o_pos] -= 1
+            current[h_pos] = o_pos
+            search(order_idx + 1, remaining, current, cost + pair_dist[(h_pos, o_pos)])
+            del current[h_pos]
+            remaining[o_pos] += 1
+
+    search(0, list(h_counts), {}, 0.0)
+    if not best_h_assignment:
+        raise RoundtripError("could not assign hydrogens to oxygen fragments")
+
+    fragment_idx = [-1] * len(symbols)
+    for o_pos, atom_idx in enumerate(oxygen_indices):
+        fragment_idx[atom_idx] = o_pos
+    for h_pos, atom_idx in enumerate(hydrogen_indices):
+        fragment_idx[atom_idx] = best_h_assignment[h_pos]
+    if any(idx < 0 for idx in fragment_idx):
+        raise RoundtripError("AIMD EDA harvesting currently supports O/H clusters only")
+    return fragment_idx, best_cost
+
+
+def rank_oh_fragment_assignments(
+    symbols: list[str],
+    coords: list[tuple[float, float, float]],
+    total_charge: int,
+    fragment_multiplicities: list[int] | None = None,
+) -> list[FragmentAssignment]:
+    n_oxygen = sum(1 for sym in symbols if sym.upper() == "O")
+    n_hydrogen = sum(1 for sym in symbols if sym.upper() == "H")
+    if n_oxygen == 0:
+        raise RoundtripError("AIMD EDA harvesting requires at least one oxygen atom")
+    if n_oxygen + n_hydrogen != len(symbols):
+        raise RoundtripError("AIMD EDA harvesting currently supports O/H clusters only")
+    fragment_mults = fragment_multiplicities or [1] * n_oxygen
+    if len(fragment_mults) != n_oxygen:
+        raise RoundtripError("fragment multiplicity count does not match oxygen count")
+
+    assignments = []
+    for charge_fragment in range(n_oxygen):
+        counts = h_counts_for_charge_state(total_charge, n_oxygen, charge_fragment, n_hydrogen)
+        fragment_idx, total_distance = minimized_oh_assignment(symbols, coords, counts)
+        fragment_charges = [0] * n_oxygen
+        fragment_charges[charge_fragment] = total_charge
+        assignments.append((charge_fragment, fragment_idx, fragment_charges, total_distance))
+    assignments.sort(key=lambda item: (item[3], item[0]))
+    best = assignments[0][3]
+    return [
+        FragmentAssignment(
+            rank=rank,
+            charge_fragment=charge_fragment,
+            fragment_idx=fragment_idx,
+            fragment_charges=fragment_charges,
+            fragment_multiplicities=fragment_mults,
+            total_distance=total_distance,
+            excess_distance=total_distance - best,
+        )
+        for rank, (charge_fragment, fragment_idx, fragment_charges, total_distance) in enumerate(assignments)
+    ]
+
+
+def assignment_signature(assignment: FragmentAssignment) -> str:
+    groups: list[list[int]] = [[] for _ in assignment.fragment_charges]
+    for atom_idx, frag_idx in enumerate(assignment.fragment_idx):
+        groups[frag_idx].append(atom_idx)
+    return "|".join(",".join(str(idx) for idx in group) for group in groups)
+
+
 def harvested_frame_molecule(
     aimd_frame: AIMDFrame,
-    source_frame: XYZFrame,
     total_charge: int,
     total_mult: int,
-    fragment_charges: list[int],
-    fragment_mults: list[int],
+    assignment: FragmentAssignment,
 ) -> XYZFrame:
     info = {
         "charge": str(total_charge),
         "multiplicity": str(total_mult),
-        "n_fragments": str(len(fragment_charges)),
-        "fragment_charges": " ".join(str(v) for v in fragment_charges),
-        "fragment_multiplicities": " ".join(str(v) for v in fragment_mults),
+        "n_fragments": str(len(assignment.fragment_charges)),
+        "fragment_charges": " ".join(str(v) for v in assignment.fragment_charges),
+        "fragment_multiplicities": " ".join(str(v) for v in assignment.fragment_multiplicities),
     }
     return XYZFrame(
         symbols=aimd_frame.symbols,
         coords=aimd_frame.coords,
         comment="",
         info=info,
-        fragment_idx=source_frame.fragment_idx,
+        fragment_idx=assignment.fragment_idx,
         index=aimd_frame.ordinal,
     )
+
+
+def aimd_structure_label(stem: str, total_charge: int) -> str:
+    charge_suffix = "+" if total_charge > 0 else "-" if total_charge < 0 else ""
+    if stem.startswith("h3o"):
+        base = f"H3O{charge_suffix}"
+        waters = stem.removeprefix("h3o")
+    elif stem.startswith("oh"):
+        base = f"OH{charge_suffix}"
+        waters = stem.removeprefix("oh")
+    else:
+        base = f"{stem}{charge_suffix}"
+        waters = ""
+    waters = waters.lstrip("_")
+    return f"{waters}_{base}" if waters else base
+
+
+def summarize_harvest(assignments_by_label: dict[str, list[FragmentAssignment]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for label, assignments in assignments_by_label.items():
+        by_rank: dict[int, list[FragmentAssignment]] = {}
+        for assignment in assignments:
+            by_rank.setdefault(assignment.rank, []).append(assignment)
+        rank_summary = {}
+        for rank, rank_assignments in sorted(by_rank.items()):
+            excess = [item.excess_distance for item in rank_assignments]
+            charge_counts: dict[str, int] = {}
+            signature_counts: dict[str, int] = {}
+            for item in rank_assignments:
+                charge_counts[str(item.charge_fragment)] = charge_counts.get(str(item.charge_fragment), 0) + 1
+                sig = assignment_signature(item)
+                signature_counts[sig] = signature_counts.get(sig, 0) + 1
+            rank_summary[str(rank)] = {
+                "n": len(rank_assignments),
+                "excess_distance_min": min(excess),
+                "excess_distance_mean": sum(excess) / len(excess),
+                "excess_distance_max": max(excess),
+                "charge_fragment_counts": charge_counts,
+                "top_assignment_signatures": sorted(
+                    signature_counts.items(), key=lambda item: (-item[1], item[0])
+                )[:10],
+            }
+        summary[label] = rank_summary
+    return summary
 
 
 def harvest_aimd_outputs(
@@ -507,7 +697,7 @@ def harvest_aimd_outputs(
     cfg: dict[str, Any],
     *,
     source_calculation: str = "aimd",
-    dest_calculation: str = "aimd_eda",
+    dest_calculation: str = "eda",
     stride: int = 50,
     overwrite: bool = False,
 ) -> tuple[int, int]:
@@ -523,35 +713,44 @@ def harvest_aimd_outputs(
     template = template_path.read_text()
     n_frames = 0
     n_inputs = 0
+    summary_items: dict[str, list[FragmentAssignment]] = {}
     for output_path in sorted((source_dir / "outputs").glob("*.out")):
         source_frame = source_frame_for_aimd_output(root, source_calculation, output_path)
         total_charge = required_int(source_frame, "charge", output_path)
         total_mult = required_int(source_frame, "multiplicity", output_path)
-        if source_frame.fragment_idx is None:
-            raise RoundtripError(f"{output_path}: source frame has no fragment_idx")
-        fragment_ids = sorted(set(source_frame.fragment_idx))
-        if fragment_ids != list(range(len(fragment_ids))):
-            raise RoundtripError(f"{output_path}: fragment_idx values must be contiguous from 0")
-        fragment_mults = fragment_multiplicities_for(source_frame, output_path, len(fragment_ids))
+        label = aimd_structure_label(output_path.stem, total_charge)
+        job_dir = dest_dir / label
+        ensure_job_layout(job_dir)
+        source_fragment_mults = None
+        if source_frame.fragment_idx is not None:
+            fragment_ids = sorted(set(source_frame.fragment_idx))
+            if fragment_ids == list(range(len(fragment_ids))):
+                source_fragment_mults = fragment_multiplicities_for(source_frame, output_path, len(fragment_ids))
         for aimd_frame in parse_aimd_output(output_path):
             if aimd_frame.ordinal % stride != 0:
                 continue
             if len(aimd_frame.symbols) != len(source_frame.symbols):
                 raise RoundtripError(f"{output_path}: AIMD frame atom count differs from starting geometry")
             n_frames += 1
-            for assignment_name, fragment_charges in charge_assignments(total_charge, len(fragment_ids)):
-                input_stem = f"{output_path.stem}_step{aimd_frame.step:05d}_frame{aimd_frame.ordinal:05d}_{assignment_name}"
-                input_path = dest_dir / "inputs" / f"{input_stem}.in"
-                marker_path = dest_dir / "state" / "generated" / f"{input_stem}.json"
+            assignments = rank_oh_fragment_assignments(
+                aimd_frame.symbols,
+                aimd_frame.coords,
+                total_charge,
+                source_fragment_mults,
+            )
+            summary_items.setdefault(label, []).extend(assignments)
+            for assignment in assignments:
+                assignment_name = f"state{assignment.rank:02d}_qfrag{assignment.charge_fragment}"
+                input_stem = f"{label}_step{aimd_frame.step:05d}_frame{aimd_frame.ordinal:05d}_{assignment_name}"
+                input_path = job_dir / "inputs" / f"{input_stem}.in"
+                marker_path = job_dir / "state" / "generated" / f"{input_stem}.json"
                 if input_path.exists() and not overwrite:
                     continue
                 harvested_frame = harvested_frame_molecule(
                     aimd_frame,
-                    source_frame,
                     total_charge,
                     total_mult,
-                    fragment_charges,
-                    fragment_mults,
+                    assignment,
                 )
                 molecule = build_fragmented_molecule(harvested_frame, output_path)
                 atomic_write(input_path, replace_molecule_block(template, molecule))
@@ -564,12 +763,20 @@ def harvest_aimd_outputs(
                         "step": aimd_frame.step,
                         "frame_ordinal": aimd_frame.ordinal,
                         "assignment": assignment_name,
-                        "fragment_charges": fragment_charges,
-                        "fragment_multiplicities": fragment_mults,
+                        "rank": assignment.rank,
+                        "charge_fragment": assignment.charge_fragment,
+                        "fragment_charges": assignment.fragment_charges,
+                        "fragment_multiplicities": assignment.fragment_multiplicities,
+                        "total_distance": assignment.total_distance,
+                        "excess_distance": assignment.excess_distance,
+                        "assignment_signature": assignment_signature(assignment),
                         "generated_at": time.time(),
                     },
                 )
                 n_inputs += 1
+    for label, label_summary in summarize_harvest(summary_items).items():
+        summary_path = dest_dir / label / "state" / "harvest_summary.json"
+        write_json_atomic(summary_path, label_summary)
     return n_frames, n_inputs
 
 
@@ -599,32 +806,35 @@ def claim_next_job(root: Path, cfg: dict[str, Any], *, stale_lock_seconds: int =
         if not calc_cfg.get("enabled", True):
             continue
         calc_dir = root / calc_name
-        for input_path in sorted((calc_dir / "inputs").glob("*.in")):
-            stem = input_path.stem
-            output_path = calc_dir / "outputs" / f"{stem}.out"
-            done_marker = calc_dir / "state" / "done" / f"{stem}.json"
-            failed_marker = calc_dir / "state" / "failed" / f"{stem}.json"
-            lock_dir = calc_dir / "state" / "locks" / f"{stem}.lock"
-            if output_path.exists() or done_marker.exists() or failed_marker.exists():
-                continue
-            if lock_dir.exists() and lock_is_stale(lock_dir, stale_lock_seconds):
-                remove_lock(lock_dir)
-            try:
-                lock_dir.mkdir()
-            except FileExistsError:
-                continue
-            write_json_atomic(
-                lock_dir / "claim.json",
-                {
-                    "calculation": calc_name,
-                    "input": str(input_path),
-                    "output": str(output_path),
-                    "claimed_at": time.time(),
-                    "hostname": os.uname().nodename,
-                    "pid": os.getpid(),
-                },
-            )
-            return ClaimedJob(calc_name, calc_dir, input_path, output_path, lock_dir)
+        for job_dir in job_dirs_for_calculation(calc_dir):
+            ensure_job_layout(job_dir)
+            for input_path in sorted((job_dir / "inputs").glob("*.in")):
+                stem = input_path.stem
+                output_path = job_dir / "outputs" / f"{stem}.out"
+                done_marker = job_dir / "state" / "done" / f"{stem}.json"
+                failed_marker = job_dir / "state" / "failed" / f"{stem}.json"
+                lock_dir = job_dir / "state" / "locks" / f"{stem}.lock"
+                if output_path.exists() or done_marker.exists() or failed_marker.exists():
+                    continue
+                if lock_dir.exists() and lock_is_stale(lock_dir, stale_lock_seconds):
+                    remove_lock(lock_dir)
+                try:
+                    lock_dir.mkdir()
+                except FileExistsError:
+                    continue
+                write_json_atomic(
+                    lock_dir / "claim.json",
+                    {
+                        "calculation": calc_name,
+                        "job_dir": str(job_dir),
+                        "input": str(input_path),
+                        "output": str(output_path),
+                        "claimed_at": time.time(),
+                        "hostname": os.uname().nodename,
+                        "pid": os.getpid(),
+                    },
+                )
+                return ClaimedJob(calc_name, job_dir, input_path, output_path, lock_dir)
     return None
 
 
@@ -718,7 +928,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     harvest = sub.add_parser("harvest-aimd", help="Harvest AIMD frames into fragmented EDA inputs.")
     harvest.add_argument("--source-calculation", default="aimd")
-    harvest.add_argument("--dest-calculation", default="aimd_eda")
+    harvest.add_argument("--dest-calculation", default="eda")
     harvest.add_argument("--stride", type=int, default=50)
     harvest.add_argument("--overwrite", action="store_true")
     harvest.set_defaults(func=cmd_harvest_aimd)

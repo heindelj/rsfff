@@ -136,7 +136,8 @@ python3 scripts/qchem_roundtrip.py \
 ```
 
 After AIMD outputs are present in `aimd/outputs/`, harvest every 50th parsed
-AIMD frame into the `aimd_eda/inputs/` pool:
+AIMD frame into per-structure EDA job folders such as `eda/H3O+/inputs/`,
+`eda/w1_H3O+/inputs/`, and `eda/w2_H3O+/inputs/`:
 
 ```bash
 bash scripts/harvest_aimd.sh
@@ -150,14 +151,18 @@ python3 scripts/qchem_roundtrip.py \
   --config config.json \
   harvest-aimd \
   --source-calculation aimd \
-  --dest-calculation aimd_eda \
+  --dest-calculation eda \
   --stride 50
 ```
 
 For a charged cluster with multiple molecular groups, the harvester creates one
-EDA input for each possible assignment of the total charge to a group. For
-example, an `H3O+(H2O)` AIMD frame produces both `H3O+/H2O` and `H2O/H3O+`
-fragment-charge assignments.
+EDA input for each possible assignment of the total charge to a group. For each
+charge placement, hydrogen atoms are assigned to oxygen fragments by minimizing
+the sum of O-H distances subject to the expected fragment stoichiometries. The
+states are ranked by the resulting distance sum, so an `H3O+(H2O)` AIMD frame
+gets two ranked EDA inputs and an `H3O+(H2O)2` frame gets three. Each structure
+folder also gets `state/harvest_summary.json` with excess-distance statistics
+and the most common atom-index signatures.
 
 ## Rsync Setup
 
@@ -195,9 +200,10 @@ If you generate inputs locally, push the bundle plus `inputs/`:
 bash qchem_roundtrip/scripts/sync_inputs_up.sh
 ```
 
-By default this stages and uploads only locally runnable inputs. An input is
-considered already handled when a matching local `outputs/<stem>.out`,
-`state/done/<stem>.json`, or `state/failed/<stem>.json` exists. To force the old
+By default this stages and uploads only locally runnable inputs, including
+nested EDA job folders. An input is considered already handled when a matching
+local `outputs/<stem>.out`, `state/done/<stem>.json`, or
+`state/failed/<stem>.json` exists in the same job folder. To force the old
 behavior and upload every input, set `SYNC_COMPLETED_INPUTS=1`.
 
 If completed inputs were uploaded earlier, clean the remote `inputs/` folders

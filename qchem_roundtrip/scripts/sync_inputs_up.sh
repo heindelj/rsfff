@@ -14,7 +14,7 @@ SYNC_DELETE_STALE_INPUTS="${SYNC_DELETE_STALE_INPUTS:-0}"
 
 SOURCE_ROOT="$ROUNDTRIP_ROOT"
 STAGING_DIR=""
-RSYNC_DELETE_ARGS=()
+RSYNC_DELETE_ARG=""
 
 cleanup() {
     if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
@@ -34,20 +34,20 @@ else
 fi
 
 if [ "$SYNC_DELETE_STALE_INPUTS" = "1" ]; then
-    RSYNC_DELETE_ARGS=(--delete)
+    RSYNC_DELETE_ARG="--delete"
     echo "[sync-inputs-up] SYNC_DELETE_STALE_INPUTS=1; deleting remote input files absent from the staged upload."
 fi
 
 rsync -av \
-    "${RSYNC_DELETE_ARGS[@]}" \
+    $RSYNC_DELETE_ARG \
     --rsync-path="mkdir -p $REMOTE_DIR_QUOTED && rsync" \
     --include='/config.json' \
     --include='/README.md' \
     --include='/templates/***' \
     --include='/scripts/***' \
     --include='/aimd/geoms/***' \
-    --include='/*/' \
-    --include='/*/inputs/***' \
+    --include='/**/' \
+    --include='/**/inputs/***' \
     --exclude='*' \
     "$SOURCE_ROOT/" \
     "$REMOTE:$REMOTE_DIR/"
