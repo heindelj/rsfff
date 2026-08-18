@@ -537,6 +537,91 @@ class UnifiedConfig:
     #: 0.1 it starts at -7.1. Softplus is unbounded, so this sets where the head starts
     #: looking rather than any ceiling.
     ct_compliance_scale: float = 0.1
+    #: A compliance head of its own for the radius-derived charge-transfer channels, leaving
+    #: the intra-fragment one to the frozen head. Two reasons, and the first is the reason it
+    #: is on by default: with ``freeze_frozen_level`` the frozen compliance head stops
+    #: training, and CT would otherwise have no way left to decide which channels to open.
+    #: Second, one head serving both channel populations was an entanglement anyway -- a
+    #: covalent O-H and a hydrogen bond are not the same object, and the ``ct_compliance_scale``
+    #: prefactor above exists precisely because the shared head cannot tell them apart.
+    separate_ct_compliance: bool = True
+    #: A bond channel for pairs that **cross** a fragment boundary, active only at the
+    #: charge-transfer level.
+    #:
+    #: This is what CT gets in exchange for ``h_frag -> h_env`` moving to ``pol``, and it is
+    #: the better trade: a feature-stream swap is polarization by construction (the
+    #: surroundings changing a bond's energy), while a bond that spans two fragments is
+    #: exactly the constraint CT lifts and nothing below it can express. Below the CT level
+    #: an inter-pair bond term would be a second, unlabeled copy of the electrostatic
+    #: correction; at the CT level it is the *only* inter-pair correction ``ct`` has, since
+    #: ``interaction_corr["ct"]`` was intra-only and everything inter came from the solve.
+    #:
+    #: It shares the usual ``ff``/``corr`` degeneracy with ``interaction_ff["ct"]``, the same
+    #: shape as ``pol_ff`` against ``pol_corr``. Watch the split, not ``ct_mae``: ``q_ct``
+    #: going to zero while ``ct_mae`` stays low means the compliance head closed every channel
+    #: and this correction is carrying the whole term.
+    ct_bond: bool = True
+    #: Output scale for that channel, Hartree. Deliberately **not** ``bond_energy_scale``,
+    #: which is 0.2 Ha because it is sized for a covalent O-H (water's bonds are ~-0.37 Ha).
+    #: Reusing it across a hydrogen bond would give this readout a step about 60x the other
+    #: interaction corrections' for the same parameter change -- so it takes the interaction
+    #: corrections' scale, which is the size of the thing it is actually correcting.
+    ct_bond_energy_scale: float = 3.0e-3
+    #: Freeze the whole fragment-confined path -- ``featurizer.channel_proj``,
+    #: ``response.params`` and ``response.compliance_head`` -- at the values this stage warm
+    #: starts from. On for every stage after the first.
+    #:
+    #: The frozen level is a *fitted, labeled* object by the end of stage 1: one-body bias
+    #: 0.014 kJ/mol per fragment, monomer polarizability 9.904 a0^3 against a true 9.891. It
+    #: then has no label of its own at the higher stages, so nothing defends it -- and both
+    #: measurably collapsed, because the response heads are one shared function and the ``pol``
+    #: gradient arriving through ``h_env`` also reshapes their ``h_frag`` behaviour. Over
+    #: stages 2 and 3 the isolated-fragment internal energy swung by 62 then 109 kJ/mol
+    #: (leaving a per-fragment one-body offset of +2.511 then -0.627 that the bond head was
+    #: left chasing), and the monomer polarizability fell to 8.903 with its in-plane
+    #: eigenvalues down by 1.8 a0^3 each.
+    #:
+    #: None of that was necessary. ``h_env == h_frag`` *exactly* on an isolated fragment --
+    #: ``EnvironmentResidual`` is anchored as ``g(h_full) - g(h_frag)`` -- so ``pol`` and ``ct``
+    #: can be expressed entirely through ``g``, the coupled solve and the correction trunk,
+    #: leaving what an isolated fragment *is* alone. This makes them.
+    #:
+    #: Freezing the response heads alone is not enough and that is worth knowing before
+    #: shortening the list: reverting only ``response.params`` to its stage-1 values left the
+    #: internal energy at -230 kJ/mol against stage 1's -342, because ``featurizer.channel_proj``
+    #: had moved 22% and the same head weights were reading different features.
+    freeze_frozen_level: bool = False
+    #: Quadratic penalty on the drift of the isolated-fragment internal energy away from the
+    #: value this stage started at, measured on the monomer anchor and divided by
+    #: ``energy_scale`` like every other term.
+    #:
+    #: **With ``freeze_frozen_level`` on this is a completeness assertion, not a force**, and
+    #: that is how to read it: the internal energy is then a function of frozen parameters
+    #: alone, so ``d_internal`` logs an exact zero (measured 1e-15 kJ/mol on a smoke run) and
+    #: the penalty contributes nothing. A nonzero reading means some route into the frozen
+    #: level is *not* in ``_frozen_level_modules`` -- which is a real possibility worth
+    #: catching cheaply, since the anchor forward it rides on happens either way.
+    #:
+    #: It is also the fallback if the freeze is ever turned off: naming the quantity that must
+    #: not move is more robust than enumerating the parameters that could move it, and this
+    #: was measured at 62 and 109 kJ/mol over the two higher stages of the unfrozen fit.
+    #:
+    #: Leave at 0 for the first stage: there is no previous stage to anchor to, and anchoring
+    #: to an untrained split would be worse than not anchoring at all.
+    internal_drift_weight: float = 0.0
+    #: Weight on the **free-atom** polarizability anchor, against
+    #: ``data.atomic_reference_states``. Dimensionless, sharing ``elec.polarizability_scale``
+    #: with the molecular term so the two are directly comparable.
+    #:
+    #: A lone atom has an all-zero density, so the on-site polarizability head reduces to one
+    #: isotropic number per element and this anchor pins it *exactly* rather than nudging it.
+    #: That is the mechanism the Phase-1 monomer model had and the unified fit dropped, and it
+    #: matters more than it looks: ``alpha_flow`` is built from ``B^T R`` and therefore has no
+    #: component perpendicular to a planar molecule's nuclear plane, so the on-site sector has
+    #: to carry all of water's out-of-plane polarizability by itself.
+    #:
+    #: Neutral states only -- see :func:`rsfff.train.loss.free_atom_batch` for why.
+    free_alpha_weight: float = 0.0
     #: Conjugate-gradient tolerances for the coupled solve. ``cg_maxiter`` is a safety net,
     #: not a working limit -- with the uncoupled response as preconditioner a water cluster
     #: converges in 5-8 iterations, so a count that climbs is the early warning that the

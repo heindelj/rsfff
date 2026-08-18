@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import torch
 
+from .data import Batch
+
 
 def compute_forces(
     energy: torch.Tensor,
@@ -388,6 +390,89 @@ def fragment_polarizability_loss(
     terms["alpha"] = weight * err.pow(2).sum((-1, -2)).mean()
     metrics["alpha_mae"] = float(
         (pred - batch.polarizability).detach().abs().amax(dim=(-1, -2)).mean()
+    )
+    return terms, metrics
+
+
+def free_atom_batch(states, neighbor_types, *, dtype, device, neutral_only=True):
+    """One isolated atom per system, one system per selected reference state.
+
+    Separate *systems* rather than separate fragments of one system: the free-atom limit is
+    only exact when nothing else is in the neighbor list, and putting them in one frame would
+    leave ``h_env`` -- and so the Pauli and dispersion parameters -- reading a lattice of
+    atoms that is not what the label describes.
+
+    ``neutral_only`` because the charged states reach the model through
+    :class:`rsfff.ff.unified.FragmentStateEmbedding`, which is untested on this path and
+    identically zero on the neutral-singlet data this is fit against. It is also where the
+    reference data is weakest: at wB97M-V/def2-TZVPD H(-) binds by 0.05 eV against an
+    experimental 0.75, so its polarizability is largely a property of the most diffuse basis
+    function rather than of the anion.
+
+    Returns ``(batch, alpha_ref)`` or ``(None, None)`` when nothing is selected.
+    """
+    z_of_species = torch.as_tensor(list(neighbor_types), dtype=torch.long)
+    keep = [
+        i for i in range(len(states))
+        if (not neutral_only or float(states.charge[i]) == 0.0)
+        and bool(states.bound[i])
+    ]
+    if not keep:
+        return None, None
+    idx = torch.tensor(keep, dtype=torch.long)
+    n = len(keep)
+    batch = Batch(
+        positions=torch.zeros(n, 3, dtype=dtype, device=device),
+        atomic_numbers=z_of_species[states.species_idx[idx]].to(device),
+        batch_idx=torch.arange(n, device=device),
+        n_systems=n,
+        energy=None,
+        fragment_idx=torch.arange(n, device=device),
+        n_fragments=n,
+        fragment_charge=states.charge[idx].to(dtype=dtype, device=device),
+        fragment_two_s=states.two_s[idx].to(dtype=dtype, device=device),
+        fragment_to_batch=torch.arange(n, device=device),
+    )
+    return batch, states.alpha[idx].to(dtype=dtype, device=device)
+
+
+def free_atom_polarizability_loss(model, batch, alpha_ref, *, weight=0.0, scale=0.5):
+    """Pin the on-site polarizability head at its **exact** free-atom limit.
+
+    A lone atom has an all-zero SOAP density and no channel graph, so every route into the
+    polarizability collapses: ``chivec = 0`` (its equivariant features vanish), the
+    anisotropic part of ``alpha_i`` vanishes with them, and ``alpha_flow`` is empty for want
+    of a bond. What is left is ``alpha_i = softplus(a0_raw(0, emb)) + psd_floor`` -- one
+    isotropic number per element. Verified numerically: a free H and a free O come back as
+    exact multiples of the identity, and their ``E_internal``, charges and dipoles are all
+    identically zero.
+
+    That exactness is the point. This is not a soft nudge competing with the molecular
+    labels; it *fixes* the per-element value the head starts from, in the one configuration
+    where the head has nothing else to hide behind. It is the mechanism the Phase-1 monomer
+    model had (``free_alpha_weight`` in ``configs/monomer_h2o_h3o_oh.yaml``) and that the
+    unified fit dropped, which matters because the on-site sector has to supply the whole
+    out-of-plane polarizability of a planar molecule: ``alpha_flow`` is built from ``B^T R``
+    and has no component perpendicular to the nuclear plane at all.
+
+    No energy term accompanies it, deliberately. For a neutral free atom ``E_internal`` is
+    identically zero, so ``fragment_energy == E0`` by construction and an energy anchor would
+    be fitting an identity.
+
+    Same scale convention as :func:`fragment_polarizability_loss`, so the two weights are
+    comparable.
+    """
+    terms: dict[str, torch.Tensor] = {}
+    metrics: dict[str, float] = {}
+    if weight <= 0.0 or batch is None:
+        return terms, metrics
+    pred = model(batch, with_polarizability=True).polarizability
+    if pred is None:
+        return terms, metrics
+    err = (pred - alpha_ref) / scale
+    terms["free_alpha"] = weight * err.pow(2).sum((-1, -2)).mean()
+    metrics["free_alpha_mae"] = float(
+        (pred - alpha_ref).detach().abs().amax(dim=(-1, -2)).mean()
     )
     return terms, metrics
 

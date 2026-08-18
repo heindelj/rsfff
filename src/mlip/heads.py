@@ -24,6 +24,19 @@ def mlp(in_dim: int, hidden: int, depth: int, out_dim: int) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
+def exempt_from_weight_decay(module: nn.Module) -> nn.Module:
+    """Mark ``module`` so :func:`rsfff.train.term_loop.parameter_groups` gives it no decay.
+
+    The two callers are :func:`zero_init_readout`, for a block whose readout starts at zero, and
+    the equivariant heads, which flag *themselves* rather than only their gate. The distinction
+    matters and is the reason this is a separate function -- see the ``equiv_reduce`` entry in
+    :func:`zero_init_readout`'s docstring.
+    """
+    # Read by `rsfff.train.term_loop.parameter_groups`, which walks `model.modules()`.
+    module.no_weight_decay = True
+    return module
+
+
 def zero_init_readout(module: nn.Module, *, bias: bool = True) -> nn.Module:
     """Zero a block's readout **and** exempt the block from weight decay. Both, always.
 
@@ -55,10 +68,36 @@ def zero_init_readout(module: nn.Module, *, bias: bool = True) -> nn.Module:
     correction trunk) did so only because their readouts grow fast enough to beat the decay --
     it is a race, and nothing about the design says which blocks should win it.
 
-    So the two go together and this function is the only place either happens. What replaces
-    weight decay is the penalty that names the quantity it wants small -- ``env_weight`` on
-    ``||h_env - h_frag||``, ``r0_spread_weight`` on the range separation -- rather than the raw
-    weights of a block that is meant to start at zero.
+    So the two go together. What replaces weight decay is the penalty that names the quantity it
+    wants small -- ``env_weight`` on ``||h_env - h_frag||``, ``r0_spread_weight`` on the range
+    separation -- rather than the raw weights of a block that is meant to start at zero.
+
+    **A zero-init readout also poisons its non-exempt siblings, and that is a worse failure than
+    the race above.** Every equivariant head here is a zero-init invariant ``gate_mlp`` times a
+    learned channel reduction ``equiv_reduce`` of the lambda=1/2 features. Flagging only the
+    ``gate_mlp`` -- which is what this function used to do, since it is handed the MLP and not
+    the head -- leaves ``equiv_reduce`` decaying, and ``dL/d(equiv_reduce) ∝ gate == 0`` at
+    initialization. It is the same "no gradient, decay uncontested" story, but the two
+    parameters are now each other's only gradient path, so it is a **deadlock** rather than a
+    race: ``equiv_reduce -> 0`` makes the head's output identically zero, which zeroes the
+    gradient into ``gate_mlp``, which holds the gate at zero, which keeps ``equiv_reduce``'s
+    gradient at zero. Nothing recovers.
+
+    Measured on the same staged fit (``equiv_reduce`` norm, init ~5.66 -> frozen -> pol -> ct)::
+
+        cquad_axis_head.axis.equiv_reduce  0.0    0.0    0.0     deadlocked before epoch 1
+        response.alpha_head.equiv_reduce   0.712  0.970  0.176   polarizability anisotropy
+        pauli dipole_head.equiv_reduce     0.719  0.840  0.286   Pauli dipole anisotropy
+        pauli quadrupole_head.equiv_reduce 1.074  0.997  0.475
+        response.chivec_head.equiv_reduce  1.373  1.250  0.830
+        response.chiquad_head.equiv_reduce 1.646  1.737  1.061
+
+    ``cquad_axis_head`` lost outright: its ``gate_mlp`` readout was still *exactly* zero after
+    210 epochs, so ``anisotropic_cquad`` -- the whole reason that head exists -- never did
+    anything, and the fitted Buckingham quadrupole's out-of-plane component was a constant. The
+    others merely bled. The fix is :func:`exempt_from_weight_decay` on the **head**, which the
+    equivariant heads now call on themselves; this function stays the only place a readout is
+    zeroed.
 
     ``bias=False`` for a readout whose bias carries the block's initial value (a compliance
     head starting at ``s_init``); the exemption is unconditional either way.
@@ -68,9 +107,7 @@ def zero_init_readout(module: nn.Module, *, bias: bool = True) -> nn.Module:
         last.weight.zero_()
         if bias:
             last.bias.zero_()
-    # Read by `rsfff.train.term_loop.parameter_groups`, which walks `model.modules()`.
-    module.no_weight_decay = True
-    return module
+    return exempt_from_weight_decay(module)
 
 
 class AtomicEnergyHead(nn.Module):

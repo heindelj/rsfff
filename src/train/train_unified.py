@@ -68,6 +68,8 @@ from .loss import (
     compute_forces,
     fragment_multipole_loss,
     fragment_polarizability_loss,
+    free_atom_batch,
+    free_atom_polarizability_loss,
     onebody_anchor_loss,
 )
 from .term_loop import fit
@@ -84,6 +86,12 @@ _LOG_KEYS = (
     "a_mae", "f_mae", "dip_mae", "quad_mae", "e_tot_mae",
     "anchor_e", "anchor_f", "dipole", "quad", "alpha_mae", "f_clu", "intra_ff",
     "q_res", "qO", "dchi", "internal", "bond",
+    # `d_internal` is the isolated-fragment internal energy's drift from where this stage
+    # started, kJ/mol. It is the quantity that produced the one-body constant offset: the
+    # split between `internal` and `bond` carries no label, so a higher level is free to slide
+    # it and leave the bond head chasing. Watch this, not `ob_mae`, for that failure.
+    # `elst_env` is the environment-dependent electrostatic energy booked as polarization.
+    "d_internal", "int_drift", "elst_env", "free_alpha_mae",
     "gate_inter_elst", "gate_intra_disp",
     "intra_elst", "intra_pauli", "intra_disp",
     "r0_elst", "r0_pauli", "r0_disp", "env_norm",
@@ -127,6 +135,11 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
     response = build_response(
         featurizer, fcfg, ecfg, neighbor_types, atomic_states,
         p0_extra=fragment_state.dim,
+        # Built at every stage, not only the charge-transfer one, so the staged warm starts
+        # see the same parameter set throughout and this head is not "left at initialization"
+        # exactly when it starts doing work. Unused -- and untrained, since nothing reaches
+        # it -- until `charge_transfer` opens the radius-derived channels.
+        separate_ct_compliance=ucfg.separate_ct_compliance,
     )
 
     log_c6, log_b_disp = build_log_priors(neighbor_types, b_prior=config.dispersion.b_prior)
@@ -172,6 +185,14 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
                 r_on=ucfg.bond_r_on, r_off=ucfg.bond_r_off,
                 energy_scale=ucfg.bond_energy_scale,
             ),
+            # The bond channel with the fragment constraint lifted: a bond energy for pairs
+            # that *cross* a fragment boundary, which is what charge transfer is allowed to
+            # be that polarization is not. Built at every stage so the staged warm starts see
+            # one parameter set; only `charge_transfer` ever reads it.
+            **({"ct_bond": ChannelSpec(
+                r_on=ucfg.bond_r_on, r_off=ucfg.bond_r_off,
+                energy_scale=ucfg.ct_bond_energy_scale,
+            )} if ucfg.ct_bond else {}),
         },
         range_channels=RANGE_CHANNELS if ucfg.pair_range_separation else (),
         # The side channel the external field enters through. Zero unless polarization is on,
@@ -223,6 +244,10 @@ def unified_fit(out, batch, cfg: Config):
         "internal": float(out.energy_internal.detach().mean()),
         "bond": float(out.energy_bond.detach().mean()),
     }
+    if out.elst_env is not None:
+        # Already inside `pol`; reported alone because the size of what moved out of
+        # `cls_elec` is what says whether the re-partition is doing anything.
+        metrics["elst_env"] = float(out.elst_env.detach().abs().mean()) * KJMOL_PER_HARTREE
     weights = {
         "elst": u.elst_weight, "pauli": u.pauli_weight, "disp": u.disp_weight,
         "pol": u.pol_weight, "ct": u.ct_weight,
@@ -283,6 +308,41 @@ def unified_fit(out, batch, cfg: Config):
     return loss, metrics, batch.fragment_energy
 
 
+def _frozen_level_parameters(model) -> dict[str, list]:
+    """Everything on the path from geometry to an *isolated fragment's* observables.
+
+    Three entries, and the list is this long because a shorter one does not work. Reverting a
+    trained stage-3 checkpoint's ``response.params`` alone to its stage-1 values left the
+    monomer internal energy at -230 kJ/mol against stage 1's -342: ``featurizer.channel_proj``
+    had moved 22% over the two higher stages, so the same head weights were reading different
+    features. The compliance head is here because it enters the frozen intra-fragment SQE
+    solve; charge transfer gets its own head rather than sharing this one, precisely so that
+    freezing it costs CT nothing.
+
+    Not here, and not an oversight: ``pauli_params``, ``disp_params`` and the correction trunk
+    also reach ``fragment_energy``, through the intra classical channels and the bond channel.
+    They have to keep training -- their own labels are inter-fragment -- and they are not a
+    problem, because ``fragment_energy`` *has* a label. What went wrong before was the
+    unlabeled split *inside* it, between ``E_internal`` and ``energy_bond``; freezing this list
+    pins ``E_internal``, so the bond head is fitting a target that holds still instead of
+    chasing one that moved 60-110 kJ/mol.
+    """
+    frozen = {
+        "response.params": list(model.response.params.parameters()),
+        "response.compliance_head": list(model.response.compliance_head.parameters()),
+    }
+    proj = getattr(model.featurizer, "channel_proj", None)
+    if proj is not None:
+        frozen["featurizer.channel_proj"] = [proj]
+    # `fragment_state` augments `h_frag` before the response heads see it, so it is part of
+    # the fragment-confined descriptor even though it is identically zero on the neutral
+    # singlets this is fit on today. It stops being zero the moment a fragment is charged,
+    # which is the case this whole distinction exists for.
+    if model.fragment_state is not None and model.fragment_state.dim:
+        frozen["fragment_state"] = list(model.fragment_state.parameters())
+    return {k: v for k, v in frozen.items() if v}
+
+
 class AnchorTerms:
     """Penalties and diagnostics: the monomer anchor, the ``r0`` pull, and the gate readouts.
 
@@ -298,34 +358,84 @@ class AnchorTerms:
     itself a random variable.
     """
 
-    def __init__(self, model, anchor, device, batch_size=0, seed=0):
+    def __init__(self, model, anchor, device, batch_size=0, seed=0,
+                 atomic_states=None, neighbor_types=()):
         self.model = model
         self.anchor = anchor            # MoleculeDataset, or None
         self.device = device
         self.batch_size = int(batch_size)
         self._gen = torch.Generator().manual_seed(int(seed))
         self._metrics: dict[str, float] = {}
-        self._eval_batch = None
+        self._eval_batch = self._eval_idx = None
+        # A handful of one-atom systems, built once: the free-atom limit does not depend on
+        # anything that varies between steps.
+        self._free_batch, self._free_alpha = (None, None)
+        if atomic_states is not None:
+            self._free_batch, self._free_alpha = free_atom_batch(
+                atomic_states, neighbor_types,
+                dtype=torch.get_default_dtype(), device=device,
+            )
+        #: (len(anchor),) the isolated-fragment internal energy at the moment this stage
+        #: started, filled by :meth:`snapshot_frozen_level`. ``None`` when not anchoring.
+        self._internal_ref = None
 
     def _anchor_batch(self, training: bool):
-        """A monomer batch with positions ready for the force term, or None."""
+        """``(batch, indices)``: a monomer batch ready for the force term, or two Nones.
+
+        The indices come back because the drift penalty compares against a per-frame snapshot
+        and the training batch is a fresh random subset every step.
+        """
         if self.anchor is None:
-            return None
+            return None, None
         n = len(self.anchor)
         take = n if not self.batch_size else min(self.batch_size, n)
         if take == n and self._eval_batch is not None:
-            return self._eval_batch
+            return self._eval_batch, self._eval_idx
         if not training:
             if self._eval_batch is None:
-                self._eval_batch = self._make(range(take))
-            return self._eval_batch
+                self._eval_idx = list(range(take))
+                self._eval_batch = self._make(self._eval_idx)
+            return self._eval_batch, self._eval_idx
         idx = torch.randperm(n, generator=self._gen)[:take].tolist()
-        return self._make(idx)
+        return self._make(idx), idx
 
     def _make(self, indices):
         batch = self.anchor.flat_batch(indices).to(self.device)
         batch.positions.requires_grad_(True)
         return batch
+
+    def snapshot_frozen_level(self, cfg: Config) -> None:
+        """Freeze the fragment-confined path and record the internal energy it produces.
+
+        Called once per stage, after the warm start and before the optimizer is built, so what
+        it captures is exactly the previous stage's fitted frozen level.
+
+        The freeze and the snapshot are two halves of one idea and are deliberately issued
+        together: the frozen level has no label of its own above stage 1, so unless something
+        holds it, ``pol`` and ``ct`` at weight 30 will move it -- and they did, by 62 and 109
+        kJ/mol of internal energy and 1 a0^3 of monomer polarizability. See
+        :attr:`rsfff.train.config.UnifiedConfig.freeze_frozen_level`.
+        """
+        u = cfg.unified
+        if u.freeze_frozen_level:
+            frozen = _frozen_level_parameters(self.model)
+            n = 0
+            for params in frozen.values():
+                for p in params:
+                    p.requires_grad_(False)
+                    n += p.numel()
+            print(
+                f"frozen level held at its warm start: {n} parameters in "
+                f"{', '.join(frozen)} no longer train"
+            , flush=True)
+        if u.internal_drift_weight > 0.0 and self.anchor is not None:
+            batch = self.anchor.flat_batch(range(len(self.anchor))).to(self.device)
+            with torch.no_grad():
+                self._internal_ref = self.model(batch).energy_internal.detach().clone()
+            print(
+                f"internal-energy drift anchored on {len(self.anchor)} monomer frames at "
+                f"{float(self._internal_ref.mean()) * KJMOL_PER_HARTREE:.3f} kJ/mol"
+            , flush=True)
 
     def penalties(self, out, batch, cfg: Config):
         u = cfg.unified
@@ -387,9 +497,19 @@ class AnchorTerms:
             # has to be earned rather than drifted into.
             extra["env"] = u.env_weight * out.environment_norm.pow(2).mean()
 
-        anchor_batch = self._anchor_batch(torch.is_grad_enabled())
+        # The exact free-atom limit of the on-site polarizability. Independent of the monomer
+        # anchor and of the cluster batch alike -- it is a handful of one-atom systems -- so it
+        # is not scaled by `anchor_weight`.
+        fa, fa_metrics = free_atom_polarizability_loss(
+            self.model, self._free_batch, self._free_alpha,
+            weight=u.free_alpha_weight, scale=cfg.elec.polarizability_scale,
+        )
+        extra.update(fa)
+        free_metrics = fa_metrics
+
+        anchor_batch, anchor_idx = self._anchor_batch(torch.is_grad_enabled())
         if anchor_batch is None:
-            self._metrics = {}
+            self._metrics = dict(free_metrics)
             return extra
 
         # One anchor forward feeding both the energy/force terms and the multipole terms.
@@ -400,9 +520,27 @@ class AnchorTerms:
                 anchor_batch, with_polarizability=cfg.elec.polarizability_weight > 0.0
             )
         w = u.anchor_weight
+
+        # How far the isolated-fragment internal energy has moved since this stage started.
+        # The split between `E_internal` and `energy_bond` inside `fragment_energy` is
+        # unlabeled gauge -- only their sum is fitted -- so `pol` and `ct` can slide it,
+        # and the bond head is left chasing a target that moved by 60-110 kJ/mol. It tracked to
+        # within 2-3 kJ/mol and stopped, which is exactly the per-fragment constant that showed
+        # up as a one-body offset. Fixing the gauge at its stage-entry value removes the
+        # degeneracy instead of reweighting it.
+        drift_metric = {}
+        if self._internal_ref is not None:
+            ref = self._internal_ref[torch.as_tensor(anchor_idx, device=self.device)]
+            drift = anchor_out.energy_internal - ref
+            extra["int_drift"] = u.internal_drift_weight * (
+                drift / u.energy_scale
+            ).pow(2).mean()
+            drift_metric["d_internal"] = float(drift.detach().mean()) * KJMOL_PER_HARTREE
         terms, self._metrics = onebody_anchor_loss(
             self.model, anchor_batch, cfg.onebody, out=anchor_out
         )
+        self._metrics.update(drift_metric)
+        self._metrics.update(free_metrics)
         extra.update({k: w * v for k, v in terms.items()})
 
         mm, mm_metrics = fragment_multipole_loss(
@@ -532,7 +670,7 @@ def _train_staged(config: Config):
     print(
         f"[{config.run_name}] staged fit: "
         + " -> ".join(s.name for s in config.stages)
-    )
+    , flush=True)
     result, previous = None, ""
     for i, stage in enumerate(config.stages, 1):
         staged = stage_config(config, stage, init_from=previous)
@@ -542,7 +680,7 @@ def _train_staged(config: Config):
             f"(epochs {staged.train.epochs}"
             + (f", warm start {staged.train.init_from}" if staged.train.init_from else "")
             + f")\n{'=' * 78}"
-        )
+        , flush=True)
         result = _train_once(staged)
         previous = str(Path(staged.checkpoint_root) / staged.run_name / "best.pt")
         if not Path(previous).exists():
@@ -565,7 +703,7 @@ def _train_once(config: Config):
     print(
         f"[{config.run_name}] device={device} dtype={config.dtype} "
         f"targets=fragment_energy + {' + '.join('eda_' + v for v in names)}"
-    )
+    , flush=True)
 
     dataset = load_datasets(config.data.path, dtype=torch.get_default_dtype())
     if not dataset.has_fragments:
@@ -588,7 +726,7 @@ def _train_once(config: Config):
     print(
         f"loaded {len(dataset)} frames; species Z={neighbor_types}; "
         f"E0 = {dict(zip(neighbor_types, reference_energies.tolist()))}"
-    )
+    , flush=True)
 
     anchor = None
     if config.data.monomer_path:
@@ -597,7 +735,7 @@ def _train_once(config: Config):
         print(
             f"monomer anchor: {len(anchor)} frames from {config.data.monomer_path}, "
             f"{min(drawn, len(anchor))} drawn per step"
-        )
+        , flush=True)
 
     model = build_unified_model(
         config, neighbor_types, reference_energies, atomic_states
@@ -615,16 +753,18 @@ def _train_once(config: Config):
         f"max_rank {config.unified.max_rank}; pair list to {model.cutoff_max} A "
         f"(no fragment mask); r0 priors {r0_table} A, "
         f"alpha init {config.unified.alpha_init} 1/A"
-    )
+    , flush=True)
 
     anchor_terms = AnchorTerms(
         model, anchor, device,
         batch_size=config.unified.anchor_batch_size, seed=config.data.seed,
+        atomic_states=atomic_states, neighbor_types=neighbor_types,
     )
     fit(
         model, dataset, config, config, device, train_idx, val_idx,
         log_keys=_LOG_KEYS, fit_term=unified_fit,
         penalties=anchor_terms.penalties, diagnostics=anchor_terms.diagnostics,
+        after_warm_start=lambda _: anchor_terms.snapshot_frozen_level(config),
         # A cluster force is a backward pass through the whole model, so positions have to be
         # leaves and autograd has to stay on even during evaluation.
         grad_positions=config.unified.force_weight > 0.0,

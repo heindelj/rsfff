@@ -63,14 +63,23 @@ def subset_batch(
     atomic_numbers: torch.Tensor,   # (N,)
     fragment_idx: torch.Tensor,     # (N,) values in [0, n_frag)
     subsets: list[tuple[int, ...]],
+    *,
+    fragment_charge: torch.Tensor | None = None,   # (n_frag,)
+    fragment_two_s: torch.Tensor | None = None,    # (n_frag,)
 ) -> Batch:
     """One :class:`Batch` holding each fragment subset as a separate system.
 
     Fragment ids are renumbered contiguously within each subset and offset to be
     batch-global, matching what ``MoleculeDataset.flat_batch`` produces -- so the atoms of
     each system stay grouped by fragment and the pair list's sortedness check passes.
+
+    ``fragment_charge`` and ``fragment_two_s`` are gathered per subset rather than dropped.
+    On neutral closed-shell fragments they change nothing -- ``FragmentStateEmbedding`` is
+    identically zero there, which is why leaving them out went unnoticed on water -- but the
+    moment a cluster carries a charged fragment, dropping them silently decomposes a
+    *different system* from the one asked about: every fragment would read as neutral.
     """
-    rows, batch_ids, frag_ids = [], [], []
+    rows, batch_ids, frag_ids, frag_src, f2b = [], [], [], [], []
     n_frag_total = 0
     for system, subset in enumerate(subsets):
         for local, frag in enumerate(subset):
@@ -78,9 +87,12 @@ def subset_batch(
             rows.append(sel)
             batch_ids.append(torch.full((sel.numel(),), system, dtype=torch.long))
             frag_ids.append(torch.full((sel.numel(),), n_frag_total + local, dtype=torch.long))
+            frag_src.append(frag)
+            f2b.append(system)
         n_frag_total += len(subset)
 
     rows = torch.cat(rows)
+    src = torch.tensor(frag_src, dtype=torch.long, device=positions.device)
     return Batch(
         positions=positions[rows],
         atomic_numbers=atomic_numbers[rows],
@@ -89,6 +101,9 @@ def subset_batch(
         energy=torch.zeros(len(subsets), dtype=positions.dtype, device=positions.device),
         fragment_idx=torch.cat(frag_ids).to(positions.device),
         n_fragments=n_frag_total,
+        fragment_charge=None if fragment_charge is None else fragment_charge[src],
+        fragment_two_s=None if fragment_two_s is None else fragment_two_s[src],
+        fragment_to_batch=torch.tensor(f2b, dtype=torch.long, device=positions.device),
     )
 
 
@@ -112,6 +127,8 @@ def mbe_decompose(
     *,
     max_order: int | None = None,
     split_components: bool = True,
+    fragment_charge: torch.Tensor | None = None,
+    fragment_two_s: torch.Tensor | None = None,
 ) -> MBEResult:
     """Many-body decomposition of ``model``'s energy for a single cluster.
 
@@ -135,7 +152,10 @@ def mbe_decompose(
     if not subsets:
         raise ValueError(f"need at least 2 fragments for an MBE, got {n_frag}")
 
-    batch = subset_batch(positions, atomic_numbers, fragment_idx, subsets)
+    batch = subset_batch(
+        positions, atomic_numbers, fragment_idx, subsets,
+        fragment_charge=fragment_charge, fragment_two_s=fragment_two_s,
+    )
     out = model(batch)
 
     fields = {"total": out.energy}
@@ -160,13 +180,28 @@ def mbe_decompose(
 
     root = results.pop("total")
     if order == n_frag:
-        # The expansion is exact by construction; a mismatch means the subset energies
-        # were not evaluated independently (e.g. a stale pair list).
-        rebuilt = sum(root.by_order.values())
-        if not torch.allclose(rebuilt, root.total, atol=1e-10):
+        # This used to compare `sum_k E^(k)` against `E(full)`. That check could never fail:
+        # both sides are built from the same `lookup` dict, and the Moebius inversion summing
+        # back to its own input is an algebraic identity, not a property of the model. It read
+        # as a guard against exactly the bug it could not see.
+        #
+        # What is worth checking is the assumption the decomposition actually rests on: that
+        # putting every subset in one batch does not let them see each other. So re-evaluate
+        # the full cluster *alone* and compare it against the copy that rode in the big batch.
+        # A stale or cross-system pair list, a solver that pools over the whole batch, or a
+        # dropped fragment field all show up here, and nothing else in this module would catch
+        # them.
+        full = tuple(range(n_frag))
+        alone = model(subset_batch(
+            positions, atomic_numbers, fragment_idx, [full],
+            fragment_charge=fragment_charge, fragment_two_s=fragment_two_s,
+        ))
+        solo = float(alone.energy[0])
+        if abs(solo - float(root.total)) > 1e-9 * max(1.0, abs(solo)):
             raise RuntimeError(
-                f"MBE does not sum to the total ({float(rebuilt):.6e} vs "
-                f"{float(root.total):.6e}); the subset energies are not independent"
+                f"the full cluster evaluates to {float(root.total):.9e} inside the subset "
+                f"batch and {solo:.9e} on its own, so the subsets are not independent and "
+                f"every term of this expansion is suspect"
             )
     root.components = results or None
     return root
@@ -193,6 +228,8 @@ def mbe_dataset(
             mbe_decompose(
                 model, frame.positions, frame.atomic_numbers, frame.fragment_idx,
                 max_order=max_order, split_components=split_components,
+                fragment_charge=frame.fragment_charge,
+                fragment_two_s=frame.fragment_two_s,
             )
         )
         if progress_every and (n + 1) % progress_every == 0:

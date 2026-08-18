@@ -25,7 +25,7 @@ import math
 import torch
 import torch.nn as nn
 
-from .heads import mlp, zero_init_readout
+from .heads import exempt_from_weight_decay, mlp, zero_init_readout
 
 
 def voigt_vector_to_symmetric_matrix(values: torch.Tensor) -> torch.Tensor:
@@ -127,6 +127,12 @@ class AtomicAlphaHead(nn.Module):
         self.equiv_reduce = nn.Parameter(torch.randn(p2, equiv_channels) / (p2 ** 0.5))
         self.base_mlp = mlp(p0 + emb_dim, hidden, depth, 1 + equiv_channels)
         self.register_buffer("_irrep6_to_voigt", irrep6_to_voigt, persistent=False)
+        # `base_mlp` is *not* zero-initialized here -- a zero readout would pin every species at
+        # `softplus(0) + psd_floor` -- so this head does not lose the race described in
+        # `zero_init_readout`. It loses the slower version of it: decay pulls `a0_raw` toward 0,
+        # whose attractor is 0.693 a0^3 per atom, and erodes `equiv_reduce` until alpha is
+        # isotropic. Measured across a staged fit, `equiv_reduce` fell 0.712 -> 0.176.
+        exempt_from_weight_decay(self)
 
     def forward(
         self,
@@ -184,6 +190,9 @@ class AtomicVectorHead(nn.Module):
         self.equiv_channels = equiv_channels
         self.equiv_reduce = nn.Parameter(torch.randn(p1, equiv_channels) / (p1 ** 0.5))
         self.gate_mlp = zero_init_readout(mlp(p0 + emb_dim, hidden, depth, equiv_channels))
+        # The whole head, not just the gate: `equiv_reduce` has no gradient while the gate is
+        # zero, so leaving it decaying deadlocks the pair. See `zero_init_readout`.
+        exempt_from_weight_decay(self)
 
     def forward(
         self,
@@ -262,6 +271,9 @@ class AxialQuadrupolePolarizabilityHead(nn.Module):
         )
         self.axis_eps = float(axis_eps)
         self.register_buffer("_gen", l2_generators, persistent=False)
+        # Redundant today -- every parameter lives in `self.axis`, which exempts itself -- but
+        # this head is the one that deadlocked completely, so it says so for itself.
+        exempt_from_weight_decay(self)
 
     def forward(
         self,
@@ -327,6 +339,8 @@ class AtomicQuadrupoleHead(nn.Module):
         self.equiv_reduce = nn.Parameter(torch.randn(p2, equiv_channels) / (p2 ** 0.5))
         self.gate_mlp = zero_init_readout(mlp(p0 + emb_dim, hidden, depth, equiv_channels))
         self.register_buffer("_to_spherical", irrep2_to_spherical, persistent=False)
+        # Same zero-gate deadlock as `AtomicVectorHead`; see `zero_init_readout`.
+        exempt_from_weight_decay(self)
 
     def forward(
         self,

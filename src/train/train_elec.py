@@ -117,7 +117,8 @@ def build_featurizer(features_cfg, ecfg, neighbor_types):
 
 
 def build_response(
-    featurizer, features_cfg, ecfg, neighbor_types, atomic_states=None, *, p0_extra=0
+    featurizer, features_cfg, ecfg, neighbor_types, atomic_states=None, *, p0_extra=0,
+    separate_ct_compliance=False,
 ):
     """The per-fragment response solve, seeded from the atomic IP/EA data.
 
@@ -129,6 +130,11 @@ def build_response(
     :class:`rsfff.ff.unified.UnifiedPairModel` appends a fragment-state block, and the
     response parameters need to see fragment charge every bit as much as the pair head does.
     At the default 0 this is the plain featurizer width.
+
+    ``separate_ct_compliance`` adds a second, identically-built compliance head that answers
+    for the radius-derived charge-transfer channels alone. Off here and on in the unified
+    configs, because only that model has a charge-transfer level to use it -- see
+    :attr:`rsfff.train.config.UnifiedConfig.separate_ct_compliance`.
     """
     p0 = featurizer.feature_dims[0] + int(p0_extra)
     p1, p2 = featurizer.feature_dims.get(1), featurizer.feature_dims.get(2)
@@ -161,11 +167,17 @@ def build_response(
         cquad_floor=ecfg.cquad_floor, environment_cquad=ecfg.environment_cquad,
         anisotropic_cquad=ecfg.anisotropic_cquad,
     )
-    compliance = PairComplianceHead(
-        p0, hidden=ecfg.compliance_hidden, depth=ecfg.compliance_depth,
-        cutoff=features_cfg.cutoff, s_init=ecfg.s_init,
+    def compliance_head():
+        return PairComplianceHead(
+            p0, hidden=ecfg.compliance_hidden, depth=ecfg.compliance_depth,
+            cutoff=features_cfg.cutoff, s_init=ecfg.s_init,
+        )
+
+    return FragmentResponse(
+        params,
+        compliance_head(),
+        compliance_head() if separate_ct_compliance else None,
     )
-    return FragmentResponse(params, compliance)
 
 
 def build_slater_elec(featurizer, response, features_cfg, ecfg, neighbor_types):

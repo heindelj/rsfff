@@ -94,6 +94,13 @@ def parameter_groups(model, weight_decay: float) -> list[dict]:
     return groups
 
 
+#: Below this Frobenius norm an ``equiv_reduce`` is treated as a deleted block rather than a
+#: trained value, and :func:`warm_start` reinitializes it. Its initialization norm is
+#: ``sqrt(equiv_channels)`` (5.66 at the default 32), and the observed dead value was a
+#: denormal 2e-315, so anything in between separates the two cases cleanly.
+_DEAD_NORM = 1.0e-6
+
+
 def warm_start(model, path: str | None) -> None:
     """Load what fits from an earlier checkpoint, and say exactly what did not.
 
@@ -118,6 +125,14 @@ def warm_start(model, path: str | None) -> None:
     Everything skipped or left at initialization is counted and printed. A stage reporting far
     more of either than the shape changes it introduced has loaded the wrong checkpoint.
 
+    **An ``equiv_reduce`` at zero is refused rather than loaded.** It is not a trained
+    value but a block that weight decay deleted, and loading it re-enters a deadlock that
+    training cannot leave -- see ``_DEAD_NORM`` and :func:`rsfff.mlip.heads.zero_init_readout`.
+    Every
+    equivariant head now exempts itself from decay, so this only fires on checkpoints written
+    before that fix; it fires loudly, because a silently dead head is what it is guarding
+    against.
+
     **Zero-padding is right for a weight and wrong for a parameter table.** Growing the input
     of a linear layer should leave the new input inert, which zero does. Growing a per-species
     bias table -- ``cquad0_raw`` from one column to three when ``elec.anisotropic_cquad`` is
@@ -131,11 +146,21 @@ def warm_start(model, path: str | None) -> None:
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     saved = ckpt.get("model_state", ckpt)
     current = model.state_dict()
-    take, padded, dropped = {}, [], []
+    take, padded, dropped, revived = {}, [], [], []
     for k, v in saved.items():
         if k not in current:
             continue
         want = current[k]
+        if k.endswith("equiv_reduce") and float(v.norm()) < _DEAD_NORM:
+            # A channel reduction that reached zero is not a trained value, it is a deleted
+            # block: `equiv_reduce == 0` zeroes its head's output, which zeroes the gradient
+            # into the zero-initialized gate, which holds the gate at zero and keeps
+            # `equiv_reduce`'s own gradient at zero. Loading it re-enters the deadlock, and no
+            # amount of further training leaves it. Keep this stage's fresh initialization
+            # instead -- the head restarts, which is strictly better than staying dead.
+            # `rsfff.mlip.heads.zero_init_readout` documents how they got there.
+            revived.append(f"{k} (norm {float(v.norm()):.3g})")
+            continue
         if want.shape == v.shape:
             take[k] = v
         elif v.dim() == want.dim() and all(a <= b for a, b in zip(v.shape, want.shape)):
@@ -145,16 +170,22 @@ def warm_start(model, path: str | None) -> None:
             padded.append(f"{k} {tuple(v.shape)}->{tuple(want.shape)}")
         else:
             dropped.append(f"{k} {tuple(v.shape)} vs {tuple(want.shape)}")
-    missing = [k for k in current if k not in take]
+    revived_keys = {r.split(" ", 1)[0] for r in revived}
+    missing = [k for k in current if k not in take and k not in revived_keys]
     model.load_state_dict(take, strict=False)
     parts = [f"warm start from {path}: loaded {len(take)}/{len(current)} tensors"]
     if padded:
         parts.append(f"{len(padded)} zero-padded ({', '.join(padded[:3])})")
     if dropped:
         parts.append(f"{len(dropped)} DROPPED, incompatible ({', '.join(dropped[:3])})")
+    if revived:
+        parts.append(
+            f"{len(revived)} REINITIALIZED, saved value was a deleted block "
+            f"({', '.join(revived[:3])})"
+        )
     if missing:
         parts.append(f"{len(missing)} left at initialization")
-    print("; ".join(parts))
+    print("; ".join(parts), flush=True)
 
 
 def run_epoch(
@@ -240,6 +271,7 @@ def fit(
     diagnostics=None,
     grad_positions: bool = False,
     report=None,               # (model) -> None, printed once at the end
+    after_warm_start=None,     # (model) -> None, between the warm start and the optimizer
 ):
     """Baseline evaluation, then the training loop with best-checkpoint saving.
 
@@ -248,6 +280,12 @@ def fit(
     these terms the physical backbone alone is often already close. With ``train.init_from``
     set it is the *warm-started* baseline, which is the number a staged fit actually starts
     from.
+
+    ``after_warm_start`` runs in the one window where a stage can read the state it inherited
+    and act on it: the checkpoint is loaded, and the optimizer does not exist yet, so freezing
+    a parameter there actually keeps it out of the optimizer rather than merely zeroing its
+    gradient. :meth:`rsfff.train.train_unified.AnchorTerms.snapshot_frozen_level` is the
+    caller, and both things it does need exactly this window.
     """
     def epoch(indices, **kw):
         return run_epoch(
@@ -257,15 +295,20 @@ def fit(
         )
 
     warm_start(model, config.train.init_from)
+    if after_warm_start is not None:
+        after_warm_start(model)
 
     base = epoch(val_idx)
-    print(f"untrained: {fmt(base, log_keys)}")
+    print(f"untrained: {fmt(base, log_keys)}", flush=True)
 
     groups = parameter_groups(model, config.train.weight_decay)
     optimizer = torch.optim.Adam(groups, lr=config.train.learning_rate)
     if len(groups) > 1:
         n = sum(p.numel() for p in groups[1]["params"])
-        print(f"weight decay {config.train.weight_decay} on all but {n} exempt parameters")
+        print(
+            f"weight decay {config.train.weight_decay} on all but {n} exempt parameters",
+            flush=True,
+        )
     ckpt_dir = Path(config.checkpoint_root) / config.run_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_val = float("inf")
@@ -279,8 +322,8 @@ def fit(
         line = f"epoch {ep+1:4d}  train: {fmt(tr, log_keys)}  ({time.time()-t0:.1f}s)"
         if do_eval and len(val_idx) > 0:
             va = epoch(val_idx)
-            print(line)
-            print(f"            val:   {fmt(va, log_keys)}")
+            print(line, flush=True)
+            print(f"            val:   {fmt(va, log_keys)}", flush=True)
             if va["loss"] < best_val:
                 best_val = va["loss"]
                 torch.save(
@@ -290,9 +333,9 @@ def fit(
                     ckpt_dir / "best.pt",
                 )
         else:
-            print(line)
+            print(line, flush=True)
 
     if report is not None:
         report(model)
-    print(f"done; best val loss {best_val:.4e}; checkpoints in {ckpt_dir}")
+    print(f"done; best val loss {best_val:.4e}; checkpoints in {ckpt_dir}", flush=True)
     return best_val

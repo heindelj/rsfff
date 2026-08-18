@@ -75,6 +75,61 @@ def test_subset_batch_selects_the_right_atoms(w3):
     assert torch.equal(batch.atomic_numbers, numbers[keep])
 
 
+def test_subset_batch_carries_the_fragment_state(w3):
+    """Charge and spin follow their fragment into every subset that contains it.
+
+    Dropping them is invisible on neutral closed-shell water -- ``FragmentStateEmbedding`` is
+    identically zero there -- and wrong the moment a cluster carries an ion: every fragment
+    would read as neutral, so the decomposition would describe a different system than the
+    one asked about, silently and with no shape error to catch it.
+    """
+    positions, numbers, fragment_idx = frame(w3)
+    charge = torch.tensor([1.0, 0.0, -1.0], dtype=positions.dtype)
+    two_s = torch.tensor([0.0, 2.0, 0.0], dtype=positions.dtype)
+    subsets = [(0, 1), (1, 2), (0, 1, 2)]
+    batch = subset_batch(
+        positions, numbers, fragment_idx, subsets,
+        fragment_charge=charge, fragment_two_s=two_s,
+    )
+
+    want_c = torch.tensor([1.0, 0.0, 0.0, -1.0, 1.0, 0.0, -1.0], dtype=positions.dtype)
+    want_s = torch.tensor([0.0, 2.0, 2.0, 0.0, 0.0, 2.0, 0.0], dtype=positions.dtype)
+    assert torch.equal(batch.fragment_charge, want_c)
+    assert torch.equal(batch.fragment_two_s, want_s)
+    assert batch.fragment_to_batch.tolist() == [0, 0, 1, 1, 2, 2, 2]
+
+    # and it stays optional, for models and callers that carry no fragment state
+    plain = subset_batch(positions, numbers, fragment_idx, subsets)
+    assert plain.fragment_charge is None and plain.fragment_two_s is None
+
+
+def test_the_independence_check_fires_when_subsets_can_see_each_other(w3):
+    """The guard inside ``mbe_decompose`` catches a model that pools across systems.
+
+    It replaced an assertion comparing ``sum_k E^(k)`` against ``E(full)``, which is an
+    algebraic identity of the Moebius inversion over the same lookup dict and so could not
+    fail for any model at all. This one re-evaluates the full cluster on its own and compares
+    it against the copy that rode in the batched subsets, which is the assumption the whole
+    decomposition rests on.
+    """
+    inner = additive_model()
+
+    class LeaksAcrossSystems(torch.nn.Module):
+        """Adds a term depending on the whole batch, which no per-system model may do."""
+
+        def forward(self, batch):
+            out = inner(batch)
+            return type("O", (), {
+                "energy": out.energy + 1e-3 * batch.positions.norm(),
+            })()
+
+    with pytest.raises(RuntimeError, match="not independent"):
+        mbe_decompose(LeaksAcrossSystems(), *frame(w3), split_components=False)
+
+    # the honest model passes the same guard
+    mbe_decompose(inner, *frame(w3), split_components=False)
+
+
 # ---------------------------------------------------------------------------
 # the expansion itself
 # ---------------------------------------------------------------------------
@@ -96,7 +151,12 @@ def test_environment_model_has_many_body(w3):
 
 
 def test_expansion_sums_to_the_total(w3):
-    """E = sum_k E^(k) exactly -- mbe_decompose asserts it internally, pin it here too."""
+    """``E = sum_k E^(k)`` exactly.
+
+    A property of the Moebius inversion rather than of the model, which is why
+    ``mbe_decompose`` no longer checks it internally -- it cannot fail, so it was not a guard.
+    Pinned here, where a truthful identity test belongs.
+    """
     for model in (additive_model(), environment_model()):
         res = mbe_decompose(model, *frame(w3))
         rebuilt = sum(res.by_order.values())

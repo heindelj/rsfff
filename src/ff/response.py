@@ -434,10 +434,15 @@ class FragmentResponse(nn.Module):
         self,
         params: ElectrostaticParameterHeads,
         compliance_head: PairComplianceHead,
+        ct_compliance_head: PairComplianceHead | None = None,
     ) -> None:
         super().__init__()
         self.params = params
         self.compliance_head = compliance_head
+        #: Used for the *radius-derived* charge-transfer channels only, leaving
+        #: ``compliance_head`` to the intra-fragment ones. See
+        #: :attr:`rsfff.train.config.UnifiedConfig.separate_ct_compliance`.
+        self.ct_compliance_head = ct_compliance_head
 
     @property
     def max_rank(self) -> int:
@@ -450,6 +455,7 @@ class FragmentResponse(nn.Module):
         *,
         bond_index: torch.Tensor | None = None,
         envelope: torch.Tensor | None = None,
+        ct_channels: torch.Tensor | None = None,
     ) -> ResponseParameters:
         """The heads' outputs plus ``q0`` and the compliances, with no solve.
 
@@ -457,6 +463,12 @@ class FragmentResponse(nn.Module):
         polarized levels. The charge-transfer level passes
         :func:`rsfff.ff.pairs.union_channels`' wider graph and the ``envelope`` that keeps its
         radius-derived channels continuous.
+
+        ``ct_channels`` is that graph's ``from_radius`` mask: where it is true and
+        :attr:`ct_compliance_head` exists, the compliance comes from that head instead. The
+        two populations are different objects -- a covalent O-H against a hydrogen bond -- and
+        keeping the intra-fragment one on the frozen head is what lets that head be frozen
+        after stage 1 without taking charge transfer's only lever with it.
         """
         if batch.fragment_idx is None:
             raise ValueError(
@@ -473,6 +485,11 @@ class FragmentResponse(nn.Module):
         compliance = self.compliance_head(
             feats.inv_feats, positions, bond_index, envelope=envelope
         )
+        if self.ct_compliance_head is not None and ct_channels is not None:
+            ct_compliance = self.ct_compliance_head(
+                feats.inv_feats, positions, bond_index, envelope=envelope
+            )
+            compliance = torch.where(ct_channels, ct_compliance, compliance)
 
         # Baseline charges: a per-element prior, then a uniform shift per fragment so that
         # sum_i q0_i is *exactly* the formal charge whatever the prior sums to. SQE then

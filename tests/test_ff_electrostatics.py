@@ -616,6 +616,49 @@ def test_equal_eigenvalues_reproduce_the_isotropic_head_exactly():
     assert torch.allclose(quiet, expected, atol=1e-14)
 
 
+def test_a_zeroed_channel_reduction_deadlocks_the_axis_head():
+    """Why ``equiv_reduce`` must never be decayed to zero: the head cannot restart itself.
+
+    ``axis(x) = gate(x) . (vec_feats @ equiv_reduce)``, and ``C`` depends on that axis only
+    through ``M = -L(n)^2``, i.e. **quadratically**. So ``v = 0`` is not merely a point where
+    one factor's gradient vanishes -- it is a flat critical point of the whole head: ``dC/dn``
+    is proportional to ``n``, so zeroing ``equiv_reduce`` kills the gradient to *both* it and
+    the gate at once, no matter how awake the gate is. Nothing can restart either half, and
+    ``C`` collapses to the isotropic ``c_0 I5`` the anisotropy was added to replace.
+
+    This is not hypothetical: on the staged water fit
+    ``response.params.cquad_axis_head.axis.equiv_reduce`` was a denormal 2e-315 in every stage
+    checkpoint and its gate readout was still exactly zero after 210 epochs, so
+    ``elec.anisotropic_cquad`` never produced any anisotropy at all. The guard is
+    :func:`rsfff.mlip.heads.exempt_from_weight_decay` on the head, checked in
+    ``tests/test_ff_unified.py``, plus the reinitialization in
+    :func:`rsfff.train.term_loop.warm_start` for checkpoints written before it.
+    """
+    head = _axial_head(awake=True)
+    inv, emb, vec = _axial_inputs()
+    c = torch.rand(inv.shape[0], 3) + 0.2
+
+    # A live head is anisotropic: that is the whole point of the block.
+    live = torch.linalg.eigvalsh(head(inv, emb, vec, c)).detach()
+    assert float((live.amax(-1) - live.amin(-1)).min()) > 1e-6
+
+    with torch.no_grad():
+        head.axis.equiv_reduce.zero_()
+    head.zero_grad(set_to_none=True)
+    head(inv, emb, vec, c).sum().backward()
+
+    assert float(head.axis(inv, emb, vec).detach().abs().max()) == 0.0, "the axis is dead"
+    for name, p in head.named_parameters():
+        assert float(p.grad.abs().max()) == 0.0, (
+            f"{name} still has gradient, so the deadlock this guards against is not what the "
+            f"code does any more"
+        )
+    dead = head(inv, emb, vec, c).detach()
+    assert torch.allclose(dead, c[:, 0, None, None] * torch.eye(5), atol=1e-12), (
+        "and what is left is the isotropic head the anisotropy was meant to replace"
+    )
+
+
 def test_axial_quadrupole_polarizability_is_equivariant():
     """Rotating the l=1 features must rotate ``C`` by the l=2 Wigner D, not merely preserve it."""
     from rsfff.ff.multipole import cartesian_to_spherical_quadrupole

@@ -55,12 +55,6 @@
 #                   (1 a0^3 = 0.28). Starts ~2.1; the previous model sat at an isotropic
 #                   3.87 a0^3 against a true 9.89, so this has real ground to make up.
 #
-# Stage 1 must hold its frozen-level numbers through stages 2 and 3: elst_mae, pauli_mae,
-# disp_mae and the intra_* leaks are not allowed to regress while pol_mae and ct_mae come down.
-# The one expected exception is elst at stage 2, where its correction moves from the
-# environment-aware stream to the fragment-confined one and the difference becomes the
-# polarization correction -- that makes cls_elec rigorously two-body, which is what the
-# interaction between frozen monomer densities is.
 
 run_name: water_staged
 device: auto
@@ -77,7 +71,12 @@ data:
   # The monomer anchor, with the def2-TZVPD molecular polarizability tensors folded in by
   # scripts/parse_polarizability.py (499 of 500 frames; one Q-Chem job did not finish).
   monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
-  atomic_reference_states: data/atomic_reference_states.json
+  # wB97M-V/def2-TZVPD, matching the labels. The older file this replaced said b3lyp/def2-svpd
+  # in its own header while every label here is wB97M-V/def2-TZVPD -- and these states are not
+  # decoration: they seed the per-element chi_0/eta_0 of the SQE solve and, from
+  # `free_alpha_weight` on, they pin the free-atom polarizability exactly.
+  # See scripts/atomic_reference_states_wb97mv.py.
+  atomic_reference_states: data/atomic_reference_states_wb97mv_tzvpd.json
   holdout_fraction: 0.1
   seed: 0
 
@@ -144,6 +143,13 @@ unified:
   disp_weight: 30.0
   anchor_weight: 1.0
   anchor_batch_size: 64        # the anchor force term is a 2nd-order backward; see UnifiedConfig
+  # The exact free-atom limit of the on-site polarizability, from
+  # data/atomic_reference_states_wb97mv_tzvpd.json (H 5.05, O 5.53 a0^3). A lone atom has an
+  # all-zero density, so alpha_i collapses to one isotropic number per element and this pins
+  # it rather than nudging it. It is what the Phase-1 monomer fit had and this one dropped --
+  # and it matters because alpha_flow, built from B^T R, has no component perpendicular to a
+  # planar molecule, so the on-site sector carries all of water's out-of-plane response alone.
+  free_alpha_weight: 1.0
   # A one-sided barrier holding r0_pair at or below its element prior, not the unbounded
   # downward pull this used to be. That pull is what put -39 kJ/mol per fragment of
   # "intramolecular dispersion" between bonded atoms in the last run: it drove the *shared
@@ -239,27 +245,47 @@ train:
 stages:
   - name: frozen
     train:
-      epochs: 100
+      epochs: 40
     unified:
       polarization: false
       charge_transfer: false
+      # Nothing to hold yet: this is the stage that *decides* the frozen level.
+      freeze_frozen_level: false
+      internal_drift_weight: 0.0
 
   - name: pol
     train:
-      epochs: 60
+      epochs: 30
     unified:
       polarization: true
       charge_transfer: false
       pol_weight: 30.0
+      # From here on the frozen level is settled and is held there. `h_env == h_frag` exactly
+      # on an isolated fragment, so pol and ct can say everything they need through `g`, the
+      # coupled solve and the correction trunk without touching what a monomer *is*. Left
+      # free, they did not: internal energy moved 62 kJ/mol and the monomer polarizability
+      # 0.17 a0^3 at this stage alone, and both got worse at ct.
+      freeze_frozen_level: true
+      # Reads an exact zero while the freeze is on -- it is there to *say* so. A nonzero
+      # d_internal means a route into the frozen level was missed, which is worth catching
+      # for free on a forward that happens anyway.
+      internal_drift_weight: 1.0
+      # The monomer anchor is 64 frames a step against ~9600 cluster frames at weight 30.
+      # That ratio is what let the response labels be outvoted; the freeze above is the real
+      # fix and this stops the remaining routes from being a fair fight.
+      anchor_weight: 10.0
 
   - name: ct
     train:
-      epochs: 50
+      epochs: 30
     unified:
       polarization: true
       charge_transfer: true
       pol_weight: 30.0
       ct_weight: 30.0
+      freeze_frozen_level: true
+      internal_drift_weight: 1.0
+      anchor_weight: 10.0
 
       total_energy_weight: 10.0
       force_weight: 0.0

@@ -162,8 +162,10 @@ class AtomWeightNet(nn.Module):
 class AtomicStateReference:
     """Isolated-atom QC anchors, aligned to a featurizer's species ordering.
 
-    Built from ``data/atomic_reference_states.json`` (see
-    ``scripts/atomic_reference_states.py``). One row per (element, charge) reference state:
+    Built from an atomic-reference-states JSON -- ``scripts/atomic_reference_states.py``
+    (b3lyp/def2-svpd, psi4) or ``scripts/atomic_reference_states_wb97mv.py``
+    (wB97M-V/def2-TZVPD, pyscf), whichever matches the labels being fitted. One row per
+    (element, charge) reference state:
 
         species_idx  (S,)       index into ``neighbor_types``
         charge       (S,)       formal charge (e)
@@ -172,11 +174,18 @@ class AtomicStateReference:
         alpha        (S, 3, 3)  static polarizability (e^2*Angstrom^2/Hartree)
         bound        (S,)       False where the anion is unbound at this level of theory
 
-    ``bound`` matters: at b3lyp/def2-svpd neither H(-) nor O(2-) actually binds its extra
-    electron, so those energies and (especially) polarizabilities are artifacts of the diffuse
-    basis functions. They are kept -- the diabatic library needs formal O(2-)/H(-) references --
-    but flagged so the training loss can weight them separately instead of chasing basis-set
-    noise.
+    ``bound`` matters, and which states carry it depends on the level of theory: at
+    b3lyp/def2-svpd neither H(-) nor O(2-) binds its extra electron, while at
+    wB97M-V/def2-TZVPD only O(2-) fails. Unbound energies and (especially) polarizabilities
+    are artifacts of whichever diffuse function the SCF fell into. They are kept -- the
+    diabatic library needs formal O(2-)/H(-) references -- but flagged so the training loss can
+    weight them separately instead of chasing basis-set noise.
+
+    ``bound`` is a floor, not a certificate. It asks only whether ``E(q) < E(q + 1)``, so it
+    catches a catastrophically unbound anion and not a badly described one: H(-) passes at
+    wB97M-V/def2-TZVPD with an EA of 0.05 eV against an experimental 0.75, so its
+    polarizability is still largely a property of the basis. Anchoring a charged state on the
+    strength of this flag alone is not enough.
     """
 
     def __init__(
