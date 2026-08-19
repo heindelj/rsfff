@@ -38,14 +38,15 @@ The levels now telescope through the *state* rather than through three readouts:
 
 One set of weights, three electronic states. ``Phi^intra`` is gated down to intra-fragment
 pairs, which is what keeps ``E_atom^0`` an isolated-fragment quantity while still letting an
-atom feel its own molecule's field. The feature stream switches at **ct**, not pol: relaxing a
-fragment's multipoles against its neighbours leaves it the same fragment, whereas letting charge
-cross the boundary does not.
+atom feel its own molecule's field. At the induction level it reads ``h_env`` instead, and the
+size of that swap is reported as ``ind_swap`` -- it is a route to the label that needs no charge
+to move, and it ate the whole of the old ``ct`` channel before the two levels were merged.
 
-**Charge transfer gets no correction readout of its own**, permanently. It is the residue of
-lifting the last constraint, so what it is entitled to is what it shares with electrostatics and
-polarization -- the coupled solve's energy difference and the atomic energy's response to it.
-If the pair corrections are switched back on, ``ct_bond`` does not come back with them.
+**Induction gets no correction readout of its own** beyond the electrostatic split. It is the
+residue of lifting the fragment constraint on the *parameters*, so what it is entitled to is the
+coupled solve's energy difference plus the atomic energy's response to the state that solve
+produced. A dedicated readout gave the old ``ct`` a private lever and supplied 96.7% of its
+label; ``ct_bond`` is gone and does not come back with the pair corrections.
 
 Two things this buys over the per-term modules
 ----------------------------------------------
@@ -202,10 +203,9 @@ def _resolve_correction_channels(spec, available) -> frozenset[str]:
     ``True`` means every channel the head was actually built with, so enabling a channel is
     always a matter of building its readout rather than of listing it twice.
 
-    A name that the head has no readout for is an **error**, not a no-op. The two ways to get
-    one are a typo and asking for ``ct_bond`` on a model built without it, and both are
-    failures that would otherwise present as a channel that silently contributes nothing --
-    which is indistinguishable from a channel that was fitted to zero.
+    A name that the head has no readout for is an **error**, not a no-op: a typo would
+    otherwise present as a channel that silently contributes nothing, which is
+    indistinguishable from a channel that was fitted to zero.
     """
     available = set(available)
     if isinstance(spec, bool):
@@ -361,8 +361,8 @@ class EnvironmentResidual(nn.Module):
         the feature cutoff is one of its own atoms, so ``h_full == h_frag`` and the residual
         vanishes -- not merely for small ``g``, and not merely at initialization. Everything
         downstream that measures environment dependence as a difference between the two streams
-        (the polarization and charge-transfer corrections, which are defined that way) is
-        therefore zero on a monomer, which is what their labels require.
+        (the induction correction, which is defined that way) is therefore zero on a
+        monomer, which is what its label requires.
 
         Exact in exact arithmetic; ~1e-16 in float64, because the two descriptors come from
         two scatters that sum the same edges in different orders
@@ -550,39 +550,36 @@ class UnifiedOutput:
     #: initialization by construction, and zero for an isolated fragment at any stage.
     environment_norm: torch.Tensor | None = None
     #: (B,) the environment-dependent part of the electrostatic channel -- correction and gate
-    #: together -- that was booked as polarization rather than left in ``cls_elec``. It is
-    #: already included in ``interaction["pol"]``; this exposes it on its own because the size
-    #: of what moved is the thing worth watching. ``None`` below the polarized level, where
-    #: there is no channel to receive it and it is dropped instead.
-    #:
-    #: Expect it to start large at the polarized stage and settle. Nothing constrains the
-    #: electrostatic readout's ``h_env`` value during the frozen stage -- it is evaluated only
-    #: to be discarded -- so it enters stage 2 at whatever the shared trunk drifted to, and the
-    #: ``pol`` label is what pulls it into place.
+    #: together -- that was booked as induction rather than left in ``cls_elec``. It is
+    #: already included in ``interaction["induction"]``; this exposes it on its own because the
+    #: size of what moved is the thing worth watching. ``None`` with induction off, where there
+    #: is no channel to receive it and it is dropped instead.
     elst_env: torch.Tensor | None = None
 
-    #: The **polarized** and **CT** levels: the same functional as the frozen one, minimized
-    #: with one more constraint lifted each time. ``None`` when that level is switched off.
-    #: Their multipoles are *not* forwarded by the properties above -- those stay frozen,
-    #: because the fragment-multipole labels are frozen-monomer values.
-    level_pol: "LevelOutput | None" = None
-    level_ct: "LevelOutput | None" = None
-    #: (F,) the same atomic-energy network read at the polarized and CT electronic states.
-    #: ``None`` when that level is off. Their differences are what ``pol`` and ``ct`` receive,
-    #: so the three telescope: ``energy_atom + (pol - 0) + (ct - pol) == energy_atom_ct``.
-    #: Exposed because the *levels* of these, not only their differences, are what says
-    #: whether the atomic energy is describing a relaxation or re-deciding what a bond is.
-    energy_atom_pol: torch.Tensor | None = None
-    energy_atom_ct: torch.Tensor | None = None
+    #: The **induction** level: the same functional as the frozen one, minimized with the
+    #: response parameters reading ``h_env`` and the multipoles free to relax against each
+    #: other. ``None`` when induction is off. Its multipoles are *not* forwarded by the
+    #: properties above -- those stay frozen, because the fragment-multipole labels are
+    #: frozen-monomer values.
+    level_ind: "LevelOutput | None" = None
+    #: (F,) the atomic-energy network read at the induced electronic state, on ``h_env``.
+    #: Its difference from ``energy_atom`` is what ``induction`` receives, so the two
+    #: telescope: ``energy_atom + (induction - 0) == energy_atom_ind``.
+    energy_atom_ind: torch.Tensor | None = None
+    #: (F,) the same evaluation on ``h_frag``. Nothing consumes it; it exists so the
+    #: **descriptor swap** is measurable. ``energy_atom_ind - energy_atom_ind_frag`` is the
+    #: part of the induction correction that comes from the feature stream alone rather than
+    #: from the relaxed state -- the quantity that was 100.0% of ``ct`` before the merge.
+    energy_atom_ind_frag: torch.Tensor | None = None
     #: (B,) the frozen level's own total, ``E_internal + all-pair electrostatics``. This is the
-    #: reference ``E_pol`` is measured against, and it is the *same functional* evaluated at
-    #: the frozen multipoles -- which is what makes ``E_pol`` a pure relaxation.
+    #: reference induction is measured against, and it is the *same functional* evaluated at
+    #: the frozen multipoles -- which is what makes ``ind_ff`` a pure relaxation.
     energy_frozen_total: torch.Tensor | None = None
     #: Per-atom electrostatic environment at the highest active level, built from the
     #: **converged** multipoles. What the bond channel reads.
     environment: OneBodyEnvironment | None = None
     #: Solver diagnostics per level: ``{level: (n_iter, converged (B,), pd_fail (B,))}``.
-    #: A rising iteration count is the early warning that the polarization is running away,
+    #: A rising iteration count is the early warning that the induction is running away,
     #: well before it becomes a NaN.
     solver: dict[str, tuple] | None = None
 
@@ -654,11 +651,7 @@ class UnifiedPairModel(nn.Module):
         max_rank: int = 1,
         classical: dict[str, ClassicalSpec] | None = None,
         max_num_neighbors: int = 512,
-        polarization: bool = False,
-        charge_transfer: bool = False,
-        ct_channel_cutoff: float = 5.0,
-        ct_channel_taper: float = 1.0,
-        ct_compliance_scale: float = 0.1,
+        induction: bool = False,
         cg_rtol: float = 1.0e-9,
         cg_atol: float = 1.0e-12,
         cg_maxiter: int = 100,
@@ -710,32 +703,20 @@ class UnifiedPairModel(nn.Module):
         self.cutoff_max = max(c.cutoff for c in self.classical.values())
         self.register_buffer("reference_energies", reference_energies.clone())
 
-        if charge_transfer and not polarization:
-            raise ValueError(
-                "charge_transfer needs polarization: `ct` is defined as E_ct - E_pol, so "
-                "without the polarized level there is nothing to difference against and the "
-                "label would silently absorb the polarization energy too"
-            )
-        self.polarization = bool(polarization)
-        self.charge_transfer = bool(charge_transfer)
-        #: Whether the pair head carries the cross-fragment bond channel. Read from the head
-        #: rather than configured here, so the two cannot disagree: the channel exists exactly
-        #: when there is a readout for it.
-        self.ct_bond = "ct_bond" in self.correction_channels
-        self.ct_channel_cutoff = float(ct_channel_cutoff)
-        self.ct_channel_taper = float(ct_channel_taper)
-        self.ct_compliance_scale = float(ct_compliance_scale)
+        #: Polarization and charge transfer as one term. Every response parameter reads
+        #: ``h_env``; the channel graph stays intra-fragment, so no charge crosses a boundary.
+        self.induction = bool(induction)
         self.cg = dict(rtol=float(cg_rtol), atol=float(cg_atol), maxiter=int(cg_maxiter))
-        if self.polarization and self.pair_corrections and pair_head.extra_dim == 0:
+        if self.induction and self.pair_corrections and pair_head.extra_dim == 0:
             raise ValueError(
-                "polarization needs a pair head built with extra_dim = "
+                "induction needs a pair head built with extra_dim = "
                 "rsfff.ff.environment.N_PAIR_INVARIANTS; the bond channel's response to the "
                 "external field is what relays the environment into the bonded region, and "
                 "with no side channel there is nowhere for the field to enter"
             )
-        if self.polarization and self.atomic_energy is None and not self.pair_corrections:
+        if self.induction and self.atomic_energy is None and not self.pair_corrections:
             raise ValueError(
-                "polarization has no route into the energy: with every pair correction off "
+                "induction has no route into the energy: with every pair correction off "
                 "and no `atomic_energy` head, nothing consumes the relaxed multipoles"
             )
 
@@ -1026,7 +1007,7 @@ class UnifiedPairModel(nn.Module):
             )
         # Below the polarized level there is nothing to receive it, so it is dropped -- see the
         # routing comment above. `cls_elec` is fragment-confined either way.
-        corr_pol_pair = elst_env_pair if self.polarization else torch.zeros_like(r)
+        corr_ind_pair = elst_env_pair if self.induction else torch.zeros_like(r)
 
         # **Pauli and dispersion read `h_env` on every pair, at every level.** Their parameters
         # are supposed to be environment-dependent: a quenched `C6` and an environment-softened
@@ -1098,18 +1079,18 @@ class UnifiedPairModel(nn.Module):
             max_rank=self.max_rank,
         )
         energy_atom = atom_energy(h_frag, res.charges, res.mu, res.quad_s, env_frozen)
-        energy_atom_pol = energy_atom_ct = None
+        energy_atom_ind = energy_atom_ind_frag = None
 
         # --- the polarized and CT levels -------------------------------------------------
         f2b_ = batch.fragment_to_batch
         if f2b_ is None:
             f2b_ = batch.batch_idx.new_zeros(n_frag).scatter_(0, frag, batch.batch_idx)
 
-        level_pol = level_ct = None
+        level_ind = None
         env = None
         energy_frozen_total = None
         solver: dict[str, tuple] = {}
-        if self.polarization:
+        if self.induction:
             # The frozen level's own total: the *same functional* the coupled levels minimize,
             # evaluated at the frozen multipoles. `E_pol` is the difference, so it is exactly
             # zero when nothing moves and (sharing parameters) negative by the variational
@@ -1118,10 +1099,12 @@ class UnifiedPairModel(nn.Module):
                 0, f2b_, res.internal_energy
             ) + pool_batch(e_ff["elst"])
 
-            def run_level(bond_index, bond_batch, envelope, ct_channels=None):
+            def run_level(bond_index, bond_batch, envelope):
+                # `h_env`, for **every** response parameter: chi, eta, alpha and the charge-flux
+                # compliance alike. That is what induction is -- the fragment still supplies the
+                # channel graph, the environment supplies the parameters on it.
                 rp = self.response.response_parameters(
                     batch, h_env, bond_index=bond_index, envelope=envelope,
-                    ct_channels=ct_channels,
                 )
                 return coupled_response(
                     rp, positions=positions, batch_idx=batch.batch_idx, n_systems=n_sys,
@@ -1151,118 +1134,58 @@ class UnifiedPairModel(nn.Module):
                     positions, pair_index, t_point, gate["elst"], m, max_rank=self.max_rank
                 )
 
-            # Polarized: response parameters see the environment and the multipoles relax
-            # against each other, but charge still cannot cross a fragment boundary.
-            ch_pol, chb_pol, _ = union_channels(positions, batch.batch_idx, frag, 0.0)
-            level_pol = run_level(ch_pol, chb_pol, None)
-            solver["pol"] = (level_pol.n_iter, level_pol.converged, level_pol.pd_fail)
-            # Kept under its own name: the CT branch below rebinds `env` to the fully relaxed
-            # environment, and the polarized atomic energy must not silently read that one.
-            env_pol = env_extra(level_pol)
-            env = env_pol
+            # Induction: every response parameter reads `h_env` and the multipoles relax
+            # against each other, on the fragment's own channel graph. `cutoff = 0` is what
+            # makes that graph intra-fragment only -- `union_channels` then returns exactly
+            # `intra_fragment_channels` with frame grouping, so no charge can cross a boundary.
+            ch_ind, chb_ind, _ = union_channels(positions, batch.batch_idx, frag, 0.0)
+            level_ind = run_level(ch_ind, chb_ind, None)
+            solver["ind"] = (level_ind.n_iter, level_ind.converged, level_ind.pd_fail)
+            env = env_ind = env_extra(level_ind)
 
-            if self.charge_transfer:
-                # CT: every constraint lifted. The channel graph opens to all pairs within a
-                # cutoff, with the radius-derived ones enveloped so they appear and disappear
-                # smoothly, and the solve groups by frame -- charge conserves per frame while
-                # each fragment's charge is free to move, which is what CT is.
-                ch_ct, chb_ct, from_radius = union_channels(
-                    positions, batch.batch_idx, frag, self.ct_channel_cutoff,
-                    max_num_neighbors=self.max_num_neighbors,
-                )
-                # `ct_compliance_scale` is the charge-transfer analogue of the correction
-                # channels' `energy_scale`, and it is there for the same reason those are.
-                # SQE has no structural reason to prefer an intramolecular channel over an
-                # intermolecular one -- the electronegativity difference driving an O-H
-                # transfer is the same whether the two atoms share a molecule -- so with both
-                # starting at `s_init` the model opens covalent-strength channels across every
-                # hydrogen bond. Measured on a freshly initialized w2, unscaled `ct` starts at
-                # -52 kJ/mol against a true `eda_ct` of -8.2, with only 0.0005 e of net charge
-                # actually crossing -- it is many soft channels each relaxing a little, not a
-                # large transfer. The default 0.1 was calibrated against that label:
-                #
-                #     scale   1.0     0.3     0.1     0.03
-                #     w2 ct  -52.0   -19.8   -7.1    -2.2     (kJ/mol, target -8.2)
-                #
-                # The scale sets the range the head operates over, not a ceiling: softplus is
-                # unbounded, so any compliance remains reachable. This only says where to
-                # start looking.
-                r_ch = (positions[ch_ct[0]] - positions[ch_ct[1]]).norm(dim=-1)
-                envelope = torch.where(
-                    from_radius,
-                    self.ct_compliance_scale * pairwise_switch(
-                        r_ch,
-                        self.ct_channel_cutoff - self.ct_channel_taper,
-                        self.ct_channel_cutoff,
-                    ),
-                    torch.ones_like(r_ch),
-                )
-                # `from_radius` also selects which channels the dedicated CT compliance head
-                # answers for, so the intra-fragment ones keep reading the frozen head even
-                # here -- they are the same covalent channels the frozen level solved.
-                level_ct = run_level(ch_ct, chb_ct, envelope, ct_channels=from_radius)
-                solver["ct"] = (level_ct.n_iter, level_ct.converged, level_ct.pd_fail)
-                env_ct = env_extra(level_ct)
-                env = env_ct
-
-            # The atomic energy's lifted constraints, telescoping so that the sum is one
-            # evaluation at the fully relaxed level:
+            # The atomic energy's lifted constraint, telescoping so that the sum is one
+            # evaluation at the relaxed level:
             #
-            #     E_atom^0   = E_theta(h_frag, M^frozen, Phi^intra)                -> 1-body
-            #     E_atom^pol = E_theta(h_frag, M^pol,    Phi^pol )  - E_atom^0      -> pol
-            #     E_atom^ct  = E_theta(h_env,  M^ct,     Phi^ct )   - E_atom^pol    -> ct
+            #     E_atom^0   = E_theta(h_frag, M^frozen, Phi^intra)              -> 1-body
+            #     E_atom^ind = E_theta(h_env,  M^ind,    Phi^ind ) - E_atom^0    -> induction
             #
-            # What moves at each step is the *electronic state*, not a parameter: one set of
-            # weights, three inputs. That is the difference from the bond channel this
-            # replaces, where each level was a separate evaluation of a readout that also
-            # defined the one-body zero, so two of the three were unlabeled and the split
-            # between them drifted.
+            # What moves is the *electronic state*, not a parameter: one set of weights, two
+            # inputs. That is the difference from the bond channel this replaces, where each
+            # level was a separate evaluation of a readout that also defined the one-body zero.
             #
-            # The feature stream changes at **ct**, not pol. Relaxing a fragment's own
-            # multipoles against its neighbours' leaves it the same fragment; letting charge
-            # cross the boundary does not, and that is also exactly when its descriptor should
-            # stop being fragment-confined.
+            # **The feature stream changes here, and that is the term's main risk.** Going
+            # `h_frag -> h_env` is a route to the label that needs no charge to move and no
+            # multipole to relax, and when `pol` and `ct` were separate levels it ate the whole
+            # of `ct` -- 100.0% of that channel's correction, with 4.6e-5 e crossing a
+            # boundary. Merged, it lands in a channel that also carries a real solve, and
+            # `energy_atom_ind_frag` below measures exactly how much of the correction is the
+            # swap alone. It is reported, not penalized: some of it is real (an atom's bonding
+            # genuinely responds to its surroundings), and the split is what says how much.
             #
-            # On an isolated fragment `ct` is **exactly** zero: `h_env == h_frag`, no channel
-            # reaches outside, so `M^ct == M^pol` and `Phi^ct == Phi^pol` bitwise. `pol` is
-            # zero only up to the fragment's own variational relaxation -- `Phi^pol` and
-            # `Phi^intra` coincide there (every pair is intra), but `M^pol != M^frozen`,
-            # because the polarized level minimizes with the intramolecular electrostatics
-            # *inside* the functional while the frozen level adds it afterwards. Measured, that
-            # relaxation is 2.6e-5 e and leaves a few hundredths of a kJ/mol in `pol`. It is a
-            # property of what the levels *are*, not of this term, and it predates it.
-            energy_atom_pol = atom_energy(
-                h_frag, level_pol.charges, level_pol.mu, level_pol.quad_s, env_pol
+            # On an isolated fragment induction is zero only up to the fragment's own
+            # variational relaxation: `h_env == h_frag` and `Phi^ind == Phi^intra` there (every
+            # pair is intra), but `M^ind != M^frozen`, because the coupled level minimizes with
+            # the intramolecular electrostatics *inside* the functional while the frozen level
+            # adds it afterwards. Measured, that relaxation is 2.6e-5 e and leaves a few
+            # hundredths of a kJ/mol. It is a property of what the levels *are*.
+            energy_atom_ind = atom_energy(
+                h_env, level_ind.charges, level_ind.mu, level_ind.quad_s, env_ind
+            )
+            # The same evaluation on the fragment-confined stream. Nothing consumes it; its
+            # only job is to make the descriptor swap measurable at no extra solve.
+            energy_atom_ind_frag = atom_energy(
+                h_frag, level_ind.charges, level_ind.mu, level_ind.quad_s, env_ind
             )
 
-            interaction_ff["pol"] = level_pol.energy - energy_frozen_total
-            interaction_corr["pol"] = (
-                pool_batch(inter * corr_pol_pair)
-                + (energy_atom_pol - energy_atom).new_zeros(n_sys).index_add_(
-                    0, f2b_, energy_atom_pol - energy_atom
-                )
+            d_atom = energy_atom_ind - energy_atom
+            interaction_ff["induction"] = level_ind.energy - energy_frozen_total
+            interaction_corr["induction"] = (
+                pool_batch(inter * corr_ind_pair)
+                + d_atom.new_zeros(n_sys).index_add_(0, f2b_, d_atom)
             )
-            interaction["pol"] = interaction_ff["pol"] + interaction_corr["pol"]
-
-            if self.charge_transfer:
-                # **CT gets no correction readout of its own.** It is the residue of lifting
-                # the last constraint, so what it is entitled to is the coupled solve's own
-                # energy difference plus the atomic energy's response to the state that solve
-                # produced -- both of which it shares with electrostatics and polarization.
-                # A dedicated `ct_bond` readout gave it a private lever instead, and measured
-                # on the checkpoint that had one it supplied 96.7% of the channel: -5.24 kJ/mol
-                # per fragment of correction against -0.18 of classical. That is not a charge
-                # transfer model, it is a neural network wearing the label.
-                #
-                # This is the step where the descriptor stops being fragment-confined, because
-                # it is the step where the fragment stops being a closed system.
-                energy_atom_ct = atom_energy(
-                    h_env, level_ct.charges, level_ct.mu, level_ct.quad_s, env_ct
-                )
-                interaction_ff["ct"] = level_ct.energy - level_pol.energy
-                d_ct = energy_atom_ct - energy_atom_pol
-                interaction_corr["ct"] = d_ct.new_zeros(n_sys).index_add_(0, f2b_, d_ct)
-                interaction["ct"] = interaction_ff["ct"] + interaction_corr["ct"]
+            interaction["induction"] = (
+                interaction_ff["induction"] + interaction_corr["induction"]
+            )
 
         # The intra bucket: the bond channel (zero unless 'bond' is a correction channel) plus
         # whatever classical energy survives the range separation. The latter is the term that
@@ -1292,8 +1215,8 @@ class UnifiedPairModel(nn.Module):
             energy_internal=res.internal_energy,
             energy_bond=energy_bond,
             energy_atom=energy_atom,
-            energy_atom_pol=energy_atom_pol,
-            energy_atom_ct=energy_atom_ct,
+            energy_atom_ind=energy_atom_ind,
+            energy_atom_ind_frag=energy_atom_ind_frag,
             pair_index=pair_index,
             r=r,
             is_intra=is_intra,
@@ -1313,11 +1236,10 @@ class UnifiedPairModel(nn.Module):
             ),
             elst_env=(
                 pool_batch(inter * elst_env_pair)
-                if split_elst and self.polarization else None
+                if split_elst and self.induction else None
             ),
             response=res,
-            level_pol=level_pol,
-            level_ct=level_ct,
+            level_ind=level_ind,
             energy_frozen_total=energy_frozen_total,
             environment=env,
             solver=solver or None,

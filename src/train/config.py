@@ -262,7 +262,21 @@ class ElectrostaticsConfig:
     # parameters per atom. Note the (C, chiquad) gauge: scaling one and inverse-scaling
     # the other leaves Theta untouched, so these are identified only once
     # `internal_energy` enters a loss -- until then leave weight_decay on.
+    #: The **permanent** atomic quadrupole. Under ``direct_multipoles`` this head's output
+    #: *is* ``Theta_0``; it is what ``eda_cls_elec`` and the fragment quadrupole labels see.
     learn_quadrupole: bool = True
+    #: The quadrupole **polarizability** -- whether a field gradient can move that moment.
+    #:
+    #: Off by default, which leaves each atom a rigid permanent quadrupole. The induction
+    #: model moves charges and dipoles only: charge flux through the SQE channels plus the
+    #: on-site ``alpha``. Quadrupole response is the smallest of the three, it is the sector
+    #: whose ``(C, chiquad)`` gauge is least constrained by any label here, and dropping it
+    #: removes a ``5N`` block from the coupled-solve state.
+    #:
+    #: Independent of ``learn_quadrupole``: turning this off does **not** make atoms
+    #: quadrupole-free, and ``max_rank`` stays 2 either way -- that decides which slots the
+    #: interaction tensor and the environment features carry, not which heads exist.
+    quadrupole_response: bool = False
     cquad_init: float = 1.0         # e^2 a0^4 / Ha
     cquad_floor: float = 1.0e-4
     environment_cquad: bool = False
@@ -273,6 +287,8 @@ class ElectrostaticsConfig:
     #: and costs three scalars plus a direction. Needs lambda=1 features for the axis.
     #: Initialized with the three equal, so it reproduces the isotropic head exactly at
     #: initialization and the axis stays inert until the fit separates them.
+    #: A sub-option of ``quadrupole_response``: inert while that is off, since there is then
+    #: no quadrupole polarizability to be anisotropic.
     anisotropic_cquad: bool = False
     #: Interpret the equivariant heads as the **permanent multipoles** rather than as the
     #: drives that produce them -- ``mu = mu0`` instead of ``mu = -alpha chivec``, with
@@ -487,14 +503,13 @@ class UnifiedConfig:
     #:
     #:     pair_corrections: [elst]      # electrostatics only; bond/pauli/disp stay silent
     #:
-    #: All-or-nothing was the wrong granularity, because the four channels are not the same
-    #: kind of object. ``bond`` sits inside ``fragment_energy`` where it is degenerate with
-    #: ``atomic_energy``, and ``ct_bond`` was measured supplying 96.7% of its label -- those
-    #: are the ones that had to go. ``elst`` is not in that position: it corrects a channel
-    #: with a real label of its own (``eda_cls_elec``), and because the electrostatic split
-    #: routes its ``h_env - h_frag`` difference to ``pol``, it is also the only correction
-    #: that reaches polarization. Turning it on alone is the useful middle setting, and it
-    #: was not expressible before.
+    #: All-or-nothing was the wrong granularity, because the channels are not the same kind of
+    #: object. ``bond`` sits inside ``fragment_energy`` where it is degenerate with
+    #: ``atomic_energy``, and the since-removed ``ct_bond`` was measured supplying 96.7% of its
+    #: label -- those are the ones that had to go. ``elst`` is not in that position: it corrects
+    #: a channel with a real label of its own (``eda_cls_elec``), and because the electrostatic
+    #: split routes its ``h_env - h_frag`` difference to ``induction``, it is also the only
+    #: correction that reaches induction. Turning it on alone is the useful middle setting.
     #:
     #: Unknown names raise at model-build time rather than being ignored, so a typo is not a
     #: silently disabled channel.
@@ -539,6 +554,19 @@ class UnifiedConfig:
     total_energy_weight: float = 0.0
     force_weight: float = 0.0
     force_scale: float = 1.0e-3         # Hartree/Angstrom
+    #: Apply the **cluster** force term every k-th training step; 1 is every step.
+    #:
+    #: Same trade as ``anchor_force_every``, and it buys more: the cluster force is a
+    #: ``create_graph=True`` backward through the whole model including the coupled solve, and
+    #: it is by far the most expensive single thing this fit can be asked to do. Measured at
+    #: batch 128 with induction on, 31.8 s/epoch without it against **86.1 with it** -- 2.7x
+    #: for one label. At ``force_every: 2`` that becomes ~1.9x.
+    #:
+    #: Striding is honest here for the same reason it is on the anchor: the term is a smooth
+    #: function of the parameters, so a strided estimate is a k-times-noisier version of the
+    #: same pull rather than a different one. Evaluation always computes it, so ``f_clu`` means
+    #: the same thing on every validation line.
+    force_every: int = 1
     #: **Known bias in the force gradient at the pol/CT levels.** ``rsfff.ff.coupled_solve``
     #: solves the response with a custom ``autograd.Function`` whose backward is the adjoint of
     #: docs §6.2. That adjoint is correct -- checked against the dense oracle, and an *energy*
@@ -603,66 +631,33 @@ class UnifiedConfig:
     #: prior. Inert while ``environment_r0`` is off.
     r0_spread_weight: float = 0.0
 
-    # --- polarization and charge transfer (docs/range_separated_mlip.md §5.1) -------------
-    #: The two remaining EDA components, as constraint lifting at a fixed fragmentation. Each
-    #: level minimizes the *same* functional as the frozen one with one more freedom, and each
-    #: label is the difference between adjacent levels -- so with both off the model is
-    #: bit-identical to the frozen fit and ``checkpoints/water_unified`` still loads.
+    # --- induction (docs/range_separated_mlip.md §5.1) ------------------------------------
+    #: **Induction: polarization and charge transfer as one term**, fitted against
+    #: ``eda_pol + eda_ct``. Off leaves the model bit-identical to the frozen fit.
     #:
-    #: ``polarization`` moves the inter-fragment electrostatics inside the response functional
-    #: so the multipoles relax against each other, lets the response parameters read ``h_env``,
-    #: and gives the bond channel the external field as a feature. ``charge_transfer`` then
-    #: opens inter-fragment charge-flow channels. CT requires polarization: ``ct`` is defined
-    #: as ``E_ct - E_pol``, so without the middle level it would absorb the polarization too.
-    polarization: bool = False
-    charge_transfer: bool = False
-    pol_weight: float = 30.0
-    ct_weight: float = 30.0
-    #: Candidate charge-transfer channels reach this far, Angstrom. Generous on purpose: a
-    #: channel is closed by the bounded limit ``s -> 0``, so an over-wide set costs accuracy
-    #: nothing while a too-narrow one cannot be recovered by learning.
-    ct_channel_cutoff: float = 5.0
-    #: Envelope width at that cutoff. **Not optional**: without it a channel appears the
-    #: instant two molecules come within range and the forces are discontinuous there.
-    ct_channel_taper: float = 1.0
-    #: Scale for the radius-derived channels' compliance -- the charge-transfer analogue of a
-    #: correction channel's ``energy_scale``, and there for the same reason. SQE has no
-    #: structural reason to prefer an intramolecular channel over an intermolecular one, so at
-    #: a shared ``s_init`` the model opens covalent-strength channels across every hydrogen
-    #: bond: a freshly initialized w2 starts at ``ct = -52`` kJ/mol against a true -8.2. At
-    #: 0.1 it starts at -7.1. Softplus is unbounded, so this sets where the head starts
-    #: looking rather than any ceiling.
-    ct_compliance_scale: float = 0.1
-    #: A compliance head of its own for the radius-derived charge-transfer channels, leaving
-    #: the intra-fragment one to the frozen head. Two reasons, and the first is the reason it
-    #: is on by default: with ``freeze_frozen_level`` the frozen compliance head stops
-    #: training, and CT would otherwise have no way left to decide which channels to open.
-    #: Second, one head serving both channel populations was an entanglement anyway -- a
-    #: covalent O-H and a hydrogen bond are not the same object, and the ``ct_compliance_scale``
-    #: prefactor above exists precisely because the shared head cannot tell them apart.
-    separate_ct_compliance: bool = True
-    #: A bond channel for pairs that **cross** a fragment boundary, active only at the
-    #: charge-transfer level.
+    #: It moves the inter-fragment electrostatics inside the response functional so the
+    #: multipoles relax against each other, and lets *every* response parameter -- ``chi``,
+    #: ``eta``, ``alpha`` and the charge-flux compliance alike -- read the environment-aware
+    #: ``h_env`` instead of the fragment-confined ``h_frag``. The fragment still supplies the
+    #: **graph** of allowed charge flux (its own intra-fragment channels); the environment
+    #: supplies the **parameters** on that graph. No charge crosses a fragment boundary.
     #:
-    #: This is what CT gets in exchange for ``h_frag -> h_env`` moving to ``pol``, and it is
-    #: the better trade: a feature-stream swap is polarization by construction (the
-    #: surroundings changing a bond's energy), while a bond that spans two fragments is
-    #: exactly the constraint CT lifts and nothing below it can express. Below the CT level
-    #: an inter-pair bond term would be a second, unlabeled copy of the electrostatic
-    #: correction; at the CT level it is the *only* inter-pair correction ``ct`` has, since
-    #: ``interaction_corr["ct"]`` was intra-only and everything inter came from the solve.
+    #: **Why these were two levels and are now one.** ``pol`` and ``ct`` were separated only by
+    #: their labels and by the atomic energy's feature stream (``h_frag`` at pol, ``h_env`` at
+    #: ct). That swap is a free ~20 kJ/mol knob that only ``ct`` could reach, and it is much
+    #: cheaper to fit than moving charge: measured on a trained checkpoint, ``ct`` was
+    #: **99.99% correction and 100.0% descriptor swap**, with 4.6e-5 e crossing a boundary
+    #: against a real ~0.01-0.03 e per hydrogen bond. The compliance head had closed every
+    #: inter-fragment channel (``q_ct`` 0.085 -> 5.7e-5, monotone) while ``ct_mae`` read 0.40
+    #: kJ/mol and reported nothing wrong. Same failure as the ``ct_bond`` readout before it
+    #: (96.7% neural), through a different route.
     #:
-    #: It shares the usual ``ff``/``corr`` degeneracy with ``interaction_ff["ct"]``, the same
-    #: shape as ``pol_ff`` against ``pol_corr``. Watch the split, not ``ct_mae``: ``q_ct``
-    #: going to zero while ``ct_mae`` stays low means the compliance head closed every channel
-    #: and this correction is carrying the whole term.
-    ct_bond: bool = True
-    #: Output scale for that channel, Hartree. Deliberately **not** ``bond_energy_scale``,
-    #: which is 0.2 Ha because it is sized for a covalent O-H (water's bonds are ~-0.37 Ha).
-    #: Reusing it across a hydrogen bond would give this readout a step about 60x the other
-    #: interaction corrections' for the same parameter change -- so it takes the interaction
-    #: corrections' scale, which is the size of the thing it is actually correcting.
-    ct_bond_energy_scale: float = 3.0e-3
+    #: Merged, the swap lands in a channel that also contains a real physical solve, and the
+    #: split is visible: watch ``ind_ff`` against ``ind_corr``, and ``ind_swap`` for how much
+    #: of the correction is the feature stream alone. Explicit inter-fragment charge transfer
+    #: comes back when reactivity does, and it will need a compliance scale again then.
+    induction: bool = False
+    induction_weight: float = 30.0
     #: Freeze the whole fragment-confined path -- ``featurizer.channel_proj``,
     #: ``response.params`` and ``response.compliance_head`` -- at the values this stage warm
     #: starts from. On for every stage after the first.

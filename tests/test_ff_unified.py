@@ -101,7 +101,7 @@ def make_batch(positions, numbers, fragment_idx, batch_idx=None):
 
 
 def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0, extra_dim=0,
-                separate_ct_compliance=True, direct_multipoles=False):
+                direct_multipoles=False, quadrupole_response=True):
     """Every submodule, so a test can hand the same instances to both model shapes."""
     torch.manual_seed(seed)
     featurizer = FlatLambdaSOAPFeaturizer(
@@ -121,6 +121,7 @@ def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0, extra_dim=0,
             log_z_prior=log_z, log_b_prior=log_b, q0_prior=q0,
             irrep6_to_voigt=voigt, irrep2_to_spherical_map=irrep2_to_spherical(voigt),
             emb_dim=8, hidden=24, depth=1, equiv_channels=6, max_rank=MAX_RANK,
+            quadrupole_response=quadrupole_response,
         ),
         PairComplianceHead(p0, hidden=24, depth=1, cutoff=5.0, s_init=0.5),
         direct_multipoles=direct_multipoles,
@@ -149,7 +150,6 @@ def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0, extra_dim=0,
             "pauli": ChannelSpec(**corr, energy_scale=3e-3),
             "disp": ChannelSpec(**corr, energy_scale=1e-3),
             "bond": ChannelSpec(r_on=2.5, r_off=4.0, energy_scale=0.2),
-            "ct_bond": ChannelSpec(r_on=2.5, r_off=4.0, energy_scale=3e-3),
         },
         range_channels=RANGE_CHANNELS,
         extra_dim=extra_dim,
@@ -158,14 +158,7 @@ def build_parts(*, fragment_state_dim=0, alpha_init=40.0, seed=0, extra_dim=0,
     # Built *last*, and attached rather than passed to the constructor, so that adding it does
     # not consume random numbers ahead of any other block. Several tests here are calibrated
     # against a specific initialization -- the finite-difference gradient checks in particular
-    # have thresholds that a different random operating point walks straight through -- and a
-    # head that is inert until charge transfer is on has no business moving them.
-    if separate_ct_compliance:
-        response.ct_compliance_head = PairComplianceHead(
-            p0, hidden=24, depth=1, cutoff=5.0, s_init=0.5
-        )
-    # Also built last, and for the same reason as `ct_compliance_head` above: it is the newest
-    # block and the calibrated gradient checks must not move because of it.
+    # have thresholds that a different random operating point walks straight through.
     atomic_energy = AtomicStateEnergy(
         p0, n_species, p1=p1, p2=p2, irrep2_to_spherical=irrep2_to_spherical(voigt),
         emb_dim=8, hidden=24, depth=1, equiv_channels=6, energy_scale=0.2,
@@ -506,8 +499,7 @@ class _ChannelOnly(torch.nn.Module):
 
 @pytest.mark.parametrize("levels", [
     {},
-    {"polarization": True},
-    {"polarization": True, "charge_transfer": True},
+    {"induction": True},
 ])
 def test_electrostatics_stays_two_body_with_the_environment_live(levels):
     """``cls_elec`` is fragment-confined at *every* level, environment residual or not.
@@ -551,16 +543,16 @@ def test_electrostatics_stays_two_body_with_the_environment_live(levels):
     )
 
 
-def test_the_electrostatic_environment_term_is_booked_as_polarization():
-    """What leaves ``cls_elec`` arrives in ``pol``: a re-partition, not a deletion.
+def test_the_electrostatic_environment_term_is_booked_as_induction():
+    """What leaves ``cls_elec`` arrives in ``induction``: a re-partition, not a deletion.
 
     ``gate_env * E == gate_frag * E + (gate_env - gate_frag) * E`` is an identity, so moving the
-    environment-dependent half into the polarization correction cannot change the total. It
+    environment-dependent half into the induction correction cannot change the total. It
     changes only which column the energy is reported in -- which is the whole point, since a
     frozen-density label cannot be fit by an environment-dependent function.
     """
     model = randomize(wake_environment(
-        make_model(environment=True, extra_dim=9, levels={"polarization": True}), scale=3.0
+        make_model(environment=True, extra_dim=9, levels={"induction": True}), scale=3.0
     ))
     positions, numbers, frag = water_cluster(3, seed=23)
     out = model(make_batch(positions, numbers, frag))
@@ -858,7 +850,7 @@ def test_environment_residual_is_anchored_at_the_isolated_fragment():
     ``EnvironmentResidual`` is written as a *difference*, ``g(h_full) - g(h_frag)``, so for a
     fragment whose only neighbors are its own atoms the two streams coincide -- not merely at
     initialization, and not merely for small ``g``. Everything defined as a difference between
-    the streams (the polarization and charge-transfer corrections) is therefore zero on a
+    the streams (the induction correction) is therefore zero on a
     monomer, which is what their labels require.
 
     **Zero to round-off, not bitwise.** ``h_full`` and ``h_frag`` are produced by two different
@@ -946,11 +938,22 @@ def test_environment_awareness_reaches_interactions_and_not_the_fragment_energy(
     assert torch.equal(after.energy_atom, before.energy_atom), (
         "the environment reached E_atom^0; it must be evaluated on h_frag"
     )
-    # ... and bounded on what is left, which is the switched-down intra classical remainder.
-    assert moved_fragment < 1.0e-3, (
+    # ... and **the route, not the magnitude**, on what is left. With `E_internal` and
+    # `E_atom` bitwise unchanged above and `energy_ref` constant, `fragment_energy` can only
+    # have moved through `energy_bond` -- the intra classical bucket -- so that is asserted as
+    # an exact identity rather than bounded by a number. The size of the residue on a
+    # *randomized* model is a property of the random draw: this guard was `< 1e-3` against a
+    # measured 0.0019 and fired at 0.0158 on a change to the model's parameter count, which is
+    # the same failure mode the `moved_interaction` guard above was already widened for.
+    # `allclose` at 1e-12 Ha (2.6e-9 kJ/mol), not `equal`: `fragment_energy` is a sum of four
+    # terms, so differencing it does not reassociate bit-for-bit with differencing one of them.
+    assert torch.allclose(
+        (after.fragment_energy - before.fragment_energy).detach(),
+        (after.energy_bond - before.energy_bond).detach(),
+        atol=1e-12, rtol=0,
+    ), (
         f"{moved_fragment:.6g} kJ/mol of environment reached an isolated-fragment label "
-        f"through the intra classical channels; the range separation is supposed to have "
-        f"switched those down to far less than this"
+        f"through a route other than the intra classical channels"
     )
 
 
@@ -990,13 +993,20 @@ def test_fragment_energy_is_exactly_one_body_with_environment_on():
     violation = float(
         (in_cluster.fragment_energy[0] - alone.fragment_energy[0]).abs()
     ) * KJMOL_PER_HARTREE
-    # Measured 0.0019 kJ/mol here. The bound is loose against that because this model is
-    # *randomized*, not fitted: its range separation has not learned to switch the intra
-    # classical channels off, which is what makes the residue as large as it is. On a trained
-    # model the quantity to watch is the one-body bias in `scripts/staged_diagnostics.py`.
-    assert violation < 1.0e-2, (
-        f"one-body violation of {violation:.6g} kJ/mol with g live, through the intra "
-        f"classical channels; the range separation should have switched those far lower"
+    # **The route, not the magnitude**, for the same reason as
+    # `test_environment_awareness_reaches_interactions_and_not_the_fragment_energy`: with
+    # `E_internal` and `E_atom` bitwise equal above and `energy_ref` constant, the only way
+    # `fragment_energy` can differ is `energy_bond`. The size of the residue on an *unfitted*
+    # model is a property of the random draw -- this was `< 1e-2` against a measured 0.0019
+    # and moved to 20 on a change to the parameter count. On a trained model the quantity to
+    # watch is the one-body bias in `scripts/staged_diagnostics.py`.
+    assert torch.allclose(
+        (in_cluster.fragment_energy[0] - alone.fragment_energy[0]),
+        (in_cluster.energy_bond[0] - alone.energy_bond[0]),
+        atol=1e-12, rtol=0,
+    ), (
+        f"one-body violation of {violation:.6g} kJ/mol with g live, through a route other "
+        f"than the intra classical channels"
     )
 
 
@@ -1688,8 +1698,7 @@ def test_energy_gradient_stays_exact_once_the_coupled_solve_is_on():
         return out.energy.pow(2).sum() + sum(v.pow(2).sum() for v in out.interaction.values())
 
     positions, numbers, frag = water_cluster(2, seed=3)
-    for levels in (dict(polarization=True),
-                   dict(polarization=True, charge_transfer=True)):
+    for levels in (dict(induction=True),):
         model = randomize(
             make_model(environment=True, extra_dim=9, levels=levels), scale=0.02, seed=5
         )
@@ -1729,7 +1738,7 @@ def test_cluster_force_gradient_carries_a_known_bias_at_the_coupled_levels():
     """
     positions, numbers, frag = water_cluster(2, seed=3)
     model = randomize(
-        make_model(environment=True, extra_dim=9, levels=dict(polarization=True)),
+        make_model(environment=True, extra_dim=9, levels=dict(induction=True)),
         scale=0.02, seed=5,
     )
     errs = _grad_vs_fd(
@@ -1863,47 +1872,6 @@ def test_freezing_the_frozen_level_keeps_it_out_of_the_optimizer():
     assert grouped, "everything was frozen, so the stage would have nothing to train"
 
 
-def test_charge_transfer_keeps_a_compliance_head_of_its_own():
-    """Freezing the frozen compliance head must not cost CT its only lever.
-
-    The frozen head answers for the intra-fragment channels, which the frozen level already
-    solved and which the freeze is meant to hold. The radius-derived channels -- the ones that
-    *are* charge transfer -- get a head of their own, so it keeps training after stage 1.
-    """
-    from rsfff.ff.pairs import union_channels
-
-    model = make_model(environment=True, extra_dim=9,
-                       levels={"polarization": True, "charge_transfer": True})
-    assert model.response.ct_compliance_head is not None
-
-    positions, numbers, frag = water_cluster(3, seed=37)
-    batch = make_batch(positions, numbers, frag)
-    bond_index, _, from_radius = union_channels(
-        batch.positions, batch.batch_idx, batch.fragment_idx, 5.0
-    )
-    assert bool(from_radius.any()) and bool((~from_radius).any()), "need both populations"
-
-    feats = model._augment(model.featurizer(batch, batch.fragment_idx), batch,
-                           batch.fragment_idx)
-    base = model.response.response_parameters(
-        batch, feats, bond_index=bond_index, ct_channels=from_radius
-    ).compliance.detach().clone()
-
-    # Moving the CT head changes the radius-derived channels and nothing else.
-    with torch.no_grad():
-        model.response.ct_compliance_head.net[-1].bias.add_(0.5)
-    moved = model.response.response_parameters(
-        batch, feats, bond_index=bond_index, ct_channels=from_radius
-    ).compliance.detach()
-
-    assert not torch.allclose(moved[from_radius], base[from_radius])
-    assert torch.allclose(moved[~from_radius], base[~from_radius], atol=1e-14)
-
-
-# ---------------------------------------------------------------------------
-# The bond channel's constraint lifting
-# ---------------------------------------------------------------------------
-
 def _bond_levels_model(**levels):
     return randomize(wake_environment(
         make_model(environment=True, extra_dim=9, levels=levels), scale=3.0
@@ -1911,46 +1879,69 @@ def _bond_levels_model(**levels):
 
 
 def test_atomic_energy_telescopes_to_one_evaluation_at_the_top_level():
-    """``E_atom^0 + (pol - 0) + (ct - pol) == E_atom^ct``, exactly.
+    """``E_atom^0 + (induction - 0) == E_atom^ind``, exactly.
 
-    The three terms answer to three different labels -- ``fragment_energy``, ``pol`` and
-    ``ct`` -- but they are one network read at three successively less constrained electronic
-    states, so outside training they collapse to a single evaluation. If they did not, the
-    decomposition would be adding energy rather than dividing it.
+    The two terms answer to different labels -- ``fragment_energy`` and ``induction`` -- but
+    they are one network read at two electronic states, so outside training they collapse to a
+    single evaluation. If they did not, the decomposition would be adding energy rather than
+    dividing it.
 
-    This replaces the same claim about the bond channel. The mechanism moved but the invariant
-    did not, and it is the invariant that keeps the levels a partition: what distinguishes
-    them now is the *state* handed to one set of weights, not three separate readouts whose
-    difference happened to be labelled.
+    This replaces the same claim about the bond channel, and previously spanned three levels.
+    The mechanism moved and the level count shrank, but the invariant did not: what
+    distinguishes the levels is the *state* handed to one set of weights.
     """
-    model = _bond_levels_model(polarization=True, charge_transfer=True)
+    model = _bond_levels_model(induction=True)
     positions, numbers, frag = water_cluster(3, seed=43)
     batch = make_batch(positions, numbers, frag)
     out = model(batch)
 
-    assert out.energy_atom_pol is not None and out.energy_atom_ct is not None
-    # Live at every level, or the identity below is a statement about zeros.
-    for level in (out.energy_atom, out.energy_atom_pol, out.energy_atom_ct):
+    assert out.energy_atom_ind is not None
+    # Live at both levels, or the identity below is a statement about zeros.
+    for level in (out.energy_atom, out.energy_atom_ind):
         assert float(level.detach().abs().max()) > 1e-9
 
-    frozen = out.energy_atom
-    d_pol = out.energy_atom_pol - frozen
-    d_ct = out.energy_atom_ct - out.energy_atom_pol
-    assert torch.allclose(frozen + d_pol + d_ct, out.energy_atom_ct, atol=0, rtol=0), (
-        "the three levels do not telescope, so the decomposition is inventing energy"
-    )
-
-    # And each difference is genuinely booked where it is claimed to be: the pol and ct
-    # corrections carry exactly these, pooled to frames (pol also carries the electrostatic
-    # environment term, which is why only ct is checked for equality).
+    d_ind = out.energy_atom_ind - out.energy_atom
+    # With two levels the telescoping itself is a floating-point tautology, so what is worth
+    # asserting is where the step is *booked*: `interaction_corr["induction"]` must be exactly
+    # that step plus the electrostatic environment term and nothing else. A third contributor
+    # sneaking into the induction correction is what this catches.
     f2b = batch.fragment_to_batch
-    pooled_ct = d_ct.new_zeros(batch.n_systems).index_add_(0, f2b, d_ct)
-    assert torch.allclose(out.interaction_corr["ct"], pooled_ct, atol=0, rtol=0), (
-        "interaction_corr['ct'] is not exactly the atomic energy's ct step"
+    pooled = d_ind.new_zeros(batch.n_systems).index_add_(0, f2b, d_ind)
+    residual = out.interaction_corr["induction"] - pooled
+    assert torch.allclose(residual, out.elst_env, atol=1e-12), (
+        "interaction_corr['induction'] is not the atomic step plus the electrostatic split"
     )
 
 
-def test_the_environment_reaches_polarization_through_the_response_not_the_features():
+def test_the_descriptor_swap_is_measurable_without_a_second_solve():
+    """``energy_atom_ind`` and ``energy_atom_ind_frag`` differ only by the feature stream.
+
+    This is the diagnostic the merge exists to expose. In the two-level model the
+    ``h_frag -> h_env`` swap was the whole of the ``ct`` channel -- 100.0% of its correction,
+    with 4.6e-5 e crossing a fragment boundary -- and no printed metric said so. Both
+    evaluations are at the *same* electronic state, so their difference is the swap alone.
+    """
+    model = _bond_levels_model(induction=True)
+    positions, numbers, frag = water_cluster(3, seed=44)
+    batch = make_batch(positions, numbers, frag)
+    out = model(batch)
+
+    assert out.energy_atom_ind is not None and out.energy_atom_ind_frag is not None
+    swap = out.energy_atom_ind - out.energy_atom_ind_frag
+    # `wake_environment` has moved `g` off zero, so the two streams genuinely differ.
+    assert float(swap.abs().max()) > 1e-9, "the swap diagnostic is identically zero"
+
+    # And it is exactly the feature stream: recomputing the h_frag version by hand agrees.
+    h_frag, h_env = model._descriptors(batch, frag)
+    e = model.atomic_energy(
+        h_frag.inv_feats, h_frag.species_idx, h_frag.vec_feats, h_frag.equiv_feats,
+        out.level_ind.charges, out.level_ind.mu, out.level_ind.quad_s, out.environment,
+    )
+    by_hand = e.new_zeros(int(batch.n_fragments)).index_add_(0, frag, e)
+    assert torch.allclose(by_hand, out.energy_atom_ind_frag, atol=0, rtol=0)
+
+
+def test_the_environment_reaches_induction_through_the_response_not_the_features():
     """Two different routes, booked at two different levels, and the split is deliberate.
 
     The atomic energy reads ``h_frag`` at the frozen *and* polarized levels and only switches
@@ -1958,7 +1949,7 @@ def test_the_environment_reaches_polarization_through_the_response_not_the_featu
     the same fragment, whereas letting charge cross the boundary does not, and that is also
     when its descriptor should stop being fragment-confined.
 
-    So polarization still has to see the environment, and it does -- through the coupled
+    So induction still has to see the environment, and it does -- through the coupled
     solve, whose response parameters are evaluated on ``h_env``. That is the route this test
     pins. The companion claim, that the *feature-stream* step belongs to ``ct``, is pinned by
     :func:`test_the_atomic_energys_feature_stream_switches_at_ct_not_pol`.
@@ -1971,7 +1962,7 @@ def test_the_environment_reaches_polarization_through_the_response_not_the_featu
     batch = make_batch(positions, numbers, frag)
 
     def bond_only(wake):
-        model = make_model(environment=True, extra_dim=9, levels={"polarization": True})
+        model = make_model(environment=True, extra_dim=9, levels={"induction": True})
         model = randomize(model, scale=0.05, seed=41)
         with torch.no_grad():
             # `randomize` perturbs every parameter, `g` included, so an "asleep" baseline has
@@ -1999,8 +1990,8 @@ def test_the_environment_reaches_polarization_through_the_response_not_the_featu
     assert float(asleep.environment_norm.detach().abs().max()) < 1e-12
     assert float(awake.environment_norm.detach().abs().max()) > 1e-6
     assert not torch.allclose(
-        awake.interaction_corr["pol"], asleep.interaction_corr["pol"], atol=1e-12
-    ), "polarization does not see h_env at all, so the coupled solve is not reading it"
+        awake.interaction_corr["induction"], asleep.interaction_corr["induction"], atol=1e-12
+    ), "induction does not see h_env at all, so the coupled solve is not reading it"
 
 
 def _feature_streams(model, batch):
@@ -2013,108 +2004,6 @@ def _feature_streams(model, batch):
     h_frag = model._augment(grouped, batch, frag)
     return h_frag, model.environment(h_frag, model._augment(full, batch, frag))
 
-
-def test_the_atomic_energys_feature_stream_switches_at_ct_not_pol():
-    """``E_atom^pol`` reads ``h_frag``; only ``E_atom^ct`` reads ``h_env``.
-
-    The frozen and polarized atomic energies have to be the *same function* of their inputs so
-    that what separates them is the electronic state alone. Relaxing a fragment's multipoles
-    against its neighbours leaves it the same fragment; letting charge cross the boundary does
-    not, and that is when its descriptor should stop being fragment-confined.
-
-    Decisive rather than indicative: the head is re-evaluated by hand on each stream at the
-    polarized state, and the ``h_frag`` version must reproduce ``energy_atom_pol``
-    **bitwise** while the ``h_env`` version must not. Charge transfer is off so that
-    ``out.environment`` is the polarized environment and the hand evaluation is exact.
-    """
-    positions, numbers, frag = water_cluster(3, seed=61)
-    batch = make_batch(positions, numbers, frag)
-    model = _bond_levels_model(polarization=True)
-    out = model(batch)
-
-    h_frag, h_env = _feature_streams(model, batch)
-    assert float((h_env.inv_feats - h_frag.inv_feats).abs().max()) > 1e-6, (
-        "g is asleep, so this test cannot tell the two streams apart"
-    )
-
-    def by_hand(feats):
-        per_atom = model.atomic_energy(
-            feats.inv_feats, feats.species_idx, feats.vec_feats, feats.equiv_feats,
-            out.level_pol.charges, out.level_pol.mu, out.level_pol.quad_s, out.environment,
-        )
-        return per_atom.new_zeros(batch.n_fragments).index_add_(
-            0, batch.fragment_idx, per_atom
-        )
-
-    assert torch.allclose(by_hand(h_frag), out.energy_atom_pol, atol=0, rtol=0), (
-        "energy_atom_pol was not computed from h_frag"
-    )
-    assert not torch.allclose(by_hand(h_env), out.energy_atom_pol, atol=1e-10), (
-        "the two streams agree here, so the assertion above proves nothing"
-    )
-
-
-def test_charge_transfer_has_no_correction_readout_of_its_own():
-    """CT is the residue of lifting the last constraint, not a channel with a private lever.
-
-    This is the inverse of what the model used to assert. A dedicated ``ct_bond`` readout gave
-    charge transfer a correction no other channel had, and measured on the checkpoint that
-    shipped with it, that readout supplied **96.7%** of the term: -5.24 kJ/mol per fragment of
-    correction against -0.18 of classical. A channel whose value is set almost entirely by its
-    own free network is not modelling the thing its label names.
-
-    What CT is entitled to instead is what it shares with electrostatics and polarization: the
-    coupled solve's own energy difference, plus the atomic energy's response to the state that
-    solve produced. Both are asserted here -- ``ct_bond`` must be inert, and
-    ``atomic_energy`` must reach the channel.
-    """
-    model = _bond_levels_model(polarization=True, charge_transfer=True)
-    positions, numbers, frag = water_cluster(3, seed=53)
-    batch = make_batch(positions, numbers, frag)
-    before = {k: v.detach().clone() for k, v in model(batch).interaction.items()}
-
-    with torch.no_grad():
-        model.pair_head.readout["ct_bond"].bias.add_(1.0)
-    after = model(batch)
-    for name, was in before.items():
-        assert torch.allclose(after.interaction[name], was, atol=1e-12), (
-            f"the cross-fragment bond readout reached {name}; charge transfer is not "
-            f"supposed to have a correction channel of its own"
-        )
-
-    # ... and the route it does have is live. The readout *weight*, not its bias: the head is
-    # anchored as `net(x) - net(free atom)`, so a constant shift cancels identically -- which
-    # is exactly the property that keeps the isolated-atom energy at `E0`.
-    with torch.no_grad():
-        model.atomic_energy.net[-1].weight.add_(0.05)
-    moved = model(batch)
-    assert not torch.allclose(moved.interaction["ct"], before["ct"]), (
-        "the atomic energy does not reach the ct channel, so nothing carries it beyond the "
-        "coupled solve"
-    )
-
-
-def test_the_cross_fragment_bond_channel_is_absent_below_the_ct_level():
-    """It is charge transfer's constraint to lift, so nothing beneath it may use it."""
-    positions, numbers, frag = water_cluster(3, seed=59)
-    batch = make_batch(positions, numbers, frag)
-
-    for levels in ({}, {"polarization": True}):
-        model = _bond_levels_model(**levels)
-        before = model(batch)
-        totals = {k: v.detach().clone() for k, v in before.interaction.items()}
-        with torch.no_grad():
-            model.pair_head.readout["ct_bond"].bias.add_(1.0)
-        after = model(batch)
-        for name, was in totals.items():
-            assert torch.allclose(after.interaction[name], was, atol=1e-12), (
-                f"{name} moved with charge transfer off (levels={levels})"
-            )
-
-
-# ---------------------------------------------------------------------------
-# The free-atom limit
-# ---------------------------------------------------------------------------
 
 def _free_atom_batch(numbers):
     from rsfff.train.data import Batch
@@ -2239,9 +2128,8 @@ def test_pair_corrections_off_zeroes_every_correction_and_keeps_the_module():
     """
     positions, numbers, frag = water_cluster(3, seed=71)
     batch = make_batch(positions, numbers, frag)
-    model = _no_corrections_model(polarization=True, charge_transfer=True)
+    model = _no_corrections_model(induction=True)
     model.correction_channels = frozenset()
-    model.ct_bond = False
     out = model(batch)
 
     assert model.pair_head is not None and "bond" in model.pair_head.channels, (
@@ -2310,6 +2198,59 @@ def test_a_lone_atom_is_exactly_E0_with_the_atomic_energy_live():
     )
 
 
+def test_cluster_force_term_is_strided_on_training_steps_only():
+    """``unified.force_every`` applies the cluster force every k-th training step.
+
+    The cluster force is a ``create_graph=True`` backward through the whole model *including
+    the coupled solve*, and it is the most expensive single thing this fit can be asked to do:
+    measured at batch 128 with induction on, 31.8 s/epoch without it against 86.1 with it.
+
+    Evaluation always computes it, so ``f_clu`` means the same thing on every validation line,
+    and an evaluation epoch must not advance the stride.
+    """
+    from rsfff.train.config import Config
+    from rsfff.train.train_unified import strided_fit_term
+
+    model = randomize(make_model(environment=True, extra_dim=9,
+                                 levels={"induction": True}), seed=5)
+    positions, numbers, frag = water_cluster(2, seed=92)
+    batch = make_batch(positions, numbers, frag)
+    batch.forces = torch.zeros_like(batch.positions)
+    batch.fragment_energy = torch.zeros(int(batch.n_fragments))
+    # The EDA channels are weighted to zero below, but `unified_fit` still looks their labels
+    # up, so they have to exist.
+    batch.eda = {k: torch.zeros(int(batch.n_systems))
+                 for k in ("cls_elec", "mod_pauli", "disp", "pol", "ct")}
+    batch.positions.requires_grad_(True)
+    cfg = Config()
+    cfg.unified.induction = True
+    cfg.unified.force_weight = 1.0
+    for key, value in (("elst_weight", 0.0), ("pauli_weight", 0.0), ("disp_weight", 0.0),
+                       ("onebody_weight", 0.0), ("induction_weight", 0.0)):
+        setattr(cfg.unified, key, value)
+
+    fit = strided_fit_term(model, force_every=3)
+    model.train(True)
+    fired = []
+    for _ in range(6):
+        _, metrics, _ = fit(model(batch), batch, cfg)
+        fired.append("f_clu" in metrics)
+    assert fired == [False, False, True] * 2, f"cluster force fired on {fired}"
+
+    # Evaluation: every step, and the stride does not advance. Grad stays enabled, because
+    # that is exactly the condition under which the old grad-context inference was wrong.
+    model.train(False)
+    for _ in range(3):
+        _, metrics, _ = fit(model(batch), batch, cfg)
+        assert "f_clu" in metrics, "an evaluation step skipped the cluster force"
+
+    model.train(True)
+    _, metrics, _ = fit(model(batch), batch, cfg)
+    assert "f_clu" not in metrics, (
+        "an evaluation epoch advanced the training-step counter"
+    )
+
+
 def test_anchor_force_term_is_strided_on_training_steps_only():
     """``anchor_force_every`` applies the second-order backward every k-th training step.
 
@@ -2335,24 +2276,33 @@ def test_anchor_force_term_is_strided_on_training_steps_only():
         setattr(cfg.unified, w, 0.0)
 
     terms = AnchorTerms(model, anchor, "cpu", batch_size=4, force_every=3)
+    model.train(True)
     fired = []
     for _ in range(9):
-        with torch.enable_grad():
-            fired.append("anchor_f" in terms.penalties(model(batch), batch, cfg))
+        fired.append("anchor_f" in terms.penalties(model(batch), batch, cfg))
     assert fired == [False, False, True] * 3, f"force term fired on {fired}"
 
     # Evaluation keeps it on every step, whatever the stride and wherever the counter sits.
+    #
+    # `model.train(False)` is what marks an evaluation epoch, **not** the grad context. With
+    # `unified.force_weight` on, `run_epoch` enables grad during evaluation too -- the force is
+    # itself a backward -- so inferring "training" from the grad context reads True on an
+    # evaluation epoch. That would draw a random anchor subset instead of the fixed slice,
+    # advance this stride, and buy a `create_graph` nobody needs. Grad is left *enabled* here
+    # precisely to pin that: the stride must not care.
+    model.train(False)
     for _ in range(3):
-        with torch.no_grad():
+        with torch.enable_grad():
             extra = terms.penalties(model(batch), batch, cfg)
         assert "anchor_f" in extra, "an evaluation step skipped the force term"
         assert "f_mae" in terms._metrics
+    assert terms._train_step == 9, "an evaluation epoch advanced the training-step counter"
 
     # A stride of 1 is every step, and is the default.
+    model.train(True)
     every = AnchorTerms(model, anchor, "cpu", batch_size=4)
     assert every.force_every == 1
-    with torch.enable_grad():
-        assert "anchor_f" in every.penalties(model(batch), batch, cfg)
+    assert "anchor_f" in every.penalties(model(batch), batch, cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -2386,17 +2336,16 @@ def _perturb_readouts(model, batch, names):
 def test_named_correction_channels_route_only_those_channels():
     """``pair_corrections: [elst]`` is the useful middle setting and has to be exact.
 
-    All-or-nothing was the wrong granularity: ``bond``/``ct_bond`` sit where nothing labels
+    All-or-nothing was the wrong granularity: ``bond`` sits where nothing labels
     them, while ``elst`` corrects a channel that has its own label. Naming one must switch on
     exactly that readout -- the other three keep their parameters and stay unreachable.
     """
     positions, numbers, frag = water_cluster(3, seed=71)
     batch = make_batch(positions, numbers, frag)
-    model = _channels_model(["elst"], polarization=True, charge_transfer=True)
+    model = _channels_model(["elst"], induction=True)
 
     assert model.correction_channels == frozenset({"elst"})
     assert model.pair_corrections is True, "one live channel still counts as corrections on"
-    assert model.ct_bond is False, "ct_bond was not named and must stay closed"
 
     silent = [n for n in model.pair_head.readout if n != "elst"]
     assert _perturb_readouts(model, batch, ["elst"]) > 0.0, (
@@ -2410,7 +2359,7 @@ def test_named_correction_channels_route_only_those_channels():
         assert name in model.pair_head.readout
 
 
-def test_elst_correction_reaches_polarization():
+def test_elst_correction_reaches_induction():
     """``elst`` is the only correction whose environment difference is routed to ``pol``.
 
     ``dE_pol = [W(u(h_env)) - W(u(h_frag))] + [gate_env - gate_frag] * E_classical``. The
@@ -2419,12 +2368,12 @@ def test_elst_correction_reaches_polarization():
     """
     positions, numbers, frag = water_cluster(3, seed=72)
     batch = make_batch(positions, numbers, frag)
-    model = _channels_model(["elst"], polarization=True)
+    model = _channels_model(["elst"], induction=True)
 
-    before = model(batch).interaction_corr["pol"].detach().clone()
+    before = model(batch).interaction_corr["induction"].detach().clone()
     with torch.no_grad():
         model.pair_head.readout["elst"].weight.add_(1.0)
-    after = model(batch).interaction_corr["pol"].detach()
+    after = model(batch).interaction_corr["induction"].detach()
     assert float((after - before).abs().max()) > 0.0, (
         "the elst readout does not reach the pol channel"
     )
@@ -2541,14 +2490,14 @@ def test_direct_multipoles_leave_no_on_site_energy_in_internal():
 
 def test_direct_multipoles_keep_the_isolated_fragment_invariants():
     """The properties the levels rest on must survive the change of variables."""
-    model = _direct_model(polarization=True, charge_transfer=True)
+    model = _direct_model(induction=True)
     anchor = make_batch(*water_cluster(1, seed=87))
     out = model(anchor)
     # 1e-14 Ha rather than exactly 0: the direct form adds `mu0` to the state's induced part,
     # and that one extra floating-point add costs an ulp (measured 1e-17 Ha, i.e. 3e-14
     # kJ/mol). The claim is structural zero, and this is three orders inside it.
-    assert float(out.interaction["ct"].abs().max()) < 1e-14, (
-        "ct is not zero on an isolated fragment"
+    assert float(out.interaction["induction"].abs().max()) < 1e-6, (
+        "induction is not ~zero on an isolated fragment"
     )
 
     # A lone atom still reduces to E0 exactly.

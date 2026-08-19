@@ -166,6 +166,17 @@ class ElectrostaticParameterHeads(nn.Module):
         environment_b: bool = False,
         learn_dipole: bool = True,
         learn_quadrupole: bool = True,
+        #: Whether the quadrupole *polarizability* exists. Off means each atom keeps its
+        #: permanent quadrupole (from ``chiquad_head`` under ``direct_multipoles``) but that
+        #: moment is rigid: the field gradient does not move it, and the coupled solve carries
+        #: no quadrupole variable. ``learn_quadrupole`` still controls the permanent moment.
+        #:
+        #: Defaults **True** here so this class alone behaves as it always did; the project
+        #: default is off and lives in :attr:`rsfff.train.config.ElectrostaticsConfig`. Only
+        #: expressible under ``direct_multipoles``: in the drive parameterization the moment
+        #: *is* ``-C chiquad``, so removing ``C`` removes the moment with it, and
+        #: :class:`FragmentResponse` refuses that combination rather than silently zeroing it.
+        quadrupole_response: bool = True,
         cquad_init: float = 1.0,
         cquad_floor: float = 1.0e-4,
         environment_cquad: bool = False,
@@ -238,6 +249,9 @@ class ElectrostaticParameterHeads(nn.Module):
         # before.
         self.chiquad_head = None
         self.cquad_axis_head = None
+        self.cquad0_raw = None
+        self.cquad_mlp = None
+        self.anisotropic_cquad = False
         if self.max_rank >= 2 and learn_quadrupole:
             if p2 is None or irrep2_to_spherical_map is None:
                 raise ValueError(
@@ -247,6 +261,14 @@ class ElectrostaticParameterHeads(nn.Module):
                 p0, p2, emb_dim, irrep2_to_spherical_map,
                 hidden=hidden, depth=depth, equiv_channels=equiv_channels,
             )
+        # **The permanent quadrupole and the quadrupole *response* are separate decisions.**
+        # `chiquad_head` above is the sole producer of the permanent `quad0` under
+        # `direct_multipoles`, so it is gated on `learn_quadrupole` alone; the polarizability
+        # below is gated on `quadrupole_response`, which is off by default. They shared one
+        # `if` until the induction merge, which made "keep permanent quadrupoles but stop
+        # moving them" inexpressible. `max_rank` stays 2 either way -- it decides which slots
+        # the interaction tensor and the environment features carry, not which heads exist.
+        if self.max_rank >= 2 and learn_quadrupole and quadrupole_response:
             self.cquad_floor = float(cquad_floor)
             # Three eigenvalues (m = 0, |m| = 1, |m| = 2) when anisotropic, one when not.
             # Initialized equal, so the anisotropic head reproduces the isotropic one exactly
@@ -306,6 +328,10 @@ class ElectrostaticParameterHeads(nn.Module):
         chiquad = cquad = None
         if self.chiquad_head is not None:
             chiquad = self.chiquad_head(feats.inv_feats, emb, feats.equiv_feats)
+        # `cquad is None` with `chiquad` present is the rigid-quadrupole case: the moment
+        # exists, nothing moves it. `multipoles_from_state` sizes the sector from the permanent
+        # multipole for exactly this reason.
+        if self.cquad0_raw is not None:
             cquad_raw = self.cquad0_raw[s]                       # (N,) or (N, 3)
             if self.cquad_mlp is not None:
                 delta = self.cquad_mlp(x)                        # (N, 1) or (N, 3)
@@ -440,7 +466,6 @@ class FragmentResponse(nn.Module):
         self,
         params: ElectrostaticParameterHeads,
         compliance_head: PairComplianceHead,
-        ct_compliance_head: PairComplianceHead | None = None,
         *,
         direct_multipoles: bool = False,
     ) -> None:
@@ -470,11 +495,29 @@ class FragmentResponse(nn.Module):
         #: to follow the energy to ``e_atom`` or it ends up watching a quantity that is near
         #: zero by construction.
         self.direct_multipoles = bool(direct_multipoles)
+        # A permanent quadrupole with no quadrupole polarizability is only expressible under
+        # the direct parameterization. Under the drive form the moment *is* `-C chiquad`, so
+        # dropping `C` drops the moment too -- the exact entanglement `direct_multipoles`
+        # exists to remove. Refused loudly, because the alternative is a model that quietly
+        # has no quadrupoles at all while `learn_quadrupole` reads True.
+        if (
+            not self.direct_multipoles
+            and params.chiquad_head is not None
+            and params.cquad0_raw is None
+        ):
+            raise ValueError(
+                "quadrupole_response=False needs direct_multipoles=True: in the drive "
+                "parameterization the permanent quadrupole is -C*chiquad, so removing the "
+                "quadrupole polarizability would remove the permanent moment with it"
+            )
+        #: One head for every channel at every level. Which *features* it reads is the caller's
+        #: decision, not the head's: the frozen level hands it ``h_frag`` and the induction
+        #: level hands it ``h_env``, so the same weights describe how easily charge flows along
+        #: a fragment's own bonds, conditioned on the surroundings at the induced level.
+        #:
+        #: There used to be a second head for radius-derived inter-fragment channels. Those
+        #: channels are gone -- see the class docstring -- and with them the reason for it.
         self.compliance_head = compliance_head
-        #: Used for the *radius-derived* charge-transfer channels only, leaving
-        #: ``compliance_head`` to the intra-fragment ones. See
-        #: :attr:`rsfff.train.config.UnifiedConfig.separate_ct_compliance`.
-        self.ct_compliance_head = ct_compliance_head
 
     @property
     def max_rank(self) -> int:
@@ -487,20 +530,18 @@ class FragmentResponse(nn.Module):
         *,
         bond_index: torch.Tensor | None = None,
         envelope: torch.Tensor | None = None,
-        ct_channels: torch.Tensor | None = None,
     ) -> ResponseParameters:
         """The heads' outputs plus ``q0`` and the compliances, with no solve.
 
-        ``bond_index`` defaults to the complete intra-fragment graph, which is the frozen and
-        polarized levels. The charge-transfer level passes
-        :func:`rsfff.ff.pairs.union_channels`' wider graph and the ``envelope`` that keeps its
-        radius-derived channels continuous.
+        ``bond_index`` defaults to the complete intra-fragment graph, which is what both levels
+        use: charge flows only along a fragment's own channels. ``feats`` is what separates
+        them -- ``h_frag`` at the frozen level, ``h_env`` at the induction level -- so the
+        fragment supplies the *graph* of allowed flux while the environment supplies the
+        *parameters* on it.
 
-        ``ct_channels`` is that graph's ``from_radius`` mask: where it is true and
-        :attr:`ct_compliance_head` exists, the compliance comes from that head instead. The
-        two populations are different objects -- a covalent O-H against a hydrogen bond -- and
-        keeping the intra-fragment one on the frozen head is what lets that head be frozen
-        after stage 1 without taking charge transfer's only lever with it.
+        ``envelope`` scales the compliances multiplicatively. It is unused now that no channel
+        appears or disappears with distance, and is kept because a reactive model will need it
+        again the moment radius-derived channels come back.
         """
         if batch.fragment_idx is None:
             raise ValueError(
@@ -517,11 +558,6 @@ class FragmentResponse(nn.Module):
         compliance = self.compliance_head(
             feats.inv_feats, positions, bond_index, envelope=envelope
         )
-        if self.ct_compliance_head is not None and ct_channels is not None:
-            ct_compliance = self.ct_compliance_head(
-                feats.inv_feats, positions, bond_index, envelope=envelope
-            )
-            compliance = torch.where(ct_channels, ct_compliance, compliance)
 
         # Baseline charges: a per-element prior, then a uniform shift per fragment so that
         # sum_i q0_i is *exactly* the formal charge whatever the prior sums to. SQE then

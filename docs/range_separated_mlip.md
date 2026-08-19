@@ -161,13 +161,18 @@ The EDA data acts as a robust training strategy to explicitly well-define the di
 
 **CT is not modeled as an explicit interaction term.** It emerges as the correction to the bond energy, alongside the changes to the classical interactions, when the fragmentation constraints are lifted — *not* from fragmentation mixing (see §1). The route is a staged fit that mirrors what ALMO-EDA actually does, and each stage relaxes exactly one constraint:
 
-| stage | response parameters | solve | label |
+| level | response parameters | solve | label |
 | --- | --- | --- | --- |
 | **frozen** | fragment-confined features, no field | grouped by fragment | `eda_cls_elec`, `fragment_energy` |
-| **polarized** | *may* use environment-aware features, with field | grouped by fragment (no inter-fragment charge flow) | `eda_pol` = E_pol − E_frozen |
-| **CT** | environment-aware, features un-grouped | inter-fragment channels open | `eda_ct` = E_ct − E_pol |
+| **induction** | environment-aware features, with field | grouped by fragment (no inter-fragment charge flow) | `eda_pol + eda_ct` |
 
-Only the **frozen** level is pinned: its multipoles are what `eda_cls_elec` means (frozen isolated-monomer densities) and its `E_internal` is what `fragment_energy` means, so its parameters cannot be environment-aware without breaking the 1-body label. That ceiling does **not** apply to the polarized level — environment-dependent response parameters are exactly what polarization *is*, and are how effective electrostatic interactions get absorbed into the response.
+**Polarization and charge transfer are one term.** They were two levels, and the only things separating them were their labels and the atomic energy's feature stream — `h_frag` at pol, `h_env` at ct. That swap is a route to the label that needs no charge to move and no multipole to relax, and it is far cheaper to fit than actual charge flow. Measured on a trained checkpoint, `ct` came out **99.99% correction and 100.0% descriptor swap**, with 4.6e-5 e crossing a fragment boundary against a real ~0.01–0.03 e per hydrogen bond: the compliance head had closed every inter-fragment channel (`q_ct` 0.085 → 5.7e-5, monotone) while `ct_mae` read 0.40 kJ/mol and reported nothing wrong. Exactly the failure the `ct_bond` readout produced before it (96.7% neural), reached by a different route.
+
+Merged, the swap lands in a channel that also carries a real physical solve, and the split is visible in the training line: `ind_ff` (the coupled relaxation) against `ind_corr` (the neural remainder) against `ind_swap` (the part of `ind_corr` that is the feature stream alone). Explicit inter-fragment charge transfer returns when reactivity does.
+
+**The fragment supplies the graph, the environment supplies the parameters.** Induction still lifts the fragment constraint, but on the *parameters* rather than on the channel topology: every response quantity — `chi`, `eta`, `alpha` and the charge-flux compliance alike — reads `h_env`, while the channel graph stays the fragment's own complete graph, so charge cannot leave a fragment.
+
+Only the **frozen** level is pinned: its multipoles are what `eda_cls_elec` means (frozen isolated-monomer densities) and its `E_internal` is what `fragment_energy` means, so its parameters cannot be environment-aware without breaking the 1-body label. That ceiling does **not** apply to the induction level — environment-dependent response parameters are exactly what induction *is*, and are how effective electrostatic interactions get absorbed into the response.
 
 #### Every new term is a difference of one function
 
@@ -175,13 +180,12 @@ Implemented in `rsfff.ff.unified`. Each higher level is the *same* readout evalu
 
 ```text
 ΔE_elst = W_elst(u(h_frag))                          → cls_elec
-ΔE_pol  = W_elst(u(h_env)) − W_elst(u(h_frag))       → pol
+ΔE_ind  = W_elst(u(h_env)) − W_elst(u(h_frag))       → induction
              sum = W_elst(u(h_env))   ← one evaluation at inference
 
-E_bond⁰   = W_bond(u(h_frag), φ=0)                       → fragment_energy
-E_bond^pol= W_bond(u(h_frag), φ¹) − W_bond(u(h_frag),0)  → pol
-E_bond^ct = W_bond(u(h_env),  φ²) − W_bond(u(h_frag),φ¹) → ct
-             sum = W_bond(u(h_env), φ²)
+E_atom⁰   = E_θ(h_frag, M_frozen, Φ_intra)                    → fragment_energy
+E_atom^ind= E_θ(h_env,  M_ind,    Φ_ind  ) − E_atom⁰          → induction
+             sum = E_θ(h_env, M_ind, Φ_ind)
 ```
 
 The split is training-time bookkeeping and telescopes away at deployment. Three notes:
@@ -196,9 +200,9 @@ The bond energy takes the external potential, field and field gradient as *featu
 
 Because those features feed a head that is *not* variational in `M*`, the adjoint of §6.2 is mandatory here — see below.
 
-#### Charge transfer needs a compliance scale
+#### Charge transfer will need a compliance scale when it returns
 
-`ct` opens inter-fragment channels (`rsfff.ff.pairs.union_channels`), with the radius-derived ones enveloped to zero at the cutoff — without that a channel appears the instant two molecules come within range and the forces are discontinuous.
+Kept here because it is the trap to re-read before re-enabling explicit CT. `ct` opened inter-fragment channels (`rsfff.ff.pairs.union_channels`), with the radius-derived ones enveloped to zero at the cutoff — without that a channel appears the instant two molecules come within range and the forces are discontinuous.
 
 SQE has no structural reason to prefer an intramolecular channel over an intermolecular one: the electronegativity difference driving an O–H transfer is the same whether the two atoms share a molecule. At a shared `s_init` the model therefore opens covalent-strength channels across every hydrogen bond — measured on a freshly initialized w2, `ct` starts at **−52 kJ/mol against a true −8.2**, with only 0.0005 e of net charge actually crossing. `ct_compliance_scale` is the fix, and it is the charge-transfer analogue of a correction channel's `energy_scale`: at 0.1 an untrained w2 starts at −7.1 kJ/mol. Softplus is unbounded, so it sets where the head starts looking, not a ceiling.
 

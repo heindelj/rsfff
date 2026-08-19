@@ -512,7 +512,7 @@ def onebody_fit(out, batch, cfg):
     return loss, metrics, batch.fragment_energy
 
 
-def onebody_anchor_loss(model, anchor_batch, cfg, out=None):
+def onebody_anchor_loss(model, anchor_batch, cfg, out=None, *, training=None):
     """Energy and force terms on the isolated-monomer anchor: ``(dict, dict)``.
 
     ``out`` is an already-computed :class:`rsfff.ff.onebody.OneBodyOutput` for
@@ -531,13 +531,15 @@ def onebody_anchor_loss(model, anchor_batch, cfg, out=None):
 
     Grad is forced on for the whole body regardless of the caller's context: a force is
     itself a backward pass, so it has to be computed even on an evaluation epoch where the
-    surrounding loop has disabled autograd. ``create_graph`` is taken from the context as it
-    was on entry, so a training step gets the second-order graph the optimizer needs and an
-    evaluation step does not pay for one.
+    surrounding loop has disabled autograd. ``training`` decides ``create_graph``, so a
+    training step gets the second-order graph the optimizer needs and an evaluation step does
+    not pay for one. It defaults to the grad context, which is right only while the *cluster*
+    force term is off -- with it on, ``run_epoch`` enables grad during evaluation too and the
+    context stops distinguishing the two. Callers that know should pass it.
     """
     from ..ff.units import KJMOL_PER_HARTREE
 
-    training = torch.is_grad_enabled()
+    training = torch.is_grad_enabled() if training is None else bool(training)
     with torch.enable_grad():
         if out is None:
             out = model(anchor_batch)

@@ -305,22 +305,31 @@ def multipoles_from_state(sys: CoupledSystem, x: State, d_map=None):
     docstring justifies. Every one applies a parameter, never its inverse.
     """
     v, u, w = x
+    n = sys.n_atoms
     p = sys.compliance * v
     q = sys.q0 + _incidence_apply(sys.bond_index, p, sys.n_atoms)
-    mu = (
-        torch.einsum("nab,nb->na", sys.alpha, u)
-        if sys.has_dipole and u.numel() else u.new_zeros(0, 3)
-    )
-    theta = (
-        _apply_cquad(sys.cquad, w)
-        if sys.has_quad and w.numel() else w.new_zeros(0, 5)
-    )
+    # **A sector's response and its permanent multipole are independent.** `has_dipole` /
+    # `has_quad` say only whether the *state* carries a variable for that sector; whether the
+    # sector contributes a multipole at all is `mu0`/`quad0`. Deciding the width from the state
+    # was a trap: with `cquad = None` (quadrupole response off, permanent quadrupoles kept)
+    # `theta` came out `(0, 5)`, the `theta.numel()` guard below then skipped `quad0`, and
+    # `_to_polytensor` zero-filled the block -- so the frozen level carried permanent
+    # quadrupoles and the coupled level silently did not. Sizing by the permanent multipole
+    # instead makes "no polarizability" mean a rigid moment, which is what it should mean.
+    if sys.has_dipole and u.numel():
+        mu = torch.einsum("nab,nb->na", sys.alpha, u)
+    else:
+        mu = u.new_zeros(n if sys.mu0 is not None else 0, 3)
+    if sys.has_quad and w.numel():
+        theta = _apply_cquad(sys.cquad, w)
+    else:
+        theta = w.new_zeros(n if sys.quad0 is not None else 0, 5)
     # Under the direct parameterization the state carries only the *induced* part, so the
     # permanent multipole is added back here -- and nowhere else, which is what keeps the
     # quadratic block `1/2 u^T alpha u` (and hence `A`) exactly as it was.
-    if sys.mu0 is not None and mu.numel():
+    if sys.mu0 is not None:
         mu = mu + sys.mu0
-    if sys.quad0 is not None and theta.numel():
+    if sys.quad0 is not None:
         theta = theta + sys.quad0
     return q, mu, theta
 

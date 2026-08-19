@@ -78,13 +78,16 @@ from .term_loop import fit
 from .train_eem import resolve_device
 from .train_elec import build_featurizer, build_response
 
-#: EDA component fitted by each interaction channel. ``pol``/``ct`` are added only when their
-#: levels are switched on, so a frozen-level config raises nothing about missing labels.
+#: EDA component fitted by each interaction channel.
 _TARGETS = {"elst": "cls_elec", "pauli": "mod_pauli", "disp": "disp"}
-_LEVEL_TARGETS = {"pol": "pol", "ct": "ct"}
+#: The induction channel's label is a **sum** of two EDA components rather than one of them,
+#: which is why it is not in ``_TARGETS``: polarization and charge transfer are fitted as one
+#: term, so what supervises it is ``eda_pol + eda_ct``. Added only when induction is on, so a
+#: frozen-level config raises nothing about missing labels.
+_INDUCTION_COMPONENTS = ("pol", "ct")
 
 _LOG_KEYS = (
-    "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae", "pol_mae", "ct_mae",
+    "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae", "ind_mae",
     "a_mae", "f_mae", "dip_mae", "quad_mae", "e_tot_mae",
     "anchor_e", "anchor_f", "dipole", "quad", "alpha_mae", "f_clu", "intra_ff",
     "q_res", "qO", "dchi", "internal", "bond", "e_atom",
@@ -92,16 +95,25 @@ _LOG_KEYS = (
     # started, kJ/mol. It is the quantity that produced the one-body constant offset: the
     # split between `internal` and `bond` carries no label, so a higher level is free to slide
     # it and leave the bond head chasing. Watch this, not `ob_mae`, for that failure.
-    # `elst_env` is the environment-dependent electrostatic energy booked as polarization.
+    # `elst_env` is the environment-dependent electrostatic energy booked as induction.
     "d_internal", "d_e_atom", "int_drift", "elst_env", "free_alpha_mae",
     "gate_inter_elst", "gate_intra_disp",
     "intra_elst", "intra_pauli", "intra_disp",
     "r0_elst", "r0_pauli", "r0_disp", "env_norm",
-    # The polarization/CT split and the solver's health. `pol_ff` is the classical relaxation
-    # and must stay <= 0 while the two levels share response parameters; `q_ct` is how much
-    # charge actually crossed a fragment boundary; a climbing `cg_ct` is the early warning
-    # that the coupled functional is losing positive definiteness.
-    "pol_ff", "ct_ff", "q_ct", "cg_pol", "cg_ct", "cg_fail",
+    # The induction split and the solver's health, and **the three to watch in that order**:
+    #
+    #   ind_ff    the coupled solve's own relaxation. Must stay <= 0 while `h_env == h_frag`
+    #             (the variational principle); once `g` trains the streams apart the guarantee
+    #             lapses, which is why it is logged rather than asserted.
+    #   ind_corr  the neural remainder. `ind_corr` swamping `ind_ff` is the failure that made
+    #             `ct` 99.99% correction before the merge.
+    #   ind_swap  how much of `ind_corr` is the `h_frag -> h_env` feature swap alone, needing
+    #             no charge to move and no multipole to relax. This was 100.0% of the old `ct`
+    #             and nothing in the printed line said so.
+    #
+    # A climbing `cg_ind` is the early warning that the coupled functional is losing positive
+    # definiteness; `cg_fail` must stay 0.
+    "ind_ff", "ind_corr", "ind_swap", "cg_ind", "cg_fail",
 )
 
 
@@ -137,11 +149,6 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
     response = build_response(
         featurizer, fcfg, ecfg, neighbor_types, atomic_states,
         p0_extra=fragment_state.dim,
-        # Built at every stage, not only the charge-transfer one, so the staged warm starts
-        # see the same parameter set throughout and this head is not "left at initialization"
-        # exactly when it starts doing work. Unused -- and untrained, since nothing reaches
-        # it -- until `charge_transfer` opens the radius-derived channels.
-        separate_ct_compliance=ucfg.separate_ct_compliance,
     )
 
     log_c6, log_b_disp = build_log_priors(neighbor_types, b_prior=config.dispersion.b_prior)
@@ -205,19 +212,11 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
                 r_on=ucfg.bond_r_on, r_off=ucfg.bond_r_off,
                 energy_scale=ucfg.bond_energy_scale,
             ),
-            # The bond channel with the fragment constraint lifted: a bond energy for pairs
-            # that *cross* a fragment boundary, which is what charge transfer is allowed to
-            # be that polarization is not. Built at every stage so the staged warm starts see
-            # one parameter set; only `charge_transfer` ever reads it.
-            **({"ct_bond": ChannelSpec(
-                r_on=ucfg.bond_r_on, r_off=ucfg.bond_r_off,
-                energy_scale=ucfg.ct_bond_energy_scale,
-            )} if ucfg.ct_bond else {}),
         },
         range_channels=RANGE_CHANNELS if ucfg.pair_range_separation else (),
-        # The side channel the external field enters through. Zero unless polarization is on,
+        # The side channel the external field enters through. Zero unless induction is on,
         # which keeps the trunk's input width -- and hence the checkpoint -- unchanged.
-        extra_dim=N_PAIR_INVARIANTS if ucfg.polarization else 0,
+        extra_dim=N_PAIR_INVARIANTS if ucfg.induction else 0,
         emb_dim=ucfg.emb_dim, hidden=ucfg.corr_hidden, depth=ucfg.corr_depth,
         n_radial=ucfg.corr_n_radial,
     )
@@ -241,22 +240,28 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
             "pauli": ClassicalSpec(ucfg.pauli_cutoff, ucfg.taper_width),
             "disp": ClassicalSpec(ucfg.disp_cutoff, ucfg.taper_width),
         },
-        polarization=ucfg.polarization,
-        charge_transfer=ucfg.charge_transfer,
-        ct_channel_cutoff=ucfg.ct_channel_cutoff,
-        ct_channel_taper=ucfg.ct_channel_taper,
-        ct_compliance_scale=ucfg.ct_compliance_scale,
+        induction=ucfg.induction,
         cg_rtol=ucfg.cg_rtol, cg_atol=ucfg.cg_atol, cg_maxiter=ucfg.cg_maxiter,
     )
 
 
-def unified_fit(out, batch, cfg: Config):
+def unified_fit(out, batch, cfg: Config, *, training: bool = True, with_forces: bool = True):
     """Four dimensionless terms: the fragment energy and the three EDA components.
 
     ``cfg`` is the whole :class:`Config`, not one block -- this fit spans ``unified:`` and
     reads ``elec:``/``onebody:`` for the shared pieces. Every error is divided by
     ``unified.energy_scale`` before squaring, the invariant :mod:`rsfff.train.term_loop` is
     built on, so all four weights are plain dimensionless numbers.
+
+    ``training`` decides whether the force term builds a second-order graph, and is passed in
+    rather than read from ``torch.is_grad_enabled()``. Those two agree only while the force
+    terms are off: turning them on makes ``run_epoch`` enable grad during *evaluation* too (the
+    force is itself a backward), at which point inferring "training" from the grad context
+    reads True on an evaluation epoch and quietly buys a ``create_graph`` nobody needs.
+
+    ``with_forces=False`` skips the cluster force term for this step -- see
+    :attr:`rsfff.train.config.UnifiedConfig.force_every`. The metric is then absent rather than
+    zero, and ``run_epoch`` averages each metric over the steps that reported it.
     """
     u = cfg.unified
     ob_err = out.fragment_energy - batch.fragment_energy
@@ -279,19 +284,11 @@ def unified_fit(out, batch, cfg: Config):
         "e_atom": float(out.energy_atom.detach().mean()) * KJMOL_PER_HARTREE,
     }
     if out.elst_env is not None:
-        # Already inside `pol`; reported alone because the size of what moved out of
+        # Already inside `induction`; reported alone because the size of what moved out of
         # `cls_elec` is what says whether the re-partition is doing anything.
         metrics["elst_env"] = float(out.elst_env.detach().abs().mean()) * KJMOL_PER_HARTREE
-    weights = {
-        "elst": u.elst_weight, "pauli": u.pauli_weight, "disp": u.disp_weight,
-        "pol": u.pol_weight, "ct": u.ct_weight,
-    }
-    targets = dict(_TARGETS)
-    if u.polarization:
-        targets["pol"] = _LEVEL_TARGETS["pol"]
-    if u.charge_transfer:
-        targets["ct"] = _LEVEL_TARGETS["ct"]
-    for name, key in targets.items():
+    weights = {"elst": u.elst_weight, "pauli": u.pauli_weight, "disp": u.disp_weight}
+    for name, key in _TARGETS.items():
         if key not in batch.eda:
             raise KeyError(
                 f"the dataset has no eda_{key} label, which the {name} channel fits; "
@@ -300,6 +297,23 @@ def unified_fit(out, batch, cfg: Config):
         err = out.interaction[name] - batch.eda[key]
         loss = loss + weights[name] * (err / u.energy_scale).pow(2).mean()
         metrics[f"{name}_mae"] = float(err.detach().abs().mean()) * KJMOL_PER_HARTREE
+
+    # Induction is fitted against the **sum** of two EDA components. Summing here rather than
+    # at load time keeps `data.py` generic -- it turns every `eda_*` header into a key and
+    # knows nothing about which of them a given model happens to combine -- and it keeps both
+    # components on the batch, so a future model that splits them again needs no data change.
+    if u.induction:
+        missing = [k for k in _INDUCTION_COMPONENTS if k not in batch.eda]
+        if missing:
+            raise KeyError(
+                f"induction is fitted against eda_pol + eda_ct and the dataset has no "
+                f"{', '.join('eda_' + m for m in missing)}; available: {sorted(batch.eda)}. "
+                f"The files from scripts/parse_roundtrip.py carry both."
+            )
+        target = sum(batch.eda[k] for k in _INDUCTION_COMPONENTS)
+        err = out.interaction["induction"] - target
+        loss = loss + u.induction_weight * (err / u.energy_scale).pow(2).mean()
+        metrics["ind_mae"] = float(err.detach().abs().mean()) * KJMOL_PER_HARTREE
 
     # The cluster total and its gradient. Diagnostics until `total_energy_weight` /
     # `force_weight` are turned on, which should only happen once `pol` and `ct` are on:
@@ -317,7 +331,7 @@ def unified_fit(out, batch, cfg: Config):
         if u.total_energy_weight > 0.0:
             loss = loss + u.total_energy_weight * (e_err / u.energy_scale).pow(2).mean()
 
-    if u.force_weight > 0.0:
+    if u.force_weight > 0.0 and with_forces:
         if batch.forces is None:
             raise ValueError(
                 "unified.force_weight > 0 but the dataset carries no forces; the merged "
@@ -328,18 +342,40 @@ def unified_fit(out, batch, cfg: Config):
                 "unified.force_weight > 0 but batch.positions is not a leaf; the training "
                 "loop must be entered with grad_positions=True"
             )
-        # `create_graph` from the context: a training step needs the second-order graph, an
-        # evaluation epoch does not and should not pay for one. See UnifiedConfig.force_weight
-        # for the measured bias this carries at the pol/CT levels -- the forces are exact, the
-        # derivative of the force with respect to the parameters is ~1e-4 relative off,
-        # because the coupled solve's adjoint is not itself double-differentiable.
-        forces = compute_forces(
-            out.energy, batch.positions, create_graph=torch.is_grad_enabled()
-        )
+        # A training step needs the second-order graph, an evaluation epoch does not and should
+        # not pay for one. See UnifiedConfig.force_weight for the measured bias this carries at
+        # the induction level -- the forces are exact, the derivative of the force with respect
+        # to the parameters is ~1e-4 relative off, because the coupled solve's adjoint is not
+        # itself double-differentiable.
+        forces = compute_forces(out.energy, batch.positions, create_graph=training)
         f_err = (forces - batch.forces) / u.force_scale
         loss = loss + u.force_weight * f_err.pow(2).sum(-1).mean()
         metrics["f_clu"] = float((forces - batch.forces).detach().abs().mean())
     return loss, metrics, batch.fragment_energy
+
+
+def strided_fit_term(model, force_every: int = 1):
+    """:func:`unified_fit` with the cluster force term applied every k-th training step.
+
+    A closure rather than a flag on the config, because the stride needs a step counter and
+    the config is a value. ``model.training`` is what separates a training step from an
+    evaluation one -- ``run_epoch`` sets it -- and it is the only reliable signal once the
+    force terms are on, since they make grad enabled during evaluation as well.
+    """
+    every = max(int(force_every), 1)
+    state = {"step": 0}
+
+    def fit(out, batch, cfg):
+        training = bool(model.training)
+        if training:
+            state["step"] += 1
+        # Evaluation always computes the force, so `f_clu` is comparable between epochs.
+        with_forces = (not training) or state["step"] % every == 0
+        return unified_fit(
+            out, batch, cfg, training=training, with_forces=with_forces
+        )
+
+    return fit
 
 
 def _frozen_level_parameters(model) -> dict[str, list]:
@@ -588,7 +624,12 @@ class AnchorTerms:
         extra.update(fa)
         free_metrics = fa_metrics
 
-        training = torch.is_grad_enabled()
+        # `model.training`, not `torch.is_grad_enabled()`. The two agree only while the force
+        # terms are off; turning them on makes `run_epoch` enable grad during evaluation too,
+        # at which point the grad context reads True on an evaluation epoch -- which would draw
+        # a *random* anchor subset instead of the fixed slice, advance the force stride, and
+        # buy a `create_graph` nobody needs. All three are wrong in the same direction.
+        training = bool(self.model.training)
         anchor_batch, anchor_idx = self._anchor_batch(training)
         if anchor_batch is None:
             self._metrics = dict(free_metrics)
@@ -635,7 +676,7 @@ class AnchorTerms:
         if training and self._train_step % self.force_every != 0:
             onebody_cfg = replace(onebody_cfg, force_weight=0.0)
         terms, self._metrics = onebody_anchor_loss(
-            self.model, anchor_batch, onebody_cfg, out=anchor_out
+            self.model, anchor_batch, onebody_cfg, out=anchor_out, training=training
         )
         self._metrics.update(drift_metric)
         self._metrics.update(free_metrics)
@@ -701,37 +742,38 @@ class AnchorTerms:
             # construction, so any growth is the model asking for many-body content.
             metrics["env_norm"] = float(out.environment_norm.detach().mean())
 
-        # The polarization/CT split. `pol_ff`/`ct_ff` are the *classical* relaxations; the
-        # rest of each channel is its correction head. Watch the split, not the MAE: pol and
-        # ct are both "environment-dependent correction" and are separated only by their
-        # labels and by acting on disjoint pair sets, which is the same degeneracy shape as
-        # the intra-classical/bond leak that the fit did not police on its own.
+        # **The induction split, which is the thing to watch on this model.** `ind_ff` is the
+        # coupled solve's own relaxation and `ind_corr` is the neural remainder; the ratio is
+        # what says whether induction is physics or a network wearing the label.
         #
-        # `pol_ff` must stay <= 0. It is a relaxation of one functional, so it is negative by
+        # `ind_ff` must stay <= 0. It is a relaxation of one functional, so it is negative by
         # the variational principle wherever the two levels share response parameters -- which
         # they do exactly at initialization. A positive value means the environment-aware
         # response parameters have drifted far enough to break that, and `env_weight` is the
         # lever.
-        for name in ("pol", "ct"):
-            if name in out.interaction_ff:
-                metrics[f"{name}_ff"] = (
-                    float(out.interaction_ff[name].detach().mean()) * KJMOL_PER_HARTREE
-                )
+        #
+        # `ind_swap` is the part of `ind_corr` that comes from reading `h_env` instead of
+        # `h_frag` at the *same* electronic state -- a route to the label that needs no charge
+        # to move and no multipole to relax. It is the diagnostic this model exists because of:
+        # in the two-level version it was 100.0% of the `ct` channel, with 4.6e-5 e crossing a
+        # fragment boundary, and every printed metric looked healthy.
+        if "induction" in out.interaction_ff:
+            metrics["ind_ff"] = (
+                float(out.interaction_ff["induction"].detach().mean()) * KJMOL_PER_HARTREE
+            )
+            metrics["ind_corr"] = (
+                float(out.interaction_corr["induction"].detach().mean()) * KJMOL_PER_HARTREE
+            )
+        if out.energy_atom_ind is not None and out.energy_atom_ind_frag is not None:
+            swap = (out.energy_atom_ind - out.energy_atom_ind_frag).detach()
+            metrics["ind_swap"] = float(swap.sum()) / max(int(batch.n_systems), 1) * (
+                KJMOL_PER_HARTREE
+            )
         if out.solver:
             for name, (n_iter, converged, pd_fail) in out.solver.items():
                 metrics[f"cg_{name}"] = float(n_iter)
                 fails = int((~converged).sum()) + int(pd_fail.sum())
                 metrics["cg_fail"] = metrics.get("cg_fail", 0.0) + float(fails)
-        if out.level_ct is not None:
-            # How much charge actually crossed a fragment boundary -- the direct readout of
-            # what the CT level bought, and zero if the compliance head closed every channel.
-            q = out.level_ct.charges.detach()
-            per_frag = q.new_zeros(n_frag).index_add_(0, frag, q)
-            want = (
-                per_frag.new_zeros(n_frag) if batch.fragment_charge is None
-                else batch.fragment_charge.to(per_frag.dtype)
-            )
-            metrics["q_ct"] = float((per_frag - want).abs().max())
 
         z = batch.atomic_numbers
         oxygen, hydrogen = z == 8, z == 1
@@ -793,14 +835,12 @@ def _train_staged(config: Config):
 def _train_once(config: Config):
     torch.set_default_dtype(torch.float64 if config.dtype == "float64" else torch.float32)
     device = resolve_device(config.device, config.dtype)
-    names = list(_TARGETS.values())
-    if config.unified.polarization:
-        names.append("pol")
-    if config.unified.charge_transfer:
-        names.append("ct")
+    names = ["eda_" + v for v in _TARGETS.values()]
+    if config.unified.induction:
+        names.append("(" + " + ".join("eda_" + c for c in _INDUCTION_COMPONENTS) + ")")
     print(
         f"[{config.run_name}] device={device} dtype={config.dtype} "
-        f"targets=fragment_energy + {' + '.join('eda_' + v for v in names)}"
+        f"targets=fragment_energy + {' + '.join(names)}"
     , flush=True)
 
     dataset = load_datasets(config.data.path, dtype=torch.get_default_dtype())
@@ -861,7 +901,8 @@ def _train_once(config: Config):
     )
     fit(
         model, dataset, config, config, device, train_idx, val_idx,
-        log_keys=_LOG_KEYS, fit_term=unified_fit,
+        log_keys=_LOG_KEYS,
+        fit_term=strided_fit_term(model, config.unified.force_every),
         penalties=anchor_terms.penalties, diagnostics=anchor_terms.diagnostics,
         after_warm_start=lambda _: anchor_terms.snapshot_frozen_level(config),
         # A cluster force is a backward pass through the whole model, so positions have to be

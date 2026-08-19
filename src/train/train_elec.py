@@ -118,7 +118,6 @@ def build_featurizer(features_cfg, ecfg, neighbor_types):
 
 def build_response(
     featurizer, features_cfg, ecfg, neighbor_types, atomic_states=None, *, p0_extra=0,
-    separate_ct_compliance=False,
 ):
     """The per-fragment response solve, seeded from the atomic IP/EA data.
 
@@ -131,10 +130,9 @@ def build_response(
     response parameters need to see fragment charge every bit as much as the pair head does.
     At the default 0 this is the plain featurizer width.
 
-    ``separate_ct_compliance`` adds a second, identically-built compliance head that answers
-    for the radius-derived charge-transfer channels alone. Off here and on in the unified
-    configs, because only that model has a charge-transfer level to use it -- see
-    :attr:`rsfff.train.config.UnifiedConfig.separate_ct_compliance`.
+    One compliance head serves every channel at every level; which *features* it reads is the
+    caller's choice. There used to be a second head for radius-derived inter-fragment
+    charge-transfer channels, and both it and those channels are gone.
     """
     p0 = featurizer.feature_dims[0] + int(p0_extra)
     p1, p2 = featurizer.feature_dims.get(1), featurizer.feature_dims.get(2)
@@ -163,20 +161,18 @@ def build_response(
         learn_z=ecfg.learn_z, environment_z=ecfg.environment_z,
         learn_b=ecfg.learn_b, environment_b=ecfg.environment_b,
         learn_dipole=ecfg.learn_dipole,
-        learn_quadrupole=ecfg.learn_quadrupole, cquad_init=ecfg.cquad_init,
+        learn_quadrupole=ecfg.learn_quadrupole,
+        quadrupole_response=ecfg.quadrupole_response,
+        cquad_init=ecfg.cquad_init,
         cquad_floor=ecfg.cquad_floor, environment_cquad=ecfg.environment_cquad,
         anisotropic_cquad=ecfg.anisotropic_cquad,
     )
-    def compliance_head():
-        return PairComplianceHead(
-            p0, hidden=ecfg.compliance_hidden, depth=ecfg.compliance_depth,
-            cutoff=features_cfg.cutoff, s_init=ecfg.s_init,
-        )
-
     return FragmentResponse(
         params,
-        compliance_head(),
-        compliance_head() if separate_ct_compliance else None,
+        PairComplianceHead(
+            p0, hidden=ecfg.compliance_hidden, depth=ecfg.compliance_depth,
+            cutoff=features_cfg.cutoff, s_init=ecfg.s_init,
+        ),
         direct_multipoles=getattr(ecfg, "direct_multipoles", False),
     )
 

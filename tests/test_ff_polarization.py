@@ -1,16 +1,22 @@
-"""The polarized and CT levels: is each label really a relaxation of the level below it?
+"""The induction level: is its label really a relaxation of the frozen level?
 
-The three levels share one energy functional and differ only in what is allowed to move, so
+Polarization and charge transfer are **one term** here. They were two, separated only by their
+labels and by the atomic energy's feature stream, and that swap turned out to be a free ~20
+kJ/mol knob only ``ct`` could reach -- measured at 99.99% of that channel with 4.6e-5 e
+crossing a fragment boundary. Explicit inter-fragment charge flow is gone until reactivity
+needs it; the fragment now supplies the channel graph and the environment supplies the
+parameters on it.
+
+The two levels share one energy functional and differ only in what is allowed to move, so
 almost everything worth testing here is an *identity between levels* rather than a number:
 
-* switch off what can move, and ``E_pol`` must be exactly zero;
-* close the inter-fragment channels, and ``E_ct`` must be exactly zero;
-* on an isolated fragment both must vanish, because there is no environment to respond to;
-* and ``fragment_energy`` must not move at all when the levels are switched on, because it is
+* switch off what can move, and ``E_ind`` must be exactly zero;
+* on an isolated fragment it must vanish, because there is no environment to respond to;
+* and ``fragment_energy`` must not move at all when induction is switched on, because it is
   Q-Chem's *isolated*-fragment energy and nothing at a higher level may touch it.
 
-The last one is the sharpest. It is the property the whole three-level arrangement exists to
-preserve, and it is the one an ordinary polarizable force field gives up when it switches on
+The last one is the sharpest. It is the property the whole arrangement exists to preserve,
+and it is the one an ordinary polarizable force field gives up when it switches on
 intramolecular induced electrostatics.
 
 Solver-level correctness (the operator, the adjoint, batching, the degenerate limits) lives in
@@ -40,7 +46,7 @@ from test_ff_unified import (  # noqa: E402  -- shared fixtures for the unified 
     water_cluster,
 )
 
-LEVELS = dict(polarization=True, charge_transfer=True, ct_channel_cutoff=5.0)
+LEVELS = dict(induction=True)
 
 
 def build(seed=11, *, live_env=True, environment=True, **levels):
@@ -68,7 +74,56 @@ def cluster():
 # each label is a relaxation of the level below it
 # ---------------------------------------------------------------------------
 
-def test_pol_vanishes_when_nothing_can_relax(cluster):
+def test_permanent_quadrupoles_survive_into_the_coupled_level_without_a_response(cluster):
+    """**The regression test for the trap this change was built around.**
+
+    With ``quadrupole_response`` off, each atom keeps a permanent quadrupole and nothing moves
+    it. ``multipoles_from_state`` used to size the quadrupole sector from ``has_quad``, i.e.
+    from whether the *state* carried a variable for it -- so dropping ``cquad`` made ``theta``
+    empty, the ``theta.numel()`` guard skipped ``quad0``, and ``_to_polytensor`` zero-filled
+    the block. The frozen level would have carried permanent quadrupoles and the coupled level
+    silently would not: ``cls_elec`` and ``induction`` describing different molecules.
+
+    Sizing the sector from the permanent multipole instead makes "no polarizability" mean a
+    rigid moment, which is what it should mean. Asserted bitwise, because it is an identity:
+    with nothing to move the quadrupole, the induced level's quadrupoles *are* the frozen
+    level's.
+    """
+    # `environment=False` so `h_env is h_frag` and both levels read the *same* quadrupole
+    # head. With the environment live the permanent moment is legitimately different between
+    # the levels -- the response parameters are environment-aware, which is what induction is
+    # -- and that would mask the thing being tested here.
+    parts = build_parts(seed=11, extra_dim=N_PAIR_INVARIANTS,
+                        direct_multipoles=True, quadrupole_response=False)
+    model = randomize(make_model(parts, environment=False, levels=LEVELS), seed=13)
+    out = model(cluster)
+
+    assert out.response.quad_s is not None, "the permanent quadrupole head is not built"
+    assert float(out.response.quad_s.detach().abs().max()) > 1e-9, (
+        "the permanent quadrupoles are identically zero, so this asserts nothing"
+    )
+    assert out.level_ind is not None and out.level_ind.quad_s is not None, (
+        "the coupled level lost its quadrupoles entirely"
+    )
+    assert torch.equal(out.level_ind.quad_s, out.response.quad_s), (
+        "the coupled level's quadrupoles differ from the frozen level's with the quadrupole "
+        "response switched off and the streams shared -- they are supposed to be rigid"
+    )
+    # The dipole sector, by contrast, still moves: this is not a model with nothing to relax.
+    assert not torch.allclose(out.level_ind.mu, out.response.mu, atol=1e-12), (
+        "nothing relaxed at all, so the quadrupole check above is vacuous"
+    )
+
+
+def test_quadrupole_response_needs_the_direct_parameterization():
+    """``Theta = -C chiquad`` cannot express a rigid quadrupole: refuse rather than zero it."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="needs direct_multipoles"):
+        build_parts(seed=3, direct_multipoles=False, quadrupole_response=False)
+
+
+def test_induction_vanishes_when_nothing_can_relax(cluster):
     """Freeze every response degree of freedom and ``E_pol`` must be exactly zero.
 
     With no polarizability and no charge flow the coupled minimum *is* the frozen point, so
@@ -95,22 +150,16 @@ def test_pol_vanishes_when_nothing_can_relax(cluster):
         return dc_replace(
             rp,
             alpha=torch.zeros_like(rp.alpha),
-            cquad=torch.zeros_like(rp.cquad),
+            cquad=None if rp.cquad is None else torch.zeros_like(rp.cquad),
             compliance=torch.zeros_like(rp.compliance),
         )
 
     model.response.response_parameters = frozen_parameters
     out = model(cluster)
-    assert abs(float(out.interaction_ff["pol"].detach())) * KJMOL_PER_HARTREE < 1e-6
+    assert abs(float(out.interaction_ff["induction"].detach())) * KJMOL_PER_HARTREE < 1e-6
 
 
-def test_ct_vanishes_with_the_inter_fragment_channels_closed(cluster):
-    """``ct_channel_cutoff = 0`` leaves the CT level identical to the polarized one."""
-    out = build(ct_channel_cutoff=0.0)(cluster)
-    assert abs(float(out.interaction_ff["ct"].detach())) * KJMOL_PER_HARTREE < 1e-9
-
-
-def test_pol_is_non_positive_at_initialization():
+def test_induction_is_non_positive_at_initialization():
     """``E_pol <= 0`` by the variational principle, wherever the levels share parameters.
 
     The frozen energy is the *same functional* evaluated at the frozen multipoles, and the
@@ -130,11 +179,11 @@ def test_pol_is_non_positive_at_initialization():
         batch = make_batch(positions, numbers, frag)
         worst_shared = max(
             worst_shared,
-            float(shared(batch).interaction_ff["pol"].detach()) * KJMOL_PER_HARTREE,
+            float(shared(batch).interaction_ff["induction"].detach()) * KJMOL_PER_HARTREE,
         )
         worst_live = max(
             worst_live,
-            float(live(batch).interaction_ff["pol"].detach()) * KJMOL_PER_HARTREE,
+            float(live(batch).interaction_ff["induction"].detach()) * KJMOL_PER_HARTREE,
         )
     assert worst_shared <= 1e-9, (
         f"E_pol must be a relaxation when the levels share parameters; most positive value "
@@ -143,7 +192,7 @@ def test_pol_is_non_positive_at_initialization():
     print(f"\n  E_pol with a trained-apart g: most positive {worst_live:+.3f} kJ/mol")
 
 
-def test_an_isolated_fragment_has_no_polarization_and_no_charge_transfer():
+def test_an_isolated_fragment_has_no_induction():
     """The sharpest single check on the anchoring.
 
     A lone water has nothing to polarize against and nowhere to transfer charge to, so both
@@ -158,10 +207,13 @@ def test_an_isolated_fragment_has_no_polarization_and_no_charge_transfer():
     """
     positions, numbers, frag = water_cluster(1, seed=7)
     out = build()(make_batch(positions, numbers, frag))
-    pol = abs(float(out.interaction["pol"].detach())) * KJMOL_PER_HARTREE
-    ct = abs(float(out.interaction["ct"].detach())) * KJMOL_PER_HARTREE
-    assert pol < 1e-4, f"isolated monomer polarization {pol:.3e} kJ/mol"
-    assert ct < 1e-4, f"isolated monomer charge transfer {ct:.3e} kJ/mol"
+    ind = abs(float(out.interaction["induction"].detach())) * KJMOL_PER_HARTREE
+    # 1e-4 rather than 0: `M^ind != M^frozen` even alone, because the coupled level minimizes
+    # with the intramolecular electrostatics *inside* the functional while the frozen level
+    # adds them afterwards. That relaxation is ~2.6e-5 e. The old `ct` bound was exactly zero
+    # because `ct` differenced two coupled solves; induction differences against the frozen
+    # one, so it inherits the looser -- and correct -- bound that `pol` always had.
+    assert ind < 1e-4, f"isolated monomer induction {ind:.3e} kJ/mol"
 
 
 def test_fragment_energy_is_untouched_by_the_higher_levels(cluster):
@@ -195,45 +247,36 @@ def test_fragment_energy_is_untouched_by_the_higher_levels(cluster):
         ), name
 
 
-def test_accounting_identity_covers_all_five_channels(cluster):
+def test_accounting_identity_covers_every_channel(cluster):
     """Every pair appears once, in one bucket: no double counting and no gap."""
     out = build()(cluster)
     total = out.fragment_energy.sum() + sum(v.sum() for v in out.interaction.values())
     assert torch.allclose(out.energy.sum(), total, atol=1e-11)
-    for name in ("pol", "ct"):
-        assert torch.allclose(
-            out.interaction[name],
-            out.interaction_ff[name] + out.interaction_corr[name],
-            atol=1e-13,
-        )
+    assert torch.allclose(
+        out.interaction["induction"],
+        out.interaction_ff["induction"] + out.interaction_corr["induction"],
+        atol=1e-13,
+    )
 
 
-def test_charge_transfer_conserves_charge_per_frame_not_per_fragment(cluster):
-    """What CT *is*, expressed as the constraint that changed.
+def test_induction_conserves_charge_per_fragment(cluster):
+    """No charge crosses a fragment boundary, which is what dropping explicit CT means.
 
-    At the polarized level charge cannot cross a fragment boundary, so every fragment keeps its
-    formal charge. At the CT level only the frame total is conserved, and the per-fragment
-    charges move -- which is the whole content of the label.
+    This is the inverse of what this file used to assert. The CT level conserved charge only
+    per *frame* and let fragment charges move -- that was the whole content of its label. With
+    the inter-fragment channels gone the induction level is back to per-*fragment*
+    conservation, structurally: `union_channels` at cutoff 0 returns the intra-fragment graph,
+    and the incidence matrix of a graph confined to a fragment cannot move charge out of it.
     """
     out = build()(cluster)
     frag = cluster.fragment_idx
     n_frag = int(cluster.n_fragments)
-
-    def per_fragment(charges):
-        return charges.new_zeros(n_frag).index_add_(0, frag, charges)
-
-    pol_q = per_fragment(out.level_pol.charges.detach())
-    ct_q = per_fragment(out.level_ct.charges.detach())
-    assert torch.allclose(pol_q, torch.zeros_like(pol_q), atol=1e-12), (
-        "the polarized level must not move charge between fragments"
+    q = out.level_ind.charges.detach()
+    per_frag = q.new_zeros(n_frag).index_add_(0, frag, q)
+    assert torch.allclose(per_frag, torch.zeros_like(per_frag), atol=1e-12), (
+        "induction moved charge across a fragment boundary; the channel graph is not "
+        "intra-fragment"
     )
-    assert float(ct_q.abs().max()) > 1e-6, "no charge crossed; the CT level did nothing"
-    assert abs(float(ct_q.sum())) < 1e-12, "the frame total must still be conserved exactly"
-
-
-# ---------------------------------------------------------------------------
-# invariance
-# ---------------------------------------------------------------------------
 
 def test_levels_are_rotation_and_translation_invariant(cluster):
     """Where a mis-symmetrized field invariant would surface.
@@ -254,8 +297,9 @@ def test_levels_are_rotation_and_translation_invariant(cluster):
         cluster.fragment_idx,
     )
     turned = model(moved)
-    for name in ("pol", "ct"):
-        assert torch.allclose(out.interaction[name], turned.interaction[name], atol=1e-10)
+    assert torch.allclose(
+        out.interaction["induction"], turned.interaction["induction"], atol=1e-10
+    )
     assert torch.allclose(out.energy, turned.energy, atol=1e-10)
 
 
@@ -276,10 +320,10 @@ def test_environment_pair_invariants_survive_swapping_the_pair(cluster):
     r_au = r / BOHR_ANG
     t_point = damped_interaction_tensor(dr_au, None, 1.0 / r_au, max_rank=2)
     m = build_polytensor(
-        out.level_ct.charges, out.level_ct.mu,
-        None if out.level_ct.quad_s is None else
+        out.level_ind.charges, out.level_ind.mu,
+        None if out.level_ind.quad_s is None else
         __import__("rsfff.ff.multipole", fromlist=["x"]).spherical_to_cartesian_quadrupole(
-            out.level_ct.quad_s
+            out.level_ind.quad_s
         ),
         max_rank=2,
     )
