@@ -79,7 +79,7 @@ import torch
 
 #: Per-element range-separation midpoint in Angstrom, before the geometric-mean combination.
 #: See the module docstring for how these were solved for from the measured distance gaps.
-DEFAULT_R0_PRIOR: dict[int, float] = {8: 0.893, 1: 1.75}
+DEFAULT_R0_PRIOR: dict[int, float] = {8: 0.893, 1: 1.6}
 
 #: Channels whose prior differs from :data:`DEFAULT_R0_PRIOR`. Absent channels use it.
 #:
@@ -120,7 +120,7 @@ DEFAULT_R0_PRIOR: dict[int, float] = {8: 0.893, 1: 1.75}
 #: one-sided barrier about the prior (:class:`rsfff.train.train_unified.AnchorTerms`), which is
 #: what makes a prior a floor rather than a starting point.
 CHANNEL_R0_PRIOR: dict[str, dict[int, float]] = {
-    "disp": {8: 1.30, 1: 1.60},
+    "disp": {8: 0.893, 1: 1.6},
 }
 
 #: Crossover width in Angstrom^-1, shared by every channel at initialization.

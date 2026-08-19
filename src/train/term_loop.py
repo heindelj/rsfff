@@ -94,6 +94,42 @@ def parameter_groups(model, weight_decay: float) -> list[dict]:
     return groups
 
 
+def build_scheduler(optimizer, train_cfg):
+    """The per-epoch learning-rate schedule, or ``None`` for a fixed rate.
+
+    ``cosine`` anneals to ``learning_rate * lr_final_factor`` over ``epochs``, stepped once
+    per epoch rather than per step so the printed rate is the one the whole epoch ran at.
+
+    The reason it exists is written up in :attr:`rsfff.train.config.TrainConfig.lr_schedule`:
+    the split of ``fragment_energy`` between ``E_internal`` and ``E_atom`` is unlabeled, hence
+    a flat direction, and along a flat direction a fixed step size does not converge -- it sets
+    a diffusion amplitude. Annealing shrinks that amplitude toward the end of the stage. It
+    does not make the direction any less flat, so it is a mitigation and not a fix; what makes
+    the number stop moving is something that actually pins the split.
+    """
+    name = str(getattr(train_cfg, "lr_schedule", "none") or "none").lower()
+    if name in ("", "none"):
+        return None
+    if name != "cosine":
+        raise ValueError(
+            f"unknown train.lr_schedule {name!r}; supported: 'none', 'cosine'"
+        )
+    final = float(getattr(train_cfg, "lr_final_factor", 0.05))
+    if not 0.0 <= final <= 1.0:
+        raise ValueError(
+            f"train.lr_final_factor must be in [0, 1], got {final}; it is a *fraction* of "
+            f"train.learning_rate, not an absolute rate"
+        )
+    # `T_max = epochs - 1`, not `epochs`: the schedule is read *before* each epoch runs and
+    # stepped after, so with `T_max = epochs` the floor would be reached one step past the end
+    # and the last epoch would run at ~1.3x it. Minus one makes the final epoch run at exactly
+    # `learning_rate * lr_final_factor`, which is what the config field says it does.
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(int(train_cfg.epochs) - 1, 1),
+        eta_min=float(train_cfg.learning_rate) * final,
+    )
+
+
 #: Below this Frobenius norm an ``equiv_reduce`` is treated as a deleted block rather than a
 #: trained value, and :func:`warm_start` reinitializes it. Its initialization norm is
 #: ``sqrt(equiv_channels)`` (5.66 at the default 32), and the observed dead value was a
@@ -309,17 +345,25 @@ def fit(
             f"weight decay {config.train.weight_decay} on all but {n} exempt parameters",
             flush=True,
         )
+    scheduler = build_scheduler(optimizer, config.train)
     ckpt_dir = Path(config.checkpoint_root) / config.run_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_val = float("inf")
 
     for ep in range(config.train.epochs):
         t0 = time.time()
+        lr = optimizer.param_groups[0]["lr"]
         tr = epoch(train_idx, optimizer=optimizer, seed=config.data.seed + ep)
+        if scheduler is not None:
+            scheduler.step()
         do_eval = (
             (ep + 1) % config.train.eval_every == 0 or ep == config.train.epochs - 1
         )
-        line = f"epoch {ep+1:4d}  train: {fmt(tr, log_keys)}  ({time.time()-t0:.1f}s)"
+        suffix = f", lr {lr:.2e}" if scheduler is not None else ""
+        line = (
+            f"epoch {ep+1:4d}  train: {fmt(tr, log_keys)}  "
+            f"({time.time()-t0:.1f}s{suffix})"
+        )
         if do_eval and len(val_idx) > 0:
             va = epoch(val_idx)
             print(line, flush=True)

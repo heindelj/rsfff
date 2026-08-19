@@ -109,6 +109,26 @@ class TrainConfig:
     #: where each level's label is a *difference* against the level below and starting from
     #: scratch would make the lower level's error indistinguishable from the new level's.
     init_from: str = ""
+    #: Learning-rate schedule over the stage's epochs: ``"none"`` or ``"cosine"``.
+    #:
+    #: Cosine anneals ``learning_rate`` down to ``learning_rate * lr_final_factor`` by the last
+    #: epoch, stepped once per epoch. It is here for a specific measured failure, not as a
+    #: default nicety: the split of ``fragment_energy`` between ``E_internal`` and ``E_atom``
+    #: is **unlabeled** -- only their sum is fitted -- so it is a flat direction of the loss,
+    #: and at a fixed learning rate the optimizer does not converge along it, it *diffuses*.
+    #: Measured over the frozen stage's 40 epochs, the two halves each wandered with a standard
+    #: deviation of ~6 kJ/mol at a correlation of **-0.98** while their labeled sum held to
+    #: 1.15, and the per-fragment residual of that walk put a 32x spread on the validation
+    #: ``ob_mae`` (0.67 to 21.8 kJ/mol). Best-checkpoint selection then hands the next stage
+    #: whichever sample of that walk happened to score best, and the freeze pins it there.
+    #:
+    #: Annealing does not remove the degeneracy -- nothing here does; it shrinks the step size
+    #: that sets the diffusion amplitude, so the stage *ends* at a converged point rather than
+    #: at a draw from a distribution. Watch ``internal`` and ``e_atom``: their spread over the
+    #: last few epochs is the number this is meant to move.
+    lr_schedule: str = "none"
+    #: Final learning rate as a fraction of the initial one, for ``lr_schedule: cosine``.
+    lr_final_factor: float = 0.05
 
 
 @dataclass
@@ -878,6 +898,10 @@ def load_config(path) -> Config:
         q_l2_weight=float(train.get("q_l2_weight", TrainConfig.q_l2_weight)),
         init_from=str(train.get("init_from", TrainConfig.init_from)),
         eval_every=int(train.get("eval_every", TrainConfig.eval_every)),
+        lr_schedule=str(train.get("lr_schedule", TrainConfig.lr_schedule)),
+        lr_final_factor=float(
+            train.get("lr_final_factor", TrainConfig.lr_final_factor)
+        ),
     )
     stages = []
     for i, block in enumerate(raw.get("stages", []) or []):

@@ -10,22 +10,24 @@
 # level below it -- `pol` is E_pol - E_frozen and `ct` is E_ct - E_pol. Turning them all on
 # together makes a regression in a lower channel and a bad fit in a new one indistinguishable.
 #
-# Stage 1 (frozen)  fragment_energy, cls_elec, mod_pauli, disp. This is configs/water_unified
-#                   exactly, and it must be refit rather than loaded from the old checkpoint:
-#                   `EnvironmentResidual` is now anchored as h_env = h_frag + g(h_full) -
-#                   g(h_frag), which is what makes pol/ct exactly zero on an isolated fragment
-#                   but also redefines h_env. Measured on the pre-anchoring checkpoint, the
-#                   1-body half transfers exactly (ob_mae 0.1531, dip_mae 0.01146) while the
-#                   interaction half does not (elst_mae 0.4615 -> 77.56).
+# Stage 1 (frozen_pol)  fragment_energy, cls_elec, mod_pauli, disp **and** eda_pol, together.
+#                   The response parameters read the environment-aware descriptor, the
+#                   inter-fragment electrostatics sits *inside* the response functional so the
+#                   multipoles relax against each other, and the one-body level is still free.
 #
-# Stage 2 (pol)     + eda_pol. The response parameters start reading the environment-aware
-#                   descriptor, the inter-fragment electrostatics moves *inside* the response
-#                   functional so the multipoles relax against each other, and the bond channel
-#                   gains the external field as a feature. The correction trunk widens by 9
-#                   here; warm start zero-pads it, so the new input starts inert.
+#                   These were two stages and are now one. The split of `fragment_energy`
+#                   between `E_internal` and `E_atom` is unlabeled -- only the sum is fitted --
+#                   so it is a flat direction the optimizer diffuses along rather than
+#                   converging: measured over the old 40-epoch frozen stage, sd ~6 kJ/mol on
+#                   each half at correlation -0.98, a labeled sum stable to 1.15, and a 32x
+#                   spread on validation `ob_mae`. `pol` is the only label that says how the
+#                   multipoles *move*, so fitting it while the one-body level is still free
+#                   constrains `E_internal` from a direction `fragment_energy` cannot. See the
+#                   stage block below for what this does and does not fix.
 #
-# Stage 3 (ct)      + eda_ct. Inter-fragment charge-flow channels open; charge conserves per
-#                   frame while each fragment's charge is free to move.
+# Stage 2 (ct)      + eda_ct. Inter-fragment charge-flow channels open; charge conserves per
+#                   frame while each fragment's charge is free to move. Still its own stage:
+#                   it changes what a fragment is, and its label is a difference against `pol`.
 #
 # Cost, measured on w2 (2158 train frames): 14.4 / 19.5 / 24.2 s per epoch. The coupled solve
 # costs +35% and both levels +68% -- much less than the 2-4x a dense solve would have.
@@ -120,7 +122,7 @@ unified:
   env_weight: 0.0
   # Shared correction trunk
   emb_dim: 16
-  corr_hidden: 64
+  corr_hidden: 32
   corr_depth: 2
   corr_n_radial: 8
   corr_r_on: 4.0
@@ -155,11 +157,11 @@ unified:
   # Cost: turning `elst` on makes the electrostatic split live, which scores the inter pairs a
   # second time on `h_frag` (the frozen re-score whose difference becomes `pol`). Measured
   # per epoch: +15% at the frozen stage, +9% at ct.
-  pair_corrections: [elst]
+  pair_corrections: []
   atomic_energy: true
-  atomic_energy_hidden: 64
+  atomic_energy_hidden: 32
   atomic_energy_depth: 2
-  atomic_energy_equiv_channels: 8
+  atomic_energy_equiv_channels: 32
   atomic_energy_scale: 0.2      # sized against a covalent bond, like bond_energy_scale
   # Classical reach. The largest sets the one shared pair list.
   elst_cutoff: 12.0
@@ -260,7 +262,7 @@ dispersion:
   learn_b: true
   environment_b: false
   emb_dim: 8
-  hidden: 32
+  hidden: 16
   depth: 2
 
 pauli:
@@ -271,9 +273,9 @@ pauli:
   learn_dipole: true
   learn_quadrupole: true
   emb_dim: 8
-  hidden: 32
+  hidden: 16
   depth: 2
-  equiv_channels: 32
+  equiv_channels: 16
 
 onebody:
   # The unified model reads only force_weight/force_scale/energy_scale from this block, for
@@ -302,52 +304,79 @@ train:
 # Three stages, run in order from one command. Each inherits everything above and overrides
 # only what changes; an unknown field here raises immediately rather than being ignored.
 stages:
-  - name: frozen
+  # The frozen level and polarization are decided **together**, in one stage.
+  #
+  # They used to be two, and the reason to merge them is what the split of `fragment_energy`
+  # between `E_internal` and `E_atom` does when only their sum is labeled. It is a flat
+  # direction, so at a fixed learning rate the optimizer diffuses along it rather than
+  # converging: measured over the old 40-epoch frozen stage the two halves each wandered with
+  # sd ~6 kJ/mol at correlation -0.98 while their labeled sum held to 1.15, and the
+  # per-fragment residual of that walk put a 32x spread on validation `ob_mae` (0.67 to 21.8).
+  # Best-checkpoint selection then handed `pol` whichever sample scored best and the freeze
+  # pinned it there, so the whole rest of the fit inherited one draw from a distribution.
+  #
+  # `pol` is a second label on the response parameters -- the only one that says how the
+  # multipoles *move* rather than where they sit -- so fitting it while the one-body level is
+  # still free constrains `E_internal` from a direction `fragment_energy` cannot.
+  #
+  # **It does not make the gauge non-flat, and it is worth being precise about why.** A
+  # constant shift `E_internal += d`, `E_atom -= d` is invisible to `pol` by construction:
+  # the atomic half enters as `E_atom^pol - E_atom^0`, one network read at two states, where
+  # an additive constant cancels exactly; and the response half enters as
+  # `level_pol.energy - E_internal`, where both terms move together. What `pol` constrains is
+  # the *fragment-dependent* part of the slosh, which is the part that shows up in `ob_mae` --
+  # the mean of the labeled sum was already stable. `lr_schedule` below handles the rest.
+  #
+  # Two consequences of merging, both good: the correction trunk is built at its full width
+  # from epoch 1, so the `pair_head.trunk.0.weight` zero-pad at the old 1->2 boundary is gone;
+  # and there is one fewer best-checkpoint selection in the chain.
+  - name: frozen_pol
     train:
-      epochs: 40
-    unified:
-      polarization: false
-      charge_transfer: false
-      # Nothing to hold yet: this is the stage that *decides* the frozen level.
-      freeze_frozen_level: false
-      internal_drift_weight: 0.0
-
-  - name: pol
-    train:
-      epochs: 30
+      epochs: 60
+      # See TrainConfig.lr_schedule. This is the half of the gauge problem that co-training
+      # cannot reach: it shrinks the step size that sets the diffusion amplitude, so the stage
+      # ends at a converged point instead of at a sample. Watch the spread of `internal` and
+      # `e_atom` over the last few epochs -- that is the number this is meant to move.
+      lr_schedule: cosine
+      lr_final_factor: 0.02
     unified:
       polarization: true
       charge_transfer: false
       pol_weight: 30.0
-      # `fragment_energy` is fitted at the frozen stage only. From here on `freeze_frozen_level`
-      # pins E0, E_internal and E_atom^0, so the only part of it still free is the intra
-      # classical remainder -- which `intra_classical_weight` already governs.
-      onebody_weight: 0.0
-      # From here on the frozen level is settled and is held there. `h_env == h_frag` exactly
-      # on an isolated fragment, so pol and ct can say everything they need through `g`, the
-      # coupled solve and the correction trunk without touching what a monomer *is*. Left
-      # free, they did not: internal energy moved 62 kJ/mol and the monomer polarizability
-      # 0.17 a0^3 at this stage alone, and both got worse at ct.
-      freeze_frozen_level: true
-      # Reads an exact zero while the freeze is on -- it is there to *say* so. A nonzero
-      # d_internal means a route into the frozen level was missed, which is worth catching
-      # for free on a forward that happens anyway.
-      internal_drift_weight: 1.0
-      # The monomer anchor is 64 frames a step against ~9600 cluster frames at weight 30.
-      # That ratio is what let the response labels be outvoted; the freeze above is the real
-      # fix and this stops the remaining routes from being a fair fight.
+      # Both levels are being decided here, so the one-body label is live and there is
+      # nothing yet to freeze or to anchor drift against.
+      onebody_weight: 1.0
+      freeze_frozen_level: false
+      internal_drift_weight: 0.0
+      # Raised from the old frozen stage's 1.0. With `pol` on at weight 30 and the frozen
+      # level *not* frozen, the monomer anchor is the only thing pinning what an isolated
+      # water is, and at 32 anchor frames a step against ~8600 cluster frames it was being
+      # outvoted -- which is why the old `pol` stage raised it to 10 the moment `pol` came on.
+      # The freeze used to be the real protection here and there is no freeze at this stage.
       anchor_weight: 10.0
 
+  # `ct` stays its own stage, because unlike `pol` it is not merely a second view of the same
+  # parameters: it opens inter-fragment charge-flow channels, which is a change to what a
+  # fragment *is*. Its label is a difference against `pol`, so `pol` has to be settled first.
   - name: ct
     train:
       epochs: 30
+      lr_schedule: cosine
+      lr_final_factor: 0.02
     unified:
       polarization: true
       charge_transfer: true
       pol_weight: 30.0
       ct_weight: 30.0
+      # The frozen level and polarization are both settled by the stage above and are held
+      # there. `h_env == h_frag` exactly on an isolated fragment, so `ct` can say everything
+      # it needs through `g`, the coupled solve and the correction trunk without touching what
+      # a monomer is. Left free it did not: internal energy moved 109 kJ/mol at this stage.
       onebody_weight: 0.0
       freeze_frozen_level: true
+      # Reads an exact zero while the freeze is on -- it is there to *say* so. A nonzero
+      # d_internal means a route into the frozen level was missed, which is worth catching
+      # for free on a forward that happens anyway.
       internal_drift_weight: 1.0
       anchor_weight: 10.0
 

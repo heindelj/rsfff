@@ -1276,6 +1276,40 @@ def test_per_species_tables_and_the_featurizer_still_see_weight_decay():
             assert id(named[name]) in decayed, f"{name} should still be decayed"
 
 
+def test_cosine_schedule_anneals_to_the_configured_floor():
+    """``lr_final_factor`` is a *fraction* of the initial rate, reached at the last epoch.
+
+    The schedule exists to damp the random walk along the unlabeled ``E_internal``/``E_atom``
+    gauge, so what matters is that the rate actually gets small by the end -- a schedule that
+    stopped at half the initial rate would not have done the job. Monotone throughout, because
+    a warm restart would put the diffusion back.
+    """
+    from rsfff.train.config import TrainConfig
+    from rsfff.train.term_loop import build_scheduler
+    from dataclasses import replace as _replace
+
+    cfg = TrainConfig(epochs=20, learning_rate=1.0e-3,
+                      lr_schedule="cosine", lr_final_factor=0.02)
+    p = [torch.nn.Parameter(torch.zeros(1))]
+    opt = torch.optim.Adam(p, lr=cfg.learning_rate)
+    sched = build_scheduler(opt, cfg)
+    lrs = []
+    for _ in range(cfg.epochs):
+        lrs.append(opt.param_groups[0]["lr"])
+        opt.step()
+        sched.step()
+
+    assert lrs[0] == pytest.approx(1.0e-3)
+    assert lrs[-1] == pytest.approx(1.0e-3 * 0.02, rel=0.05), "did not reach the floor"
+    assert all(b <= a for a, b in zip(lrs, lrs[1:])), "the schedule is not monotone"
+
+    assert build_scheduler(opt, _replace(cfg, lr_schedule="none")) is None
+    with pytest.raises(ValueError, match="unknown train.lr_schedule"):
+        build_scheduler(opt, _replace(cfg, lr_schedule="step"))
+    with pytest.raises(ValueError, match=r"lr_final_factor must be in \[0, 1\]"):
+        build_scheduler(opt, _replace(cfg, lr_final_factor=2.0))
+
+
 def test_warm_start_refuses_to_load_a_channel_reduction_that_reached_zero(tmp_path, capsys):
     """A zeroed ``equiv_reduce`` is a deleted block, not a trained value. Do not inherit it.
 
