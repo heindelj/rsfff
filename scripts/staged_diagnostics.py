@@ -8,8 +8,11 @@ regression hid behind a healthy-looking log:
    the correlation plot shows a slope (the constant times ``n_frag``, since the plot pools
    fragments to frames). Measured at +0.014 / +2.511 / -0.627 kJ/mol across frozen / pol / ct
    on the fit that motivated ``freeze_frozen_level``, identical to four digits across w2..w5.
-2. **The internal/bond split.** The unlabeled gauge inside ``fragment_energy``. It moved by
-   -62 then +109 kJ/mol while ``ob_mae`` stayed small, because the bond head chased it.
+2. **The internal/E_atom split.** The unlabeled gauge inside ``fragment_energy``. Only the
+   sum is fitted, so a higher level is free to slide the split and leave the other half
+   chasing. With the bond channel it moved -62 then +109 kJ/mol while ``ob_mae`` stayed
+   small; ``E_atom`` is the same shape of hazard in a new place, which is why
+   ``freeze_frozen_level`` now pins it too.
 3. **Monomer polarizability eigenvalues.** Fitted almost exactly at the frozen stage (9.904
    a0^3 isotropic against a true 9.891) and then dismantled: 8.903 by the ct stage, with the
    two in-plane components down 1.8 a0^3 each. The isotropic average alone hides this.
@@ -132,6 +135,7 @@ def monomer_split(model, anchor, take=64):
     return {
         "internal": float(out.energy_internal.mean()) * K,
         "bond": float(out.energy_bond.mean()) * K,
+        "e_atom": float(out.energy_atom.mean()) * K,
         "ob_bias": float((out.fragment_energy - batch.fragment_energy).mean()) * K,
         "alpha": ev.mean(0),
         "alpha_ref": None if ref is None else ref.mean(0),
@@ -226,8 +230,9 @@ def main() -> None:
 
         if anchor is not None:
             m = monomer_split(model, anchor)
-            print("\n[2] monomer anchor (kJ/mol) -- watch internal+bond, not their sum")
-            print(f"    internal {m['internal']:+10.2f}   bond {m['bond']:+10.2f}   "
+            print("\n[2] monomer anchor (kJ/mol) -- watch the pieces, not their sum")
+            print(f"    internal {m['internal']:+10.2f}   E_atom {m['e_atom']:+10.2f}   "
+                  f"bond {m['bond']:+10.2f}   "
                   f"one-body bias {m['ob_bias']:+8.4f}")
             print("\n[3] monomer polarizability eigenvalues (a0^3)")
             print(f"    predicted {np.array2string(m['alpha'], precision=3)}   "

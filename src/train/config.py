@@ -254,6 +254,19 @@ class ElectrostaticsConfig:
     #: Initialized with the three equal, so it reproduces the isotropic head exactly at
     #: initialization and the axis stays inert until the fit separates them.
     anisotropic_cquad: bool = False
+    #: Interpret the equivariant heads as the **permanent multipoles** rather than as the
+    #: drives that produce them -- ``mu = mu0`` instead of ``mu = -alpha chivec``, with
+    #: ``alpha``/``cquad`` describing only the response to a field. The same functional
+    #: (``mu0 = -alpha chivec``), so the solve stays quadratic and CG is untouched; what it
+    #: buys is that the permanent multipole stops being a product of two heads, and that
+    #: ``alpha -> 0`` no longer forces a non-polar atom.
+    #:
+    #: It also empties the on-site sectors out of ``internal_energy``: at the frozen level the
+    #: state *is* the minimum, so there is no ``-1/2 chi^T a chi`` left to report and the
+    #: ~-400 kJ/mol per fragment it carried moves to ``unified.atomic_energy``. Turn that on
+    #: with this, or the energy has nowhere to go. See
+    #: :attr:`rsfff.ff.response.FragmentResponse.direct_multipoles`.
+    direct_multipoles: bool = False
     # Penetration heads
     learn_z: bool = True
     environment_z: bool = False
@@ -433,6 +446,53 @@ class UnifiedConfig:
     bond_energy_scale: float = 0.2
     bond_r_on: float = 2.5          # the bond channel opens where the bonds are
     bond_r_off: float = 4.0
+    #: Whether the pair head's **energy** readouts are consumed. Off leaves the module built
+    #: and its state_dict loadable -- so this is a config change, not a refit from scratch,
+    #: in either direction -- while every ``interaction_corr`` reads exactly zero and the
+    #: intramolecular deformation energy comes from ``atomic_energy`` instead.
+    #:
+    #: Off is the "atomic energy plus range-separated force field" model. It exists because
+    #: the corrections had grown into the thing they were correcting: measured on the last
+    #: checkpoint that had them, ``ct`` was **96.7%** neural (-5.24 kJ/mol per fragment of
+    #: correction against -0.18 of classical), and the bond channel was carrying a constant
+    #: -1.686 kJ/mol per fragment of unlabeled one-body gauge along with it.
+    #:
+    #: Note that with this off *and* ``pair_range_separation`` off the head is never called,
+    #: so it receives no gradient and weight decay is the only force acting on it. See
+    #: :func:`rsfff.train.term_loop.parameter_groups`, which keeps it out of the optimizer
+    #: for exactly that reason.
+    #:
+    #: **Per channel.** ``true`` enables every channel the head was built with, ``false``
+    #: none, and a list names exactly the ones to consume::
+    #:
+    #:     pair_corrections: [elst]      # electrostatics only; bond/pauli/disp stay silent
+    #:
+    #: All-or-nothing was the wrong granularity, because the four channels are not the same
+    #: kind of object. ``bond`` sits inside ``fragment_energy`` where it is degenerate with
+    #: ``atomic_energy``, and ``ct_bond`` was measured supplying 96.7% of its label -- those
+    #: are the ones that had to go. ``elst`` is not in that position: it corrects a channel
+    #: with a real label of its own (``eda_cls_elec``), and because the electrostatic split
+    #: routes its ``h_env - h_frag`` difference to ``pol``, it is also the only correction
+    #: that reaches polarization. Turning it on alone is the useful middle setting, and it
+    #: was not expressible before.
+    #:
+    #: Unknown names raise at model-build time rather than being ignored, so a typo is not a
+    #: silently disabled channel.
+    pair_corrections: bool | list[str] = True
+    #: The per-atom energy of the self-consistent electronic state,
+    #: :class:`rsfff.ff.atomic_energy.AtomicStateEnergy`. This is what carries the covalent
+    #: bond energy inside ``fragment_energy`` when ``pair_corrections`` is off, and what
+    #: carries the ``pol``/``ct`` response of the bonding to the relaxed multipoles.
+    atomic_energy: bool = False
+    atomic_energy_hidden: int = 64
+    atomic_energy_depth: int = 2
+    atomic_energy_emb_dim: int = 16
+    #: How many channels the lambda=1/2 features are reduced to before being contracted
+    #: against the multipoles and the electrostatic environment.
+    atomic_energy_equiv_channels: int = 8
+    #: Output scale, Hartree. Sized against a covalent bond like ``bond_energy_scale``, not
+    #: against the interaction corrections -- this term has to supply ~-566 kJ/mol per water.
+    atomic_energy_scale: float = 0.2
     # Classical reach per channel, Angstrom. The largest sets the one shared pair list.
     elst_cutoff: float = 12.0       # the one term with a genuine 1/r tail
     pauli_cutoff: float = 7.0
@@ -484,6 +544,22 @@ class UnifiedConfig:
     #: and over an epoch it still sees every monomer. Evaluation uses a fixed leading slice
     #: so the validation number stays comparable across epochs.
     anchor_batch_size: int = 64
+    #: Apply the anchor **force** term every k-th training step; 1 is every step.
+    #:
+    #: The force is ``-dE/dR`` by autograd with ``create_graph=True``, so it is a second-order
+    #: backward and by far the most expensive single item in a step: measured at **36% of the
+    #: entire step** on the frozen stage, for one label. Evaluating it every k steps is the
+    #: same trade ``TrainConfig.dmu_dr_every`` makes for the dipole derivative, and for the
+    #: same reason -- the term is a smooth function of the parameters, so a strided estimate
+    #: of it is a k-times-noisier version of the same pull rather than a different one.
+    #:
+    #: Skipping is a **training-step** decision only. Evaluation epochs always compute it: the
+    #: force there is a single backward (no ``create_graph``), it is cheap, and ``f_mae`` is a
+    #: validation metric that has to mean the same thing every time it is printed. On skipped
+    #: training steps the key is simply absent, and ``run_epoch`` averages each metric over the
+    #: steps that reported it, so the logged ``f_mae`` stays an unbiased mean rather than being
+    #: diluted by zeros.
+    anchor_force_every: int = 1
     #: Penalty on classical energy between pairs the **bond channel** is already describing.
     #:
     #: Dispersion between covalently bonded atoms is not dispersion -- that correlation

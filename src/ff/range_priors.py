@@ -120,7 +120,7 @@ DEFAULT_R0_PRIOR: dict[int, float] = {8: 0.893, 1: 1.75}
 #: one-sided barrier about the prior (:class:`rsfff.train.train_unified.AnchorTerms`), which is
 #: what makes a prior a floor rather than a starting point.
 CHANNEL_R0_PRIOR: dict[str, dict[int, float]] = {
-    "disp": {8: 1.30, 1: 2.00},
+    "disp": {8: 1.30, 1: 1.60},
 }
 
 #: Crossover width in Angstrom^-1, shared by every channel at initialization.

@@ -94,7 +94,11 @@ unified:
   alpha_init: 40.0
   learn_r0: true
   environment_r0: false         # competes with the pair correction; leave off for the first fit
-  pair_range_separation: true   # per-pair r0 on top of the element prior; see UnifiedConfig
+  # Per-element r0 only. The per-pair deviation is read from the pair trunk, which is switched
+  # off below -- and it was implicated in the dispersion leak that put -39 kJ/mol per fragment
+  # of "intramolecular dispersion" between bonded atoms, because the shared trunk applied one
+  # deviation to intra and inter pairs alike.
+  pair_range_separation: false
   learn_alpha: true
   # Fragment-state slot: identically zero for a neutral singlet, so inert on this data.
   # Present so H5O2+ is an addition rather than a retrofit. Set 0 to drop it entirely.
@@ -127,6 +131,36 @@ unified:
   bond_energy_scale: 0.2        # Hartree; water's two O-H bonds are ~-0.37 Ha
   bond_r_on: 2.5
   bond_r_off: 4.0
+  # --- the atomic energy replaces the pair corrections ---------------------------------
+  # The bond readout was carrying three jobs: the covalent bond energy, the unlabeled
+  # one-body gauge inside `fragment_energy`, and (through the bond_pol/bond_ct telescoping)
+  # `eda_pol` and `eda_ct`. Two of the three had no label, and the measured result was a
+  # constant -1.686 kJ/mol per fragment in `fragment_energy` -- identical to three decimals
+  # across w2..w5, so the frame-pooled plots drew it as a size-dependent offset -- alongside a
+  # `ct` channel that was 96.7% neural.
+  #
+  # `atomic_energy` takes over the first job properly: one network, read at three electronic
+  # states, so what separates the levels is the state and not a parameter. The pair head stays
+  # built and loadable, its other readouts are simply not consumed.
+  #
+  # Per channel, so the two cases can be told apart. `bond` and `ct_bond` are the ones the
+  # paragraph above is about: they sit where nothing labels them, degenerate with
+  # `atomic_energy` and with `ct` respectively, and they stay off. `elst` is not in that
+  # position -- it corrects a channel that has its own label (`eda_cls_elec`) and is the only
+  # correction whose `h_env - h_frag` difference is routed to `pol`, so it corrects
+  # polarization too. `pauli` and `disp` stay off for now: their channels are the two whose
+  # classical forms already leaked into the bonded region once, and adding a neural readout
+  # there before that is settled would re-open it with no label to catch it.
+  #
+  # Cost: turning `elst` on makes the electrostatic split live, which scores the inter pairs a
+  # second time on `h_frag` (the frozen re-score whose difference becomes `pol`). Measured
+  # per epoch: +15% at the frozen stage, +9% at ct.
+  pair_corrections: [elst]
+  atomic_energy: true
+  atomic_energy_hidden: 64
+  atomic_energy_depth: 2
+  atomic_energy_equiv_channels: 8
+  atomic_energy_scale: 0.2      # sized against a covalent bond, like bond_energy_scale
   # Classical reach. The largest sets the one shared pair list.
   elst_cutoff: 12.0
   pauli_cutoff: 7.0
@@ -142,7 +176,12 @@ unified:
   pauli_weight: 30.0
   disp_weight: 30.0
   anchor_weight: 1.0
-  anchor_batch_size: 64        # the anchor force term is a 2nd-order backward; see UnifiedConfig
+  # The monomer anchor is a fixed cost per *optimizer step*, independent of the cluster batch
+  # size, and profiling put it at 58% of a step at batch 32. Two levers, both here: draw fewer
+  # monomer frames, and apply the force term -- the fit's only second-order backward, 36% of a
+  # step on its own -- every fifth step. See `train.batch_size` for the third.
+  anchor_batch_size: 32        # the anchor force term is a 2nd-order backward; see UnifiedConfig
+  anchor_force_every: 5
   # The exact free-atom limit of the on-site polarizability, from
   # data/atomic_reference_states_wb97mv_tzvpd.json (H 5.05, O 5.53 a0^3). A lone atom has an
   # all-zero density, so alpha_i collapses to one isotropic number per element and this pins
@@ -185,6 +224,17 @@ elec:
   # starts doing work at stage 2, where Theta = C (gradF - chiquad) makes the
   # response directional.
   anisotropic_cquad: true
+  # Output the permanent multipoles directly; alpha/cquad describe only the response to a
+  # field. Same functional as the chivec form (mu0 = -alpha chivec) so the solve is unchanged,
+  # but the permanent multipole stops being a product of two heads -- which is the entanglement
+  # that let the polarizability be dismantled (9.904 -> 8.903 a0^3) while the dipole labels
+  # looked fine -- and alpha -> 0 no longer forces a non-polar atom.
+  #
+  # It empties the on-site sectors out of `internal`: with the frozen state *at* the minimum
+  # there is no -1/2 chi^T a chi to report, so the ~-400 kJ/mol per fragment it carried moves
+  # into `atomic_energy`. Watch `d_internal` AND `d_e_atom` from here on; the first is near
+  # zero by construction now and would never fire on its own.
+  direct_multipoles: true
   learn_z: true
   environment_z: false
   learn_b: true
@@ -204,7 +254,7 @@ elec:
   polarizability_scale: 0.5
 
 dispersion:
-  b_prior: per_element          # a uniform 2.0 over-binds badly; see build_log_priors
+  b_prior: per_element
   learn_c6: true
   environment_c6: true
   learn_b: true
@@ -234,7 +284,16 @@ onebody:
 
 train:
   epochs: 150          # overridden per stage below
-  batch_size: 32
+  # 32 was a poor operating point once the anchor is priced in. The anchor, the free-atom
+  # limit and the optimizer step are all *per step* and independent of how many cluster frames
+  # the step covers, so a small batch pays them over and over: measured per epoch at the frozen
+  # stage, 62.0 s at batch 32 against 25.4 s at 128 and 18.5 s at 256, on identical work.
+  #
+  # This is not free -- it is 4x fewer optimizer updates per epoch, so it changes the
+  # optimization and not only the wall clock. 128 is the compromise: most of the speedup, and
+  # still 68 updates an epoch. Raise `learning_rate` if the fit turns out to be update-starved
+  # rather than time-starved.
+  batch_size: 128
   learning_rate: 1.0e-3
   weight_decay: 1.0e-4
   grad_clip: 5.0
@@ -260,6 +319,10 @@ stages:
       polarization: true
       charge_transfer: false
       pol_weight: 30.0
+      # `fragment_energy` is fitted at the frozen stage only. From here on `freeze_frozen_level`
+      # pins E0, E_internal and E_atom^0, so the only part of it still free is the intra
+      # classical remainder -- which `intra_classical_weight` already governs.
+      onebody_weight: 0.0
       # From here on the frozen level is settled and is held there. `h_env == h_frag` exactly
       # on an isolated fragment, so pol and ct can say everything they need through `g`, the
       # coupled solve and the correction trunk without touching what a monomer *is*. Left
@@ -283,6 +346,7 @@ stages:
       charge_transfer: true
       pol_weight: 30.0
       ct_weight: 30.0
+      onebody_weight: 0.0
       freeze_frozen_level: true
       internal_drift_weight: 1.0
       anchor_weight: 10.0

@@ -142,6 +142,26 @@ class CoupledSystem:
     t_1c_j: torch.Tensor           # (P, K, K), gate-scaled
     m_nuc: torch.Tensor            # (N, K) point nuclear multipoles, constant in x
 
+    #: **The two parameterizations of the same functional.** Exactly one of ``chivec`` and
+    #: ``mu0`` is ever non-``None``, and likewise for ``chiquad``/``quad0``:
+    #:
+    #:   chivec  ->  E = chivec.mu + 1/2 mu^T alpha^-1 mu          minimized at mu = -alpha chivec
+    #:   mu0     ->  E = 1/2 (mu - mu0)^T alpha^-1 (mu - mu0)      minimized at mu = mu0
+    #:
+    #: They are related by ``mu0 = -alpha chivec``, so this is a change of variables and not a
+    #: different model. What it buys is conditioning. Under ``chivec`` the permanent dipole is
+    #: a *product* of two heads, so the multipole labels and the polarizability labels pull on
+    #: both at once and an error in ``alpha`` corrupts ``mu``; under ``mu0`` each label pins one
+    #: head. It also separates two statements that ``chivec`` conflates: ``alpha -> 0`` there
+    #: forces ``mu -> 0``, i.e. an unpolarizable atom is forced to be non-polar, whereas here it
+    #: correctly leaves a rigid ``mu0``.
+    #:
+    #: Both forms leave ``A`` identical -- the linear term moves into ``b``, not the operator --
+    #: so the preconditioner, the CG and the adjoint are untouched, and the functional stays
+    #: quadratic.
+    mu0: torch.Tensor | None = None     # (N, 3)
+    quad0: torch.Tensor | None = None   # (N, 5) spherical
+
     @property
     def has_dipole(self) -> bool:
         return self.alpha is not None
@@ -295,6 +315,13 @@ def multipoles_from_state(sys: CoupledSystem, x: State, d_map=None):
         _apply_cquad(sys.cquad, w)
         if sys.has_quad and w.numel() else w.new_zeros(0, 5)
     )
+    # Under the direct parameterization the state carries only the *induced* part, so the
+    # permanent multipole is added back here -- and nowhere else, which is what keeps the
+    # quadratic block `1/2 u^T alpha u` (and hence `A`) exactly as it was.
+    if sys.mu0 is not None and mu.numel():
+        mu = mu + sys.mu0
+    if sys.quad0 is not None and theta.numel():
+        theta = theta + sys.quad0
     return q, mu, theta
 
 
@@ -357,15 +384,24 @@ def _grad_state(sys: CoupledSystem, x: State, d_map) -> State:
         _incidence_adjoint(sys.bond_index, d_q) + x[0]
     )
 
-    # dipole sector: chivec.mu + 1/2 u^T alpha u, pulled back through mu = alpha u
+    # dipole sector, pulled back through mu = mu0 + alpha u (mu0 = 0 in the chivec form).
+    #
+    #   chivec form:  E = chivec.mu + 1/2 u^T alpha u   ->  dE/du = alpha (chivec + g_mu) + alpha u
+    #   mu0 form:     E = 1/2 u^T alpha u               ->  dE/du = alpha (g_mu + u)
+    #
+    # The `alpha u` term is written out rather than reusing `mu`, because under the direct
+    # parameterization `mu` now carries `mu0` too and adding it here would be a linear term
+    # that does not exist -- the whole point of that form is that there is none.
     if sys.has_dipole and x[1].numel():
-        g_u = torch.einsum("nab,nb->na", sys.alpha, sys.chivec + g_mu) + mu
+        drive = g_mu if sys.mu0 is not None else sys.chivec + g_mu
+        g_u = torch.einsum("nab,nb->na", sys.alpha, drive + x[1])
     else:
         g_u = x[1]
 
-    # quadrupole sector: chiquad.Theta + 1/2 c |w|^2, pulled back through Theta = c w
+    # quadrupole sector: the same, pulled back through Theta = quad0 + C w.
     if sys.has_quad and x[2].numel():
-        g_w = _apply_cquad(sys.cquad, sys.chiquad + g_theta) + theta
+        drive_q = g_theta if sys.quad0 is not None else sys.chiquad + g_theta
+        g_w = _apply_cquad(sys.cquad, drive_q + x[2])
     else:
         g_w = x[2]
 
@@ -392,9 +428,17 @@ def coupled_energy(sys: CoupledSystem, x: State, d_map=None) -> torch.Tensor:
 
     e_atom = sys.chi * q + 0.5 * sys.eta * q * q
     if sys.has_dipole and x[1].numel():
-        e_atom = e_atom + (sys.chivec * mu).sum(-1) + 0.5 * (x[1] * mu).sum(-1)
+        # `1/2 u . (alpha u)`, i.e. the *induced* part only. Under the direct parameterization
+        # `mu` includes `mu0`, so `1/2 u . mu` would smuggle in a linear term.
+        mu_ind = mu if sys.mu0 is None else mu - sys.mu0
+        e_atom = e_atom + 0.5 * (x[1] * mu_ind).sum(-1)
+        if sys.mu0 is None:
+            e_atom = e_atom + (sys.chivec * mu).sum(-1)
     if sys.has_quad and x[2].numel():
-        e_atom = e_atom + (sys.chiquad * theta).sum(-1) + 0.5 * (x[2] * theta).sum(-1)
+        th_ind = theta if sys.quad0 is None else theta - sys.quad0
+        e_atom = e_atom + 0.5 * (x[2] * th_ind).sum(-1)
+        if sys.quad0 is None:
+            e_atom = e_atom + (sys.chiquad * theta).sum(-1)
 
     energy = e_atom.new_zeros(sys.n_systems).index_add(0, sys.batch_idx, e_atom)
     if x[0].numel():
@@ -572,9 +616,13 @@ def pcg(
 # the differentiable entry point
 # ---------------------------------------------------------------------------
 
+#: The differentiable leaves handed to :class:`_CoupledSolve`. ``mu0``/``quad0`` belong here
+#: for the same reason ``chivec``/``chiquad`` do: they enter the residual, so the adjoint has to
+#: be able to differentiate it with respect to them. Leaving them out would silently zero the
+#: permanent multipoles' gradient.
 _PARAM_FIELDS = (
     "chi", "eta", "q0", "compliance", "chivec", "alpha", "chiquad", "cquad",
-    "t_point", "t_ss", "t_1c_i", "t_1c_j", "m_nuc",
+    "t_point", "t_ss", "t_1c_i", "t_1c_j", "m_nuc", "mu0", "quad0",
 )
 
 

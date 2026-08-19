@@ -349,6 +349,12 @@ class ResponseParameters:
     cquad: torch.Tensor | None         # (N,) isotropic quadrupole polarizability
     z: torch.Tensor                    # (N,) effective nuclear charge (penetration)
     b: torch.Tensor                    # (N,) Slater exponent (penetration)
+    #: The **direct** parameterization: the permanent multipoles themselves, rather than the
+    #: drives that produce them. Exactly one of ``chivec``/``mu0`` is non-``None``, likewise
+    #: ``chiquad``/``quad0``; see :class:`rsfff.ff.coupled_solve.CoupledSystem` for why the
+    #: two are the same functional and what the change of variables buys.
+    mu0: torch.Tensor | None = None    # (N, 3) e*bohr
+    quad0: torch.Tensor | None = None  # (N, 5) spherical, e*bohr^2
 
 
 @dataclass
@@ -435,9 +441,35 @@ class FragmentResponse(nn.Module):
         params: ElectrostaticParameterHeads,
         compliance_head: PairComplianceHead,
         ct_compliance_head: PairComplianceHead | None = None,
+        *,
+        direct_multipoles: bool = False,
     ) -> None:
         super().__init__()
         self.params = params
+        #: Interpret the equivariant heads' outputs as the **permanent multipoles** rather than
+        #: as the drives that produce them: ``mu = mu0`` instead of ``mu = -alpha chivec``, with
+        #: ``alpha`` and ``cquad`` left to describe the *response* to a field alone.
+        #:
+        #: The same functional either way (``mu0 = -alpha chivec``), so the solve, the
+        #: preconditioner and the adjoint are untouched and it stays quadratic. What changes is
+        #: conditioning and bookkeeping:
+        #:
+        #: * The permanent multipole stops being a *product* of two heads. Under ``chivec`` the
+        #:   dipole labels and the polarizability labels both pull on both heads, so an error in
+        #:   ``alpha`` corrupts ``mu``; here each label pins one head.
+        #: * ``alpha -> 0`` no longer forces ``mu -> 0``. "Not polarizable" and "not polar" are
+        #:   different statements and the drive form conflates them.
+        #: * The on-site dipole and quadrupole energies leave ``internal_energy`` entirely --
+        #:   at the frozen level the state *is* the minimum, so there is no ``-1/2 chi^T a chi``
+        #:   to report. That energy has to be carried by
+        #:   :class:`rsfff.ff.atomic_energy.AtomicStateEnergy`, which is the point: it moves a
+        #:   few hundred kJ/mol per fragment out of an unlabeled split and into a term that
+        #:   reads the multipoles it is describing.
+        #:
+        #: That last consequence is not free -- see ``internal_drift_weight``, whose alarm has
+        #: to follow the energy to ``e_atom`` or it ends up watching a quantity that is near
+        #: zero by construction.
+        self.direct_multipoles = bool(direct_multipoles)
         self.compliance_head = compliance_head
         #: Used for the *radius-derived* charge-transfer channels only, leaving
         #: ``compliance_head`` to the intra-fragment ones. See
@@ -504,6 +536,14 @@ class FragmentResponse(nn.Module):
         prior_sum = q0_species.new_zeros(n_frag).index_add_(0, frag, q0_species)
         q0 = q0_species + ((frag_q - prior_sum) / counts.clamp(min=1))[frag]
 
+        if self.direct_multipoles:
+            # The heads' equivariant outputs *are* the permanent multipoles here. Exactly one
+            # of each pair is passed on, so nothing downstream has to guess which form it has.
+            return ResponseParameters(
+                chi=chi, eta=eta, q0=q0, compliance=compliance,
+                chivec=None, alpha=alpha_i, chiquad=None, cquad=cquad, z=z, b=b,
+                mu0=chivec, quad0=chiquad,
+            )
         return ResponseParameters(
             chi=chi, eta=eta, q0=q0, compliance=compliance,
             chivec=chivec, alpha=alpha_i, chiquad=chiquad, cquad=cquad, z=z, b=b,
@@ -524,8 +564,13 @@ class FragmentResponse(nn.Module):
         n_frag = int(batch.n_fragments)
 
         rp = self.response_parameters(batch, feats)
-        chi, eta, chivec, alpha_i = rp.chi, rp.eta, rp.chivec, rp.alpha
-        z, b, chiquad, cquad = rp.z, rp.b, rp.chiquad, rp.cquad
+        chi, eta, alpha_i = rp.chi, rp.eta, rp.alpha
+        z, b, cquad = rp.z, rp.b, rp.cquad
+        # Exactly one of each pair is populated, so read whichever this model is using. The
+        # branch below then decides what it *means*, which is the only place the two forms
+        # differ at the frozen level.
+        chivec = rp.mu0 if self.direct_multipoles else rp.chivec
+        chiquad = rp.quad0 if self.direct_multipoles else rp.chiquad
         q0, compliance = rp.q0, rp.compliance
         bond_index, bond_batch = intra_fragment_channels(frag)
 
@@ -541,15 +586,28 @@ class FragmentResponse(nn.Module):
 
         mu = None
         internal = sol.energy
+        # In the direct form the heads' outputs are already the frozen multipoles and the
+        # on-site sectors contribute **no** internal energy: the frozen state is the minimum of
+        # `1/2 (mu - mu0)^T alpha^-1 (mu - mu0)`, which is zero there by construction. The
+        # ~-400 kJ/mol per fragment that `-1/2 chivec^T alpha chivec` used to put here is not
+        # lost, it is handed to the atomic-energy head instead.
         if chivec is not None:
-            mu = atomic_dipoles(chivec, alpha_i, frag, None)
-            internal = internal + atomic_dipole_energy(chivec, alpha_i, frag, n_frag, None)
+            if self.direct_multipoles:
+                mu = chivec
+            else:
+                mu = atomic_dipoles(chivec, alpha_i, frag, None)
+                internal = internal + atomic_dipole_energy(
+                    chivec, alpha_i, frag, n_frag, None
+                )
         quad_s = None
         if chiquad is not None:
-            quad_s = atomic_quadrupoles(chiquad, cquad, frag, None)
-            internal = internal + atomic_quadrupole_energy(
-                chiquad, cquad, frag, n_frag, None
-            )
+            if self.direct_multipoles:
+                quad_s = chiquad
+            else:
+                quad_s = atomic_quadrupoles(chiquad, cquad, frag, None)
+                internal = internal + atomic_quadrupole_energy(
+                    chiquad, cquad, frag, n_frag, None
+                )
         return FragmentResponseOutput(
             charges=sol.charges,
             mu=mu,

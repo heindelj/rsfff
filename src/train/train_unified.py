@@ -37,12 +37,14 @@ directly.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 import torch
 
 from ..ff.dispersion import DispersionParameterHeads, build_log_priors
 from ..ff.environment import N_PAIR_INVARIANTS
+from ..ff.atomic_energy import AtomicStateEnergy
 from ..ff.multipole import irrep2_to_spherical
 from ..ff.pauli import PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
@@ -85,13 +87,13 @@ _LOG_KEYS = (
     "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae", "pol_mae", "ct_mae",
     "a_mae", "f_mae", "dip_mae", "quad_mae", "e_tot_mae",
     "anchor_e", "anchor_f", "dipole", "quad", "alpha_mae", "f_clu", "intra_ff",
-    "q_res", "qO", "dchi", "internal", "bond",
+    "q_res", "qO", "dchi", "internal", "bond", "e_atom",
     # `d_internal` is the isolated-fragment internal energy's drift from where this stage
     # started, kJ/mol. It is the quantity that produced the one-body constant offset: the
     # split between `internal` and `bond` carries no label, so a higher level is free to slide
     # it and leave the bond head chasing. Watch this, not `ob_mae`, for that failure.
     # `elst_env` is the environment-dependent electrostatic energy booked as polarization.
-    "d_internal", "int_drift", "elst_env", "free_alpha_mae",
+    "d_internal", "d_e_atom", "int_drift", "elst_env", "free_alpha_mae",
     "gate_inter_elst", "gate_intra_disp",
     "intra_elst", "intra_pauli", "intra_disp",
     "r0_elst", "r0_pauli", "r0_disp", "env_norm",
@@ -174,6 +176,24 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
         learn_alpha=ucfg.learn_alpha,
     )
 
+    # The per-atom energy of the electronic state. Built only when asked for, because it and
+    # the pair head's bond channel describe the same thing -- an atom's bonding energy -- and
+    # having both live at once would reintroduce exactly the unlabeled split this replaces.
+    atomic_energy = None
+    if ucfg.atomic_energy:
+        atomic_energy = AtomicStateEnergy(
+            p0, n_species, p1=p1, p2=p2,
+            irrep2_to_spherical=(
+                irrep2_to_spherical(featurizer.backend.irrep6_to_voigt())
+                if p2 is not None else None
+            ),
+            emb_dim=ucfg.atomic_energy_emb_dim,
+            hidden=ucfg.atomic_energy_hidden,
+            depth=ucfg.atomic_energy_depth,
+            equiv_channels=ucfg.atomic_energy_equiv_channels,
+            energy_scale=ucfg.atomic_energy_scale,
+        )
+
     corr = dict(r_on=ucfg.corr_r_on, r_off=ucfg.corr_r_off)
     pair_head = UnifiedPairHead(
         p0, n_species,
@@ -212,6 +232,8 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
     return UnifiedPairModel(
         featurizer, response, disp_params, pauli_params, range_heads, pair_head,
         fragment_state, reference_energies,
+        atomic_energy=atomic_energy,
+        pair_corrections=ucfg.pair_corrections,
         environment=environment,
         max_rank=ucfg.max_rank,
         classical={
@@ -241,8 +263,20 @@ def unified_fit(out, batch, cfg: Config):
     loss = u.onebody_weight * (ob_err / u.energy_scale).pow(2).mean()
     metrics = {
         "ob_mae": float(ob_err.detach().abs().mean()) * KJMOL_PER_HARTREE,
-        "internal": float(out.energy_internal.detach().mean()),
-        "bond": float(out.energy_bond.detach().mean()),
+        # kJ/mol per fragment, all three, matching `scripts/staged_diagnostics.py` and every
+        # other energy in this dict. They were Hartree, which put three columns on a different
+        # scale from their neighbours for no reason -- `bond` in particular reads as 1e-05 and
+        # is 0.04 kJ/mol.
+        "internal": float(out.energy_internal.detach().mean()) * KJMOL_PER_HARTREE,
+        # Despite the name this is the intra-fragment *classical* remainder, not a bond
+        # channel: `e_corr["bond"]` is identically zero unless 'bond' is listed in
+        # `pair_corrections`, so what is left is the gated elst/pauli/disp between
+        # same-fragment atoms. Watch `intra_elst`/`intra_pauli`/`intra_disp` for its breakdown.
+        "bond": float(out.energy_bond.detach().mean()) * KJMOL_PER_HARTREE,
+        # The other half of the unlabeled split inside `fragment_energy`. Only their sum is
+        # fitted, so watch the two together: a drift in `e_atom` against a fixed `internal`
+        # between stages is the failure this design exists to remove.
+        "e_atom": float(out.energy_atom.detach().mean()) * KJMOL_PER_HARTREE,
     }
     if out.elst_env is not None:
         # Already inside `pol`; reported alone because the size of what moved out of
@@ -331,6 +365,14 @@ def _frozen_level_parameters(model) -> dict[str, list]:
         "response.params": list(model.response.params.parameters()),
         "response.compliance_head": list(model.response.compliance_head.parameters()),
     }
+    # `atomic_energy` *is* the frozen level's definition now: `E_atom^0` is what carries the
+    # intramolecular deformation energy inside `fragment_energy`, and the higher levels are
+    # the same weights read at a relaxed electronic state. Leaving it trainable above stage 1
+    # would hand `pol` and `ct` at weight 30 a direct lever on the one-body zero -- which is
+    # precisely how the bond channel it replaces ended up carrying a constant -1.686 kJ/mol
+    # per fragment. What pol and ct move instead is the *state*, not this network.
+    if getattr(model, "atomic_energy", None) is not None:
+        frozen["atomic_energy"] = list(model.atomic_energy.parameters())
     proj = getattr(model.featurizer, "channel_proj", None)
     if proj is not None:
         frozen["featurizer.channel_proj"] = [proj]
@@ -356,14 +398,23 @@ class AnchorTerms:
     training set, 269 times an epoch. Drawing a fresh subset per step is plain SGD on that
     term. Evaluation draws a fixed leading slice instead, so the validation metric is not
     itself a random variable.
+
+    The force term is additionally **strided**: ``unified.anchor_force_every`` applies it on
+    every k-th training step and on every evaluation step. Even minibatched it remained the
+    most expensive single item in a step -- 36% of the total on the frozen stage -- because it
+    is the only second-order backward in the fit.
     """
 
     def __init__(self, model, anchor, device, batch_size=0, seed=0,
-                 atomic_states=None, neighbor_types=()):
+                 atomic_states=None, neighbor_types=(), force_every=1):
         self.model = model
         self.anchor = anchor            # MoleculeDataset, or None
         self.device = device
         self.batch_size = int(batch_size)
+        self.force_every = max(int(force_every), 1)
+        #: Counts *training* steps only, so the stride is over optimizer steps rather than
+        #: over forwards; an evaluation epoch neither advances it nor skips its own force term.
+        self._train_step = 0
         self._gen = torch.Generator().manual_seed(int(seed))
         self._metrics: dict[str, float] = {}
         self._eval_batch = self._eval_idx = None
@@ -378,6 +429,12 @@ class AnchorTerms:
         #: (len(anchor),) the isolated-fragment internal energy at the moment this stage
         #: started, filled by :meth:`snapshot_frozen_level`. ``None`` when not anchoring.
         self._internal_ref = None
+        #: The same snapshot for ``E_atom``. Both halves of the unlabeled split are watched,
+        #: because which of them carries the energy is a configuration choice: under
+        #: ``elec.direct_multipoles`` the on-site sectors leave ``internal_energy`` entirely,
+        #: so an alarm on ``internal`` alone would be watching a quantity that is near zero by
+        #: construction and would never fire.
+        self._atom_ref = None
 
     def _anchor_batch(self, training: bool):
         """``(batch, indices)``: a monomer batch ready for the force term, or two Nones.
@@ -417,6 +474,27 @@ class AnchorTerms:
         :attr:`rsfff.train.config.UnifiedConfig.freeze_frozen_level`.
         """
         u = cfg.unified
+        # A pair head that nothing calls. With **every** energy readout off *and* the per-pair
+        # range separation off, no gradient ever reaches it. `torch.optim.Adam` skips a
+        # parameter whose `.grad` is None, so it would in fact survive untouched -- but that
+        # is a property of the optimizer rather than of anything stated here, and the whole
+        # point of keeping the module is that its weights are still worth something later.
+        # Saying so explicitly also keeps it out of the optimizer state entirely.
+        #
+        # One live channel is enough to keep the whole head training: the trunk is shared, so
+        # `pair_corrections: [elst]` puts a gradient on every parameter except the three silent
+        # readouts, and freezing any of it would be wrong.
+        head = getattr(self.model, "pair_head", None)
+        if head is not None and not self.model.pair_corrections and not head.range_channels:
+            n = 0
+            for prm in head.parameters():
+                prm.requires_grad_(False)
+                n += prm.numel()
+            if n:
+                print(
+                    f"pair head inert (no correction channels, no per-pair r0): {n} parameters "
+                    f"held at their loaded values and kept out of the optimizer"
+                , flush=True)
         if u.freeze_frozen_level:
             frozen = _frozen_level_parameters(self.model)
             n = 0
@@ -431,10 +509,13 @@ class AnchorTerms:
         if u.internal_drift_weight > 0.0 and self.anchor is not None:
             batch = self.anchor.flat_batch(range(len(self.anchor))).to(self.device)
             with torch.no_grad():
-                self._internal_ref = self.model(batch).energy_internal.detach().clone()
+                snap = self.model(batch)
+                self._internal_ref = snap.energy_internal.detach().clone()
+                self._atom_ref = snap.energy_atom.detach().clone()
             print(
-                f"internal-energy drift anchored on {len(self.anchor)} monomer frames at "
-                f"{float(self._internal_ref.mean()) * KJMOL_PER_HARTREE:.3f} kJ/mol"
+                f"frozen-level drift anchored on {len(self.anchor)} monomer frames at "
+                f"internal {float(self._internal_ref.mean()) * KJMOL_PER_HARTREE:.3f} + "
+                f"E_atom {float(self._atom_ref.mean()) * KJMOL_PER_HARTREE:.3f} kJ/mol"
             , flush=True)
 
     def penalties(self, out, batch, cfg: Config):
@@ -507,10 +588,13 @@ class AnchorTerms:
         extra.update(fa)
         free_metrics = fa_metrics
 
-        anchor_batch, anchor_idx = self._anchor_batch(torch.is_grad_enabled())
+        training = torch.is_grad_enabled()
+        anchor_batch, anchor_idx = self._anchor_batch(training)
         if anchor_batch is None:
             self._metrics = dict(free_metrics)
             return extra
+        if training:
+            self._train_step += 1
 
         # One anchor forward feeding both the energy/force terms and the multipole terms.
         # Grad is forced on because the force term is itself a backward pass and this runs on
@@ -530,14 +614,28 @@ class AnchorTerms:
         # degeneracy instead of reweighting it.
         drift_metric = {}
         if self._internal_ref is not None:
-            ref = self._internal_ref[torch.as_tensor(anchor_idx, device=self.device)]
-            drift = anchor_out.energy_internal - ref
+            idx = torch.as_tensor(anchor_idx, device=self.device)
+            drift = anchor_out.energy_internal - self._internal_ref[idx]
+            d_atom = anchor_out.energy_atom - self._atom_ref[idx]
+            # Both halves, summed into one penalty. Their *sum* is the labeled quantity, so
+            # penalising the sum would be redundant with `ob_mae`; what has to be held is each
+            # one separately, which is what makes this an assertion about the gauge rather
+            # than a second copy of the energy loss.
             extra["int_drift"] = u.internal_drift_weight * (
-                drift / u.energy_scale
-            ).pow(2).mean()
+                (drift / u.energy_scale).pow(2).mean()
+                + (d_atom / u.energy_scale).pow(2).mean()
+            )
             drift_metric["d_internal"] = float(drift.detach().mean()) * KJMOL_PER_HARTREE
+            drift_metric["d_e_atom"] = float(d_atom.detach().mean()) * KJMOL_PER_HARTREE
+        # The force term, strided. `create_graph=True` makes it the only second-order backward
+        # in the fit and the single most expensive item in a step, so `anchor_force_every`
+        # applies it every k-th *training* step. Evaluation always keeps it: there the force is
+        # one plain backward, and `f_mae` has to mean the same thing on every validation line.
+        onebody_cfg = cfg.onebody
+        if training and self._train_step % self.force_every != 0:
+            onebody_cfg = replace(onebody_cfg, force_weight=0.0)
         terms, self._metrics = onebody_anchor_loss(
-            self.model, anchor_batch, cfg.onebody, out=anchor_out
+            self.model, anchor_batch, onebody_cfg, out=anchor_out
         )
         self._metrics.update(drift_metric)
         self._metrics.update(free_metrics)
@@ -759,6 +857,7 @@ def _train_once(config: Config):
         model, anchor, device,
         batch_size=config.unified.anchor_batch_size, seed=config.data.seed,
         atomic_states=atomic_states, neighbor_types=neighbor_types,
+        force_every=config.unified.anchor_force_every,
     )
     fit(
         model, dataset, config, config, device, train_idx, val_idx,

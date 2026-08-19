@@ -177,6 +177,7 @@ def build_response(
         params,
         compliance_head(),
         compliance_head() if separate_ct_compliance else None,
+        direct_multipoles=getattr(ecfg, "direct_multipoles", False),
     )
 
 

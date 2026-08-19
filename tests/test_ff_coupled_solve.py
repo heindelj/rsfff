@@ -474,3 +474,81 @@ def test_charge_is_conserved_per_channel_component():
     got = q.new_zeros(3).index_add_(0, frag, q)
     want = sys.q0.new_zeros(3).index_add_(0, frag, sys.q0)
     assert torch.allclose(got, want, atol=1e-13)
+
+
+# ---------------------------------------------------------------------------
+# The direct parameterization: mu0 instead of chivec
+# ---------------------------------------------------------------------------
+
+def _as_direct(sys):
+    """The same functional written with permanent multipoles: ``mu0 = -alpha chivec``."""
+    from dataclasses import replace
+
+    from rsfff.ff.coupled_solve import _apply_cquad
+
+    mu0 = -torch.einsum("nab,nb->na", sys.alpha, sys.chivec)
+    quad0 = -_apply_cquad(sys.cquad, sys.chiquad)
+    return replace(sys, chivec=None, chiquad=None, mu0=mu0, quad0=quad0)
+
+
+def test_direct_grad_state_is_still_the_gradient_of_the_energy():
+    """The invariant the whole module rests on has to survive the change of variables."""
+    sys = _as_direct(make_system(seed=3, max_rank=2))
+    d_map = _spherical_to_poly_map(torch.float64, sys.chi.device)
+    g = torch.Generator().manual_seed(11)
+    zero = zero_state(sys, torch.float64, sys.chi.device)
+    x = tuple(
+        (t + 0.05 * torch.randn(t.shape, generator=g)).requires_grad_(True) for t in zero
+    )
+    auto = torch.autograd.grad(total_energy(sys, x, d_map).sum(), x, allow_unused=True)
+    manual = _grad_state(sys, tuple(t.detach() for t in x), d_map)
+    for name, a, m in zip("vuw", auto, manual):
+        if a is None or not a.numel():
+            continue
+        assert float((a - m).abs().max()) < 1e-12, name
+
+
+def test_direct_and_drive_parameterizations_are_the_same_functional():
+    """``mu0 = -alpha chivec`` is a change of variables, so the physics must be identical.
+
+    Three things have to agree, and the third is the one that matters for the staged fit:
+    the converged multipoles, and ``E_pol`` measured against each form's *own* uncoupled
+    reference. That reference is not the same state in the two forms -- under ``chivec`` the
+    uncoupled minimum is ``u = -chivec`` while under ``mu0`` it is ``u = 0`` -- and moving it
+    to the solver's origin is precisely what empties the on-site sectors out of
+    ``internal_energy``.
+    """
+    drive = make_system(seed=3, max_rank=2)
+    direct = _as_direct(drive)
+    d_map = _spherical_to_poly_map(torch.float64, drive.chi.device)
+
+    (x_drive, _), (x_direct, _) = coupled_solve(drive), coupled_solve(direct)
+    m_drive = multipoles_from_state(drive, x_drive, d_map)
+    m_direct = multipoles_from_state(direct, x_direct, d_map)
+    for name, a, b in zip(("q", "mu", "Theta"), m_drive, m_direct):
+        assert float((a - b).abs().max()) < 1e-9, f"{name} differs between the two forms"
+
+    unc_drive = (torch.zeros_like(x_drive[0]), -drive.chivec, -drive.chiquad)
+    unc_direct = zero_state(direct, torch.float64, direct.chi.device)
+    pol_drive = float(
+        (total_energy(drive, x_drive, d_map) - total_energy(drive, unc_drive, d_map)).sum()
+    )
+    pol_direct = float(
+        (total_energy(direct, x_direct, d_map) - total_energy(direct, unc_direct, d_map)).sum()
+    )
+    assert abs(pol_drive - pol_direct) < 1e-11, (
+        f"E_pol differs: {pol_drive:.12f} vs {pol_direct:.12f}"
+    )
+    # And the constant that moved: E_internal loses exactly -1/2 chi^T a chi.
+    from rsfff.ff.coupled_solve import _apply_cquad
+
+    predicted = float(
+        -0.5 * torch.einsum("na,nab,nb->n", drive.chivec, drive.alpha, drive.chivec).sum()
+        - 0.5 * (drive.chiquad * _apply_cquad(drive.cquad, drive.chiquad)).sum()
+    )
+    observed = float(
+        (coupled_energy(drive, x_drive, d_map) - coupled_energy(direct, x_direct, d_map)).sum()
+    )
+    assert abs(predicted - observed) < 1e-11, (
+        f"the energy that left the on-site sectors is {observed:.10f}, expected {predicted:.10f}"
+    )

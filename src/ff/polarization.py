@@ -117,6 +117,8 @@ def build_coupled_system(
         q0=rp.q0,
         compliance=rp.compliance,
         chivec=rp.chivec,
+        mu0=rp.mu0,
+        quad0=rp.quad0,
         alpha=rp.alpha,
         chiquad=rp.chiquad,
         cquad=rp.cquad,

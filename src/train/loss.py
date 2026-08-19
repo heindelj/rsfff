@@ -461,12 +461,21 @@ def free_atom_polarizability_loss(model, batch, alpha_ref, *, weight=0.0, scale=
 
     Same scale convention as :func:`fragment_polarizability_loss`, so the two weights are
     comparable.
+
+    Evaluated through :meth:`rsfff.ff.unified.UnifiedPairModel.frozen_polarizability` when the
+    model offers it, which is the same response solve without the pair model wrapped around
+    it. On a batch of isolated atoms the pair list is empty, so the two agree exactly -- but
+    the full forward still paid the fixed cost of building it, measured at 6.7 ms a training
+    step for *two atoms*. Models without the method fall back to the full forward.
     """
     terms: dict[str, torch.Tensor] = {}
     metrics: dict[str, float] = {}
     if weight <= 0.0 or batch is None:
         return terms, metrics
-    pred = model(batch, with_polarizability=True).polarizability
+    short = getattr(model, "frozen_polarizability", None)
+    pred = short(batch) if short is not None else model(
+        batch, with_polarizability=True
+    ).polarizability
     if pred is None:
         return terms, metrics
     err = (pred - alpha_ref) / scale

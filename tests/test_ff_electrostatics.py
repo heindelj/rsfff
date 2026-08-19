@@ -297,6 +297,71 @@ def test_fragment_charge_is_conserved_exactly(w2_dataset, w3_dataset):
             assert per_frag.abs().max() < 1e-13
 
 
+def _reference_channels(fragment_idx):
+    """The per-fragment Python loop ``intra_fragment_channels`` used to be.
+
+    Kept as a test oracle rather than as production code: it is obviously correct and
+    unusably slow (~6.5 microseconds per fragment, which at nine calls a step and 900
+    fragments was 52 ms of pure overhead per training step). The vectorized implementation
+    has to agree with it exactly, not merely up to ordering -- the channel order fixes the
+    order of ``compliance`` and of the transfers ``p``, so a permutation would silently
+    reassign every learned compliance.
+    """
+    n_frag = int(fragment_idx.max()) + 1 if fragment_idx.numel() else 0
+    counts = torch.bincount(fragment_idx, minlength=n_frag)
+    offsets = torch.cumsum(counts, 0) - counts
+    rows, cols, owner = [], [], []
+    for f in range(n_frag):
+        n = int(counts[f])
+        if n < 2:
+            continue
+        a, b = torch.triu_indices(n, n, offset=1)
+        rows.append(a + offsets[f])
+        cols.append(b + offsets[f])
+        owner.append(torch.full((a.numel(),), f, dtype=torch.long))
+    if not rows:
+        empty = torch.zeros(0, dtype=torch.long)
+        return torch.zeros(2, 0, dtype=torch.long), empty
+    return torch.stack((torch.cat(rows), torch.cat(cols))), torch.cat(owner)
+
+
+@pytest.mark.parametrize(
+    "fragment_idx",
+    [
+        torch.arange(7).repeat_interleave(3),          # uniform waters
+        torch.tensor([0, 0, 0, 1, 1, 2, 3, 3, 3, 3]),  # ragged, with a lone atom
+        torch.tensor([0, 1, 2]),                       # every fragment a lone atom
+        torch.zeros(9, dtype=torch.long),              # one big fragment
+        torch.zeros(0, dtype=torch.long),              # empty batch
+    ],
+    ids=["uniform", "ragged", "all-lone", "one-big", "empty"],
+)
+def test_channel_enumeration_matches_the_per_fragment_loop(fragment_idx):
+    """The vectorized enumeration is bit-identical to the loop it replaced."""
+    want_ij, want_bb = _reference_channels(fragment_idx)
+    got_ij, got_bb = intra_fragment_channels(fragment_idx.clone())
+    assert torch.equal(got_ij, want_ij), "channel list differs from the reference loop"
+    assert torch.equal(got_bb, want_bb), "channel ownership differs from the reference loop"
+
+
+def test_channel_memo_is_invalidated_by_an_in_place_write():
+    """The cache is keyed on identity *and* version, so a mutated input is recomputed.
+
+    Identity alone would be a live trap: ``fragment_idx`` is not conceptually immutable, and
+    a cache that answered from a stale entry would hand the solve a channel graph for a
+    fragmentation that no longer exists.
+    """
+    frag = torch.tensor([0, 0, 0, 1, 1, 1])
+    first = intra_fragment_channels(frag)
+    assert intra_fragment_channels(frag) is first, "a repeat call should hit the memo"
+    assert first[0].shape[1] == 6, "two triangles of three atoms"
+
+    frag[3:] = 0                       # the same tensor, now one fragment of six
+    again = intra_fragment_channels(frag)
+    assert again[0].shape[1] == 15, "the memo served a stale graph after an in-place write"
+    assert torch.equal(again[1], torch.zeros(15, dtype=torch.long))
+
+
 def test_complete_channel_graph_reduces_to_the_covalent_one(w2_dataset):
     """The identity the channel enumeration rests on: s(H-H) -> 0 recovers O-H-only charges.
 

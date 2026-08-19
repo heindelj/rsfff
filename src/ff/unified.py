@@ -11,8 +11,41 @@ fragmentation. Those are two different jobs and this module keeps them apart::
     E_elst  = sum over INTER pairs of E_ij^elst      ->  eda_cls_elec
     E_pauli = sum over INTER pairs of E_ij^pauli     ->  eda_mod_pauli
     E_disp  = sum over INTER pairs of E_ij^disp      ->  eda_disp
-    E_frag  = E0 + E_internal + sum over INTRA pairs of ( E^elst + E^pauli + E^disp + dE^bond )
-    E_total = sum_f E_frag(f) + E_elst + E_pauli + E_disp
+    E_frag  = E0 + E_internal + E_atom^0 + sum over INTRA pairs of ( E^elst + E^pauli + E^disp )
+    E_total = sum_f E_frag(f) + E_elst + E_pauli + E_disp + E_pol + E_ct
+
+Where the bonding energy lives
+------------------------------
+``E_atom^0`` is :class:`rsfff.ff.atomic_energy.AtomicStateEnergy`, a **per-atom** energy of the
+self-consistent electronic state -- ``E_theta(h_i, M_i, Phi_i)`` in the notation of
+``docs/atomic_response_functional.md``. It replaced a per-pair ``bond`` correction channel, and
+the reason is worth keeping:
+
+That readout was carrying three jobs at once. It was the covalent bond energy (~-566 kJ/mol per
+water). It was the only free knob left inside ``fragment_energy`` once ``freeze_frozen_level``
+pins ``E_internal``. And through a ``bond_pol``/``bond_ct`` telescoping it carried the whole of
+``eda_pol`` and ``eda_ct``. Two of those three have no label, so the split between them drifted:
+measured, a **constant -1.686 kJ/mol per fragment** appeared in ``fragment_energy``, identical
+to three decimals across w2--w5, which the frame-pooled diagnostics drew as a size-dependent
+offset. Alongside it, ``eda_ct`` came out **96.7% neural** -- -5.24 kJ/mol per fragment of
+correction against -0.18 of classical.
+
+The levels now telescope through the *state* rather than through three readouts::
+
+    E_atom^0   = E_theta( h_frag , M^frozen , Phi^intra )    -> fragment_energy
+    E_atom^pol = E_theta( h_frag , M^pol    , Phi^pol   )    -> eda_pol gets (pol - 0)
+    E_atom^ct  = E_theta( h_env  , M^ct     , Phi^ct    )    -> eda_ct  gets (ct  - pol)
+
+One set of weights, three electronic states. ``Phi^intra`` is gated down to intra-fragment
+pairs, which is what keeps ``E_atom^0`` an isolated-fragment quantity while still letting an
+atom feel its own molecule's field. The feature stream switches at **ct**, not pol: relaxing a
+fragment's multipoles against its neighbours leaves it the same fragment, whereas letting charge
+cross the boundary does not.
+
+**Charge transfer gets no correction readout of its own**, permanently. It is the residue of
+lifting the last constraint, so what it is entitled to is what it shares with electrostatics and
+polarization -- the coupled solve's energy difference and the atomic energy's response to it.
+If the pair corrections are switched back on, ``ct_bond`` does not come back with them.
 
 Two things this buys over the per-term modules
 ----------------------------------------------
@@ -38,9 +71,9 @@ well-posed.
 What routing is *not* is a no-op on the total. It is tempting to say that summing every
 channel makes the partition invisible, and that is wrong on two counts, both measurable:
 
-1. **The bond channel is intra-only.** There is no inter-fragment counterpart, because the
-   frozen EDA components are a complete decomposition of the frozen interaction and carry no
-   bonding term. So a pair that moves from inter to intra *gains* an energy channel.
+1. **The atomic energy is per fragment.** ``E_atom`` is summed over the atoms of a fragment
+   and booked to that fragment's label, and the frozen EDA components carry no bonding term at
+   all. So relabelling changes which bucket the bonding energy lands in.
 2. **The descriptors are fragment-confined**, hence partition-dependent themselves. Relabelling
    a dimer as one fragment changes every atom's ``inv_feats`` (measured: max change 0.19), so
    every classical and correction energy moves too.
@@ -52,9 +85,8 @@ exactly the bond-channel term whose growth is what CT looks like in this decompo
 
 What *is* exact is the accounting, and ``tests/test_ff_unified.py`` pins it::
 
-    energy == sum_i E0[Z_i] + sum_f E_internal(f)
+    energy == sum_i E0[Z_i] + sum_f ( E_internal(f) + E_atom(f) )
               + sum_{all pairs} sum_c ( e_ff^c + e_corr^c )
-              + sum_{intra pairs} e_corr^bond
 
 Every pair appears exactly once, in exactly one bucket: no double counting and no gap. That
 is the invariant that has to survive when ``is_intra`` softens into a mixture weight.
@@ -72,35 +104,42 @@ With :class:`EnvironmentResidual` attached, an atom carries two descriptors: ``h
 confined to its own fragment, and ``h_env = h_frag + g(h_full)``. Only **one** consumer needs
 the fragment-confined one:
 
-* ``h_frag`` -> the response solve and the **bond channel**. Together those are
-  ``fragment_energy`` up to a kilojoule, and that label is Q-Chem's *isolated*-fragment
-  energy, which has no environment dependence to fit.
+* ``h_frag`` -> the frozen response solve and ``E_atom`` at the frozen and polarized levels.
+  Together those are ``fragment_energy`` up to a few thousandths of a kJ/mol, and that label is
+  Q-Chem's *isolated*-fragment energy, which has no environment dependence to fit.
 * ``h_env`` -> everything else: the interaction parameters (``C6``, the Slater exponents, the
-  Pauli multipoles, ``r0``) and the three correction channels, which is where effective
-  many-body physics such as environment-quenched ``C6`` belongs.
+  Pauli multipoles, ``r0``), the coupled solve's response parameters, and ``E_atom`` at the CT
+  level. This is where effective many-body physics such as environment-quenched ``C6`` belongs.
 
-An earlier version evaluated every interaction parameter head on *both* streams and selected
-per pair, so that an intra-fragment pair's classical energy used isolated-fragment parameters.
-That was over-built. The range separation already switches the intra classical contribution
-down to **under 1 kJ/mol per fragment** (:mod:`rsfff.ff.range_priors`), so there is no
-meaningful path from the environment into an isolated-fragment label through it -- while the
-term that *does* carry that label, the bond channel at ~-640 kJ/mol per fragment, is
-unaffected by any gate and is exactly what the split now protects.
+**Pauli and dispersion read ``h_env`` on every pair, intra ones included.** An earlier version
+evaluated those heads on *both* streams and selected per pair, so that an intra-fragment pair's
+classical energy used isolated-fragment parameters. That bought exactness in
+``fragment_energy`` at the price of making a bonded pair answer to a different network than a
+hydrogen-bonded one, and it is no longer where the label's integrity comes from: the two terms
+that carry ``fragment_energy`` -- ``E_internal`` and ``E_atom^0`` -- are fragment-confined *by
+construction*, and the range separation switches the intra classical remainder down to well
+under a kJ/mol per fragment.
 
-The residual cost is that ``fragment_energy`` is no longer environment-independent *by
-construction*, only to within that switched-off remainder; ``tests/test_ff_unified.py``
-measures it rather than asserting it away.
+So ``fragment_energy`` is exactly one-body in its two dominant terms and approximately so in
+the remainder. ``tests/test_ff_unified.py`` asserts the first bitwise and bounds the second
+rather than asserting it away.
 
 What is deliberately not here
 -----------------------------
-The polarized and CT response levels, and the electrostatic-environment features of
-``docs/range_separated_mlip.md`` §4.2. The response parameters stay fragment-confined and no
-external field enters the solve; see §5.1 for why that ceiling binds on the frozen level only.
+The **variational** coupling of ``docs/atomic_response_functional.md`` §2, where ``E_atom``
+sits inside the functional and ``dE_SCF/dM = 0`` includes it. Here ``E_atom`` is evaluated at
+the *converged* multipoles, so the coupling runs one way (``M* -> E_atom``) and not back. That
+is a deliberate first step, and it is safe because
+:class:`rsfff.ff.coupled_solve._CoupledSolve`'s adjoint exists precisely to make a
+non-variational consumer of ``M*`` differentiate correctly. Closing the loop would mean
+replacing ``pcg``'s linear ``a_mul`` with a nonlinear root find and generalising ``A`` in the
+adjoint from a constant operator to the Hessian at ``M*``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Sequence
 
 import torch
 import torch.nn as nn
@@ -109,14 +148,11 @@ from ..features.features import LambdaFeatures
 from ..mlip.heads import mlp, zero_init_readout
 from ..mlip.switch import pairwise_switch
 from ..mlip.unified_head import ChannelSpec, UnifiedPairHead
+from .atomic_energy import AtomicStateEnergy
 from .damping import fermi_switch
 from .dispersion import DispersionParameterHeads, tt_damped_c6_energy
 from .electrostatics import slater_elec_pair_energy
-from .environment import (
-    OneBodyEnvironment,
-    electrostatic_environment,
-    environment_pair_invariants,
-)
+from .environment import OneBodyEnvironment, electrostatic_environment
 from .multipole import (
     build_polytensor,
     damped_interaction_tensor,
@@ -158,6 +194,35 @@ DEFAULT_CLASSICAL: dict[str, ClassicalSpec] = {
     "pauli": ClassicalSpec(7.0),
     "disp": ClassicalSpec(10.0),
 }
+
+
+def _resolve_correction_channels(spec, available) -> frozenset[str]:
+    """``True``/``False``/a list of names -> the set of consumed correction channels.
+
+    ``True`` means every channel the head was actually built with, so enabling a channel is
+    always a matter of building its readout rather than of listing it twice.
+
+    A name that the head has no readout for is an **error**, not a no-op. The two ways to get
+    one are a typo and asking for ``ct_bond`` on a model built without it, and both are
+    failures that would otherwise present as a channel that silently contributes nothing --
+    which is indistinguishable from a channel that was fitted to zero.
+    """
+    available = set(available)
+    if isinstance(spec, bool):
+        return frozenset(available) if spec else frozenset()
+    if isinstance(spec, str):
+        raise TypeError(
+            f"pair_corrections must be a bool or a list of channel names, got the bare "
+            f"string {spec!r}; write [{spec!r}] to name one channel"
+        )
+    wanted = frozenset(str(name) for name in spec)
+    unknown = wanted - available
+    if unknown:
+        raise ValueError(
+            f"pair_corrections names channel(s) {sorted(unknown)} that the pair head has no "
+            f"readout for; it was built with {sorted(available)}"
+        )
+    return wanted
 
 
 class FragmentStateEmbedding(nn.Module):
@@ -444,6 +509,13 @@ class UnifiedOutput:
     energy_ref: torch.Tensor                  # (F,) sum_i E0[Z_i], frozen
     energy_internal: torch.Tensor             # (F,) the response solve's internal energy
     energy_bond: torch.Tensor                 # (F,) intra pairs: classical + all corrections
+    #: (F,) the **frozen** per-atom energy of the electronic state, pooled per fragment:
+    #: ``E_theta(h_frag, M^frozen, Phi^intra)``. This is what carries the covalent bond energy
+    #: inside ``fragment_energy`` now that the bond channel does not, and it is the pair of
+    #: numbers to watch alongside ``energy_internal`` -- their split is unlabeled, so a drift
+    #: between stages is the failure mode this design exists to remove. Zero when no
+    #: :class:`rsfff.ff.atomic_energy.AtomicStateEnergy` head is attached.
+    energy_atom: torch.Tensor                 # (F,)
     pair_index: torch.Tensor                  # (2, P)
     r: torch.Tensor                           # (P,) Angstrom
     is_intra: torch.Tensor                    # (P,) bool, routing only -- never a gate
@@ -495,6 +567,13 @@ class UnifiedOutput:
     #: because the fragment-multipole labels are frozen-monomer values.
     level_pol: "LevelOutput | None" = None
     level_ct: "LevelOutput | None" = None
+    #: (F,) the same atomic-energy network read at the polarized and CT electronic states.
+    #: ``None`` when that level is off. Their differences are what ``pol`` and ``ct`` receive,
+    #: so the three telescope: ``energy_atom + (pol - 0) + (ct - pol) == energy_atom_ct``.
+    #: Exposed because the *levels* of these, not only their differences, are what says
+    #: whether the atomic energy is describing a relaxation or re-deciding what a bond is.
+    energy_atom_pol: torch.Tensor | None = None
+    energy_atom_ct: torch.Tensor | None = None
     #: (B,) the frozen level's own total, ``E_internal + all-pair electrostatics``. This is the
     #: reference ``E_pol`` is measured against, and it is the *same functional* evaluated at
     #: the frozen multipoles -- which is what makes ``E_pol`` a pure relaxation.
@@ -549,6 +628,13 @@ class UnifiedPairModel(nn.Module):
     reference_energies : (n_species,) isolated-atom energies in Hartree, frozen.
     max_rank       : multipole rank, must match the response heads'.
     classical      : per-channel neighbor-list reach.
+    atomic_energy  : :class:`rsfff.ff.atomic_energy.AtomicStateEnergy`, the per-atom energy of
+                     the electronic state. ``None`` falls back to the bond channel.
+    pair_corrections : which of the pair head's energy readouts are consumed. ``True`` is all
+                     of them, ``False`` none, and an iterable of channel names exactly those.
+                     A channel that is off leaves its readout built -- and hence loadable, and
+                     re-enablable -- while its ``e_corr`` stays at zero. See the note in
+                     :meth:`forward`.
     """
 
     def __init__(
@@ -562,6 +648,8 @@ class UnifiedPairModel(nn.Module):
         fragment_state: FragmentStateEmbedding,
         reference_energies: torch.Tensor,
         *,
+        atomic_energy: "AtomicStateEnergy | None" = None,
+        pair_corrections: "bool | Sequence[str]" = True,
         environment: "EnvironmentResidual | None" = None,
         max_rank: int = 1,
         classical: dict[str, ClassicalSpec] | None = None,
@@ -586,10 +674,18 @@ class UnifiedPairModel(nn.Module):
         missing = set(range_heads.channel_names) - set(self.classical)
         if missing:
             raise ValueError(f"range separation for channels with no classical form: {missing}")
-        if "bond" not in pair_head.channels:
+        correction_channels = _resolve_correction_channels(
+            pair_corrections, pair_head.channels
+        )
+        # Exactly one of the two has to be carrying the intramolecular deformation energy that
+        # `fragment_energy` measures. Historically that was the bond channel; it is now
+        # `atomic_energy`, and the check is that *something* is there rather than that a
+        # particular one is.
+        if atomic_energy is None and "bond" not in correction_channels:
             raise ValueError(
-                "the pair head needs a 'bond' channel; it is the only thing carrying the "
-                "intramolecular deformation energy that fragment_energy measures"
+                "nothing is carrying the intramolecular deformation energy that "
+                "fragment_energy measures: pass an `atomic_energy` head, or include 'bond' "
+                "in `pair_corrections` with a 'bond' channel in the pair head"
             )
         self.featurizer = featurizer
         self.response = response
@@ -597,6 +693,16 @@ class UnifiedPairModel(nn.Module):
         self.pauli_params = pauli_params
         self.range_heads = range_heads
         self.pair_head = pair_head
+        self.atomic_energy = atomic_energy
+        #: Which of the pair head's *energy* readouts are read, as a frozenset of channel
+        #: names. The module stays built whatever this holds: every readout keeps its
+        #: parameters, its ``range_readout`` may still be live, its state_dict stays loadable
+        #: across the switch, and turning a channel back on is a config change rather than a
+        #: refit from scratch. Note that with this **empty** and ``pair_range_separation`` off,
+        #: nothing calls the head at all -- see ``parameter_groups`` in
+        #: :mod:`rsfff.train.term_loop` for why it then has to be kept out of the optimizer
+        #: rather than left to weight decay.
+        self.correction_channels = correction_channels
         self.fragment_state = fragment_state
         self.environment = environment
         self.max_rank = int(max_rank)
@@ -615,17 +721,22 @@ class UnifiedPairModel(nn.Module):
         #: Whether the pair head carries the cross-fragment bond channel. Read from the head
         #: rather than configured here, so the two cannot disagree: the channel exists exactly
         #: when there is a readout for it.
-        self.ct_bond = "ct_bond" in pair_head.channels
+        self.ct_bond = "ct_bond" in self.correction_channels
         self.ct_channel_cutoff = float(ct_channel_cutoff)
         self.ct_channel_taper = float(ct_channel_taper)
         self.ct_compliance_scale = float(ct_compliance_scale)
         self.cg = dict(rtol=float(cg_rtol), atol=float(cg_atol), maxiter=int(cg_maxiter))
-        if self.polarization and pair_head.extra_dim == 0:
+        if self.polarization and self.pair_corrections and pair_head.extra_dim == 0:
             raise ValueError(
                 "polarization needs a pair head built with extra_dim = "
                 "rsfff.ff.environment.N_PAIR_INVARIANTS; the bond channel's response to the "
                 "external field is what relays the environment into the bonded region, and "
                 "with no side channel there is nowhere for the field to enter"
+            )
+        if self.polarization and self.atomic_energy is None and not self.pair_corrections:
+            raise ValueError(
+                "polarization has no route into the energy: with every pair correction off "
+                "and no `atomic_energy` head, nothing consumes the relaxed multipoles"
             )
 
     def _augment(self, feats: LambdaFeatures, batch, frag) -> LambdaFeatures:
@@ -636,6 +747,67 @@ class UnifiedPairModel(nn.Module):
         if state is None:
             return feats
         return replace(feats, inv_feats=torch.cat((feats.inv_feats, state), dim=-1))
+
+    @property
+    def pair_corrections(self) -> bool:
+        """Whether *any* correction channel is consumed.
+
+        Derived from :attr:`correction_channels` rather than stored, and deliberately
+        read-only. It was a stored bool when the switch was all-or-nothing, and the two then
+        had to be kept in step by hand -- assigning ``model.pair_corrections = False`` looked
+        like it turned the corrections off while ``forward`` went on reading the set and
+        happily scored every channel. Making it a property turns that into an ``AttributeError``
+        at the assignment instead of a silent wrong answer several layers down.
+        """
+        return bool(self.correction_channels)
+
+    def _descriptors(self, batch, frag, *, want_env: bool = True):
+        """``(h_frag, h_env)`` -- the fragment-confined and environment-aware descriptors.
+
+        ``h_frag`` is what the response solve and the atomic energy read: ``fragment_energy``
+        is an isolated-fragment label, so a 1-body term built on anything else is fitting a
+        function that cannot match its target. ``h_env`` adds the zero-initialized environment
+        residual and is what the *interaction* parameters read. With ``environment`` off the
+        two are the same object and everything downstream runs once.
+
+        ``want_env=False`` returns ``(h_frag, None)`` and skips the residual, for callers that
+        only need the frozen response. It still asks the featurizer for ``also_ungrouped``:
+        the grouped-only and paired code paths sum edges in different orders, so taking
+        ``grouped`` from the pair is what keeps ``h_frag`` bit-identical to the one
+        :meth:`forward` builds. The second power spectrum is the price of that identity, and
+        it is not what makes the cheap path cheap -- skipping the pair model is.
+        """
+        if self.environment is None:
+            h = self._augment(self.featurizer(batch, frag), batch, frag)
+            return h, h
+        grouped, full = self.featurizer(batch, frag, also_ungrouped=True)
+        h_frag = self._augment(grouped, batch, frag)
+        if not want_env:
+            return h_frag, None
+        return h_frag, self.environment(h_frag, self._augment(full, batch, frag))
+
+    def frozen_polarizability(self, batch) -> torch.Tensor | None:
+        """``(F, 3, 3)`` each fragment's frozen molecular polarizability, without the pair model.
+
+        The same tensor :attr:`UnifiedOutput.polarizability` carries, reached by the short
+        route: featurizer, then the frozen response solve. Nothing else contributes to it --
+        the pair list, the classical channels, the correction trunk and the atomic energy all
+        feed *energies*, not the response -- so this is not an approximation to the full
+        forward, it is the same computation with the unused three quarters left out.
+
+        It exists for :func:`rsfff.train.loss.free_atom_polarizability_loss`, whose batch is a
+        handful of **single atoms**. Through the full forward that measured 6.7 ms a step for
+        two atoms, more than a 350-atom cluster forward, because essentially all of it was the
+        fixed Python cost of machinery that had nothing to do on an empty pair list.
+        """
+        frag = batch.fragment_idx
+        if frag is None:
+            raise ValueError(
+                "frozen_polarizability is a per-fragment quantity but batch.fragment_idx is "
+                "None; the extxyz needs a `fragment_idx` column"
+            )
+        h_frag, _ = self._descriptors(batch, frag, want_env=False)
+        return self.response(batch, h_frag, with_polarizability=True).polarizability
 
     def _pauli_multipoles(self, feats: LambdaFeatures):
         """``(polytensor (N, K), b (N,))`` for the Slater Pauli term."""
@@ -663,18 +835,7 @@ class UnifiedPairModel(nn.Module):
         n_sys = int(batch.n_systems)
 
         # --- features ------------------------------------------------------------------
-        # `h_frag` is fragment-confined and is what the response solve and the bond channel
-        # read: `fragment_energy` is an isolated-fragment label, so a 1-body term built on
-        # anything else is fitting a function that cannot match its target. `h_env` adds the
-        # zero-initialized environment residual and is what the *interaction* parameters
-        # read. With `environment` off the two are the same object and everything below runs
-        # once.
-        if self.environment is None:
-            h_frag = h_env = self._augment(self.featurizer(batch, frag), batch, frag)
-        else:
-            grouped, full = self.featurizer(batch, frag, also_ungrouped=True)
-            h_frag = self._augment(grouped, batch, frag)
-            h_env = self.environment(h_frag, self._augment(full, batch, frag))
+        h_frag, h_env = self._descriptors(batch, frag)
 
         # --- the frozen response solve, shared by the 1-body and elst channels -----------
         res = self.response(batch, h_frag, with_polarizability=with_polarizability)
@@ -719,18 +880,34 @@ class UnifiedPairModel(nn.Module):
         # of gates whose *difference* is polarization, built below. On the other two channels,
         # and everywhere `h_env is h_frag`, the two dicts hold the same tensors.
         d_log_r0_env = dict(d_log_r0)
-        for idx, feats, want in (
-            (intra_idx, h_frag, ("bond",)),
-            (inter_idx, h_env, tuple(self.classical)),
-        ):
-            if not idx.numel():
-                continue
-            energies, devs = score(idx, feats)
-            for name in want:
-                e_corr[name] = e_corr[name].index_copy(0, idx, energies[name])
-            for name in devs:
-                d_log_r0[name] = d_log_r0[name].index_copy(0, idx, devs[name])
-                d_log_r0_env[name] = d_log_r0[name]
+        # Two independent consumers of the trunk, and either can be switched off on its own:
+        # the energy readouts (`correction_channels`) and the per-pair range separation
+        # (`range_channels`). With both off the head is never called and `e_corr`/`d_log_r0`
+        # keep the zeros they were initialized with, which is exactly the "atomic energy plus
+        # range-separated FF" model -- no branch anywhere downstream has to know.
+        #
+        # The energy switch is **per channel**: a name absent from `correction_channels` keeps
+        # its zeros here and is silent everywhere downstream, while the head still evaluates
+        # once per partition either way (one trunk, all readouts) so the choice costs nothing
+        # to make. `elst` alone is the setting that corrects electrostatics -- and, through the
+        # split below, polarization -- while leaving `bond` to `atomic_energy`.
+        want = self.correction_channels
+        want_corr = bool(want)
+        want_r0 = bool(self.pair_head.range_channels)
+        if want_corr or want_r0:
+            for idx, feats, routed in (
+                (intra_idx, h_frag, ("bond",)),
+                (inter_idx, h_env, tuple(self.classical)),
+            ):
+                if not idx.numel():
+                    continue
+                energies, devs = score(idx, feats)
+                for name in routed:
+                    if name in want and name in energies:
+                        e_corr[name] = e_corr[name].index_copy(0, idx, energies[name])
+                for name in devs:
+                    d_log_r0[name] = d_log_r0[name].index_copy(0, idx, devs[name])
+                    d_log_r0_env[name] = d_log_r0[name]
 
         # --- the electrostatic channel is fragment-confined, at every level ----------------
         # `eda_frz_elec` is the Coulomb interaction between *superimposed frozen monomer
@@ -759,16 +936,30 @@ class UnifiedPairModel(nn.Module):
         # every stage, which is what makes the staged fit's frozen numbers comparable across
         # stages at all.
         elst_env_pair = torch.zeros_like(r)
-        split_elst = bool(inter_idx.numel()) and h_env is not h_frag
+        # The correction half of the split needs the `elst` *readout* specifically, not merely
+        # some channel being on: with `pair_corrections: [bond]` there is no electrostatic
+        # correction to re-score and only the gate half has anything to say.
+        want_elst_corr = "elst" in want
+        split_elst = (
+            (want_elst_corr or want_r0) and bool(inter_idx.numel()) and h_env is not h_frag
+        )
         if split_elst:
             frozen_elst, frozen_devs = score(inter_idx, h_frag)
-            elst_env_pair = elst_env_pair.index_copy(
-                0, inter_idx, e_corr["elst"][inter_idx] - frozen_elst["elst"]
-            )
-            e_corr["elst"] = e_corr["elst"].index_copy(0, inter_idx, frozen_elst["elst"])
-            d_log_r0["elst"] = d_log_r0["elst"].index_copy(
-                0, inter_idx, frozen_devs["elst"]
-            )
+            # Each half is guarded by its own switch. The correction half writes *into*
+            # `e_corr`, so running it with the `elst` correction off would resurrect exactly
+            # the readout that was supposed to be silent -- measured at 0.004 Ha on `cls_elec`
+            # before this guard existed, which is the whole channel.
+            if want_elst_corr:
+                elst_env_pair = elst_env_pair.index_copy(
+                    0, inter_idx, e_corr["elst"][inter_idx] - frozen_elst["elst"]
+                )
+                e_corr["elst"] = e_corr["elst"].index_copy(
+                    0, inter_idx, frozen_elst["elst"]
+                )
+            if want_r0:
+                d_log_r0["elst"] = d_log_r0["elst"].index_copy(
+                    0, inter_idx, frozen_devs["elst"]
+                )
 
         # --- classical backbones, every pair ---------------------------------------------
         # ``r0`` is a per-element base (the covalent-distance knowledge of
@@ -837,47 +1028,29 @@ class UnifiedPairModel(nn.Module):
         # routing comment above. `cls_elec` is fragment-confined either way.
         corr_pol_pair = elst_env_pair if self.polarization else torch.zeros_like(r)
 
-        # The Pauli and dispersion parameters are the *only* remaining path by which the
-        # environment could reach an isolated-fragment label, so they are the only ones
-        # evaluated on both streams. Everything else is already safe: the electrostatic
-        # multipoles come from the fragment-confined response, both its per-atom `r0` base and
-        # its per-pair `r0` deviation are read from the fragment-confined stream, and the
-        # per-pair `r0` correction for intra pairs is read from the fragment-confined trunk.
+        # **Pauli and dispersion read `h_env` on every pair, at every level.** Their parameters
+        # are supposed to be environment-dependent: a quenched `C6` and an environment-softened
+        # Slater exponent *are* the effective many-body content of those channels, and that is
+        # the reason the environment descriptor exists.
         #
-        # This costs two per-atom MLP evaluations and it is worth it. Left on `h_env` alone,
-        # a fragment's energy inside a cluster differs from that fragment alone by ~1.1 kJ/mol
-        # at the environment strength this model actually trains to -- roughly half the target
-        # `ob_mae`, i.e. a systematic error large enough to be mistaken for fit error.
-        def _select(frag_side, env_side, index):
-            if frag_side is env_side:
-                return frag_side[index]
-            wide = is_intra.reshape((-1,) + (1,) * (frag_side.dim() - 1))
-            return torch.where(wide, frag_side[index], env_side[index])
-
-        poly_f, b_p_f = self._pauli_multipoles(h_frag)
-        poly_e, b_p_e = (
-            (poly_f, b_p_f) if h_env is h_frag else self._pauli_multipoles(h_env)
-        )
-        b_p_ij = (0.5 * (
-            _select(b_p_f, b_p_e, i).log() + _select(b_p_f, b_p_e, j).log()
-        )).exp()
+        # This used to select per pair -- `h_frag` for intra, `h_env` for inter -- to keep
+        # `fragment_energy` free of environment dependence, at a measured cost of ~1.1 kJ/mol.
+        # That protection is no longer where the one-body label's integrity comes from. The
+        # intra classical channels are switched down to well under a kJ/mol per fragment by the
+        # range separation, and what actually carries `fragment_energy` is `E_internal` (from
+        # the fragment-confined response) plus `E_atom^0` (from `h_frag`, by construction).
+        # Paying two per-atom MLP evaluations to defend a term that is already switched off is
+        # the wrong trade, and it made the Pauli and dispersion parameters of a bonded pair
+        # answer to a different network than those of a hydrogen-bonded one.
+        poly_e, b_p_e = self._pauli_multipoles(h_env)
+        b_p_ij = (0.5 * (b_p_e[i].log() + b_p_e[j].log())).exp()
         e_pauli = slater_pauli_pair_energy(
-            dr_au, r_au,
-            _select(poly_f, poly_e, i), _select(poly_f, poly_e, j),
-            b_p_ij, max_rank=self.max_rank,
+            dr_au, r_au, poly_e[i], poly_e[j], b_p_ij, max_rank=self.max_rank,
         )
 
-        c6_f, b_d_f = self.disp_params(h_frag.inv_feats, h_frag.species_idx)
-        c6_e, b_d_e = (
-            (c6_f, b_d_f) if h_env is h_frag
-            else self.disp_params(h_env.inv_feats, h_env.species_idx)
-        )
-        c6_ij = (0.5 * (
-            _select(c6_f, c6_e, i).log() + _select(c6_f, c6_e, j).log()
-        )).exp()
-        b_d_ij = (0.5 * (
-            _select(b_d_f, b_d_e, i).log() + _select(b_d_f, b_d_e, j).log()
-        )).exp()
+        c6_e, b_d_e = self.disp_params(h_env.inv_feats, h_env.species_idx)
+        c6_ij = (0.5 * (c6_e[i].log() + c6_e[j].log())).exp()
+        b_d_ij = (0.5 * (b_d_e[i].log() + b_d_e[j].log())).exp()
         e_disp = tt_damped_c6_energy(r, c6_ij, b_d_ij)
 
         e_ff = {
@@ -900,6 +1073,33 @@ class UnifiedPairModel(nn.Module):
             interaction_corr[name] = pool_batch(inter * e_corr[name])
             interaction[name] = interaction_ff[name] + interaction_corr[name]
 
+        # --- the per-atom energy of the electronic state ----------------------------------
+        # `t_point` is hoisted out of the polarized branch because the *frozen* atomic energy
+        # needs it too: an isolated fragment's atoms genuinely feel their own molecule's field,
+        # and that field is part of what its bonds are worth.
+        t_point = damped_interaction_tensor(dr_au, None, 1.0 / r_au, max_rank=self.max_rank)
+
+        def atom_energy(feats, q_, mu_, quad_s_, env_):
+            """``(n_frag,)`` -- the per-atom energies of one level, pooled per fragment."""
+            if self.atomic_energy is None:
+                return positions.new_zeros(n_frag)
+            e = self.atomic_energy(
+                feats.inv_feats, feats.species_idx, feats.vec_feats, feats.equiv_feats,
+                q_, mu_, quad_s_, env_,
+            )
+            return e.new_zeros(n_frag).index_add_(0, frag, e)
+
+        # `Phi^intra`: gating the environment down to intra-fragment pairs is the whole of what
+        # makes `E_atom^0` an isolated-fragment quantity. Do not simplify it to `phi = 0` --
+        # that was the bond channel's workaround for having no way to tell the two apart, and
+        # it left the intramolecular field invisible to the term that describes bonding.
+        env_frozen = electrostatic_environment(
+            positions, pair_index, t_point, gate["elst"] * intra, m_real,
+            max_rank=self.max_rank,
+        )
+        energy_atom = atom_energy(h_frag, res.charges, res.mu, res.quad_s, env_frozen)
+        energy_atom_pol = energy_atom_ct = None
+
         # --- the polarized and CT levels -------------------------------------------------
         f2b_ = batch.fragment_to_batch
         if f2b_ is None:
@@ -918,9 +1118,6 @@ class UnifiedPairModel(nn.Module):
                 0, f2b_, res.internal_energy
             ) + pool_batch(e_ff["elst"])
 
-            t_point = damped_interaction_tensor(dr_au, None, 1.0 / r_au, max_rank=self.max_rank)
-            r_hat = (positions[j] - positions[i]) / r.unsqueeze(-1)
-
             def run_level(bond_index, bond_batch, envelope, ct_channels=None):
                 rp = self.response.response_parameters(
                     batch, h_env, bond_index=bond_index, envelope=envelope,
@@ -933,6 +1130,16 @@ class UnifiedPairModel(nn.Module):
                 )
 
             def env_extra(level):
+                """The per-atom ``(V, E, grad E)`` at one level's converged multipoles.
+
+                It used to also return the per-*pair* reduction
+                (:func:`~rsfff.ff.environment.environment_pair_invariants`) as a side channel
+                for the bond readout's field dependence. The bond telescoping is gone, and
+                nothing else consumed it, so computing it every step was pure cost. If the
+                pair corrections are switched back on and wanted field-aware, rebuild it here
+                from ``e`` and ``r_hat`` -- both are still to hand, and the head's
+                ``extra_dim`` columns are still sized for it.
+                """
                 quad_c = (
                     None if level.quad_s is None
                     else spherical_to_cartesian_quadrupole(level.quad_s)
@@ -940,17 +1147,19 @@ class UnifiedPairModel(nn.Module):
                 m = build_polytensor(
                     level.charges, level.mu, quad_c, max_rank=self.max_rank
                 )
-                e = electrostatic_environment(
+                return electrostatic_environment(
                     positions, pair_index, t_point, gate["elst"], m, max_rank=self.max_rank
                 )
-                return e, environment_pair_invariants(e, pair_index, r_hat)
 
             # Polarized: response parameters see the environment and the multipoles relax
             # against each other, but charge still cannot cross a fragment boundary.
             ch_pol, chb_pol, _ = union_channels(positions, batch.batch_idx, frag, 0.0)
             level_pol = run_level(ch_pol, chb_pol, None)
             solver["pol"] = (level_pol.n_iter, level_pol.converged, level_pol.pd_fail)
-            env, extra_pol = env_extra(level_pol)
+            # Kept under its own name: the CT branch below rebinds `env` to the fully relaxed
+            # environment, and the polarized atomic energy must not silently read that one.
+            env_pol = env_extra(level_pol)
+            env = env_pol
 
             if self.charge_transfer:
                 # CT: every constraint lifted. The channel graph opens to all pairs within a
@@ -993,85 +1202,81 @@ class UnifiedPairModel(nn.Module):
                 # here -- they are the same covalent channels the frozen level solved.
                 level_ct = run_level(ch_ct, chb_ct, envelope, ct_channels=from_radius)
                 solver["ct"] = (level_ct.n_iter, level_ct.converged, level_ct.pd_fail)
-                env, extra_ct = env_extra(level_ct)
+                env_ct = env_extra(level_ct)
+                env = env_ct
 
-            # The bond channel's two lifted constraints, telescoping so that the sum is one
+            # The atomic energy's lifted constraints, telescoping so that the sum is one
             # evaluation at the fully relaxed level:
             #
-            #     E_bond^0   = W(u(h_frag), 0)                      -> fragment_energy
-            #     E_bond^pol = W(u(h_env), phi1) - W(u(h_frag), 0)   -> pol
-            #     E_bond^ct  = W(u(h_env), phi2) - W(u(h_env), phi1) -> ct
+            #     E_atom^0   = E_theta(h_frag, M^frozen, Phi^intra)                -> 1-body
+            #     E_atom^pol = E_theta(h_frag, M^pol,    Phi^pol )  - E_atom^0      -> pol
+            #     E_atom^ct  = E_theta(h_env,  M^ct,     Phi^ct )   - E_atom^pol    -> ct
             #
-            # The frozen term takes phi = 0 rather than the frozen field, because
-            # `fragment_energy` is the *isolated* fragment and an isolated fragment feels
-            # nothing. So the whole field-dependent bond energy is polarization -- including
-            # the part driven by the permanent field, which is what it is.
+            # What moves at each step is the *electronic state*, not a parameter: one set of
+            # weights, three inputs. That is the difference from the bond channel this
+            # replaces, where each level was a separate evaluation of a readout that also
+            # defined the one-body zero, so two of the three were unlabeled and the split
+            # between them drifted.
             #
-            # `h_frag -> h_env` sits in the **pol** step, not the ct one. It is a change in a
-            # bond's energy caused by its surroundings, which is what polarization is; and the
-            # same transition is booked as pol on the inter-pair electrostatic correction
-            # above, so putting it elsewhere here would have made the two inconsistent. Both
-            # remain exactly zero on an isolated fragment, where `h_env == h_frag` and phi = 0.
+            # The feature stream changes at **ct**, not pol. Relaxing a fragment's own
+            # multipoles against its neighbours' leaves it the same fragment; letting charge
+            # cross the boundary does not, and that is also exactly when its descriptor should
+            # stop being fragment-confined.
             #
-            # What CT gets instead is the constraint that actually distinguishes it: the bond
-            # channel stops being confined to pairs *within* a fragment. See `ct_bond` below.
-            bond_pol = torch.zeros_like(r)
-            bond_ct = torch.zeros_like(r)
-            if intra_idx.numel():
-                e_pol_bond, _ = score(intra_idx, h_env, extra_pol)
-                bond_pol = bond_pol.index_copy(
-                    0, intra_idx, e_pol_bond["bond"] - e_corr["bond"][intra_idx]
-                )
-                if self.charge_transfer:
-                    e_ct_bond, _ = score(intra_idx, h_env, extra_ct)
-                    bond_ct = bond_ct.index_copy(
-                        0, intra_idx, e_ct_bond["bond"] - e_pol_bond["bond"]
-                    )
+            # On an isolated fragment `ct` is **exactly** zero: `h_env == h_frag`, no channel
+            # reaches outside, so `M^ct == M^pol` and `Phi^ct == Phi^pol` bitwise. `pol` is
+            # zero only up to the fragment's own variational relaxation -- `Phi^pol` and
+            # `Phi^intra` coincide there (every pair is intra), but `M^pol != M^frozen`,
+            # because the polarized level minimizes with the intramolecular electrostatics
+            # *inside* the functional while the frozen level adds it afterwards. Measured, that
+            # relaxation is 2.6e-5 e and leaves a few hundredths of a kJ/mol in `pol`. It is a
+            # property of what the levels *are*, not of this term, and it predates it.
+            energy_atom_pol = atom_energy(
+                h_frag, level_pol.charges, level_pol.mu, level_pol.quad_s, env_pol
+            )
 
             interaction_ff["pol"] = level_pol.energy - energy_frozen_total
-            interaction_corr["pol"] = pool_batch(inter * corr_pol_pair + intra * bond_pol)
+            interaction_corr["pol"] = (
+                pool_batch(inter * corr_pol_pair)
+                + (energy_atom_pol - energy_atom).new_zeros(n_sys).index_add_(
+                    0, f2b_, energy_atom_pol - energy_atom
+                )
+            )
             interaction["pol"] = interaction_ff["pol"] + interaction_corr["pol"]
 
             if self.charge_transfer:
-                # The fragment constraint, lifted on the bond channel itself: a pair that
-                # *crosses* a fragment boundary gets a bond energy of its own. Below the CT
-                # level there is no such thing -- `e_corr` routes intra pairs to `bond` and
-                # inter pairs to the three classical corrections, and an inter-pair bond term
-                # there would be a second, unlabeled copy of the electrostatic correction.
+                # **CT gets no correction readout of its own.** It is the residue of lifting
+                # the last constraint, so what it is entitled to is the coupled solve's own
+                # energy difference plus the atomic energy's response to the state that solve
+                # produced -- both of which it shares with electrostatics and polarization.
+                # A dedicated `ct_bond` readout gave it a private lever instead, and measured
+                # on the checkpoint that had one it supplied 96.7% of the channel: -5.24 kJ/mol
+                # per fragment of correction against -0.18 of classical. That is not a charge
+                # transfer model, it is a neural network wearing the label.
                 #
-                # It is a full value rather than a difference because the level beneath it is
-                # identically zero: at the polarized level this pair had no bond channel at
-                # all. That also makes it the *only* inter-pair correction `ct` has -- until
-                # now `interaction_corr["ct"]` was intra-only, and everything inter came from
-                # the coupled solve.
-                #
-                # Its own scale, not `bond`'s: `bond_energy_scale` is sized for a covalent O-H
-                # at 0.2 Ha, and reusing it across a hydrogen bond would give this readout a
-                # step ~60x the other interaction corrections for the same parameter change.
-                bond_ct_inter = torch.zeros_like(r)
-                if self.ct_bond and inter_idx.numel():
-                    e_inter_bond, _ = score(inter_idx, h_env, extra_ct)
-                    bond_ct_inter = bond_ct_inter.index_copy(
-                        0, inter_idx, e_inter_bond["ct_bond"]
-                    )
-                interaction_ff["ct"] = level_ct.energy - level_pol.energy
-                interaction_corr["ct"] = pool_batch(
-                    intra * bond_ct + inter * bond_ct_inter
+                # This is the step where the descriptor stops being fragment-confined, because
+                # it is the step where the fragment stops being a closed system.
+                energy_atom_ct = atom_energy(
+                    h_env, level_ct.charges, level_ct.mu, level_ct.quad_s, env_ct
                 )
+                interaction_ff["ct"] = level_ct.energy - level_pol.energy
+                d_ct = energy_atom_ct - energy_atom_pol
+                interaction_corr["ct"] = d_ct.new_zeros(n_sys).index_add_(0, f2b_, d_ct)
                 interaction["ct"] = interaction_ff["ct"] + interaction_corr["ct"]
 
-        # The intra bucket: the bond channel plus whatever classical energy survives the
-        # range separation. The latter is the term that does not exist in the per-term stack,
-        # and it is why a same-fragment pair at 8 Angstrom is no longer inert -- while at
-        # bonded range it is switched off to under a kJ/mol per fragment.
-        e_intra = e_corr["bond"] + sum(e_ff.values())
+        # The intra bucket: the bond channel (zero unless 'bond' is a correction channel) plus
+        # whatever classical energy survives the range separation. The latter is the term that
+        # does not exist in the per-term stack, and it is why a same-fragment pair at
+        # 8 Angstrom is no longer inert -- while at bonded range it is switched off to under a
+        # kJ/mol per fragment.
+        e_intra = e_corr.get("bond", torch.zeros_like(r)) + sum(e_ff.values())
         energy_bond = r.new_zeros(n_frag).index_add_(
             0, pair_frag[intra_idx], (intra * e_intra)[intra_idx]
         )
 
-        e_atom = self.reference_energies[h_frag.species_idx]
-        energy_ref = e_atom.new_zeros(n_frag).index_add_(0, frag, e_atom)
-        fragment_energy = energy_ref + res.internal_energy + energy_bond
+        e0 = self.reference_energies[h_frag.species_idx]
+        energy_ref = e0.new_zeros(n_frag).index_add_(0, frag, e0)
+        fragment_energy = energy_ref + res.internal_energy + energy_bond + energy_atom
 
         energy = fragment_energy.new_zeros(n_sys).index_add_(0, f2b_, fragment_energy)
         for name in interaction:
@@ -1086,6 +1291,9 @@ class UnifiedPairModel(nn.Module):
             energy_ref=energy_ref,
             energy_internal=res.internal_energy,
             energy_bond=energy_bond,
+            energy_atom=energy_atom,
+            energy_atom_pol=energy_atom_pol,
+            energy_atom_ct=energy_atom_ct,
             pair_index=pair_index,
             r=r,
             is_intra=is_intra,
