@@ -528,6 +528,22 @@ class UnifiedConfig:
     #: Output scale, Hartree. Sized against a covalent bond like ``bond_energy_scale``, not
     #: against the interaction corrections -- this term has to supply ~-566 kJ/mol per water.
     atomic_energy_scale: float = 0.2
+    #: Scale of the per-element energy offset in
+    #: :meth:`rsfff.ff.atomic_energy.AtomicStateEnergy._species_offset`, Hartree. **0 disables
+    #: it** and reproduces the model exactly as it was before the offset existed.
+    #:
+    #: This is the one direction the free-atom anchoring takes away. The anchoring subtracts
+    #: ``net(ref)``, so the readout's final-layer bias cancels identically -- its gradient is
+    #: exactly zero -- and with ``E0`` frozen and a uniform ``chi`` shift inert (``sum q = 0``
+    #: per fragment), nothing could move the one-body constant without also reshaping the
+    #: geometry dependence. Measured on the last staged checkpoint, that cost a **constant
+    #: -5.23 kJ/mol per fragment**, identical to 0.13 across the monomer anchor and w2--w5;
+    #: removing it would have cut the total loss by 56%, and no term in the loss opposed it.
+    #:
+    #: The offset is gated to vanish exactly where the anchoring does, so the exact free-atom
+    #: limit survives, and it is zero-initialized, so turning it on is bit-identical until it
+    #: trains.
+    atomic_energy_offset_scale: float = 1.0e-2
     # Classical reach per channel, Angstrom. The largest sets the one shared pair list.
     elst_cutoff: float = 12.0       # the one term with a genuine 1/r tail
     pauli_cutoff: float = 7.0

@@ -2198,6 +2198,96 @@ def test_a_lone_atom_is_exactly_E0_with_the_atomic_energy_live():
     )
 
 
+def test_the_species_offset_is_inert_until_it_trains():
+    """Zero-init, so adding the parameter cannot change an existing model or its checkpoint."""
+    positions, numbers, frag = water_cluster(3, seed=61)
+    batch = make_batch(positions, numbers, frag)
+    parts = build_parts(seed=5)
+    with_offset = make_model(parts)
+    off = make_model(build_parts(seed=5))
+    with torch.no_grad():                      # the same model with the offset compiled out
+        off.atomic_energy.offset_scale = 0.0
+    assert torch.equal(with_offset(batch).energy, off(batch).energy)
+    assert float(with_offset.atomic_energy.species_offset.detach().abs().max()) == 0.0
+
+
+def test_the_species_offset_vanishes_at_the_free_atom():
+    """The exact ``E0`` limit has to survive the new parameter, at any value of it.
+
+    ``E0`` is a *measured* isolated-atom energy, and the whole reason the atomic energy is
+    anchored is to keep the free-atom limit exact at every point in training rather than only
+    at initialization. A per-element constant is exactly the thing that would break it, so the
+    offset is gated on ``||h||`` -- zero for a lone atom, which is the same condition the
+    anchoring itself uses.
+    """
+    model = make_model()
+    with torch.no_grad():                      # a large, live offset
+        model.atomic_energy.species_offset.fill_(5.0)
+    out = model(_free_atom_batch(list(NEIGHBOR_TYPES)))
+    assert float(out.energy_atom.detach().abs().max()) == 0.0, (
+        "the species offset does not vanish at the free atom; E0 is no longer exact"
+    )
+    assert torch.allclose(out.fragment_energy, out.energy_ref, atol=0, rtol=0)
+
+
+def test_the_species_offset_is_a_constant_direction():
+    """The point of the parameter: it moves the one-body energy *uniformly*.
+
+    The MLP can already express any constant -- what it cannot do is express one without
+    reshaping its geometry dependence at the same time, because the anchoring cancels the only
+    coordinate that would. This asserts the new one is genuinely flat: perturb it, and the
+    induced shift per fragment must be the same number everywhere, not a new function of
+    geometry.
+
+    The bound is the measured saturation of the gate. Over the monomer anchor and w2--w5 the
+    smallest ``||h||`` is 1.664, so at ``offset_gate = 0.5`` the gate is >= 0.9974 and the
+    residual spread is a few parts in a thousand of the offset itself.
+    """
+    model = randomize(make_model(), scale=0.05, seed=63)
+    positions, numbers, frag = water_cluster(5, spacing=3.2, jitter=0.25, seed=67)
+    batch = make_batch(positions, numbers, frag)
+    before = model(batch).fragment_energy.detach().clone()
+    with torch.no_grad():
+        model.atomic_energy.species_offset.add_(1.0)
+    shift = (model(batch).fragment_energy.detach() - before) * KJMOL_PER_HARTREE
+
+    assert float(shift.abs().min()) > 0.0, "the offset did not reach fragment_energy at all"
+    spread = float(shift.max() - shift.min()) / float(shift.abs().mean())
+    assert spread < 0.01, (
+        f"the offset varies by {100 * spread:.2f}% across fragments, so it is not a constant "
+        f"direction -- it would inject shape dependence of the same kind it exists to remove"
+    )
+
+
+def test_the_species_offset_reaches_the_one_body_label_and_nothing_else():
+    """It must move ``fragment_energy`` and leave every interaction channel untouched.
+
+    ``E_atom`` is pooled per fragment and booked to ``fragment_energy`` alone, so this is a
+    routing assertion: the offset is a one-body repair and must not become a cheap way to move
+    an EDA channel.
+    """
+    model = randomize(
+        make_model(build_parts(extra_dim=9, seed=69), levels={"induction": True}),
+        scale=0.05, seed=69,
+    )
+    positions, numbers, frag = water_cluster(3, seed=71)
+    batch = make_batch(positions, numbers, frag)
+    before = model(batch)
+    keep = {k: v.detach().clone() for k, v in before.interaction.items()}
+    ob = before.fragment_energy.detach().clone()
+    with torch.no_grad():
+        model.atomic_energy.species_offset.add_(2.0)
+    after = model(batch)
+
+    assert float((after.fragment_energy.detach() - ob).abs().min()) > 0.0
+    for name, was in keep.items():
+        # `induction` is the exception and it is not a leak: it carries `E_atom` re-read at the
+        # relaxed state, so a constant added to the head appears in *both* evaluations and
+        # cancels. Asserted rather than skipped, because a cancellation that stopped holding
+        # would be a real route from a one-body knob into an EDA label.
+        assert torch.allclose(after.interaction[name].detach(), was, atol=1e-12), name
+
+
 def test_cluster_force_term_is_strided_on_training_steps_only():
     """``unified.force_every`` applies the cluster force every k-th training step.
 

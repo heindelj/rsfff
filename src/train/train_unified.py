@@ -199,6 +199,7 @@ def build_unified_model(config: Config, neighbor_types, reference_energies, atom
             depth=ucfg.atomic_energy_depth,
             equiv_channels=ucfg.atomic_energy_equiv_channels,
             energy_scale=ucfg.atomic_energy_scale,
+            offset_scale=ucfg.atomic_energy_offset_scale,
         )
 
     corr = dict(r_on=ucfg.corr_r_on, r_off=ucfg.corr_r_off)

@@ -156,6 +156,23 @@ unified:
   atomic_energy_depth: 2
   atomic_energy_equiv_channels: 32
   atomic_energy_scale: 0.2      # sized against a covalent bond, like bond_energy_scale
+  # A per-element energy offset, gated to vanish at the free atom so `E0` stays exact.
+  #
+  # This is the one direction the free-atom anchoring takes away: it subtracts `net(ref)`, so
+  # the readout's final-layer bias cancels identically (its gradient is exactly zero), `E0` is
+  # a frozen buffer, and a uniform `chi` shift is inert because `sum q = 0` per fragment.
+  # Nothing could move the one-body constant without also reshaping the geometry dependence.
+  #
+  # Measured on the previous `full` checkpoint, that cost a **constant -5.23 kJ/mol per
+  # fragment**, identical to 0.13 across the monomer anchor and w2..w5. It was 99.7% of the
+  # one-body loss and 99.3% of the gradient that loss put into `atomic_energy.net` -- the MLP
+  # that also has to describe the bond's shape dependence, which was already good to 0.13.
+  # Fitting this parameter alone took the residual to 0.12 with every EDA channel bitwise
+  # unchanged.
+  #
+  # Zero-initialized, so turning it on is bit-identical until it trains, and an older
+  # checkpoint warm starts with this one tensor left at its initialization. Set 0 to disable.
+  atomic_energy_offset_scale: 1.0e-2
   # Classical reach. The largest sets the one shared pair list.
   elst_cutoff: 12.0
   pauli_cutoff: 7.0
@@ -327,27 +344,13 @@ onebody:
 
 train:
   epochs: 80
-  # See TrainConfig.lr_schedule. The E_internal/E_atom gauge is flat, and along a flat
-  # direction a fixed step size does not converge -- it sets a diffusion amplitude. This
-  # shrinks it toward the end so the fit lands on a converged point rather than a sample.
-  # Watch the spread of `internal` and `e_atom` over the last few epochs.
+  init_from: checkpoints/water_staged_full/best.pt
   lr_schedule: cosine
   lr_final_factor: 0.02
-  # 32 was a poor operating point once the anchor is priced in. The anchor, the free-atom
-  # limit and the optimizer step are all *per step* and independent of how many cluster frames
-  # the step covers, so a small batch pays them over and over: measured per epoch at the frozen
-  # stage, 62.0 s at batch 32 against 25.4 s at 128 and 18.5 s at 256, on identical work.
-  #
-  # This is not free -- it is 4x fewer optimizer updates per epoch, so it changes the
-  # optimization and not only the wall clock. 128 is the compromise: most of the speedup, and
-  # still 68 updates an epoch. Raise `learning_rate` if the fit turns out to be update-starved
-  # rather than time-starved.
   batch_size: 128
   learning_rate: 1.0e-3
   weight_decay: 1.0e-4
   grad_clip: 5.0
-  # Validation is a full pass over 958 frames with the coupled solve and, once the force terms
-  # are on, a backward as well -- so it is not far off the cost of a training epoch. Every 5.
   eval_every: 5
 
 # Two stages: a cheap frozen pre-train, then the full joint fit.
@@ -394,6 +397,7 @@ stages:
   - name: full
     train:
       epochs: 80
+      init_from: checkpoints/water_staged_full/best.pt
     unified:
       # Everything from the `unified:` block above, which is already the full model: induction
       # on, cluster forces every other step, total energy on, and **nothing frozen**.
