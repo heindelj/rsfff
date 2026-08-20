@@ -344,7 +344,7 @@ onebody:
 
 train:
   epochs: 80
-  init_from: checkpoints/water_staged_full/best.pt
+  init_from: ""
   lr_schedule: cosine
   lr_final_factor: 0.02
   batch_size: 128
@@ -397,7 +397,6 @@ stages:
   - name: full
     train:
       epochs: 80
-      init_from: checkpoints/water_staged_full/best.pt
     unified:
       # Everything from the `unified:` block above, which is already the full model: induction
       # on, cluster forces every other step, total energy on, and **nothing frozen**.
