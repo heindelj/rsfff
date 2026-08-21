@@ -1,6 +1,6 @@
 {
-  "method": "mp2",
-  "basis": "aug-cc-pvtz",
+  "method": "wB97M-V",
+  "basis": "def2-TZVPD",
   "source_structures": [
     "/Users/joseph.heindel/dev/rsfff/benchmarks/structures/w10_mp2_avtz.xyz",
     "/Users/joseph.heindel/dev/rsfff/benchmarks/structures/w11_mp2_avtz.xyz",

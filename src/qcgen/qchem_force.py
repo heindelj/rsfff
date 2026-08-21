@@ -89,12 +89,16 @@ class ForceRecord:
         return len(self.symbols)
 
 
-def _parse_gradient(lines: list[str], n_atoms: int) -> np.ndarray:
+def parse_gradient(lines: list[str], n_atoms: int) -> np.ndarray:
     """Parse the blocked, transposed ``Gradient of SCF Energy`` table: ``(n_atoms, 3)``.
 
     A header line inside the table is all integers (the atom column indices); a
     data line is a component index 1/2/3 followed by floats. Q-Chem prints
     decimals, so "all tokens parse as int" separates the two unambiguously.
+
+    The *last* block in ``lines`` is the one read, so an AIMD parser hands in one
+    time step's slice rather than the whole file (see
+    :mod:`rsfff.qcgen.qchem_aimd`).
     """
     idx = find_all(lines, _GRADIENT_HEADER)
     if not idx:
@@ -171,7 +175,7 @@ def parse_force_output(path: str) -> ForceRecord:
         path=path,
         symbols=symbols,
         positions=positions,
-        forces=-_parse_gradient(lines, len(symbols)),
+        forces=-parse_gradient(lines, len(symbols)),
         energy=energy,
         total_charge=total_charge,
         multiplicity=multiplicity,
@@ -222,5 +226,6 @@ __all__ = [
     "QChemParseError",
     "check_consistency",
     "parse_force_output",
+    "parse_gradient",
     "to_atomic_units",
 ]

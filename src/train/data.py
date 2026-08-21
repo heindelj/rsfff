@@ -448,7 +448,83 @@ def _expand_second_moments(flat: np.ndarray, n_frag: int) -> np.ndarray:
     )
 
 
-def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> MoleculeDataset:
+def _select_fragmentation(atoms, fragmentation: int, path) -> None:
+    """Collapse a multi-fragmentation frame in place to one of its fragmentations.
+
+    Files written by ``scripts/parse_aimd_eda.py`` carry several decompositions of
+    the same geometry (see :mod:`rsfff.qcgen.multifrag`): an ``n_fragmentations``
+    header, one ``fragment_idx``/``fragment_idx_k`` column per decomposition, and
+    per-decomposition vectors for every ``eda_*`` and ``fragment_*`` quantity.
+    Rewriting the frame into the ordinary single-fragmentation form here means the
+    rest of the loader -- and every model and loss downstream of it -- needs no
+    special case.
+
+    A model that *mixes* over the decompositions wants all of them at once and
+    should read the file with :func:`rsfff.qcgen.multifrag.read_multifrag_extxyz`
+    instead; this function deliberately throws the alternatives away.
+    """
+    info = atoms.info
+    n_sets = info.get("n_fragmentations")
+    if n_sets is None:
+        if fragmentation:
+            raise ValueError(
+                f"{path}: fragmentation={fragmentation} was requested but this file has "
+                f"one fragmentation per frame (no `n_fragmentations` header)"
+            )
+        return
+    n_sets = int(n_sets)
+    k = int(fragmentation)
+    if not 0 <= k < n_sets:
+        raise ValueError(
+            f"{path}: fragmentation={k} out of range; the frame has {n_sets}"
+        )
+
+    counts = np.asarray(info["n_fragments"], dtype=int).reshape(n_sets)
+    lo = int(counts[:k].sum())
+    hi = lo + int(counts[k])
+
+    column = "fragment_idx" if k == 0 else f"fragment_idx_{k}"
+    atoms.arrays["fragment_idx"] = np.asarray(atoms.arrays[column], dtype=np.int64)
+    for j in range(1, n_sets):
+        atoms.arrays.pop(f"fragment_idx_{j}", None)
+
+    for key in ("fragment_charges", "fragment_multiplicities", "fragment_energies"):
+        info[key] = np.asarray(info[key], dtype=np.float64)[lo:hi]
+    for key, width in (("fragment_dipoles", 3), ("fragment_second_moments", 6)):
+        flat = np.asarray(info[key], dtype=np.float64).reshape(-1, width)
+        info[key] = flat[lo:hi].ravel()
+    if "fragment_mulliken" in info:
+        info["fragment_mulliken"] = np.asarray(
+            info["fragment_mulliken"], dtype=np.float64
+        ).reshape(n_sets, len(atoms))[k]
+
+    for key in list(info):
+        if key.startswith("eda_"):
+            info[key] = float(np.asarray(info[key], dtype=np.float64).reshape(n_sets)[k])
+    for key in (
+        "fragmentation_ranks",
+        "fragmentation_charge_fragment",
+        "fragmentation_excess_distance",
+    ):
+        if key in info:
+            info[key.replace("fragmentation_", "fragmentation_selected_")] = np.asarray(
+                info[key], dtype=np.float64
+            ).reshape(n_sets)[k]
+    types = " ".join(
+        str(t) for t in np.atleast_1d(info.get("fragmentation_config_types", ""))
+    ).split()
+    if types:
+        info["fragmentation_config_type"] = types[k]
+    info["n_fragments"] = int(counts[k])
+    info["selected_fragmentation"] = k
+
+
+def load_extxyz(
+    path,
+    dtype: torch.dtype = torch.float32,
+    library=None,
+    fragmentation: int = 0,
+) -> MoleculeDataset:
     """Read every frame of an extended-XYZ file into a :class:`MoleculeDataset`.
 
     ASE attaches ``energy=`` and the per-atom ``forces`` to a ``SinglePointCalculator``,
@@ -478,6 +554,14 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
        ``fragment_multiplicities`` headers. This gives a partition but **no channel
        graph** (a distance-independent set of charge-transfer channels cannot be inferred
        from a partition alone), so SQE models still need a library.
+
+    ``fragmentation`` selects which decomposition to read from a *multi*-fragmentation
+    file -- the H3O+/OH- microsolvation data, where one geometry carries an ALMO-EDA
+    decomposition for every placement of the excess charge. ``0`` is the harvester's
+    rank-0 assignment, the one with the smallest total O-H bond-length sum. Everything
+    downstream then sees an ordinary single-fragmentation dataset; see
+    :func:`_select_fragmentation` for what is discarded, and
+    :func:`rsfff.qcgen.multifrag.read_multifrag_extxyz` for reading all of them at once.
     """
     import ase.units
     from ase.io import iread
@@ -490,6 +574,7 @@ def load_extxyz(path, dtype: torch.dtype = torch.float32, library=None) -> Molec
     frag_e_list, frag_dip_list, frag_m2_list = [], [], []
     bond_list, bond_counts = [], []
     for atoms in iread(str(path), index=":"):
+        _select_fragmentation(atoms, fragmentation, path)
         n = len(atoms)
         pos_list.append(np.asarray(atoms.get_positions(), dtype=np.float64))
         num_list.append(np.asarray(atoms.numbers, dtype=np.int64))

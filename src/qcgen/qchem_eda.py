@@ -368,6 +368,7 @@ def check_consistency(
     atol: float = 1e-3,
     rtol: float = 1e-4,
     max_int_energy: float = 1000.0,
+    dipole_rtol: float = 0.5,
 ) -> list[str]:
     """Return a list of human-readable warnings about internal inconsistencies.
 
@@ -428,7 +429,7 @@ def check_consistency(
         frozen = per_fragment.sum(axis=0)
         relaxed = rec.multipoles["dipole"]
         scale = float(np.linalg.norm(per_fragment, axis=-1).sum())
-        if scale > 1e-6 and float(np.linalg.norm(frozen - relaxed)) > 0.5 * scale:
+        if scale > 1e-6 and float(np.linalg.norm(frozen - relaxed)) > dipole_rtol * scale:
             msgs.append(
                 f"sum of fragment dipoles {frozen} is far from the supersystem "
                 f"dipole {relaxed}; the fragment blocks may be misaligned"

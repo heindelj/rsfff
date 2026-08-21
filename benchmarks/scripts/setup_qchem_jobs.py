@@ -112,27 +112,40 @@ def fragmented_molecule(frame: Frame) -> str:
 
 
 def rem_block(*, jobtype: str, method: str, basis: str, mem_total: int, mem_static: int) -> str:
-    lines = ["$rem", f"   JOBTYPE          =  {jobtype}"]
     if jobtype == "eda":
-        lines.extend(
-            [
-                "   EDA2             =  1",
-                "   EDA_BSSE         =  false",
-                "   SCF_PRINT_FRGM   =  true",
-            ]
-        )
-    lines.extend(
-        [
+        lines = [
+            "$rem",
+            "   JOBTYPE          =  eda",
+            "   EDA2             =  1",
             f"   METHOD           =  {method}",
             f"   BASIS            =  {basis}",
             "   SCF_CONVERGENCE  =  8",
             "   THRESH           =  14",
+            "   XC_GRID          =  000099000590",
+            "   NL_GRID          =  1",
+            "   SYMMETRY         =  false",
+            "   EDA_BSSE         =  false",
+            "   FD_MAT_VEC_PROD  =  false",
+            f"   MEM_TOTAL        =  {mem_total}",
+            f"   MEM_STATIC       =  {mem_static}",
+            "   SCF_PRINT_FRGM   =  true",
+            "$end",
+        ]
+    else:
+        lines = [
+            "$rem",
+            f"   JOBTYPE          =  {jobtype}",
+            f"   METHOD           =  {method}",
+            f"   BASIS            =  {basis}",
+            "   SCF_CONVERGENCE  =  8",
+            "   THRESH           =  14",
+            "   XC_GRID          =  000099000590",
+            "   NL_GRID          =  1",
             "   SYMMETRY         =  false",
             f"   MEM_TOTAL        =  {mem_total}",
             f"   MEM_STATIC       =  {mem_static}",
             "$end",
         ]
-    )
     return "\n".join(lines)
 
 
@@ -250,8 +263,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("structures", nargs="*", help="specific benchmark XYZ files")
     parser.add_argument("--structures-dir", type=Path, default=DEFAULT_STRUCTURES)
     parser.add_argument("--roundtrip-root", type=Path, default=DEFAULT_ROUNDTRIP)
-    parser.add_argument("--method", default="mp2")
-    parser.add_argument("--basis", default="aug-cc-pvtz")
+    parser.add_argument("--method", default="wB97M-V")
+    parser.add_argument("--basis", default="def2-TZVPD")
     parser.add_argument("--mem-total", type=int, default=64000)
     parser.add_argument("--mem-static", type=int, default=10000)
     parser.add_argument("--overwrite", action="store_true")
