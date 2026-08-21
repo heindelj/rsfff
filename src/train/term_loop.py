@@ -65,12 +65,20 @@ def eda_component_fit(out, batch, cfg):
 def parameter_groups(model, weight_decay: float) -> list[dict]:
     """Optimizer groups, exempting modules that declare ``no_weight_decay``.
 
-    The flag is set in exactly one place, :func:`rsfff.mlip.heads.zero_init_readout`, which is
-    also where the reasoning and the measurements live: a block whose readout starts at zero
-    gets *no loss gradient at all* on the first step, weight decay is then the only force
-    acting on it, and it does not recover -- five such blocks in this model were measured going
-    to zero over a staged fit, taking the many-body dispersion, the per-channel compliance and
-    the quadrupole anisotropy with them, silently.
+    Exemption is declared at two granularities, and both are read here:
+
+    * **per module**, ``module.no_weight_decay``, set by
+      :func:`rsfff.mlip.heads.zero_init_readout` -- a block whose readout starts at zero gets
+      *no loss gradient at all* on the first step, weight decay is then the only force acting on
+      it, and it does not recover. Five such blocks in this model were measured going to zero
+      over a staged fit, taking the many-body dispersion, the per-channel compliance and the
+      quadrupole anisotropy with them, silently.
+    * **per parameter**, ``param._no_weight_decay``, set by
+      :func:`rsfff.mlip.heads.exempt_parameter` and hence by
+      :func:`rsfff.mlip.heads.mark_env_slot`. A :class:`~rsfff.mlip.heads.TwoSlotLinear` needs
+      this granularity: its ``w_frag`` half is normally initialized and should keep decaying,
+      while its ``w_env`` half is governed by the named ``L_env`` penalty instead. Flagging the
+      module would exempt both.
 
     Nothing else is exempt. Per-species tables, the featurizer and the plainly-initialized
     heads all keep decaying, because they have live gradients to push back with.
@@ -85,9 +93,10 @@ def parameter_groups(model, weight_decay: float) -> list[dict]:
                 seen.add(id(p))
                 exempt.append(p)
     for p in model.parameters():
-        if p.requires_grad and id(p) not in seen:
-            seen.add(id(p))
-            decayed.append(p)
+        if not p.requires_grad or id(p) in seen:
+            continue
+        seen.add(id(p))
+        (exempt if getattr(p, "_no_weight_decay", False) else decayed).append(p)
     groups = [{"params": decayed, "weight_decay": float(weight_decay)}]
     if exempt:
         groups.append({"params": exempt, "weight_decay": 0.0})

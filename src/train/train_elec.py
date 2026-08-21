@@ -118,6 +118,7 @@ def build_featurizer(features_cfg, ecfg, neighbor_types):
 
 def build_response(
     featurizer, features_cfg, ecfg, neighbor_types, atomic_states=None, *, p0_extra=0,
+    slots=None,
 ):
     """The per-fragment response solve, seeded from the atomic IP/EA data.
 
@@ -130,12 +131,20 @@ def build_response(
     response parameters need to see fragment charge every bit as much as the pair head does.
     At the default 0 this is the plain featurizer width.
 
+    ``slots`` is a :class:`rsfff.ff.slots.SlotDims` from the fragment-expert model, giving the
+    environment-slot widths per lambda. ``None`` -- the default -- builds the single-slot head
+    exactly as it has always been built, same modules and same parameter names, which is what
+    keeps a v1 checkpoint loadable.
+
     One compliance head serves every channel at every level; which *features* it reads is the
     caller's choice. There used to be a second head for radius-derived inter-fragment
     charge-transfer channels, and both it and those channels are gone.
     """
     p0 = featurizer.feature_dims[0] + int(p0_extra)
     p1, p2 = featurizer.feature_dims.get(1), featurizer.feature_dims.get(2)
+    p_env = 0 if slots is None else slots.p0_env
+    p1_env = 0 if slots is None else slots.p1_env
+    p2_env = 0 if slots is None else slots.p2_env
     log_z, log_b, q0 = build_elec_priors(neighbor_types)
 
     # Mulliken (IP + EA)/2 and (IP - EA) are the free-atom limits of the SQE chi and eta, so
@@ -153,6 +162,7 @@ def build_response(
             irrep2_to_spherical(featurizer.backend.irrep6_to_voigt()) if p2 is not None
             else None
         ),
+        p_env=p_env, p1_env=p1_env, p2_env=p2_env,
         emb_dim=ecfg.emb_dim, hidden=ecfg.hidden, depth=ecfg.depth,
         equiv_channels=ecfg.equiv_channels, max_rank=ecfg.max_rank,
         chi_init=chi_init, eta_init=eta_init,
@@ -170,7 +180,7 @@ def build_response(
     return FragmentResponse(
         params,
         PairComplianceHead(
-            p0, hidden=ecfg.compliance_hidden, depth=ecfg.compliance_depth,
+            p0, p_env=p_env, hidden=ecfg.compliance_hidden, depth=ecfg.compliance_depth,
             cutoff=features_cfg.cutoff, s_init=ecfg.s_init,
         ),
         direct_multipoles=getattr(ecfg, "direct_multipoles", False),

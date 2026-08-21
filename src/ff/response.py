@@ -36,7 +36,7 @@ import torch.nn as nn
 
 from ..features.features import LambdaFeatures
 from ..mlip.eem import atomic_dipoles, atomic_quadrupoles
-from ..mlip.heads import mlp, zero_init_readout
+from ..mlip.heads import two_slot_mlp, zero_init_readout
 from ..mlip.response_heads import (
     AtomicAlphaHead,
     AtomicQuadrupoleHead,
@@ -149,6 +149,12 @@ class ElectrostaticParameterHeads(nn.Module):
         irrep6_to_voigt: torch.Tensor,
         q0_prior: torch.Tensor | None = None,   # (n_species,) baseline charges
         irrep2_to_spherical_map: torch.Tensor | None = None,
+        #: Environment-slot widths, per lambda. All 0 -- the default -- rebuilds this head
+        #: exactly as it was, single-slot, with the same parameter names. The input layout is
+        #: ``[ h | eta | emb ]``; see :func:`rsfff.mlip.heads.two_slot_mlp`.
+        p_env: int = 0,
+        p1_env: int = 0,
+        p2_env: int = 0,
         emb_dim: int = 16,
         hidden: int = 64,
         depth: int = 2,
@@ -199,14 +205,26 @@ class ElectrostaticParameterHeads(nn.Module):
         ).clamp(min=self.eta_floor + 1e-6)
         self.chi0 = nn.Parameter(chi0)
         self.eta0_raw = nn.Parameter(torch.log(torch.expm1(eta0 - self.eta_floor)))
-        self.chi_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_chi else None
-        self.eta_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_eta else None
+        self.chi_mlp = (
+            two_slot_mlp(p0, p_env, hidden, depth, 1, p_tail=emb_dim)
+            if environment_chi else None
+        )
+        self.eta_mlp = (
+            two_slot_mlp(p0, p_env, hidden, depth, 1, p_tail=emb_dim)
+            if environment_eta else None
+        )
 
         # --- penetration ---------------------------------------------------------------
         self.d_log_z = nn.Parameter(torch.zeros(n_species), requires_grad=learn_z)
         self.d_log_b = nn.Parameter(torch.zeros(n_species), requires_grad=learn_b)
-        self.z_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_z else None
-        self.b_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_b else None
+        self.z_mlp = (
+            two_slot_mlp(p0, p_env, hidden, depth, 1, p_tail=emb_dim)
+            if environment_z else None
+        )
+        self.b_mlp = (
+            two_slot_mlp(p0, p_env, hidden, depth, 1, p_tail=emb_dim)
+            if environment_b else None
+        )
 
         for m in (self.chi_mlp, self.eta_mlp, self.z_mlp, self.b_mlp):
             if m is not None:   # start at exactly the per-species value
@@ -222,10 +240,12 @@ class ElectrostaticParameterHeads(nn.Module):
                     "features.selected_lambdas: [0, 1, 2] (or max_rank: 0)"
                 )
             self.chivec_head = AtomicVectorHead(
-                p0, p1, emb_dim, hidden=hidden, depth=depth, equiv_channels=equiv_channels
+                p0, p1, emb_dim, p_env=p_env, p1_env=p1_env,
+                hidden=hidden, depth=depth, equiv_channels=equiv_channels,
             )
             self.alpha_head = AtomicAlphaHead(
-                p0, p2, emb_dim, irrep6_to_voigt, hidden=hidden, depth=depth,
+                p0, p2, emb_dim, irrep6_to_voigt, p_env=p_env, p2_env=p2_env,
+                hidden=hidden, depth=depth,
                 equiv_channels=equiv_channels, positive_isotropic=True, psd_floor=psd_floor,
             )
 
@@ -258,7 +278,7 @@ class ElectrostaticParameterHeads(nn.Module):
                     "max_rank=2 needs lambda=2 features and the irrep2_to_spherical map"
                 )
             self.chiquad_head = AtomicQuadrupoleHead(
-                p0, p2, emb_dim, irrep2_to_spherical_map,
+                p0, p2, emb_dim, irrep2_to_spherical_map, p_env=p_env, p2_env=p2_env,
                 hidden=hidden, depth=depth, equiv_channels=equiv_channels,
             )
         # **The permanent quadrupole and the quadrupole *response* are separate decisions.**
@@ -283,7 +303,8 @@ class ElectrostaticParameterHeads(nn.Module):
             c0 = torch.full(shape, max(float(cquad_init) - self.cquad_floor, 1e-6))
             self.cquad0_raw = nn.Parameter(torch.log(torch.expm1(c0)))
             self.cquad_mlp = (
-                mlp(p0 + emb_dim, hidden, depth, n_c) if environment_cquad else None
+                two_slot_mlp(p0, p_env, hidden, depth, n_c, p_tail=emb_dim)
+                if environment_cquad else None
             )
             if self.cquad_mlp is not None:
                 zero_init_readout(self.cquad_mlp)
@@ -294,7 +315,7 @@ class ElectrostaticParameterHeads(nn.Module):
                         "axis; set features.selected_lambdas: [0, 1, 2]"
                     )
                 self.cquad_axis_head = AxialQuadrupolePolarizabilityHead(
-                    p0, p1, emb_dim, l2_rotation_generators(),
+                    p0, p1, emb_dim, l2_rotation_generators(), p_env=p_env, p1_env=p1_env,
                     hidden=hidden, depth=depth, equiv_channels=equiv_channels,
                 )
 

@@ -1,4 +1,9 @@
-"""One pair list, one trunk, four channels: the range-separated model without the mask.
+"""FROZEN v1 SNAPSHOT -- DO NOT EDIT. See ``rsfff.ff.v1`` for why. Kept only so
+``checkpoints/water_staged/best.pt`` still loads and runs; the live model is the
+fragment-expert architecture of ``docs/fff_v2.md``. Verbatim copy apart from import depth,
+and ``tests/test_v1_checkpoint.py`` pins its answers.
+
+One pair list, one trunk, four channels: the range-separated model without the mask.
 
 Every pair in the system carries the classical backbone and the neural correction. How much
 of the classical form is switched on is decided per pair and per channel by a **learned range
@@ -145,28 +150,26 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 
-from ..features.features import LambdaFeatures
-from ..mlip.heads import mlp, zero_init_readout
-from ..mlip.switch import pairwise_switch
-from ..mlip.unified_head import ChannelSpec, UnifiedPairHead
+from ...features.features import LambdaFeatures
+from ...mlip.heads import mlp, zero_init_readout
+from ...mlip.switch import pairwise_switch
+from ...mlip.unified_head import ChannelSpec, UnifiedPairHead
 from .atomic_energy import AtomicStateEnergy
-from .damping import fermi_switch
-from .fragment_state import FragmentStateEmbedding
-from .dispersion import DispersionParameterHeads, tt_damped_c6_energy
-from .electrostatics import slater_elec_pair_energy
-from .environment import OneBodyEnvironment, electrostatic_environment
-from .multipole import (
+from ..damping import fermi_switch
+from ..dispersion import DispersionParameterHeads, tt_damped_c6_energy
+from ..electrostatics import slater_elec_pair_energy
+from ..environment import OneBodyEnvironment, electrostatic_environment
+from ..multipole import (
     build_polytensor,
     damped_interaction_tensor,
     spherical_to_cartesian_quadrupole,
 )
-from .pairs import union_channels, union_pairs
-from .pauli import PauliMultipoleHeads, slater_pauli_pair_energy
-from .polarization import LevelOutput, coupled_response
-from .range_heads import RangeSeparationHeads
-from .range_priors import RANGE_CHANNELS, build_range_priors
-from .response import FragmentResponse, FragmentResponseOutput
-from .units import BOHR_ANG
+from ..pairs import union_channels, union_pairs
+from ..pauli import PauliMultipoleHeads, slater_pauli_pair_energy
+from ..polarization import LevelOutput, coupled_response
+from ..range_priors import RANGE_CHANNELS, build_range_priors
+from ..response import FragmentResponse, FragmentResponseOutput
+from ..units import BOHR_ANG
 
 
 @dataclass(frozen=True)
@@ -225,6 +228,62 @@ def _resolve_correction_channels(spec, available) -> frozenset[str]:
             f"readout for; it was built with {sorted(available)}"
         )
     return wanted
+
+
+class FragmentStateEmbedding(nn.Module):
+    """Per-atom block encoding its fragment's ``(Q_f, 2S_f)``, zero at the neutral singlet.
+
+    The featurizer every force-field term uses (``FlatLambdaSOAPFeaturizer``) carries species
+    and geometry only -- no fragment charge, no multiplicity. On water that is invisible,
+    because every fragment is a neutral singlet. On H5O2+ it is fatal: the two fragmentations
+    differ precisely in which fragment carries the charge, an H2O and an H3O+ have very
+    different internal energies, and with no fragment-level information the model can only
+    tell them apart by geometry -- while an OH radical and a hydroxide are indistinguishable
+    outright.
+
+    The output is ``net(Q, 2S) - net(0, 0)``, so it is **identically zero for a neutral
+    singlet no matter what the weights do**. That matters more than a zero-initialized
+    readout would: on water-only data the input is the constant ``(0, 0)``, and a plain
+    zero-init readout would still drift to some arbitrary constant that downstream biases
+    absorb. Anchoring at the neutral reference means water training genuinely cannot move
+    this block, and for a charged fragment the block reads as the *deviation from neutral*,
+    which is the interpretable thing to condition on.
+
+    Be clear about what this buys today: nothing. A constant-zero input receives no gradient,
+    so the block is not trained until charged-fragment data arrives. It is here so that step
+    is an addition rather than a retrofit of fragment-state awareness into the whole
+    force-field stack at the same time as the fragmentation mixture.
+
+    ``dim=0`` disables it entirely and is bit-identical to a model built without it.
+
+    **Exempt from weight decay**, for the same reason :class:`EnvironmentResidual` is and with
+    the same evidence. Anchoring makes the block's gradient a *difference*, water-only data
+    holds its input at the constant ``(0, 0)`` so that difference is exactly zero, and decay is
+    then unopposed: measured over a staged fit its first-layer weight norm went 3.17 -> 1.96 ->
+    0.24 -> 9e-13. Nothing was wrong with that while the input stays constant -- but the whole
+    point of the block is to be ready when charged-fragment data arrives, and a flattened block
+    is not ready. Left alone it sits at its initialization instead, which is.
+    """
+
+    #: See the note above. Weight decay would flatten a block that water-only data cannot
+    #: train, leaving nothing for H5O2+ data to start from.
+    no_weight_decay = True
+
+    def __init__(self, dim: int = 4, *, hidden: int = 32, depth: int = 1) -> None:
+        super().__init__()
+        self.dim = int(dim)
+        self.net = mlp(2, hidden, depth, self.dim) if self.dim else None
+
+    def forward(self, batch, fragment_idx: torch.Tensor, dtype, device) -> torch.Tensor | None:
+        if self.net is None:
+            return None
+        n_frag = int(batch.n_fragments)
+        zeros = torch.zeros(n_frag, dtype=dtype, device=device)
+        q = zeros if batch.fragment_charge is None else batch.fragment_charge.to(dtype)
+        s = zeros if batch.fragment_two_s is None else batch.fragment_two_s.to(dtype)
+        x = torch.stack((q, s), dim=-1)
+        ref = self.net(torch.zeros_like(x[:1]))
+        return (self.net(x) - ref)[fragment_idx]
 
 
 class EnvironmentResidual(nn.Module):
@@ -341,6 +400,105 @@ class EnvironmentResidual(nn.Module):
     def magnitude(self, frag: LambdaFeatures, env: LambdaFeatures) -> torch.Tensor:
         """``||h_env - h_frag||`` per atom: how much environment the model is using."""
         return (env.inv_feats - frag.inv_feats).norm(dim=-1)
+
+
+class RangeSeparationHeads(nn.Module):
+    """Per-atom ``r0`` and per-channel ``alpha`` for the Fermi range separation.
+
+    ``r0`` is per **atom** and combined across a pair as the geometric mean, the same
+    log-space rule every other pair parameter here uses. A per-atom ``r0`` cannot distinguish
+    an intramolecular O-H from an intermolecular one -- it is the same hydrogen in both -- and
+    does not have to: that discrimination comes from ``r``, which is what a range separation
+    is for. The parameter only sets *where* the handoff sits for an element pair in a channel.
+
+    One ``r0`` and one ``alpha`` per channel, because the channels are not descriptions of
+    equal fidelity. The classical electrostatics stays valid to shorter range than the
+    Tang-Toennies dispersion does, so their handoff points genuinely differ, and a single
+    shared parameter would impose the worst channel's handoff on all of them. They start from
+    the same prior only because the measurement in :mod:`rsfff.ff.range_priors` constrains
+    where the *bonded* region ends, which is common to all three; the fit is free to separate
+    them.
+
+    ``environment_r0`` defaults off, matching the treatment of the other damping exponents
+    (``b``, ``z``): a range separation that varies with the environment competes directly with
+    the pair correction for the same mid-range energy, so the first fit should move only the
+    per-element values. The MLP is zero-initialized, so turning it on starts from exactly the
+    per-element result.
+
+    ``alpha`` is kept positive by ``softplus`` rather than by a runtime check, which is the
+    guarantee :func:`rsfff.ff.damping.fermi_switch` relies on when handed a tensor.
+    """
+
+    def __init__(
+        self,
+        p0: int,
+        n_species: int,
+        *,
+        log_r0_prior: torch.Tensor,          # (n_channels, n_species), rows like `channels`
+        alpha_init: float,
+        channels: tuple[str, ...] = RANGE_CHANNELS,
+        emb_dim: int = 16,
+        hidden: int = 64,
+        depth: int = 2,
+        learn_r0: bool = True,
+        environment_r0: bool = False,
+        learn_alpha: bool = True,
+    ) -> None:
+        super().__init__()
+        if not alpha_init > 0.0:
+            raise ValueError(f"RangeSeparationHeads needs alpha_init > 0, got {alpha_init}")
+        self.channel_names = tuple(channels)
+        if log_r0_prior.dim() == 1:      # one row broadcast to every channel
+            log_r0_prior = log_r0_prior.expand(len(self.channel_names), -1)
+        if log_r0_prior.shape[0] != len(self.channel_names):
+            raise ValueError(
+                f"log_r0_prior has {log_r0_prior.shape[0]} rows for "
+                f"{len(self.channel_names)} channels {self.channel_names}; the dispersion "
+                f"prior differs from the others (see rsfff.ff.range_priors.CHANNEL_R0_PRIOR) "
+                f"so the rows are not interchangeable"
+            )
+        self.register_buffer("log_r0_prior", log_r0_prior.clone().contiguous())
+        self.species_emb = nn.Embedding(n_species, emb_dim)
+        alpha_raw = float(torch.log(torch.expm1(torch.tensor(float(alpha_init)))))
+
+        self.d_log_r0 = nn.ParameterDict(
+            {
+                name: nn.Parameter(torch.zeros(n_species), requires_grad=learn_r0)
+                for name in self.channel_names
+            }
+        )
+        self.alpha_raw = nn.ParameterDict(
+            {
+                name: nn.Parameter(torch.tensor(alpha_raw), requires_grad=learn_alpha)
+                for name in self.channel_names
+            }
+        )
+        self.r0_mlp = None
+        if environment_r0:
+            self.r0_mlp = nn.ModuleDict(
+                {name: mlp(p0 + emb_dim, hidden, depth, 1) for name in self.channel_names}
+            )
+            for m in self.r0_mlp.values():   # start at exactly the per-element value
+                zero_init_readout(m)
+
+    def forward(
+        self,
+        inv_feats: torch.Tensor,     # (N, p0)
+        species_idx: torch.Tensor,   # (N,)
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """``({channel: r0 (N,) Angstrom}, {channel: alpha () Angstrom^-1})``."""
+        s = species_idx
+        x = None
+        if self.r0_mlp is not None:
+            x = torch.cat((inv_feats, self.species_emb(s)), dim=-1)
+        r0, alpha = {}, {}
+        for c, name in enumerate(self.channel_names):
+            log_r0 = self.log_r0_prior[c][s] + self.d_log_r0[name][s]
+            if self.r0_mlp is not None:
+                log_r0 = log_r0 + self.r0_mlp[name](x).squeeze(-1)
+            r0[name] = log_r0.exp()
+            alpha[name] = torch.nn.functional.softplus(self.alpha_raw[name])
+        return r0, alpha
 
 
 @dataclass

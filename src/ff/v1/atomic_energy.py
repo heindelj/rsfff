@@ -1,4 +1,9 @@
-"""The per-atom energy of the self-consistent electronic state.
+"""FROZEN v1 SNAPSHOT -- DO NOT EDIT. See ``rsfff.ff.v1`` for why. Kept only so
+``checkpoints/water_staged/best.pt`` still loads and runs; the live model is the
+fragment-expert architecture of ``docs/fff_v2.md``. Verbatim copy apart from import depth,
+and ``tests/test_v1_checkpoint.py`` pins its answers.
+
+The per-atom energy of the self-consistent electronic state.
 
 ``docs/atomic_response_functional.md`` in one sentence: an atom's energy should depend on the
 multipoles it actually carries, not only on where its neighbours are. This module is that
@@ -63,8 +68,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..mlip.heads import exempt_from_weight_decay, mlp, zero_init_readout
-from .state_invariants import state_invariants
+from ...mlip.heads import exempt_from_weight_decay, mlp, zero_init_readout
+from ..multipole import spherical_to_cartesian_quadrupole
 
 
 class AtomicStateEnergy(nn.Module):
@@ -176,21 +181,56 @@ class AtomicStateEnergy(nn.Module):
         field: torch.Tensor | None,          # (N, 3)
         field_gradient: torch.Tensor | None,  # (N, 5) spherical
     ) -> torch.Tensor:
-        """``(N, n_invariants)``. Split out so tests can check invariance without the MLP.
+        """``(N, n_invariants)``. Split out so tests can check invariance without the MLP."""
+        n = q.shape[0]
+        zero = q.new_zeros(n)
+        k = self.equiv_channels
 
-        The body now lives in :func:`rsfff.ff.state_invariants.state_invariants`, shared with
-        :class:`rsfff.ff.bond_energy.FragmentBondEnergy`. Pure code motion -- ``rsfff.ff.v1``
-        keeps its own copy of this class, so the two are directly comparable and
-        ``tests/test_bond_energy.py`` compares them.
-        """
-        return state_invariants(
-            equiv_channels=self.equiv_channels,
-            vec_feats=vec_feats, equiv_feats=equiv_feats,
-            vec_reduce=self.vec_reduce, equiv_reduce=self.equiv_reduce,
-            to_spherical=self._to_spherical,
-            q=q, mu=mu, quad_s=quad_s,
-            potential=potential, field=field, field_gradient=field_gradient,
+        cols = [q, zero if potential is None else potential]
+
+        # -- rank 1 ------------------------------------------------------------------------
+        d = q.new_zeros(n, 3) if mu is None else mu
+        f = q.new_zeros(n, 3) if field is None else field
+        cols += [(d * d).sum(-1), (f * f).sum(-1), (d * f).sum(-1)]
+
+        # -- rank 2, contracted in Cartesian form ------------------------------------------
+        t = q.new_zeros(n, 3, 3) if quad_s is None else spherical_to_cartesian_quadrupole(quad_s)
+        g = (
+            q.new_zeros(n, 3, 3) if field_gradient is None
+            else spherical_to_cartesian_quadrupole(field_gradient)
         )
+        cols += [
+            (t * t).sum((-2, -1)),
+            (g * g).sum((-2, -1)),
+            (t * g).sum((-2, -1)),
+        ]
+
+        # -- rank 1 against the geometric features -----------------------------------------
+        if self.vec_reduce is None or vec_feats is None:
+            cols += [q.new_zeros(n, 2 * k)]
+        else:
+            v_k = torch.einsum("nmp,pk->nmk", vec_feats, self.vec_reduce)     # (N, 3, K)
+            cols += [
+                torch.einsum("nm,nmk->nk", d, v_k),
+                torch.einsum("nm,nmk->nk", f, v_k),
+            ]
+
+        # -- rank 2 against the geometric features -----------------------------------------
+        if self.equiv_reduce is None or equiv_feats is None:
+            cols += [q.new_zeros(n, 2 * k)]
+        else:
+            e_k = torch.einsum("nmp,pk->nmk", equiv_feats, self.equiv_reduce)  # (N, 5, K)
+            # (N, K, 5) in the backend basis -> spherical -> Cartesian, so the contraction
+            # below is a genuine tensor double-dot rather than a basis-dependent dot product.
+            g_k = spherical_to_cartesian_quadrupole(
+                e_k.transpose(1, 2) @ self._to_spherical
+            )                                                                  # (N, K, 3, 3)
+            cols += [
+                torch.einsum("nab,nkab->nk", t, g_k),
+                torch.einsum("nab,nkab->nk", g, g_k),
+            ]
+
+        return torch.cat([c.reshape(n, -1) for c in cols], dim=-1)
 
     def forward(
         self,

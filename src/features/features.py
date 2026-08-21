@@ -644,6 +644,7 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         group_idx: torch.Tensor | None = None,
         *,
         also_ungrouped: bool = False,
+        also_cross: bool = False,
     ) -> "LambdaFeatures | tuple[LambdaFeatures, LambdaFeatures]":
         """``group_idx`` restricts which atoms may be neighbors (default: the frame).
 
@@ -661,15 +662,38 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         and nothing else. Only the scatter and the power spectrum are duplicated; see
         :meth:`DensityExpansion.scatter_species`.
 
+        ``also_cross=True`` returns ``(grouped, cross)`` instead, where ``cross`` is built from
+        the **complementary** edges -- those leaving the group. This is the two-slot descriptor
+        of ``docs/fff_v2.md`` §3, and the property it exists for is that ``cross`` is
+        *identically zero* for an isolated group: with no cross-group edges there is nothing to
+        scatter, so the density is zero and so is its power spectrum. Not small, not zero by an
+        anchoring subtraction between two evaluations of a network, and not only at
+        initialization -- zero because the sum is empty.
+
+        That is what lets a parameterizer's isolated evaluation ``theta_0 = P(h, 0)`` be exactly
+        what the model says about a fragment on its own, and it is why the one-body energy can
+        be environment-independent by construction rather than by a training schedule.
+
+        The two modes cost the same: one neighbor search, one set of spherical harmonics, two
+        scatters and two power spectra. They differ only in which mask the second scatter uses
+        (``mask`` vs ``~mask``), and ``grouped`` is bitwise the same tensor in both, because it
+        comes from the same masked scatter of the same shared ``RY``.
+
         The default path is untouched and takes exactly the code it always did, so nothing
         that does not ask for the pair pays for it -- including in the last bits, since the
         two paths sum edges in different orders.
         """
+        if also_ungrouped and also_cross:
+            raise ValueError(
+                "also_ungrouped and also_cross are alternative second descriptors; ask for one. "
+                "The ungrouped one is the *union* of the two edge sets and the cross one their "
+                "difference, so they answer different questions and are not combinable here."
+            )
         positions = batch.positions
         species_idx = self._species_lut[batch.atomic_numbers]
         n_atoms = int(positions.shape[0])
 
-        if not also_ungrouped:
+        if not (also_ungrouped or also_cross):
             edge_index = self._build_edges(
                 positions, batch.batch_idx if group_idx is None else group_idx
             )
@@ -683,24 +707,37 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
 
         edge_index = self._build_edges(positions, batch.batch_idx)
         RY = self.density.edge_expansion(positions, edge_index)
-        full = self._features_from_density(
-            self._compress(
-                self.density.scatter_species(RY, edge_index, species_idx, n_atoms)
-            ),
-            species_idx, batch.batch_idx, edge_index,
-        )
+        full = None
+        if also_ungrouped:
+            full = self._features_from_density(
+                self._compress(
+                    self.density.scatter_species(RY, edge_index, species_idx, n_atoms)
+                ),
+                species_idx, batch.batch_idx, edge_index,
+            )
         if group_idx is None:
+            if also_cross:
+                raise ValueError(
+                    "also_cross needs a group_idx to have edges to be cross *to*; pass "
+                    "batch.fragment_idx. Without one every edge is intra-group and the "
+                    "environment slot would be identically zero everywhere, which is a silently "
+                    "environment-free model rather than an error at the first forward."
+                )
             return full, full
         mask = group_idx[edge_index[0]] == group_idx[edge_index[1]]
-        grouped = self._features_from_density(
-            self._compress(
-                self.density.scatter_species(
-                    RY, edge_index, species_idx, n_atoms, edge_mask=mask
-                )
-            ),
-            species_idx, batch.batch_idx, edge_index[:, mask],
-        )
-        return grouped, full
+
+        def masked(edge_mask):
+            return self._features_from_density(
+                self._compress(
+                    self.density.scatter_species(
+                        RY, edge_index, species_idx, n_atoms, edge_mask=edge_mask
+                    )
+                ),
+                species_idx, batch.batch_idx, edge_index[:, edge_mask],
+            )
+
+        grouped = masked(mask)
+        return (grouped, masked(~mask)) if also_cross else (grouped, full)
 
 
 class FlatStateSOAPFeaturizer(nn.Module):

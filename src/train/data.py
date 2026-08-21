@@ -330,6 +330,105 @@ class MoleculeDataset:
         )
 
 
+def fragment_view(dataset: MoleculeDataset, indices=None) -> MoleculeDataset:
+    """Every fragment of every frame, as a frame of its own.
+
+    The w2-w5 files carry ``fragment_energies`` -- **isolated**-fragment SCF energies, from the
+    ALMO-EDA that produced the interaction labels -- along with ``fragment_dipoles`` and
+    ``fragment_second_moments``. Those are labels for a monomer at the geometry a cluster
+    actually visits, and there are roughly 34k of them against the 499 in the dedicated monomer
+    set. Exploding the corpus this way turns them into a training stream.
+
+    It is the stream on which ``eta`` is **identically zero**: a lone fragment has no
+    cross-fragment edges, so every parameter is evaluated at ``theta_0`` and this data is a
+    direct measurement of the isolated-fragment sector. It also runs without a coupled solve and
+    with a pair list that has no inter-fragment pairs, so it is cheap.
+
+    **Forces are dropped, deliberately.** The per-atom forces in a cluster file are
+    ``-dE/dR`` of the *whole cluster*; the gradient of an isolated fragment's energy is a
+    different quantity, and training the one-body term against the cluster gradient would be
+    fitting the wrong function while looking like supervision. The dedicated monomer set has
+    true one-body forces and keeps them.
+
+    ``eda_*`` goes too -- those are frame-level interaction labels and a single fragment has no
+    interactions. ``energy`` is set to the fragment energy: for a one-fragment frame every
+    classical channel is an empty sum, so the model's total *is* its fragment energy -- provided
+    the coupled solve is off, which is why the isolated streams pass ``with_induction=False``
+    (see :meth:`rsfff.ff.expert_model.FragmentExpertModel.forward`). With it on a lone fragment
+    still relaxes against its own field, which the label does not know about.
+
+    ``indices`` restricts the source frames. Pass the **training** split: the fragment stream
+    and the cluster stream share every weight, so exploding a validation cluster into the
+    training stream leaks exactly the quantity the fragment-stream validation number is there
+    to measure.
+    """
+    if not dataset.has_fragments:
+        raise ValueError(
+            "fragment_view needs a fragment partition; the extxyz needs a `fragment_idx` column"
+        )
+    if dataset._fragment_energy is None:
+        raise ValueError(
+            "fragment_view needs `fragment_energies` in the file -- the isolated-fragment SCF "
+            "energies. Without them the exploded frames would carry no label at all"
+        )
+
+    keep = (
+        torch.arange(len(dataset)) if indices is None
+        else torch.as_tensor(indices, dtype=torch.long)
+    )
+    frame_of_atom = torch.repeat_interleave(
+        torch.arange(len(dataset)), dataset._counts
+    )
+    # Frame-local fragment ids -> globally unique ones, the same offsetting `flat_batch` does.
+    global_frag = dataset._fragment_idx + dataset._frag_offsets[frame_of_atom]
+    # Stable, so atoms keep their within-fragment order; nothing downstream depends on it, but
+    # a reproducible layout makes a diff of two datasets meaningful.
+    # Restrict to the selected frames before sorting, then renumber the surviving fragments
+    # so the ids stay dense.
+    atom_keep = torch.isin(frame_of_atom, keep)
+    global_frag = global_frag[atom_keep]
+    frag_keep = torch.cat(
+        [torch.arange(dataset._frag_offsets[i], dataset._frag_offsets[i + 1])
+         for i in keep.tolist()]
+    ) if keep.numel() else torch.empty(0, dtype=torch.long)
+    renumber = torch.full((int(dataset._frag_offsets[-1]),), -1, dtype=torch.long)
+    renumber[frag_keep] = torch.arange(frag_keep.shape[0])
+    global_frag = renumber[global_frag]
+
+    atom_rows = atom_keep.nonzero().squeeze(-1)
+    order = atom_rows[torch.argsort(global_frag, stable=True)]
+    counts = torch.bincount(global_frag, minlength=frag_keep.shape[0])
+    if frag_keep.numel() and int(counts.min()) == 0:
+        raise ValueError(
+            "some fragment has no atoms; the `fragment_idx` column and the per-fragment "
+            "headers disagree about how many fragments the frame has"
+        )
+
+    n_frag = int(frag_keep.shape[0])
+    pick = lambda x: None if x is None else x[frag_keep].clone()  # noqa: E731
+    energy = dataset._fragment_energy[frag_keep].clone()
+    return MoleculeDataset(
+        positions=dataset._pos[order].clone(),
+        atomic_numbers=dataset._num[order],
+        forces=None,
+        energy=energy,
+        counts=counts,
+        fragment_idx=torch.zeros(order.shape[0], dtype=torch.long),
+        fragment_charge=(
+            pick(dataset._fragment_charge) if dataset._fragment_charge is not None
+            else torch.zeros(n_frag)
+        ),
+        fragment_two_s=(
+            pick(dataset._fragment_two_s) if dataset._fragment_two_s is not None
+            else torch.zeros(n_frag)
+        ),
+        fragment_energy=energy.clone(),
+        fragment_dipole=pick(dataset._fragment_dipole),
+        fragment_second_moment=pick(dataset._fragment_second_moment),
+        fragment_counts=torch.ones(n_frag, dtype=torch.long),
+    )
+
+
 def _expand_second_moments(flat: np.ndarray, n_frag: int) -> np.ndarray:
     """``(F*6,)`` unique components in Q-Chem's order -> ``(F, 3, 3)`` symmetric tensors.
 

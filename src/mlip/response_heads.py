@@ -25,7 +25,13 @@ import math
 import torch
 import torch.nn as nn
 
-from .heads import exempt_from_weight_decay, mlp, zero_init_readout
+from .heads import (
+    env_reduce_parameter,
+    exempt_from_weight_decay,
+    slot_reduce,
+    two_slot_mlp,
+    zero_init_readout,
+)
 
 
 def voigt_vector_to_symmetric_matrix(values: torch.Tensor) -> torch.Tensor:
@@ -112,6 +118,8 @@ class AtomicAlphaHead(nn.Module):
         emb_dim: int,
         irrep6_to_voigt: torch.Tensor,
         *,
+        p_env: int = 0,
+        p2_env: int = 0,
         hidden: int = 64,
         depth: int = 2,
         equiv_channels: int = 32,
@@ -125,7 +133,10 @@ class AtomicAlphaHead(nn.Module):
         # Toggle for the strict-PSD eigenvalue shift; set False to skip the shift.
         self.enforce_psd = True
         self.equiv_reduce = nn.Parameter(torch.randn(p2, equiv_channels) / (p2 ** 0.5))
-        self.base_mlp = mlp(p0 + emb_dim, hidden, depth, 1 + equiv_channels)
+        self.equiv_reduce_env = env_reduce_parameter(p2_env, equiv_channels)
+        self.base_mlp = two_slot_mlp(
+            p0, p_env, hidden, depth, 1 + equiv_channels, p_tail=emb_dim
+        )
         self.register_buffer("_irrep6_to_voigt", irrep6_to_voigt, persistent=False)
         # `base_mlp` is *not* zero-initialized here -- a zero readout would pin every species at
         # `softplus(0) + psd_floor` -- so this head does not lose the race described in
@@ -143,7 +154,8 @@ class AtomicAlphaHead(nn.Module):
         out = self.base_mlp(torch.cat((inv_feats, emb), dim=-1))   # (N, 1+K)
         a0_raw = out[:, :1]                                        # (N, 1)
         gate = out[:, 1:]                                          # (N, K)
-        equiv_k = torch.einsum("nmp,pk->nmk", equiv_feats, self.equiv_reduce)  # (N,5,K)
+        reduce = slot_reduce(self.equiv_reduce, self.equiv_reduce_env, equiv_feats.shape[-1])
+        equiv_k = torch.einsum("nmp,pk->nmk", equiv_feats, reduce)             # (N,5,K)
         a2 = torch.einsum("nmk,nk->nm", equiv_k, gate)             # (N, 5)
 
         if not self.positive_isotropic:
@@ -182,6 +194,8 @@ class AtomicVectorHead(nn.Module):
         p1: int,
         emb_dim: int,
         *,
+        p_env: int = 0,
+        p1_env: int = 0,
         hidden: int = 64,
         depth: int = 2,
         equiv_channels: int = 32,
@@ -189,7 +203,10 @@ class AtomicVectorHead(nn.Module):
         super().__init__()
         self.equiv_channels = equiv_channels
         self.equiv_reduce = nn.Parameter(torch.randn(p1, equiv_channels) / (p1 ** 0.5))
-        self.gate_mlp = zero_init_readout(mlp(p0 + emb_dim, hidden, depth, equiv_channels))
+        self.equiv_reduce_env = env_reduce_parameter(p1_env, equiv_channels)
+        self.gate_mlp = zero_init_readout(
+            two_slot_mlp(p0, p_env, hidden, depth, equiv_channels, p_tail=emb_dim)
+        )
         # The whole head, not just the gate: `equiv_reduce` has no gradient while the gate is
         # zero, so leaving it decaying deadlocks the pair. See `zero_init_readout`.
         exempt_from_weight_decay(self)
@@ -201,7 +218,8 @@ class AtomicVectorHead(nn.Module):
         vec_feats: torch.Tensor,  # (N, 3, P1)
     ) -> torch.Tensor:
         gate = self.gate_mlp(torch.cat((inv_feats, emb), dim=-1))         # (N, K)
-        vec_k = torch.einsum("nmp,pk->nmk", vec_feats, self.equiv_reduce)  # (N,3,K)
+        reduce = slot_reduce(self.equiv_reduce, self.equiv_reduce_env, vec_feats.shape[-1])
+        vec_k = torch.einsum("nmp,pk->nmk", vec_feats, reduce)                 # (N,3,K)
         return torch.einsum("nmk,nk->nm", vec_k, gate)                     # (N, 3)
 
 
@@ -256,6 +274,8 @@ class AxialQuadrupolePolarizabilityHead(nn.Module):
         emb_dim: int,
         l2_generators: torch.Tensor,      # (3, 5, 5)
         *,
+        p_env: int = 0,
+        p1_env: int = 0,
         hidden: int = 64,
         depth: int = 2,
         equiv_channels: int = 32,
@@ -267,7 +287,8 @@ class AxialQuadrupolePolarizabilityHead(nn.Module):
                 f"l2_generators must be (3, 5, 5), got {tuple(l2_generators.shape)}"
             )
         self.axis = AtomicVectorHead(
-            p0, p1, emb_dim, hidden=hidden, depth=depth, equiv_channels=equiv_channels
+            p0, p1, emb_dim, p_env=p_env, p1_env=p1_env,
+            hidden=hidden, depth=depth, equiv_channels=equiv_channels
         )
         self.axis_eps = float(axis_eps)
         self.register_buffer("_gen", l2_generators, persistent=False)
@@ -326,6 +347,8 @@ class AtomicQuadrupoleHead(nn.Module):
         emb_dim: int,
         irrep2_to_spherical: torch.Tensor,   # (5, 5)
         *,
+        p_env: int = 0,
+        p2_env: int = 0,
         hidden: int = 64,
         depth: int = 2,
         equiv_channels: int = 32,
@@ -337,7 +360,10 @@ class AtomicQuadrupoleHead(nn.Module):
             )
         self.equiv_channels = equiv_channels
         self.equiv_reduce = nn.Parameter(torch.randn(p2, equiv_channels) / (p2 ** 0.5))
-        self.gate_mlp = zero_init_readout(mlp(p0 + emb_dim, hidden, depth, equiv_channels))
+        self.equiv_reduce_env = env_reduce_parameter(p2_env, equiv_channels)
+        self.gate_mlp = zero_init_readout(
+            two_slot_mlp(p0, p_env, hidden, depth, equiv_channels, p_tail=emb_dim)
+        )
         self.register_buffer("_to_spherical", irrep2_to_spherical, persistent=False)
         # Same zero-gate deadlock as `AtomicVectorHead`; see `zero_init_readout`.
         exempt_from_weight_decay(self)
@@ -349,6 +375,7 @@ class AtomicQuadrupoleHead(nn.Module):
         equiv_feats: torch.Tensor,  # (N, 5, P2)
     ) -> torch.Tensor:
         gate = self.gate_mlp(torch.cat((inv_feats, emb), dim=-1))              # (N, K)
-        equiv_k = torch.einsum("nmp,pk->nmk", equiv_feats, self.equiv_reduce)  # (N,5,K)
+        reduce = slot_reduce(self.equiv_reduce, self.equiv_reduce_env, equiv_feats.shape[-1])
+        equiv_k = torch.einsum("nmp,pk->nmk", equiv_feats, reduce)             # (N,5,K)
         a2 = torch.einsum("nmk,nk->nm", equiv_k, gate)                         # (N, 5)
         return a2 @ self._to_spherical                                         # (N, 5)

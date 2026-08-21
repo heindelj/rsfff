@@ -39,12 +39,10 @@ from ase.calculators.singlepoint import SinglePointCalculator  # noqa: E402
 from ase.calculators.calculator import Calculator, all_changes  # noqa: E402
 from ase.data import atomic_numbers  # noqa: E402
 
-from rsfff.mlip.reference_states import AtomicStateReference  # noqa: E402
-from rsfff.train.config import load_config, stage_config  # noqa: E402
-from rsfff.train.data import Batch, load_reference_energies  # noqa: E402
+from rsfff.ff.v1 import load_v1_checkpoint  # noqa: E402
+from rsfff.train.data import Batch  # noqa: E402
 from rsfff.train.loss import compute_forces  # noqa: E402
 from rsfff.train.train_eem import resolve_device  # noqa: E402
-from rsfff.train.train_unified import build_unified_model  # noqa: E402
 
 
 HARTREE_TO_EV = 27.211386245988
@@ -79,76 +77,51 @@ def structure_paths(paths: Iterable[str | Path] | None = None) -> list[Path]:
 
 
 def load_water_model(
-    config_path: str | Path = REPO_ROOT / "configs" / "water_staged.yaml",
+    config_path: str | Path | None = None,
     *,
-    stage: str = "full",
+    stage: str | None = None,
     checkpoint_path: str | Path | None = None,
     checkpoint_root: str | Path | None = None,
     device: str | None = None,
 ) -> ModelBundle:
-    config_path = Path(config_path)
-    if not config_path.is_absolute():
-        config_path = REPO_ROOT / config_path
-    cfg0 = load_config(config_path)
-    selected = next((s for s in cfg0.stages if s.name == stage), None)
-    if selected is None:
-        known = ", ".join(s.name for s in cfg0.stages)
-        raise ValueError(f"unknown stage {stage!r}; available stages: {known}")
-    cfg = stage_config(cfg0, selected)
+    """The benchmark model, rebuilt from a checkpoint alone.
 
+    This goes through :mod:`rsfff.ff.v1`, the frozen copy of the unified pair model, because
+    ``checkpoints/water_staged/best.pt`` is a v1 checkpoint and the live tree has moved to the
+    fragment-expert architecture of ``docs/fff_v2.md``. See that package's docstring.
+
+    ``config_path`` and ``stage`` are accepted and recorded so the CLI flags and the result JSON
+    schema are unchanged, but they no longer *select* anything: a checkpoint embeds the full
+    config it was trained under, which is both more robust and the only thing that still makes
+    sense now that ``configs/water_staged.yaml`` lives under ``configs/archive/``. Passing a
+    config that disagrees with the checkpoint used to silently build a different model; now it
+    cannot.
+    """
+    ckpt = Path(checkpoint_path) if checkpoint_path is not None else DEFAULT_CHECKPOINT
+    if not ckpt.is_absolute():
+        ckpt = REPO_ROOT / ckpt
+    if checkpoint_root is not None and checkpoint_path is None:
+        root = Path(checkpoint_root)
+        if not root.is_absolute():
+            root = REPO_ROOT / root
+        ckpt = root / DEFAULT_CHECKPOINT.parent.name / "best.pt"
+    if not ckpt.exists():
+        raise FileNotFoundError(f"no checkpoint at {ckpt}")
+
+    state = torch.load(ckpt, map_location="cpu", weights_only=False)
+    cfg = state["config"]
     dtype = torch.float64 if cfg.dtype == "float64" else torch.float32
     torch.set_default_dtype(dtype)
     dev = resolve_device(device or cfg.device, cfg.dtype)
 
-    root = (
-        Path(checkpoint_root)
-        if checkpoint_root is not None
-        else Path(cfg.checkpoint_root)
-    )
-    if not root.is_absolute():
-        root = REPO_ROOT / root
-    ckpt = (
-        Path(checkpoint_path)
-        if checkpoint_path is not None
-        else root / f"{cfg0.run_name}_{stage}" / "best.pt"
-    )
-    if not ckpt.is_absolute():
-        ckpt = REPO_ROOT / ckpt
-    state = torch.load(ckpt, map_location="cpu", weights_only=False)
-    neighbor_types = tuple(int(z) for z in state["neighbor_types"])
-    reference_path = Path(cfg.data.reference_energies)
-    if not reference_path.is_absolute():
-        reference_path = REPO_ROOT / reference_path
-    reference_energies = load_reference_energies(
-        reference_path, neighbor_types
-    ).to(dtype)
-
-    atomic_states = None
-    if cfg.data.atomic_reference_states:
-        state_path = Path(cfg.data.atomic_reference_states)
-        if not state_path.is_absolute():
-            state_path = REPO_ROOT / state_path
-        atomic_states = AtomicStateReference.from_json(
-            state_path, neighbor_types, dtype=dtype
-        )
-
-    model = build_unified_model(cfg, neighbor_types, reference_energies, atomic_states)
-    missing, unexpected = model.load_state_dict(state["model_state"], strict=False)
-    if missing or unexpected:
-        print(
-            f"warning: loaded checkpoint with {len(missing)} missing and "
-            f"{len(unexpected)} unexpected tensors",
-            file=sys.stderr,
-        )
-    model.to(dev)
-    model.eval()
+    model, cfg, neighbor_types = load_v1_checkpoint(ckpt, device=dev, dtype=dtype)
     return ModelBundle(
         model=model,
         device=dev,
         dtype=dtype,
-        config_path=config_path,
+        config_path=Path(config_path) if config_path is not None else ckpt,
         checkpoint_path=ckpt,
-        config_stage=stage,
+        config_stage=stage or "archived-v1",
         neighbor_types=neighbor_types,
     )
 

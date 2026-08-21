@@ -45,7 +45,7 @@ import torch
 import torch.nn as nn
 
 from ..features.features import LambdaFeatures
-from ..mlip.heads import mlp, zero_init_readout
+from ..mlip.heads import mlp, two_slot_mlp, zero_init_readout
 from ..mlip.pair_heads import PairEnergyHead
 from ..mlip.switch import pairwise_switch
 from .damping import fermi_switch, tang_toennies
@@ -163,6 +163,7 @@ class DispersionParameterHeads(nn.Module):
         *,
         log_c6_prior: torch.Tensor,     # (n_species,)
         log_b_prior: torch.Tensor,      # (n_species,)
+        p_env: int = 0,
         emb_dim: int = 16,
         hidden: int = 64,
         depth: int = 2,
@@ -181,8 +182,24 @@ class DispersionParameterHeads(nn.Module):
         self.d_log_c6 = nn.Parameter(torch.zeros(n_species), requires_grad=learn_c6)
         self.d_log_b = nn.Parameter(torch.zeros(n_species), requires_grad=learn_b)
 
-        self.c6_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_c6 else None
-        self.b_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_b else None
+        # `p0` is the **fragment** slot width and `p_env` the environment slot's; the input is
+        # `[ h | eta | emb ]`, so the embedding is the tail. `p_env = 0` builds exactly the
+        # single-slot MLP this head has always had -- see `two_slot_mlp`.
+        #
+        # `C6` is the quantity that most obviously *should* be environmental (a quenched C6 is
+        # what effective many-body dispersion looks like here), and it is also the one with no
+        # isolated-fragment label at all: an intra-fragment dispersion pair is switched off by
+        # the range separation, so nothing in `fragment_energy` constrains `C6_0`. That is why
+        # the environment share of this head is reported per epoch rather than assumed small.
+        self.p_env = int(p_env)
+        self.c6_mlp = (
+            two_slot_mlp(p0, self.p_env, hidden, depth, 1, p_tail=emb_dim)
+            if environment_c6 else None
+        )
+        self.b_mlp = (
+            two_slot_mlp(p0, self.p_env, hidden, depth, 1, p_tail=emb_dim)
+            if environment_b else None
+        )
         for m in (self.c6_mlp, self.b_mlp):
             if m is not None:   # start at exactly the per-species prior
                 zero_init_readout(m)

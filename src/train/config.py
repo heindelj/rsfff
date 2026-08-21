@@ -85,6 +85,13 @@ class SQEConfig:
 
 @dataclass
 class TrainConfig:
+    #: Seeds the **model initialization**, so two runs of the same config start from the same
+    #: weights. Without it ``torch.randn`` inside every head reads whatever global RNG state
+    #: the process happens to be in, and a comparison between two fits -- an ablation, or the
+    #: ``env_penalty_weight`` sweep the fragment-expert model is meant to support -- is
+    #: measuring the initialization as much as the change. ``data.seed`` is a different thing
+    #: and stays a different thing: it picks the train/val split.
+    seed: int = 0
     epochs: int = 200
     batch_size: int = 32
     learning_rate: float = 1.0e-3
@@ -739,6 +746,156 @@ class UnifiedConfig:
 
 
 @dataclass
+class ExpertConfig:
+    """The fragment-expert model of ``docs/fff_v2.md``.
+
+    Successor to :class:`UnifiedConfig`, which stays as it is because ``rsfff.ff.v1`` unpickles
+    a checkpoint's embedded config and reads it. Nothing here is shared with it.
+
+    What is gone relative to that block, and why, in one place:
+
+    * ``atomic_energy_offset_scale`` -- the per-element constant gated to vanish at the free
+      atom. It only existed because the bond head anchored itself there, cancelling its own
+      readout bias; without the anchoring the bias is the one-body constant and the gadget is
+      redundant. See :class:`rsfff.ff.bond_energy.FragmentBondEnergy`.
+    * ``pair_corrections`` / ``pair_range_separation`` and the whole correction trunk. The
+      neural content is in the parameters an expert emits; a readout on top is a second,
+      unlabeled model competing for the same energy.
+    * ``env_hidden`` / ``env_depth`` / ``env_weight`` -- the environment *residual*. The
+      environment is now a separate input slot rather than an MLP summed into the fragment one,
+      so there is no network to size. ``env_penalty_weight`` replaces ``env_weight`` and acts on
+      the parameters rather than on a feature norm.
+    * ``free_alpha_weight`` -- pinning the free-atom polarizability. That is a constraint at a
+      geometry the expert does not claim to describe.
+    """
+
+    #: The fragment compositions with an expert, in Hill notation over the data's elements --
+    #: ``"H2O"``, ``"HO"``, ``"H3O"``. A composition in the data with no expert **raises**: a
+    #: fragment-expert model has no generic head to fall back to, and answering with some other
+    #: molecule's expert is the failure this refuses to make silently.
+    compositions: tuple = ("H2O",)
+    max_rank: int = 2
+
+    #: Build the environment slot at all. Off makes every parameter fragment-confined and the
+    #: model rigorously two-body -- the ablation, and a genuinely useful one.
+    environment_features: bool = True
+
+    # --- range separation, per element and per channel --------------------------------
+    alpha_init: float = 40.0
+    learn_r0: bool = True
+    learn_alpha: bool = True
+    #: Let ``r0`` respond to the environment slot. This is the *only* route by which the
+    #: electrostatic channel acquires any environment dependence at all, and that dependence is
+    #: booked to induction rather than to ``cls_elec`` (see :mod:`rsfff.ff.expert_model`). Off
+    #: for a first fit: it competes with the parameters for the same mid-range energy.
+    environment_r0: bool = False
+    r0_emb_dim: int = 16
+    r0_hidden: int = 64
+    r0_depth: int = 2
+
+    # --- the fragment-state slot ------------------------------------------------------
+    #: ``(Q_f, 2S_f)``, identically zero for a neutral singlet and so inert on water. Present so
+    #: one ``"OH"`` expert can tell hydroxide from the OH radical. 0 drops it entirely.
+    fragment_state_dim: int = 4
+    fragment_state_hidden: int = 32
+    fragment_state_depth: int = 1
+
+    # --- the bonding term -------------------------------------------------------------
+    bond_emb_dim: int = 16
+    bond_hidden: int = 32
+    bond_depth: int = 2
+    bond_equiv_channels: int = 32
+    #: Hartree, sized against a covalent bond -- water's two O-H bonds are ~-0.37 Ha.
+    bond_energy_scale: float = 0.2
+
+    # --- applicability ----------------------------------------------------------------
+    #: Emit ``v_f``. Untrained: with one sensible fragmentation of water there is nothing to
+    #: fit it against, so it carries no loss term until competing fragmentations exist.
+    applicability: bool = False
+    applicability_hidden: int = 32
+    applicability_depth: int = 2
+
+    # --- classical reach --------------------------------------------------------------
+    elst_cutoff: float = 12.0
+    pauli_cutoff: float = 7.0
+    disp_cutoff: float = 10.0
+    taper_width: float = 1.0
+
+    # --- induction --------------------------------------------------------------------
+    induction: bool = True
+    cg_rtol: float = 1.0e-9
+    cg_atol: float = 1.0e-12
+    cg_maxiter: int = 100
+
+    # --- loss ---------------------------------------------------------------------------
+    #: One kJ/mol in Hartree. Every error is divided by this before squaring, so every weight
+    #: below is a plain dimensionless number and "1.0" means "one kJ/mol of error costs 1".
+    energy_scale: float = 3.8093e-4
+    onebody_weight: float = 30.0
+    elst_weight: float = 30.0
+    pauli_weight: float = 30.0
+    disp_weight: float = 30.0
+    induction_weight: float = 30.0
+    #: The cluster total. **Off, and measured rather than assumed.** Forces are its gradient so
+    #: supervising it alongside them looks natural, but it is one number per frame against five
+    #: well-posed component targets and it admits every wrong split that happens to sum
+    #: correctly. Measured on the previous model at weight 10 against 0, the coupled solve
+    #: stopped doing the work entirely (``ind_ff`` went *positive*) and even ``e_tot_mae`` got
+    #: worse. Turn it on only with a reason, and watch the induction split when you do.
+    total_energy_weight: float = 0.0
+    force_weight: float = 1.0
+    force_scale: float = 1.0e-3      # Ha/Angstrom
+    #: Cluster forces are a ``create_graph=True`` backward through the coupled solve and the
+    #: single most expensive thing in a step. Every other step is the trade taken.
+    force_every: int = 2
+
+    # --- the isolated stream -------------------------------------------------------------
+    #: Weight on the fragment-view stream: ``fragment_energy`` and the fragment multipoles, on
+    #: every fragment of every cluster as its own frame. ``eta`` is identically zero there, so
+    #: this is a direct measurement of the isolated-fragment sector.
+    fragment_weight: float = 10.0
+    fragment_batch_size: int = 64
+    #: Weight on the dedicated monomer set, which is the only data carrying a molecular
+    #: polarizability and true one-body forces.
+    anchor_weight: float = 10.0
+    anchor_batch_size: int = 32
+    #: The anchor force term is the fit's other second-order backward; apply it every k-th step.
+    anchor_force_every: int = 5
+
+    # --- the environment penalty ----------------------------------------------------------
+    #: **The dial this design exists to provide.** Penalizes how far each parameter moves
+    #: between ``theta_0`` and ``theta``, in log space for the positive ones. The EDA channels
+    #: fix the *sum*; this decides how much of it is allowed to be environment-dependent,
+    #: pushing every explanation into the fragment unless the data genuinely demands otherwise.
+    #:
+    #: L1 rather than L2, deliberately: the prior is that *most* parameters have no environment
+    #: dependence at all and a few have a lot, which is a sparsity statement, not a smallness
+    #: one. Squaring would spread a little dependence over everything instead.
+    #:
+    #: It replaces ``UnifiedConfig.env_weight``, which penalized ``||h_env - h_frag||`` -- a
+    #: feature-space norm with no physical reading and hence no defensible value.
+    env_penalty_weight: float = 0.0
+    #: Per-quantity overrides, e.g. ``{"c6": 0.1}``. Keys are those of
+    #: :attr:`rsfff.ff.expert_model.ExpertOutput.env_shift`; an unknown key raises.
+    env_penalty_weights: dict = field(default_factory=dict)
+
+    # --- range separation penalties -------------------------------------------------------
+    #: A one-sided barrier holding each inter pair's ``r0`` at or below its element prior. Not a
+    #: pull: an unbounded downward one is what once put -39 kJ/mol per fragment of
+    #: "intramolecular dispersion" between covalently bonded atoms.
+    r0_weight: float = 0.05
+    #: Holds each per-atom ``r0`` near its element prior in log space, so no single atom runs
+    #: away while the barrier above keeps the mean in place.
+    r0_spread_weight: float = 1.0
+
+    # --- ablation ---------------------------------------------------------------------------
+    #: Freeze everything except the environment slot. **Not part of the training schedule** --
+    #: see ``docs/fff_v2.md`` §4 for why freezing after a monomer stage is wrong. It is here to
+    #: answer "how much can the environment sector explain on its own".
+    freeze_core: bool = False
+
+
+@dataclass
 class StageConfig:
     """One stage of a staged fit: a name plus per-block overrides of the parent config.
 
@@ -772,6 +929,7 @@ class Config:
     onebody: OneBodyConfig = field(default_factory=OneBodyConfig)
     joint: JointConfig = field(default_factory=JointConfig)
     unified: UnifiedConfig = field(default_factory=UnifiedConfig)
+    expert: ExpertConfig = field(default_factory=ExpertConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
@@ -887,6 +1045,7 @@ def load_config(path) -> Config:
     joint_cfg = _from_block(JointConfig, raw.get("joint", {}) or {})
     unified_cfg = _from_block(UnifiedConfig, raw.get("unified", {}) or {})
     train_cfg = TrainConfig(
+        seed=int(train.get("seed", TrainConfig.seed)),
         epochs=int(train.get("epochs", TrainConfig.epochs)),
         batch_size=int(train.get("batch_size", TrainConfig.batch_size)),
         learning_rate=float(train.get("learning_rate", TrainConfig.learning_rate)),

@@ -54,7 +54,7 @@ import torch
 import torch.nn as nn
 
 from ..features.features import LambdaFeatures
-from ..mlip.heads import mlp, zero_init_readout
+from ..mlip.heads import two_slot_mlp, zero_init_readout
 from ..mlip.pair_heads import PairEnergyHead
 from ..mlip.response_heads import AtomicQuadrupoleHead, AtomicVectorHead
 from ..mlip.switch import pairwise_switch
@@ -175,6 +175,9 @@ class PauliMultipoleHeads(nn.Module):
         log_b_prior: torch.Tensor,      # (n_species,)
         dipole_scale: torch.Tensor,     # (n_species,)
         p2: int | None = None,
+        p_env: int = 0,
+        p1_env: int = 0,
+        p2_env: int = 0,
         quad_scale: torch.Tensor | None = None,     # (n_species,)
         irrep2_to_spherical: torch.Tensor | None = None,   # (5, 5)
         emb_dim: int = 16,
@@ -204,8 +207,17 @@ class PauliMultipoleHeads(nn.Module):
         self.d_log_q = nn.Parameter(torch.zeros(n_species), requires_grad=learn_q)
         self.d_log_b = nn.Parameter(torch.zeros(n_species), requires_grad=learn_b)
 
-        self.q_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_q else None
-        self.b_mlp = mlp(p0 + emb_dim, hidden, depth, 1) if environment_b else None
+        # `p0`/`p1`/`p2` are the **fragment** slot widths, `*_env` the environment slot's. The
+        # input is `[ h | eta | emb ]`, embedding last -- see `two_slot_mlp`. All the `*_env`
+        # default to 0, which rebuilds this head exactly as it was.
+        self.q_mlp = (
+            two_slot_mlp(p0, p_env, hidden, depth, 1, p_tail=emb_dim)
+            if environment_q else None
+        )
+        self.b_mlp = (
+            two_slot_mlp(p0, p_env, hidden, depth, 1, p_tail=emb_dim)
+            if environment_b else None
+        )
         for m in (self.q_mlp, self.b_mlp):
             if m is not None:   # start at exactly the per-species prior
                 zero_init_readout(m)
@@ -218,7 +230,8 @@ class PauliMultipoleHeads(nn.Module):
                     "(e.g. [0, 1, 2]) or set max_rank: 0 / learn_dipole: false"
                 )
             self.dipole_head = AtomicVectorHead(
-                p0, p1, emb_dim, hidden=hidden, depth=depth, equiv_channels=equiv_channels
+                p0, p1, emb_dim, p_env=p_env, p1_env=p1_env,
+                hidden=hidden, depth=depth, equiv_channels=equiv_channels,
             )
 
         self.quadrupole_head = None
@@ -234,7 +247,7 @@ class PauliMultipoleHeads(nn.Module):
                     "with rsfff.ff.multipole.irrep2_to_spherical(backend.irrep6_to_voigt())"
                 )
             self.quadrupole_head = AtomicQuadrupoleHead(
-                p0, p2, emb_dim, irrep2_to_spherical,
+                p0, p2, emb_dim, irrep2_to_spherical, p_env=p_env, p2_env=p2_env,
                 hidden=hidden, depth=depth, equiv_channels=equiv_channels,
             )
 

@@ -49,8 +49,10 @@ BASE_COLUMNS = [
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("structures", nargs="*", help="XYZ files to optimize")
-    ap.add_argument("--config", default="configs/water_staged.yaml")
-    ap.add_argument("--stage", default="full", help="config stage used to build the model")
+    # Recorded in the result JSON, but no longer load-bearing: the model is rebuilt from the
+    # checkpoint's own embedded config. See benchmark_utils.load_water_model.
+    ap.add_argument("--config", default=None)
+    ap.add_argument("--stage", default=None, help="recorded in the results; not used to build")
     ap.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
     ap.add_argument("--checkpoint-root", default=None)
     ap.add_argument("--device", default=None)

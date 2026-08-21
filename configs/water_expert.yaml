@@ -1,0 +1,248 @@
+# The fragment-expert model of docs/fff_v2.md, fitted in one run.
+#
+#   python -m rsfff.train.train_expert configs/water_expert.yaml
+#
+# Writes to checkpoints/water_expert*/. The v1 model and its trained checkpoint are untouched:
+# see configs/archive/water_staged.yaml and src/ff/v1.
+#
+# The one idea. Every parameter comes from a fragment expert evaluated on two slots -- a
+# fragment descriptor `h` and a cross-fragment descriptor `eta` that is *identically zero* when
+# a fragment is alone. So every quantity exists at two values, `theta = P(h, eta)` and
+# `theta_0 = P(h, 0)`, and the one-body sector reads only the second. That makes
+# `fragment_energy` exactly the isolated-fragment quantity its label is, at every geometry and
+# at every point in training, with no freeze and nothing to enforce.
+#
+# What to watch, in order of what will bite:
+#
+#   env_c6      how far each parameter moved between theta_0 and theta. **The numbers this
+#   env_b_disp  whole design exists to produce.** The EDA channels fix the sum of the
+#   env_pauli_* interaction energy; `env_penalty_weight` decides how much of it is allowed to
+#   env_e_bond  be environment-dependent. If a channel's explanation lives here rather than in
+#               the fragment, the penalty is too loose. `env_e_bond` is the charge transfer.
+#   env_norm    ||eta||. A property of the geometry, not of the weights, so unlike the old
+#               environment residual it cannot be flattened by weight decay. Nonzero on any
+#               cluster batch; exactly zero on the isolated streams, by construction.
+#   ob_mae      the one-body error on the *cluster* batch. Not optimized against that batch --
+#   frag_mae    `frag_mae` on the fragment-view stream is -- so it is a free running check that
+#               the two agree, which they must, being the same function of the same weights.
+#   ind_ff      the coupled solve's own relaxation, against `env_e_bond`. Induction is a real
+#               relaxation of the multipoles plus a shift in the bonding parameters; both are
+#               physical and the ratio is what has to stay honest. Two previous charge-transfer
+#               channels were 96.7% and 100% neural.
+#   internal    the unlabeled split inside `fragment_energy`. Only the sum is fitted, so this
+#   bond        is a flat direction: watch the spread over the last epochs, not the values.
+#   cg_ind      CG iterations, 5-8 on a fresh model. A climbing count is the early warning that
+#   cg_fail     the coupled functional is losing positive definiteness. `cg_fail` must stay 0.
+
+run_name: water_expert
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  # The only file with molecular polarizability tensors and true one-body forces. The bulk of
+  # the isolated-fragment supervision now comes from exploding the clusters above into their
+  # fragments (~34k geometries against these 499), which this complements rather than replaces.
+  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
+  # wB97M-V/def2-TZVPD, matching the labels. These seed the per-element chi_0/eta_0 of the SQE
+  # solve. They are an *initialization* only now: the free-atom polarizability penalty is gone,
+  # because pinning alpha at a geometry the water expert does not claim to describe is a
+  # constraint on nothing this model is asked about.
+  atomic_reference_states: data/atomic_reference_states_wb97mv_tzvpd.json
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]   # lambda=1 for chivec/Pauli dipoles, lambda=2 for alpha
+  backend: e3nn
+  density_channels: 8
+
+expert:
+  # One composition in this data. A fragment whose composition has no expert raises: there is
+  # no generic head to fall back to, which is the point.
+  compositions: ["H2O"]
+  max_rank: 2                   # must match elec.max_rank
+
+  # The environment slot. Off makes every parameter fragment-confined and the model rigorously
+  # two-body -- a genuinely useful ablation, and what `tests/test_expert_model.py` pins.
+  environment_features: true
+
+  # Range separation: per element (src/ff/range_priors.py), per channel, learnable.
+  alpha_init: 40.0
+  learn_r0: true
+  learn_alpha: true
+  # The only route by which the electrostatic channel can acquire *any* environment dependence,
+  # and that dependence is booked to induction rather than to cls_elec -- eda_cls_elec is the
+  # Coulomb interaction between superimposed frozen monomer densities and so is rigorously
+  # pairwise. Off for the first fit: it competes with the parameters for the same mid-range
+  # energy. Turning it on is what makes `env_gate_elst` meaningful.
+  environment_r0: false
+
+  # Identically zero for a neutral singlet, so inert on this data. Present so one "OH" expert
+  # can tell hydroxide from the OH radical when that data arrives. 0 drops it entirely.
+  fragment_state_dim: 4
+
+  # The bonding term. No free-atom anchoring and no per-species offset: the readout bias *is*
+  # the one-body constant now, which is the direction the anchoring used to cancel. The cost of
+  # that cancellation was a measured -5.23 kJ/mol per fragment, 99.7% of the one-body loss.
+  bond_hidden: 32
+  bond_depth: 2
+  bond_equiv_channels: 32
+  bond_energy_scale: 0.2        # Hartree; water's two O-H bonds are ~-0.37 Ha
+
+  # Emitted and logged, untrained: with one sensible fragmentation of water there is no signal
+  # to fit it against. On when there is something to compete with.
+  applicability: false
+
+  # Classical reach. The largest sets the one shared pair list.
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+
+  induction: true
+
+  # --- loss. Each term is 1.0 at an error of one energy_scale, so these are dimensionless. ---
+  energy_scale: 3.8093e-4
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  induction_weight: 30.0
+  # Off, and measured rather than assumed: the total is one number per frame against five
+  # well-posed component targets and it admits every wrong split that happens to sum correctly.
+  # At weight 10 on the previous model the coupled solve stopped doing the work entirely.
+  total_energy_weight: 0.0
+  force_weight: 1.0
+  force_scale: 1.0e-3
+  force_every: 2
+
+  # The isolated streams. `fragment_weight` carries the one-body sector now; the anchor adds
+  # the polarizability and the true one-body forces that only the monomer file has.
+  fragment_weight: 10.0
+  fragment_batch_size: 64
+  anchor_weight: 10.0
+  anchor_batch_size: 32
+  anchor_force_every: 5
+
+  # **The dial.** 0 for the first fit, so the first run measures how much environment
+  # dependence the data asks for *unopposed*. Read env_c6 / env_b_disp / env_pauli_multipole /
+  # env_e_bond off that run and set this against them; raising it before knowing the
+  # unconstrained answer is choosing a number with nothing to compare it to.
+  env_penalty_weight: 0.0
+
+  # A one-sided barrier at the element prior, not the unbounded downward pull this used to be:
+  # that pull is what put -39 kJ/mol per fragment of "intramolecular dispersion" between
+  # covalently bonded atoms, with nothing opposing it.
+  r0_weight: 0.05
+  r0_spread_weight: 1.0
+
+  cg_rtol: 1.0e-9
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+
+# Reused verbatim: the response solve and the two parameter heads. What changed is who *owns*
+# the heads these configure, not how they are configured.
+elec:
+  max_rank: 2
+  environment_chi: true
+  environment_eta: true
+  eta_floor: 0.05
+  learn_dipole: true
+  learn_quadrupole: true
+  # Only charges and dipoles move. Each atom keeps a permanent quadrupole, emitted directly,
+  # but no field gradient moves it and the coupled solve carries no quadrupole variable.
+  quadrupole_response: false
+  anisotropic_cquad: true
+  # Output the permanent multipoles directly; alpha/cquad describe only the response to a
+  # field. This stops the permanent moment being a product of two heads -- the entanglement
+  # that let the polarizability be dismantled while the dipole labels looked fine.
+  direct_multipoles: true
+  learn_z: true
+  environment_z: false
+  learn_b: true
+  environment_b: false
+  s_init: 0.5
+  emb_dim: 8
+  hidden: 32
+  depth: 2
+  equiv_channels: 32
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
+
+dispersion:
+  b_prior: per_element
+  learn_c6: true
+  environment_c6: true
+  learn_b: true
+  environment_b: false
+  emb_dim: 8
+  hidden: 16
+  depth: 2
+
+pauli:
+  learn_q: true
+  environment_q: true
+  learn_b: true
+  environment_b: false
+  learn_dipole: true
+  learn_quadrupole: true
+  emb_dim: 8
+  hidden: 16
+  depth: 2
+  equiv_channels: 16
+
+onebody:
+  # Read only for the monomer anchor, where the QC gradient really is -dE_1body/dR.
+  energy_scale: 3.8093e-4
+  force_weight: 1.0
+  force_scale: 1.0e-3
+
+train:
+  epochs: 80
+  init_from: ""
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 128
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 5
+
+# A cheap pre-train on the isolated streams before the clusters arrive: it gets the one-body and
+# response sectors into the right basin so the coupled solve does not spend its first epochs on
+# nonsense multipoles. **A warm start, never a freeze** -- freezing the isolated sector after a
+# monomer stage would pin C6, b_disp, the Pauli multipoles and r0 at noise, because monomer data
+# cannot constrain them at all, and force the environment weights to carry the whole dispersion
+# and Pauli parameterization. See docs/fff_v2.md §4.
+stages:
+  - name: isolated
+    train:
+      epochs: 15
+      # No annealing: this stage is a warm start, not a converged answer.
+      lr_schedule: none
+    expert:
+      # No coupled solve, no cluster forces. The interaction channels still run -- they are the
+      # only constraint C6, b_disp and the Pauli multipoles have anywhere -- but cheaply.
+      induction: false
+      force_weight: 0.0
+      total_energy_weight: 0.0
+      fragment_weight: 30.0
+
+  - name: full
+    train:
+      epochs: 80
+    expert:
+      induction: true

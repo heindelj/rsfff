@@ -1,3 +1,14 @@
+# ============================================================================
+# ARCHIVED. This config belongs to the **v1** model, frozen in `src/ff/v1`.
+#
+# It trained `checkpoints/water_staged/best.pt`, which the benchmarks still run
+# against. It will NOT load into the live fragment-expert model -- v1's
+# `EnvironmentResidual`, its free-atom-anchored `AtomicStateEnergy` and its
+# `atomic_energy_offset_scale` all went away with `docs/fff_v2.md`.
+#
+# For the current model see `configs/water_expert.yaml`.
+# ============================================================================
+
 # The whole decomposition, fitted in one run.
 #
 #   python -m rsfff.train.train_unified configs/water_staged.yaml

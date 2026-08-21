@@ -65,7 +65,7 @@ import torch
 import torch.nn as nn
 
 from ..features import BesselBasis
-from .heads import mlp, zero_init_readout
+from .heads import two_slot_mlp, zero_init_readout
 
 
 def _local_index(group_idx: torch.Tensor, n_groups: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -238,6 +238,7 @@ class PairComplianceHead(nn.Module):
         self,
         p0: int,
         *,
+        p_env: int = 0,
         hidden: int = 64,
         depth: int = 2,
         n_radial: int = 8,
@@ -250,7 +251,20 @@ class PairComplianceHead(nn.Module):
         self.radial = BesselBasis(n_radial, cutoff)
         # `bias=False`: this readout's bias *is* the initial compliance `s_init`, so zeroing
         # it would close every channel. The weight-decay exemption applies either way.
-        self.net = zero_init_readout(mlp(2 * p0 + n_radial, hidden, depth, 1), bias=False)
+        # Two slots, and this head is the one place the layout needs rearranging rather than
+        # just widening. Its input is a *symmetric pair* reduction, `[sum | absdiff | radial]`,
+        # so with `h = [h_frag | eta]` the environment columns land in two disjoint places.
+        # `forward` therefore regroups them to `[frag_sum | frag_diff | env_sum | env_diff |
+        # radial]`, which puts the environment in one contiguous block with the radial basis as
+        # the tail. At `p_env = 0` that regrouping is a no-op and the layout, the modules and
+        # the parameter names are exactly what they have always been.
+        self.p0, self.p_env = int(p0), int(p_env)
+        self.net = zero_init_readout(
+            two_slot_mlp(
+                2 * self.p0, 2 * self.p_env, hidden, depth, 1, p_tail=n_radial
+            ),
+            bias=False,
+        )
         raw = torch.log(torch.expm1(torch.tensor(max(float(s_init) - self.s_floor, 1e-6))))
         with torch.no_grad():
             self.net[-1].bias.fill_(raw.item())
@@ -277,7 +291,11 @@ class PairComplianceHead(nn.Module):
         i, j = bond_index[0], bond_index[1]
         h_i, h_j = h[i], h[j]
         r = (positions[i] - positions[j]).norm(dim=-1)
-        x = torch.cat((h_i + h_j, (h_i - h_j).abs(), self.radial(r)), dim=-1)
+        # A narrow `h` is the isolated evaluation, the same convention `TwoSlotLinear` uses.
+        blocks = [h_i + h_j, (h_i - h_j).abs()]
+        if self.p_env and h.shape[-1] != self.p0:
+            blocks = [b[..., : self.p0] for b in blocks] + [b[..., self.p0 :] for b in blocks]
+        x = torch.cat(blocks + [self.radial(r)], dim=-1)
         s = torch.nn.functional.softplus(self.net(x).squeeze(-1)) + self.s_floor
         return s if envelope is None else s * envelope
 
