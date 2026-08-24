@@ -37,13 +37,49 @@ def resolve_device(name: str) -> torch.device:
     return torch.device("cpu")
 
 
-def _iter_minibatches(indices: torch.Tensor, batch_size: int, *, shuffle: bool, seed: int):
+def _iter_minibatches(
+    indices: torch.Tensor,
+    batch_size: int,
+    *,
+    shuffle: bool,
+    seed: int,
+    group_id: torch.Tensor | None = None,
+):
+    """Minibatches of ``indices``, keeping whole ``group_id`` groups together when given.
+
+    Grouping matters for the multi-fragmentation data: the applicability term compares a
+    geometry's decompositions against each other, which it can only do if they are in the
+    same minibatch. Groups are shuffled as units and packed until the batch is full, so a
+    batch overshoots ``batch_size`` by at most one group's size -- a frame or two, which
+    ``run_epoch`` absorbs because it returns per-sample means.
+    """
     idx = indices
+    if group_id is None:
+        if shuffle:
+            g = torch.Generator().manual_seed(seed)
+            idx = indices[torch.randperm(indices.shape[0], generator=g)]
+        for start in range(0, idx.shape[0], batch_size):
+            yield idx[start : start + batch_size]
+        return
+
+    keys = torch.as_tensor(group_id, dtype=torch.long)[idx]
+    unique, inverse = torch.unique(keys, return_inverse=True)
+    order = torch.arange(unique.shape[0])
     if shuffle:
         g = torch.Generator().manual_seed(seed)
-        idx = indices[torch.randperm(indices.shape[0], generator=g)]
-    for start in range(0, idx.shape[0], batch_size):
-        yield idx[start : start + batch_size]
+        order = torch.randperm(unique.shape[0], generator=g)
+    members = [idx[(inverse == int(k)).nonzero().squeeze(-1)] for k in order]
+
+    batch: list[torch.Tensor] = []
+    size = 0
+    for group in members:
+        if batch and size + group.shape[0] > batch_size:
+            yield torch.cat(batch)
+            batch, size = [], 0
+        batch.append(group)
+        size += group.shape[0]
+    if batch:
+        yield torch.cat(batch)
 
 
 def _run_epoch(model, dataset, indices, config, device, *, optimizer=None, seed=0):

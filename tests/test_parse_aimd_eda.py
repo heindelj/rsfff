@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from rsfff.ff.pairs import union_pairs
 from rsfff.qcgen.multifrag import read_multifrag_extxyz, recenter
 from rsfff.train.data import load_extxyz
 
@@ -120,7 +121,12 @@ def test_each_fragmentation_loads_as_an_ordinary_dataset(parsed):
         assert len(ds) == 3
         assert ds.has_fragments and ds.has_forces
         n = len(raw[0]["symbols"])
-        assert ds._fragment_idx[:n].tolist() == list(raw[0]["fragment_idx"][k])
+        # The loader groups a frame's atoms by the selected partition, because the pair
+        # builder refuses an interleaved one -- so the rows come back permuted and the
+        # partition, not the column order, is what must match.
+        assert ds._fragment_idx[:n].tolist() == sorted(raw[0]["fragment_idx"][k])
+        batch = ds.flat_batch(range(len(ds)))
+        union_pairs(batch.positions, batch.batch_idx, batch.fragment_idx, 12.0)
         seen.append(ds._eda["ct"][0].item())
         assert ds._eda["ct"][0].item() == pytest.approx(raw[0]["eda"]["ct"][k], abs=1e-15)
     assert len(set(seen)) == 3, "the three decompositions should not share a CT energy"

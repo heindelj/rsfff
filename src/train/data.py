@@ -112,6 +112,12 @@ class Batch:
     n_fragments: int = 0
     bond_index: torch.Tensor | None = None
     bond_batch: torch.Tensor | None = None
+    #: (B,) which *geometry* each frame is a decomposition of. Frames sharing an id are the
+    #: same nuclei under different fragmentations, so they are alternatives to be compared
+    #: rather than independent samples: the train/val split keeps a group whole
+    #: (:func:`split_indices_grouped`) and the applicability term softmaxes within one.
+    #: ``None`` for data where every frame is its own geometry.
+    group_id: torch.Tensor | None = None
 
     def to(self, device) -> "Batch":
         opt = lambda t: t.to(device) if t is not None else None  # noqa: E731
@@ -141,6 +147,7 @@ class Batch:
             n_fragments=self.n_fragments,
             bond_index=opt(self.bond_index),
             bond_batch=opt(self.bond_batch),
+            group_id=opt(self.group_id),
         )
 
 
@@ -174,6 +181,7 @@ class MoleculeDataset:
         fragment_counts: torch.Tensor | None = None,     # (n_frames,) fragments per frame
         bond_index: torch.Tensor | None = None,          # (2, Nbond_all) frame-local
         bond_counts: torch.Tensor | None = None,         # (n_frames,) channels per frame
+        group_id: torch.Tensor | None = None,            # (n_frames,) geometry id
     ) -> None:
         self._pos = positions
         self._num = atomic_numbers.long()
@@ -202,6 +210,7 @@ class MoleculeDataset:
         self._fragment_counts = fragment_counts.long() if fragment_counts is not None else None
         self._bond_index = bond_index
         self._bond_counts = bond_counts.long() if bond_counts is not None else None
+        self._group_id = group_id.long() if group_id is not None else None
         if self._fragment_counts is not None:
             self._frag_offsets = torch.cat(
                 (torch.zeros(1, dtype=torch.long), torch.cumsum(self._fragment_counts, 0))
@@ -325,6 +334,7 @@ class MoleculeDataset:
             eda=(
                 {k: v[idx] for k, v in self._eda.items()} if self._eda is not None else None
             ),
+            group_id=self._group_id[idx] if self._group_id is not None else None,
             **fragments,
             **channels,
         )
@@ -462,6 +472,9 @@ def _select_fragmentation(atoms, fragmentation: int, path) -> None:
     A model that *mixes* over the decompositions wants all of them at once and
     should read the file with :func:`rsfff.qcgen.multifrag.read_multifrag_extxyz`
     instead; this function deliberately throws the alternatives away.
+
+    The atoms are then re-sorted by the selected partition -- see
+    :func:`_sort_by_fragment`, which is not optional for this data.
     """
     info = atoms.info
     n_sets = info.get("n_fragmentations")
@@ -471,6 +484,7 @@ def _select_fragmentation(atoms, fragmentation: int, path) -> None:
                 f"{path}: fragmentation={fragmentation} was requested but this file has "
                 f"one fragmentation per frame (no `n_fragmentations` header)"
             )
+        _sort_by_fragment(atoms)
         return
     n_sets = int(n_sets)
     k = int(fragmentation)
@@ -517,6 +531,50 @@ def _select_fragmentation(atoms, fragmentation: int, path) -> None:
         info["fragmentation_config_type"] = types[k]
     info["n_fragments"] = int(counts[k])
     info["selected_fragmentation"] = k
+    _sort_by_fragment(atoms)
+
+
+def _sort_by_fragment(atoms) -> None:
+    """Reorder a frame's atoms so ``fragment_idx`` is non-decreasing. In place.
+
+    **Not a tidiness pass.** :func:`rsfff.ff.pairs.union_pairs` and
+    :func:`rsfff.ff.pairs.intra_fragment_channels` both *require* atoms grouped by
+    fragment and raise otherwise, because the channel enumeration works by offsetting
+    a triangular index block per fragment rather than by gathering.
+
+    Files whose atom order comes from a Q-Chem EDA ``$molecule`` block are already
+    grouped, so this is a no-op on ``data/wb97mv_tzvpd/w2``-``w5``. The
+    multi-fragmentation files are not: their canonical atom order is the AIMD
+    trajectory's, shared across every decomposition of a frame, so a decomposition
+    that hands a shared proton to the *other* oxygen interleaves. Measured over
+    ``data/wb97mv_tzvpd``: about half the ``w1_*`` frames interleave at rank 0, and
+    every ``w2_oh-`` frame does at ranks 1 and 2.
+
+    The sort is stable, so atoms keep their relative order inside a fragment, and it
+    is a permutation of rows -- positions, species, forces and every per-atom column
+    move together, so nothing about the frame changes but the order it is written in.
+    ``atoms.calc.results`` is permuted too: ASE keeps the per-atom ``forces`` column
+    there rather than in ``atoms.arrays``, and leaving it behind would silently pair
+    each atom with another atom's gradient. The calculator's cached copy of the atoms
+    is then refreshed, because ``SinglePointCalculator.get_property`` compares that
+    copy against the live object and refuses to answer at all once they differ --
+    which is how this function first announced that it had moved the atoms.
+    """
+    frag = atoms.arrays.get("fragment_idx")
+    if frag is None:
+        return
+    frag = np.asarray(frag)
+    if frag.size < 2 or bool((np.diff(frag) >= 0).all()):
+        return
+    order = np.argsort(frag, kind="stable")
+    for key, value in atoms.arrays.items():
+        atoms.arrays[key] = np.asarray(value)[order]
+    if atoms.calc is not None:
+        for key, value in atoms.calc.results.items():
+            value = np.asarray(value)
+            if value.ndim >= 1 and value.shape[0] == order.shape[0]:
+                atoms.calc.results[key] = value[order]
+        atoms.calc.atoms = atoms.copy()
 
 
 def load_extxyz(
@@ -791,6 +849,7 @@ def concatenate_datasets(datasets: "list[MoleculeDataset]") -> MoleculeDataset:
         fragment_counts=_cat_optional("_fragment_counts"),
         bond_index=_cat_optional("_bond_index", dim=1),
         bond_counts=_cat_optional("_bond_counts"),
+        group_id=_cat_optional("_group_id"),
     )
 
 
@@ -799,6 +858,90 @@ def load_datasets(paths, dtype: torch.dtype = torch.float32, library=None) -> Mo
     if isinstance(paths, (str, Path)):
         paths = [paths]
     return concatenate_datasets([load_extxyz(p, dtype=dtype, library=library) for p in paths])
+
+
+def frame_fragmentations(path) -> int:
+    """How many decompositions a file carries per frame; 1 for an ordinary one.
+
+    Read from the first frame only. Every frame of a file written by
+    ``scripts/parse_aimd_eda.py`` has the same count -- the driver drops a frame whose
+    fragmentation set is incomplete rather than writing a ragged one.
+    """
+    from ase.io import read
+
+    return int(read(str(path), index=0).info.get("n_fragmentations", 1))
+
+
+def load_cluster_datasets(
+    paths,
+    dtype: torch.dtype = torch.float32,
+    library=None,
+    fragmentations: str | int | list[int] = "all",
+) -> MoleculeDataset:
+    """Load cluster files, expanding each frame into one dataset frame per fragmentation.
+
+    The H3O+/OH- files carry several ALMO-EDA decompositions of one geometry (see
+    :mod:`rsfff.qcgen.multifrag`). Each becomes a training frame of its own: the partition is
+    a model *input*, so the same nuclei under two decompositions are two different questions
+    with two different sets of right answers, and both are true.
+
+    They are not, however, two independent samples. The returned dataset carries a
+    ``group_id`` marking which geometry each frame came from, which is what
+    :func:`split_indices_grouped` splits on -- putting one decomposition of a geometry in
+    training and another in validation would leak the geometry outright -- and what the
+    applicability term softmaxes over.
+
+    ``fragmentations`` selects which to load: ``"all"`` (the default), a single index, or a
+    list of them. Files with one fragmentation per frame are loaded once whatever this says,
+    so a mixed corpus of neutral water clusters and ion clusters needs no special casing.
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+
+    parts: list[MoleculeDataset] = []
+    next_group = 0
+    for path in paths:
+        available = frame_fragmentations(path)
+        if fragmentations == "all":
+            wanted = range(available)
+        else:
+            requested = [fragmentations] if isinstance(fragmentations, int) else fragmentations
+            wanted = [k for k in requested if k < available]
+            if not wanted:
+                raise ValueError(
+                    f"{path}: fragmentations={fragmentations} selects nothing; the file has "
+                    f"{available}"
+                )
+        base = next_group
+        for k in wanted:
+            part = load_extxyz(path, dtype=dtype, library=library, fragmentation=k)
+            # Frame i of every fragmentation of one file is the same geometry, so they get
+            # the same id. `base` keeps ids from colliding across files.
+            part._group_id = torch.arange(len(part), dtype=torch.long) + base
+            parts.append(part)
+            next_group = max(next_group, base + len(part))
+    return concatenate_datasets(parts)
+
+
+def split_indices_grouped(group_id, holdout_fraction: float, seed: int = 0):
+    """``split_indices`` over *geometries* rather than frames.
+
+    Several fragmentations of one geometry share every nucleus, so splitting frames at
+    random would put one decomposition in training and another in validation and call the
+    result a held-out measurement. This splits the groups and then takes every frame of
+    each, which costs an exactly-honest validation set and a slightly ragged split fraction.
+
+    Returns ``(train_idx, val_idx)`` over *frames*, as :func:`split_indices` does.
+    """
+    group_id = torch.as_tensor(group_id, dtype=torch.long)
+    unique, inverse = torch.unique(group_id, return_inverse=True)
+    g = torch.Generator().manual_seed(int(seed))
+    perm = torch.randperm(unique.shape[0], generator=g)
+    n_val = int(round(holdout_fraction * unique.shape[0]))
+    val_groups = torch.zeros(unique.shape[0], dtype=torch.bool)
+    val_groups[perm[:n_val]] = True
+    is_val = val_groups[inverse]
+    return (~is_val).nonzero().squeeze(-1), is_val.nonzero().squeeze(-1)
 
 
 def load_isolated_species(path, dtype: torch.dtype = torch.float32) -> Batch:

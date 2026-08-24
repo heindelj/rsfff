@@ -125,7 +125,7 @@ def build_expert(
 
     applicability = (
         ApplicabilityHead(
-            p0, hidden=xcfg.applicability_hidden, depth=xcfg.applicability_depth
+            p0, p_env, hidden=xcfg.applicability_hidden, depth=xcfg.applicability_depth
         )
         if xcfg.applicability else None
     )
@@ -162,6 +162,23 @@ def build_expert_model(config, neighbor_types, reference_energies, atomic_states
         )
         for key in xcfg.compositions
     }
+
+    # `alpha` -- the sharpness of the Fermi handoff -- is one number per channel, with no atom
+    # axis, so a pair whose two atoms belong to different experts has no way to combine two of
+    # them. `r0` has the same problem and solves it by being per atom and combining as a
+    # geometric mean; `alpha` cannot, so it is *shared*: every expert's ParameterDict entry is
+    # made the same Parameter object. One tensor, one gradient, one value in every checkpoint.
+    #
+    # The alternative -- read the first expert's and leave the rest -- is worse than it looks.
+    # Those copies would receive no gradient while `weight_decay` kept acting on them, so they
+    # would decay away silently and a later change of which expert is "first" would move the
+    # model. This repo has been bitten by exactly that (see `zero_init_readout`).
+    if len(experts) > 1:
+        reference = next(iter(experts.values())).range_heads.alpha_raw
+        for expert in experts.values():
+            for name in reference:
+                expert.range_heads.alpha_raw[name] = reference[name]
+
     return FragmentExpertModel(
         featurizer,
         ExpertBank(experts, symbols),

@@ -279,24 +279,56 @@ def test_the_fragmentations_are_actually_different(written):
 
 
 def test_load_extxyz_selects_one_fragmentation(written):
+    """Each fragmentation loads as an ordinary dataset, with its atoms re-sorted.
+
+    ``load_extxyz`` groups a frame's atoms by the selected partition, because
+    ``union_pairs`` refuses an interleaved one. So the per-atom rows come back
+    *permuted* relative to the file, and the check is that the permutation carried
+    everything with it -- not that the order was preserved, which it deliberately is not.
+    """
+    import ase.units
+
     frame, path = written
     for k, ref in enumerate(frame.fragmentations):
         ds = load_extxyz(path, dtype=torch.float64, fragmentation=k)
         assert len(ds) == 2
-        assert ds._fragment_idx[:7].tolist() == list(ref.fragment_idx)
+        got = ds._fragment_idx[:7].numpy()
+        assert (np.diff(got) >= 0).all(), "atoms must come back grouped by fragment"
+        # A stable sort of the partition labels is exactly the labels, sorted.
+        assert got.tolist() == sorted(ref.fragment_idx)
+
+        order = np.argsort(ref.fragment_idx, kind="stable")
+        assert ds._pos[:7].numpy() == pytest.approx(frame.positions[order], abs=1e-9)
+        assert ds._forces[:7].numpy() == pytest.approx(
+            frame.forces[order] / ase.units.Bohr, abs=1e-9
+        )
+
         assert ds._fragment_charge[:2].tolist() == [float(c) for c in ref.fragment_charges]
         assert ds._fragment_energy[:2].numpy() == pytest.approx(ref.fragment_energies, abs=1e-9)
         assert ds._fragment_dipole[:2].numpy() == pytest.approx(ref.fragment_dipoles, abs=1e-9)
         for name, value in ref.eda.items():
             assert ds._eda[name][0].item() == pytest.approx(value, abs=1e-15)
-        # The forces belong to the frame, not to the fragmentation, so every
-        # selection sees the same ones. load_extxyz converts the stored
-        # Hartree/bohr to Hartree/Angstrom on the way in.
-        import ase.units
 
-        assert ds._forces[:7].numpy() == pytest.approx(
-            frame.forces / ase.units.Bohr, abs=1e-9
-        )
+
+def test_the_synthetic_frame_actually_exercises_the_sort(written):
+    """Otherwise the test above would pass on a loader that never re-sorted anything."""
+    frame, _ = written
+    interleaved = [
+        k for k, f in enumerate(frame.fragmentations)
+        if (np.diff(f.fragment_idx) < 0).any()
+    ]
+    assert interleaved, "no fragmentation in the fixture is interleaved"
+
+
+def test_an_interleaved_partition_survives_union_pairs(written):
+    """The reason the sort exists: the pair builder refuses an interleaved partition."""
+    from rsfff.ff.pairs import union_pairs
+
+    _, path = written
+    for k in (0, 1):
+        ds = load_extxyz(path, dtype=torch.float64, fragmentation=k)
+        batch = ds.flat_batch(range(len(ds)))
+        union_pairs(batch.positions, batch.batch_idx, batch.fragment_idx, 6.0)
 
 
 def test_load_extxyz_rejects_an_out_of_range_fragmentation(written):

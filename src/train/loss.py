@@ -394,6 +394,115 @@ def fragment_polarizability_loss(
     return terms, metrics
 
 
+#: Which EDA components measure "how far this decomposition had to move its fragments".
+#: Polarization plus charge transfer is exactly the relaxation from frozen, non-interacting
+#: monomers to the true wavefunction, and it is the sharpest of the available discriminators:
+#: over the 399 H3O+/OH- frames in ``data/wb97mv_tzvpd`` it picks the chemically obvious
+#: assignment 398 times, against 395 for ``|E_int|`` and 368 for ``|E_frz|``.
+APPLICABILITY_COMPONENTS = ("pol", "ct")
+
+
+def _segment_max(values, inverse, n_groups):
+    """Per-segment maximum of ``values``, as a ``(n_groups,)`` tensor."""
+    return values.new_zeros(n_groups).scatter_reduce_(
+        0, inverse, values, reduce="amax", include_self=False
+    )
+
+
+def _segment_log_softmax(values, inverse, n_groups):
+    """Log-softmax of ``values`` within each segment named by ``inverse``.
+
+    Shifted by the per-segment maximum before exponentiating, the usual guard against a
+    large score overflowing -- and not optional here, since the score is unbounded and
+    nothing in training normalizes it.
+    """
+    shifted = values - _segment_max(values, inverse, n_groups)[inverse]
+    total = shifted.new_zeros(n_groups).index_add_(0, inverse, shifted.exp())
+    return shifted - total.log()[inverse]
+
+
+def applicability_loss(out, batch, *, weight: float = 0.0, temperature: float = 50.0):
+    """Fit the applicability score to say which decomposition of a geometry is best.
+
+    The H3O+/OH- files carry several ALMO-EDA decompositions of one geometry, and
+    ``batch.group_id`` says which frames are alternatives to each other. Within a group the
+    predicted per-frame scores are softmaxed and fitted by cross-entropy to a target softmax
+    over ``-|E_pol + E_ct|``: **the decomposition that perturbs its reference fragments least
+    is the best one**, which is the physical statement ALMO-EDA is making and the only sense
+    in which the data ranks fragmentations at all.
+
+    Only *relative* scores are trained, deliberately. Nothing here pins the scale, because
+    nothing downstream uses it: a mixture over decompositions needs weights, and weights come
+    from differences within a geometry.
+
+    ``temperature`` is in kJ/mol and sets how soft the target is. The measured best-versus-
+    second gap runs 165-476 kJ/mol, so at the 50 kJ/mol default the target is nearly one-hot
+    on the frames where the answer is obvious, while a near-degenerate geometry -- where the
+    two decompositions really are comparable -- gets a soft label rather than a confident and
+    arbitrary one.
+
+    Frames whose group has one member contribute nothing: a neutral water cluster has one
+    sensible fragmentation and there is no competition to learn. Returns
+    ``(dict[str, Tensor], dict[str, float])``, both empty when the term does not apply.
+    """
+    from ..ff.units import KJMOL_PER_HARTREE
+
+    terms: dict[str, torch.Tensor] = {}
+    metrics: dict[str, float] = {}
+    scores = getattr(out, "applicability", None)
+    if weight <= 0.0 or scores is None or batch.group_id is None or batch.eda is None:
+        return terms, metrics
+    missing = [k for k in APPLICABILITY_COMPONENTS if k not in batch.eda]
+    if missing:
+        raise KeyError(
+            f"the applicability term is fitted against "
+            f"{' + '.join('eda_' + m for m in APPLICABILITY_COMPONENTS)} and the dataset has "
+            f"no {', '.join('eda_' + m for m in missing)}"
+        )
+
+    # One score per frame: a frame *is* a decomposition. Mean rather than sum so a group
+    # whose members somehow differ in fragment count is still comparing like with like.
+    f2b = batch.fragment_to_batch
+    per_frame = scores.new_zeros(batch.n_systems).index_add_(0, f2b, scores)
+    counts = scores.new_zeros(batch.n_systems).index_add_(0, f2b, torch.ones_like(scores))
+    per_frame = per_frame / counts.clamp(min=1.0)
+
+    unique, inverse = torch.unique(batch.group_id, return_inverse=True)
+    n_groups = int(unique.shape[0])
+    sizes = torch.bincount(inverse, minlength=n_groups)
+    contested = sizes[inverse] > 1
+    if not bool(contested.any()):
+        return terms, metrics
+
+    perturbation = sum(batch.eda[k] for k in APPLICABILITY_COMPONENTS).abs()
+    target_logits = -perturbation * (KJMOL_PER_HARTREE / float(temperature))
+
+    log_pred = _segment_log_softmax(per_frame, inverse, n_groups)
+    log_target = _segment_log_softmax(target_logits.detach(), inverse, n_groups)
+    target = log_target.exp()
+
+    # Cross-entropy, averaged over the contested groups. Single-member groups are masked to
+    # zero rather than dropped, so the tensor shapes stay batch-aligned.
+    n_contested = int((sizes > 1).sum())
+    cross_entropy = -(target * log_pred) * contested.to(log_pred.dtype)
+    terms["applicability"] = weight * cross_entropy.sum() / max(n_contested, 1)
+
+    with torch.no_grad():
+        # The score's argmax must be *unique* to count. A zero-initialized head gives every
+        # decomposition the same score, and a tolerance comparison would then mark every
+        # frame as "picked" and report perfect accuracy for a model with no opinion at all --
+        # which is exactly what it did on the first run of this term.
+        at_best = per_frame >= _segment_max(per_frame, inverse, n_groups)[inverse] - 1e-12
+        n_at_best = torch.zeros(n_groups, dtype=torch.long, device=per_frame.device)
+        n_at_best.index_add_(0, inverse, at_best.to(torch.long))
+        wanted = target >= _segment_max(target, inverse, n_groups)[inverse] - 1e-12
+        agrees = at_best & wanted & contested & (n_at_best[inverse] == 1)
+        hit = torch.zeros(n_groups, dtype=torch.long, device=per_frame.device)
+        hit.index_add_(0, inverse, agrees.to(torch.long))
+        metrics["app_acc"] = float((hit > 0).sum()) / max(n_contested, 1)
+    return terms, metrics
+
+
 def free_atom_batch(states, neighbor_types, *, dtype, device, neutral_only=True):
     """One isolated atom per system, one system per selected reference state.
 

@@ -78,13 +78,15 @@ from ..mlip.reference_states import AtomicStateReference
 from .build_expert import build_expert_model
 from .config import Config, load_config, stage_config
 from .data import (
+    concatenate_datasets,
     fragment_view,
-    load_datasets,
+    load_cluster_datasets,
     load_extxyz,
     load_reference_energies,
-    split_indices,
+    split_indices_grouped,
 )
 from .loss import (
+    applicability_loss,
     compute_forces,
     fragment_multipole_loss,
     fragment_polarizability_loss,
@@ -104,7 +106,7 @@ _INDUCTION_COMPONENTS = ("pol", "ct")
 _LOG_KEYS = (
     "loss", "ob_mae", "elst_mae", "pauli_mae", "disp_mae", "ind_mae", "e_tot_mae",
     "f_clu", "frag_mae", "dip_mae", "quad_mae", "alpha_mae", "f_mono",
-    "internal", "bond", "q_res",
+    "internal", "bond", "q_res", "applicability", "app_acc",
     "r0_elst", "r0_pauli", "r0_disp",
     # The environment sector, per quantity. See the module docstring.
     "env_norm", "env_c6", "env_b_disp", "env_pauli_multipole", "env_e_bond",
@@ -159,6 +161,17 @@ def expert_fit(out, batch, cfg: Config, *, training: bool = True, with_forces: b
         if out.energy_frozen_total is not None and out.level_ind is not None:
             relax = out.level_ind.energy - out.energy_frozen_total
             metrics["ind_ff"] = float(relax.detach().mean()) * KJMOL_PER_HARTREE
+
+    # Which decomposition of this geometry is the best one. Contributes only where the batch
+    # actually holds competing fragmentations of one geometry -- see `applicability_loss`.
+    app_terms, app_metrics = applicability_loss(
+        out, batch,
+        weight=x.applicability_weight,
+        temperature=x.applicability_temperature,
+    )
+    for value in app_terms.values():
+        loss = loss + value
+    metrics.update(app_metrics)
 
     if batch.energy is not None:
         e_err = out.energy - batch.energy
@@ -224,7 +237,7 @@ class IsolatedStreams:
         *,
         fragment_dataset,
         fragment_batch_size: int,
-        anchor_dataset=None,
+        anchor_datasets=(),
         anchor_batch_size: int = 32,
         anchor_force_every: int = 5,
         seed: int = 0,
@@ -233,7 +246,8 @@ class IsolatedStreams:
         self.device = device
         self.fragments = fragment_dataset
         self.fragment_batch_size = int(fragment_batch_size)
-        self.anchor = anchor_dataset
+        #: One per label set; see the anchor block in :meth:`penalties`.
+        self.anchors = list(anchor_datasets)
         self.anchor_batch_size = int(anchor_batch_size)
         self.anchor_force_every = max(int(anchor_force_every), 1)
         self.generator = torch.Generator().manual_seed(int(seed))
@@ -328,45 +342,53 @@ class IsolatedStreams:
             extra.update({k: x.fragment_weight * v for k, v in mm.items()})
             self._metrics.update(mm_metrics)
 
-        # --- the dedicated monomer set ----------------------------------------------------
+        # --- the dedicated monomer sets ---------------------------------------------------
         # The only data carrying a molecular polarizability -- the one label that says how the
         # charges and dipoles *move* rather than where they sit -- and true one-body forces.
-        drawn = (
-            self._draw(
-                self.anchor, self.anchor_batch_size, training, grad_positions=True
-            )
-            if self.anchor is not None else None
-        )
-        if drawn is None:
-            return extra
-        anchor_batch, _ = drawn
-        with torch.enable_grad():
-            anchor_out = self.model(
-                anchor_batch,
-                with_polarizability=cfg.elec.polarizability_weight > 0.0,
-                # Same reason as the fragment stream, plus one more: `onebody_anchor_loss`
-                # takes its force from `out.energy` on the premise that a one-fragment system
-                # has `energy == fragment_energy`. This is what makes that exact.
-                with_induction=False,
-            )
+        #
+        # Several streams rather than one, because the files disagree about what they carry:
+        # the bare-ion AIMD trajectories have energies and forces, the `*_pol` references add
+        # multipoles and polarizabilities, and `concatenate_datasets` refuses to mix label
+        # sets (rightly -- the alternative is silently dropping supervision). Every loss term
+        # below already no-ops on an absent label, so each stream contributes what it has.
         w = x.anchor_weight
+        for i, anchor in enumerate(self.anchors):
+            drawn = self._draw(
+                anchor, self.anchor_batch_size, training, grad_positions=True
+            )
+            if drawn is None:
+                continue
+            anchor_batch, _ = drawn
+            with torch.enable_grad():
+                anchor_out = self.model(
+                    anchor_batch,
+                    with_polarizability=cfg.elec.polarizability_weight > 0.0,
+                    # Same reason as the fragment stream, plus one more:
+                    # `onebody_anchor_loss` takes its force from `out.energy` on the premise
+                    # that a one-fragment system has `energy == fragment_energy`. This is
+                    # what makes that exact.
+                    with_induction=False,
+                )
 
-        onebody_cfg = cfg.onebody
-        if training and self._step % self.anchor_force_every != 0:
-            onebody_cfg = replace(onebody_cfg, force_weight=0.0)
-        terms, metrics = onebody_anchor_loss(
-            self.model, anchor_batch, onebody_cfg, out=anchor_out, training=training
-        )
-        extra.update({k: w * v for k, v in terms.items()})
-        self._metrics.update(metrics)
-
-        ap, ap_metrics = fragment_polarizability_loss(
-            anchor_out, anchor_batch,
-            weight=cfg.elec.polarizability_weight,
-            scale=cfg.elec.polarizability_scale,
-        )
-        extra.update({k: w * v for k, v in ap.items()})
-        self._metrics.update(ap_metrics)
+            onebody_cfg = cfg.onebody
+            if training and self._step % self.anchor_force_every != 0:
+                onebody_cfg = replace(onebody_cfg, force_weight=0.0)
+            terms, metrics = onebody_anchor_loss(
+                self.model, anchor_batch, onebody_cfg, out=anchor_out, training=training
+            )
+            ap, ap_metrics = fragment_polarizability_loss(
+                anchor_out, anchor_batch,
+                weight=cfg.elec.polarizability_weight,
+                scale=cfg.elec.polarizability_scale,
+            )
+            # Suffixed per stream: two streams writing `anchor_e` would have the second
+            # silently replace the first in the loss, and the printed line would show one
+            # number for two different things.
+            tag = "" if len(self.anchors) == 1 else f"_{i}"
+            extra.update({f"{k}{tag}": w * v for k, v in {**terms, **ap}.items()})
+            self._metrics.update(
+                {f"{k}{tag}": v for k, v in {**metrics, **ap_metrics}.items()}
+            )
         return extra
 
     def diagnostics(self, out, batch, target):
@@ -398,20 +420,60 @@ def _freeze_core(model) -> None:
     )
 
 
+#: The optional label fields an anchor file may or may not carry. Two files agreeing on all
+#: of these can be concatenated; disagreeing on any one of them means `concatenate_datasets`
+#: would refuse, and rightly -- it has no way to fill the gap.
+_ANCHOR_LABELS = (
+    "_forces", "_dipole", "_polarizability", "_dipole_derivatives",
+    "_fragment_energy", "_fragment_dipole", "_fragment_second_moment",
+)
+
+
+def load_anchor_datasets(paths, *, dtype) -> list:
+    """Monomer anchor files as a list of streams, one per distinct label set.
+
+    The five monomer files in ``data/wb97mv_tzvpd`` do not carry the same labels. The bare-ion
+    AIMD trajectories (``h3o+``, ``oh-``) have energies and true one-body forces and nothing
+    else -- an AIMD run prints no multipoles per step -- while ``h2o_*_pol`` and the three
+    ``*_opt_*_pol`` references add dipoles, second moments and polarizabilities. Concatenating
+    those would mean dropping a label for the frames that have it, so files are grouped by
+    what they carry and each group becomes a stream of its own.
+
+    In practice this returns two streams for that set, not five: everything with
+    polarizabilities lands together, and the two bare-ion trajectories land together.
+    """
+    if not paths:
+        return []
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+
+    by_labels: dict[tuple, list] = {}
+    for path in paths:
+        dataset = load_extxyz(path, dtype=dtype)
+        signature = tuple(getattr(dataset, name) is not None for name in _ANCHOR_LABELS)
+        by_labels.setdefault(signature, []).append(dataset)
+    return [concatenate_datasets(group) for group in by_labels.values()]
+
+
 def _train_once(config: Config):
     dtype = torch.float64 if config.dtype == "float64" else torch.float32
     torch.set_default_dtype(dtype)
     device = resolve_device(config.device, config.dtype)
 
-    clusters = load_datasets(config.data.path, dtype=dtype)
+    clusters = load_cluster_datasets(
+        config.data.path, dtype=dtype, fragmentations=config.data.fragmentations
+    )
     if not clusters.has_fragments:
         raise ValueError(
             "the expert model routes every pair to a per-fragment or per-frame label, so the "
             "dataset needs a `fragment_idx` column"
         )
     neighbor_types = tuple(clusters.unique_atomic_numbers)
-    train_idx, val_idx = split_indices(
-        len(clusters), config.data.holdout_fraction, config.data.seed
+    # By *geometry*, not by frame. Several decompositions of one geometry share every
+    # nucleus, so a frame-wise split would put one in training and its alternative in
+    # validation and report the result as held out.
+    train_idx, val_idx = split_indices_grouped(
+        clusters._group_id, config.data.holdout_fraction, config.data.seed
     )
 
     # Split the clusters *first*, then explode. A fragment of a validation cluster must not
@@ -419,9 +481,7 @@ def _train_once(config: Config):
     # leakage of exactly the quantity `frag_mae` is meant to be validating.
     fragments = fragment_view(clusters, train_idx)
 
-    anchor = None
-    if config.data.monomer_path:
-        anchor = load_extxyz(config.data.monomer_path, dtype=dtype)
+    anchors = load_anchor_datasets(config.data.monomer_path, dtype=dtype)
 
     reference_energies = load_reference_energies(
         config.data.reference_energies, neighbor_types
@@ -444,13 +504,15 @@ def _train_once(config: Config):
 
     n_all = sum(p.numel() for p in model.parameters())
     n_env = sum(p.numel() for _n, p in env_parameters(model))
+    n_geoms = int(torch.unique(clusters._group_id).shape[0])
     print(
-        f"{len(clusters)} cluster frames, {len(train_idx)}/{len(val_idx)} train/val; "
-        f"{len(fragments)} fragment views; "
-        f"{len(anchor) if anchor else 0} monomer anchor frames",
+        f"{len(clusters)} cluster frames over {n_geoms} geometries, "
+        f"{len(train_idx)}/{len(val_idx)} train/val; {len(fragments)} fragment views; "
+        f"{sum(len(a) for a in anchors)} monomer anchor frames in {len(anchors)} stream(s)",
         flush=True,
     )
     print(
+        f"experts {sorted(model.experts.experts)}; "
         f"{n_all} parameters, {n_env} ({100 * n_env / n_all:.1f}%) in the environment slot",
         flush=True,
     )
@@ -459,7 +521,7 @@ def _train_once(config: Config):
         model, device,
         fragment_dataset=fragments,
         fragment_batch_size=config.expert.fragment_batch_size,
-        anchor_dataset=anchor,
+        anchor_datasets=anchors,
         anchor_batch_size=config.expert.anchor_batch_size,
         anchor_force_every=config.expert.anchor_force_every,
         seed=config.data.seed,

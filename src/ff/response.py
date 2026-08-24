@@ -52,6 +52,7 @@ from ..mlip.sqe import (
 )
 from .multipole import l2_rotation_generators
 from .pairs import intra_fragment_channels
+from .slots import select_atoms
 from .units import BOHR_ANG
 
 #: Per-element ``(Z_cp [e], b_elec [1/bohr])`` charge-penetration priors from the fitted CMM
@@ -551,6 +552,7 @@ class FragmentResponse(nn.Module):
         *,
         bond_index: torch.Tensor | None = None,
         envelope: torch.Tensor | None = None,
+        atom_index: torch.Tensor | None = None,
     ) -> ResponseParameters:
         """The heads' outputs plus ``q0`` and the compliances, with no solve.
 
@@ -563,6 +565,17 @@ class FragmentResponse(nn.Module):
         ``envelope`` scales the compliances multiplicatively. It is unused now that no channel
         appears or disappears with distance, and is kept because a reactive model will need it
         again the moment radius-derived channels come back.
+
+        ``atom_index`` restricts the **per-atom** outputs to those rows, for the
+        fragment-expert model, where each composition's parameters come from its own expert
+        and the caller stitches the pieces back together
+        (:class:`rsfff.ff.expert_model.FragmentExpertModel`). ``feats`` and ``bond_index``
+        stay in full-batch indexing either way: the compliance head reads its endpoints out
+        of the full feature array, so restricting *it* is done by handing in a ``bond_index``
+        that only names this subset's channels -- which is well defined because a channel
+        never leaves its fragment and a fragment never spans two experts. The returned
+        ``compliance`` therefore has one row per channel *named*, and the per-atom fields one
+        row per atom *selected*.
         """
         if batch.fragment_idx is None:
             raise ValueError(
@@ -573,7 +586,9 @@ class FragmentResponse(nn.Module):
         frag = batch.fragment_idx
         n_frag = int(batch.n_fragments)
 
-        chi, eta, chivec, alpha_i, z, b, chiquad, cquad = self.params(feats)
+        chi, eta, chivec, alpha_i, z, b, chiquad, cquad = self.params(
+            select_atoms(feats, atom_index)
+        )
         if bond_index is None:
             bond_index, _ = intra_fragment_channels(frag)
         compliance = self.compliance_head(
@@ -584,14 +599,23 @@ class FragmentResponse(nn.Module):
         # sum_i q0_i is *exactly* the formal charge whatever the prior sums to. SQE then
         # conserves that identically, for any compliances. See DEFAULT_Q0_PRIOR for why the
         # starting point is load-bearing rather than cosmetic.
-        counts = torch.bincount(frag, minlength=n_frag).to(positions.dtype)
+        #
+        # Under `atom_index` the sums run over the selected rows only. That is not an
+        # approximation: every atom of a fragment is selected together, so each fragment's
+        # count and prior sum are complete. Fragments outside the selection get a count of
+        # zero and a meaningless shift, and no selected row ever reads them.
+        sel_frag = frag if atom_index is None else frag[atom_index]
+        species_idx = (
+            feats.species_idx if atom_index is None else feats.species_idx[atom_index]
+        )
+        counts = torch.bincount(sel_frag, minlength=n_frag).to(positions.dtype)
         if batch.fragment_charge is None:
             frag_q = positions.new_zeros(n_frag)
         else:
             frag_q = batch.fragment_charge.to(positions.dtype)
-        q0_species = self.params.q0_prior[feats.species_idx]
-        prior_sum = q0_species.new_zeros(n_frag).index_add_(0, frag, q0_species)
-        q0 = q0_species + ((frag_q - prior_sum) / counts.clamp(min=1))[frag]
+        q0_species = self.params.q0_prior[species_idx]
+        prior_sum = q0_species.new_zeros(n_frag).index_add_(0, sel_frag, q0_species)
+        q0 = q0_species + ((frag_q - prior_sum) / counts.clamp(min=1))[sel_frag]
 
         if self.direct_multipoles:
             # The heads' equivariant outputs *are* the permanent multipoles here. Exactly one
@@ -616,70 +640,97 @@ class FragmentResponse(nn.Module):
         that already happened, so it is cheap -- but it is not free, and every cluster forward
         would pay it for a number nothing reads.
         """
-        positions = batch.positions
-        frag = batch.fragment_idx
-        n_frag = int(batch.n_fragments)
-
-        rp = self.response_parameters(batch, feats)
-        chi, eta, alpha_i = rp.chi, rp.eta, rp.alpha
-        z, b, cquad = rp.z, rp.b, rp.cquad
-        # Exactly one of each pair is populated, so read whichever this model is using. The
-        # branch below then decides what it *means*, which is the only place the two forms
-        # differ at the frozen level.
-        chivec = rp.mu0 if self.direct_multipoles else rp.chivec
-        chiquad = rp.quad0 if self.direct_multipoles else rp.chiquad
-        q0, compliance = rp.q0, rp.compliance
-        bond_index, bond_batch = intra_fragment_channels(frag)
-
-        sol = sqe_solve(
-            chi, eta, compliance, q0, positions,
-            bond_index, frag, bond_batch, n_frag,
-            field=None, with_polarizability=with_polarizability,
-        )
-        polarizability = (
-            None if sol.alpha_flow is None
-            else fragment_polarizability(sol.alpha_flow, alpha_i, frag, n_frag)
+        return solve_frozen(
+            self.response_parameters(batch, feats), batch,
+            direct_multipoles=self.direct_multipoles,
+            with_polarizability=with_polarizability,
         )
 
-        mu = None
-        internal = sol.energy
-        # In the direct form the heads' outputs are already the frozen multipoles and the
-        # on-site sectors contribute **no** internal energy: the frozen state is the minimum of
-        # `1/2 (mu - mu0)^T alpha^-1 (mu - mu0)`, which is zero there by construction. The
-        # ~-400 kJ/mol per fragment that `-1/2 chivec^T alpha chivec` used to put here is not
-        # lost, it is handed to the atomic-energy head instead.
-        if chivec is not None:
-            if self.direct_multipoles:
-                mu = chivec
-            else:
-                mu = atomic_dipoles(chivec, alpha_i, frag, None)
-                internal = internal + atomic_dipole_energy(
-                    chivec, alpha_i, frag, n_frag, None
-                )
-        quad_s = None
-        if chiquad is not None:
-            if self.direct_multipoles:
-                quad_s = chiquad
-            else:
-                quad_s = atomic_quadrupoles(chiquad, cquad, frag, None)
-                internal = internal + atomic_quadrupole_energy(
-                    chiquad, cquad, frag, n_frag, None
-                )
-        return FragmentResponseOutput(
-            charges=sol.charges,
-            mu=mu,
-            quad_s=quad_s,
-            internal_energy=internal,
-            transfers=sol.transfers,
-            compliance=compliance,
-            chi=chi,
-            eta=eta,
-            chiquad=chiquad,
-            cquad=cquad,
-            z=z,
-            b=b,
-            polarizability=polarizability,
-        )
+
+def solve_frozen(
+    rp: ResponseParameters,
+    batch,
+    *,
+    direct_multipoles: bool,
+    with_polarizability: bool = False,
+) -> FragmentResponseOutput:
+    """The frozen solve, given parameters that are already assembled.
+
+    Split from :meth:`FragmentResponse.forward` for the fragment-expert model, where the
+    parameters for one batch come from **several** experts: each expert emits the rows for
+    its own fragments, those rows are scattered into full-length tensors, and the solve then
+    runs once for the whole batch.
+
+    Running it once is exact rather than convenient. ``sqe_solve`` couples atoms only along
+    :func:`rsfff.ff.pairs.intra_fragment_channels`, so its linear system is block diagonal
+    over fragments, and a fragment never spans two experts
+    (:meth:`rsfff.ff.expert.ExpertBank.groups` partitions *by fragment*). One global solve
+    and a solve per expert therefore have the same blocks in the same order and differ only
+    in how many kernel launches they cost.
+    """
+    positions = batch.positions
+    frag = batch.fragment_idx
+    n_frag = int(batch.n_fragments)
+
+    chi, eta, alpha_i = rp.chi, rp.eta, rp.alpha
+    z, b, cquad = rp.z, rp.b, rp.cquad
+    # Exactly one of each pair is populated, so read whichever this model is using. The
+    # branch below then decides what it *means*, which is the only place the two forms
+    # differ at the frozen level.
+    chivec = rp.mu0 if direct_multipoles else rp.chivec
+    chiquad = rp.quad0 if direct_multipoles else rp.chiquad
+    q0, compliance = rp.q0, rp.compliance
+    bond_index, bond_batch = intra_fragment_channels(frag)
+
+    sol = sqe_solve(
+        chi, eta, compliance, q0, positions,
+        bond_index, frag, bond_batch, n_frag,
+        field=None, with_polarizability=with_polarizability,
+    )
+    polarizability = (
+        None if sol.alpha_flow is None
+        else fragment_polarizability(sol.alpha_flow, alpha_i, frag, n_frag)
+    )
+
+    mu = None
+    internal = sol.energy
+    # In the direct form the heads' outputs are already the frozen multipoles and the
+    # on-site sectors contribute **no** internal energy: the frozen state is the minimum of
+    # `1/2 (mu - mu0)^T alpha^-1 (mu - mu0)`, which is zero there by construction. The
+    # ~-400 kJ/mol per fragment that `-1/2 chivec^T alpha chivec` used to put here is not
+    # lost, it is handed to the atomic-energy head instead.
+    if chivec is not None:
+        if direct_multipoles:
+            mu = chivec
+        else:
+            mu = atomic_dipoles(chivec, alpha_i, frag, None)
+            internal = internal + atomic_dipole_energy(
+                chivec, alpha_i, frag, n_frag, None
+            )
+    quad_s = None
+    if chiquad is not None:
+        if direct_multipoles:
+            quad_s = chiquad
+        else:
+            quad_s = atomic_quadrupoles(chiquad, cquad, frag, None)
+            internal = internal + atomic_quadrupole_energy(
+                chiquad, cquad, frag, n_frag, None
+            )
+    return FragmentResponseOutput(
+        charges=sol.charges,
+        mu=mu,
+        quad_s=quad_s,
+        internal_energy=internal,
+        transfers=sol.transfers,
+        compliance=compliance,
+        chi=chi,
+        eta=eta,
+        chiquad=chiquad,
+        cquad=cquad,
+        z=z,
+        b=b,
+        polarizability=polarizability,
+    )
 
 
 def _inverse_softplus(x: float) -> float:
@@ -693,6 +744,8 @@ __all__ = [
     "ElectrostaticParameterHeads",
     "FragmentResponse",
     "FragmentResponseOutput",
+    "ResponseParameters",
     "build_elec_priors",
     "fragment_polarizability",
+    "solve_frozen",
 ]

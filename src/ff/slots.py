@@ -51,7 +51,32 @@ import torch
 
 from ..features.features import LambdaFeatures
 
-__all__ = ["SlotDims", "SlotFeatures"]
+__all__ = ["SlotDims", "SlotFeatures", "select_atoms"]
+
+
+def select_atoms(feats: LambdaFeatures | None, atom_index) -> LambdaFeatures | None:
+    """A view of ``feats`` holding only ``atom_index``'s rows, per lambda.
+
+    ``atom_index=None`` means "all of them" and returns ``feats`` untouched, which is what
+    keeps the single-expert path in :class:`rsfff.ff.expert_model.FragmentExpertModel`
+    allocation-free.
+
+    ``edge_index`` is dropped rather than renumbered: it addresses the full batch, and a
+    silently stale copy is worse than an absent one. Nothing that consumes a subset reads it.
+    """
+    if feats is None or atom_index is None:
+        return feats
+    return replace(
+        feats,
+        inv_feats=feats.inv_feats[atom_index],
+        equiv_feats=(
+            None if feats.equiv_feats is None else feats.equiv_feats[atom_index]
+        ),
+        vec_feats=None if feats.vec_feats is None else feats.vec_feats[atom_index],
+        species_idx=feats.species_idx[atom_index],
+        batch_idx=feats.batch_idx[atom_index],
+        edge_index=None,
+    )
 
 
 @dataclass(frozen=True)

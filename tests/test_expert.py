@@ -85,14 +85,49 @@ def test_only_refuses_a_multi_expert_bank():
 # applicability
 # ---------------------------------------------------------------------------------------
 
-def test_applicability_refuses_the_joined_descriptor():
-    """Structural, not conventional: eta cannot reach ``v_f`` even by mistake."""
+def test_applicability_requires_the_joined_descriptor():
+    """The score is about competition between decompositions, so ``eta`` is not optional.
+
+    This head used to *refuse* the joined descriptor, on the reading that applicability was a
+    property of one fragment. It is not: the question is whether this decomposition is the
+    best description of the system, which an H2O with a proton 1 Angstrom away cannot answer
+    from inside its own fragment. Passing the isolated slot is now the width error.
+    """
     torch.set_default_dtype(torch.float64)
-    head = ApplicabilityHead(6, hidden=8, depth=2).double()
+    head = ApplicabilityHead(6, 4, hidden=8, depth=2).double()
+    frag = torch.tensor([0, 0, 0])
+    assert head.width == 10
+    head(torch.randn(3, 10), frag, 1, None, None)      # joined: accepted
+    with pytest.raises(ValueError, match="reads the joined descriptor"):
+        head(torch.randn(3, 6), frag, 1, None, None)   # isolated: refused
+
+
+def test_applicability_sees_the_environment_slot():
+    """A score that ignored eta could not tell two fragmentations of one geometry apart.
+
+    ``TwoSlotLinear.w_env`` is zero-initialized, so the score starts *inert* to the
+    environment -- a fresh model has no opinion about which decomposition is better, which is
+    the right thing to know nothing from. Both halves of that are pinned here: inert at
+    initialization, live once the environment weights have moved.
+    """
+    torch.set_default_dtype(torch.float64)
+    torch.manual_seed(0)
+    head = ApplicabilityHead(6, 4, hidden=8, depth=2).double()
+    head.net[-1].weight.data.normal_()      # wake the zero-init readout
+    head.net[-1].bias.data.normal_()
+
     frag = torch.tensor([0, 0, 0])
     joined = torch.randn(3, 10)
-    with pytest.raises(ValueError, match="reads the fragment slot only"):
-        head(joined, frag, 1, None, None)
+    moved = joined.clone()
+    moved[:, 6:] += 1.0                     # perturb the environment block only
+
+    base = head(joined, frag, 1, None, None)
+    assert torch.allclose(base, head(moved, frag, 1, None, None))
+
+    head.net[0].w_env.data.normal_()        # wake the environment slot
+    assert not torch.allclose(
+        head(joined, frag, 1, None, None), head(moved, frag, 1, None, None)
+    )
 
 
 def test_applicability_is_per_fragment_and_ignores_other_fragments():

@@ -108,6 +108,19 @@ class RangeSeparationHeads(nn.Module):
             for m in self.r0_mlp.values():   # start at exactly the per-element value
                 zero_init_readout(m)
 
+    def alphas(self) -> dict[str, torch.Tensor]:
+        """``{channel: alpha () Angstrom^-1}`` on its own, without evaluating ``r0``.
+
+        ``alpha`` has no atom axis, so unlike ``r0`` it cannot be gathered per expert and
+        stitched back. A model with several experts reads it from one of them and ties the
+        parameters so that "one of them" is not a choice --
+        :func:`rsfff.train.build_expert.build_expert_model` does the tying and says why.
+        """
+        return {
+            name: torch.nn.functional.softplus(self.alpha_raw[name])
+            for name in self.channel_names
+        }
+
     def forward(
         self,
         inv_feats: torch.Tensor,     # (N, p0)

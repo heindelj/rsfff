@@ -263,7 +263,10 @@ def run_epoch(
     sums: dict[str, float] = {}
     counts: dict[str, int] = {}
 
-    for mb in _iter_minibatches(indices, train_cfg.batch_size, shuffle=training, seed=seed):
+    for mb in _iter_minibatches(
+        indices, train_cfg.batch_size, shuffle=training, seed=seed,
+        group_id=getattr(dataset, "_group_id", None),
+    ):
         batch = dataset.flat_batch(mb).to(device)
         if grad_positions:
             batch.positions.requires_grad_(True)

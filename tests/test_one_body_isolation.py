@@ -172,8 +172,18 @@ def test_the_electrostatic_channel_is_fragment_confined(model_factory, water):
     assert torch.equal(before.interaction["elst"], after.interaction["elst"])
 
 
-def test_applicability_is_blind_to_the_environment_weights(model_factory, water):
-    """``v_f`` reads the fragment slot only -- a design constraint, not an implementation detail."""
+def test_applicability_reads_the_environment_and_stays_out_of_the_energy(model_factory, water):
+    """``v_f`` is the one quantity here that *should* move with the environment.
+
+    It used to be asserted blind to it. That was the old reading of the head -- "is this
+    expert right for this fragment" -- and it is not what the score is for: it says whether
+    this *decomposition* is the best description of the system, which is a statement about
+    the surroundings. See :class:`rsfff.ff.expert.ApplicabilityHead`.
+
+    What must still hold is that it is an output and not an input: no energy in the model
+    reads it, so moving the environment weights may move ``applicability`` freely while
+    ``fragment_energy`` stays exactly where it was.
+    """
     model = model_factory()
     _wake(model)
     batch = _with_second_copy(water, 3.0)
@@ -183,7 +193,9 @@ def test_applicability_is_blind_to_the_environment_weights(model_factory, water)
     with torch.no_grad():
         for _name, p in env_parameters(model):
             p.normal_(0.0, 0.5)
-    assert torch.equal(before.applicability, model(batch).applicability)
+    after = model(batch)
+    assert not torch.equal(before.applicability, after.applicability)
+    assert torch.equal(before.fragment_energy, after.fragment_energy)
 
 
 def test_still_blind_after_optimizer_steps(model_factory, water):

@@ -42,7 +42,17 @@ class DataConfig:
     # Isolated-monomer frames used as a multipole anchor by train_elec. Kept separate
     # from `path` rather than concatenated: they carry no eda_* components and they do
     # carry forces, so concatenate_datasets refuses the mix (rightly).
-    monomer_path: str | None = None
+    #
+    # A list gives one anchor *stream* per label set. The five monomer files do not agree on
+    # what they carry -- the bare-ion AIMD trajectories have energies and forces, while
+    # `h2o_*_pol` and the `*_opt_*_pol` references add dipoles, second moments and
+    # polarizabilities -- so they cannot be concatenated, and each stream draws its own
+    # minibatch. See `rsfff.train.train_expert.load_anchor_datasets`.
+    monomer_path: str | list[str] | None = None
+    #: Which decompositions to load from a multi-fragmentation cluster file: ``"all"``, a
+    #: single index, or a list. Files with one fragmentation per frame ignore it.
+    #: ``"all"`` is what makes a geometry contribute every placement of its excess charge.
+    fragmentations: str | int | list[int] = "all"
     holdout_fraction: float = 0.1
     seed: int = 0
 
@@ -809,11 +819,22 @@ class ExpertConfig:
     bond_energy_scale: float = 0.2
 
     # --- applicability ----------------------------------------------------------------
-    #: Emit ``v_f``. Untrained: with one sensible fragmentation of water there is nothing to
-    #: fit it against, so it carries no loss term until competing fragmentations exist.
+    #: Emit ``v_f``, the score saying whether *this decomposition* is the best description of
+    #: the system. It is trained only where competing fragmentations exist: on water, where
+    #: there is one sensible fragmentation, the term below sees no contested group and
+    #: contributes nothing whatever its weight.
     applicability: bool = False
     applicability_hidden: int = 32
     applicability_depth: int = 2
+    #: Weight on the within-geometry cross-entropy of
+    #: :func:`rsfff.train.loss.applicability_loss`. Dimensionless: the term is already an
+    #: average cross-entropy over contested geometries, so 1.0 makes it comparable to one
+    #: nat of confusion per geometry.
+    applicability_weight: float = 0.0
+    #: kJ/mol. How soft the target ranking is. The measured best-versus-second gap in
+    #: ``|E_pol + E_ct|`` runs 165-476 kJ/mol, so this is near-one-hot where the answer is
+    #: clear and soft where two decompositions really are comparable.
+    applicability_temperature: float = 50.0
 
     # --- classical reach --------------------------------------------------------------
     elst_cutoff: float = 12.0
@@ -974,6 +995,15 @@ def stage_config(config: "Config", stage: "StageConfig", init_from: str = "") ->
     return staged
 
 
+def _monomer_paths(value):
+    """``data.monomer_path`` as ``None``, a string, or a list of strings."""
+    if not value:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [str(p) for p in value]
+    return str(value)
+
+
 def _from_block(cls, block: dict):
     """Build a config dataclass from a YAML block, keeping each field's declared type."""
     kwargs = {}
@@ -1023,7 +1053,8 @@ def load_config(path) -> Config:
             str(data["atomic_reference_states"])
             if data.get("atomic_reference_states") else None
         ),
-        monomer_path=(str(data["monomer_path"]) if data.get("monomer_path") else None),
+        monomer_path=_monomer_paths(data.get("monomer_path")),
+        fragmentations=data.get("fragmentations", DataConfig.fragmentations),
         holdout_fraction=float(data.get("holdout_fraction", DataConfig.holdout_fraction)),
         seed=int(data.get("seed", DataConfig.seed)),
     )
@@ -1044,6 +1075,7 @@ def load_config(path) -> Config:
     onebody_cfg = _from_block(OneBodyConfig, raw.get("onebody", {}) or {})
     joint_cfg = _from_block(JointConfig, raw.get("joint", {}) or {})
     unified_cfg = _from_block(UnifiedConfig, raw.get("unified", {}) or {})
+    expert_cfg = _from_block(ExpertConfig, raw.get("expert", {}) or {})
     train_cfg = TrainConfig(
         seed=int(train.get("seed", TrainConfig.seed)),
         epochs=int(train.get("epochs", TrainConfig.epochs)),
@@ -1096,6 +1128,7 @@ def load_config(path) -> Config:
         onebody=onebody_cfg,
         joint=joint_cfg,
         unified=unified_cfg,
+        expert=expert_cfg,
         data=data_cfg,
         train=train_cfg,
     )

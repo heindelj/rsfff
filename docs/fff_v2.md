@@ -42,7 +42,7 @@ The type selects an expert `E_s`, which owns a complete set of parameter-emittin
 | Pauli | shell charge `q`, exponent `b`, `mu`, `Theta` |
 | range separation | per-atom `r0` and per-channel `alpha` for each classical channel |
 | bond | the per-atom energy of the electronic state |
-| applicability | `v_f` (§8) |
+| applicability | `v_f`, a per-fragment diagnostic (§8) |
 
 Charge and multiplicity are **not** part of the type. They enter as a fragment-state input inside
 the expert, so a single `"OH"` expert covers hydroxide and the OH radical and can be told which one
@@ -192,8 +192,8 @@ receives. In particular:
   `alpha` remain as *initialization*.
 
 The consequence is explicit and accepted: **the model no longer has an exact isolated-atom limit.**
-A water expert is not asked about a bare oxygen. Saying so is the applicability metric's job (§8),
-not an anchoring's.
+A water expert is not asked about a bare oxygen. Saying so is the applicability diagnostic's job
+(§8), not an anchoring's.
 
 ---
 
@@ -250,31 +250,163 @@ model. Explicit inter-fragment charge flow returns when reactivity does.
 
 ---
 
-## 8. Applicability
+## 8. Mediation: what happens when an atom is shared
 
-Each expert reports, per fragment:
+### The unit of competition is an atom, not a fragmentation
+
+Competing fragmentations are not independent hypotheses about a system. For two decompositions `A`
+and `B` of one geometry, let
 
 ```text
-v_f  =  V_s( pool_{i in f} h_i , Q_f , 2S_f )
+D  =  { i : frag_A(i) != frag_B(i) }
 ```
 
-**The fragment slot only. Never `eta`.**
+In every H3O+/OH− frame in `data/wb97mv_tzvpd`, `|D| = 1` and the atom is a hydrogen.
+`H3O+ | H2O | H2O` versus `H2O | H3O+ | H2O` is one proton changing address. Whatever else
+competition between fragmentations might mean in general, in the data this model has it means
+**a bond is being relabeled**, and that is the structure to exploit.
 
-The claim being made is "the water-specific description is appropriate for *this* water", and that
-is a property of the water. This is not a limitation dressed as a principle. A proton approaching
-does change the applicability of the water description — but it does so *by distorting the water*,
-and that distortion is in `h`. Letting `eta` in directly would let the metric say "I am less
-applicable because something is nearby", which is not a statement about the fragment at all; it is a
-statement about competition between fragmentations, and that belongs to the router (§10), which sees
-both fragments and the geometry between them.
+Moving atom `i` from `f` to `g` does the following, and nothing else:
 
-The useful reading is not "does this bond exist". As an O–H stretches, the range-separated
-electrostatics, Pauli repulsion and dispersion between those atoms remain perfectly valid. What
-ceases to be valid is the **water-specific residual**. So `v_H2O` can fall smoothly while a
-competing fragmentation's viability rises, with the classical backbone continuous throughout.
+| Changes | Does not change |
+| --- | --- |
+| pairs `(i, j in f)` flip intra → inter | any pair with both atoms outside `f ∪ g` |
+| pairs `(i, j in g)` flip inter → intra | `sum_i E0[Z_i]`, which is fragmentation-invariant |
+| the compositions of `f` and `g`, hence **which experts describe them** | the nuclei, the total charge, `E_total`, the forces |
+| `Q_f` and `Q_g` | |
+| the SQE channel graph inside `f` and `g` | |
+| `h` and `eta` for every atom of `f ∪ g` | |
 
-Emitted and logged. It carries **no loss term** until competing fragmentations exist to give it a
-signal, and is off by default in the water configuration.
+The *decision* is atom-local; the *consequence* is confined to `f ∪ g`. That is what bounds the cost
+of doing this properly, and it is why a mediator that sees one atom and its two candidate hosts is
+the right size of object.
+
+### Why this is not the applicability score's job
+
+`v_f` asks "is this expert appropriate for this fragment". At a proton-transfer geometry both
+decompositions are asking a well-posed question of a well-posed expert — a slightly-too-long H3O+
+and an H2O with a slightly-too-close proton are each perfectly describable. Ranking them by pooled
+per-fragment viability answers a question adjacent to the one that matters. What matters is what
+becomes of **the bond being relabeled**, and no quantity pooled over a whole fragment is addressed
+to it.
+
+`v_f` is therefore demoted (§11): it survives as a per-fragment diagnostic and an optional mediator
+input, and the softmax-over-fragmentations loss it carried is replaced by what follows.
+
+### When a swap is live
+
+Two stages, and the separation is deliberate: enumeration is discrete and cheap, mediation is
+learned and smooth.
+
+**Enumeration.** Atom `i`, currently in `f`, is a candidate for sharing with `g` when all of:
+
+1. `Omega_ig > 0`, a C²-continuous validity bump (`rsfff.mlip.switch.validity_bump`) on the contact
+   geometry — for a transferring hydrogen, the `H···g` distance.
+2. The bank holds experts for **both** post-swap compositions. This is the whole of "we have seen
+   this reaction before": the expert keys *are* the reaction database, so there is no second
+   registry to fall out of sync with the model, and `ExpertBank.assign` already refuses an unknown
+   composition rather than answering with the wrong network.
+3. The post-swap charges and multiplicities are ones those two experts were trained on.
+
+**Mediation.** Every atom then carries a membership over its candidate hosts, a partition of unity:
+
+```text
+pi_ig  =  softmax_over g ( M( h_i , eta_i , H_f , H_g , rho_ifg )  +  log Omega_ig )
+sum_g pi_ig  =  1
+```
+
+`H_f` and `H_g` are the pooled fragment descriptors of the two hosts and `rho` the contact geometry.
+`M` is **one universal network, not one per expert**: it learns the logic of chemical competition
+and never a fragment's chemistry. That is the division of labour the deferred router existed for,
+relocated to the object that can actually act on it.
+
+`M` must read only combinations symmetric under swapping the two candidate hosts, so the same
+physical swap enumerated from either end returns the same weights. `AdiabaticCorrection` already
+does this by reading `h^K + h^J` and `(h^K − h^J)^2`; the same trick applies here.
+
+An atom with one candidate has `pi = 1` and costs nothing, so a neutral water cluster runs the
+model of §5–§7 untouched.
+
+### What the weights do
+
+One rule decides where each quantity is mixed:
+
+> **Mix at the lowest level at which the quantity means the same thing to both experts.**
+
+| Quantity | Mixed at | Because |
+| --- | --- | --- |
+| pair routing, `b_ij = sum_F w_F I_F(ij)` | the accounting | `sum_F w_F = 1`, so every pair still appears exactly once across the buckets |
+| `C6`, `b_disp`, `r0`, Pauli multipoles, response parameters | the **parameter** | a `C6` is a `C6`: both experts emit the same physical number, and pairs already combine per-atom values across experts by geometric mean |
+| `E_bond` | the **output** | `FragmentBondEnergy` is per-expert and the two networks share no input space, so there is nothing to mix upstream of it |
+| the response solve | one solve on the union graph | a channel only one assignment opens carries its weight as a compliance scale |
+
+The routing row is the one most easily left out of this design and the one that would break it. It
+is where energy crosses the boundary between `fragment_energy` and the EDA channels, so a hard
+`is_intra` under a soft `pi` is not merely inconsistent — it is a discontinuity in the accounting
+itself.
+
+The solve row has a precedent to reuse rather than invent: the diabatic-mixture stack solved exactly
+this with `finest_common_refinement` plus a compliance switch, where a partially-open channel is
+rescaled by `S` and not `sqrt(S)`, on pain of training NaNs at the closed limit.
+
+Note what the rule does **not** permit. Blending the experts' *features* and decoding once — what
+the diabatic mixture did, and the better answer wherever it is available — is unavailable here by
+construction: the decoder is per-composition, and that is the architecture rather than an accident.
+Mixing therefore happens downstream of the experts, and the price is that it happens separately for
+each kind of quantity.
+
+### Invariants
+
+Non-negotiable, and each one testable:
+
+1. **Vertex identity.** When every `pi` is one-hot the model reduces *exactly* — not approximately —
+   to the single-fragmentation model of §5–§7. This is what makes the mediator an addition rather
+   than a second model, and it is the property the old `4 c_K c_J` prefactor bought structurally.
+2. **Partition of unity.** `sum_g pi_ig = 1`, so the accounting identity of §6 survives.
+3. **Swap symmetry.** The weights do not depend on which host was enumerated first.
+4. **C² continuity** as a candidate opens or closes, carried by `Omega`.
+5. **`fragment_energy` stays a vertex quantity.** It is defined per fragmentation and nowhere else:
+   a fragment with a half-owned atom has no isolated-fragment SCF energy to be compared against. The
+   mixture produces a **total**, and the fragment-view stream of §9 is untouched by all of this.
+
+### Training the mediator
+
+There is a label problem here and it has to be stated plainly: **a mixture has no ALMO-EDA label.**
+Every EDA channel is defined relative to a choice of fragments, so `eda_cls_elec` for a 60/40
+mixture of two decompositions is not a quantity Q-Chem computed, or could compute.
+
+What *is* fragmentation-invariant is the total energy and the forces. Every frame of a `group_id`
+carries the same `E_total` and the same forces, because it is the same geometry and the same
+wavefunction. That gives the split:
+
+| Supervises | With |
+| --- | --- |
+| the pure vertices | the four EDA channels, per fragmentation, exactly as §9 already does |
+| the mixture | `E_total` and forces — the only labels defined where `pi` is not one-hot |
+| the mediator, as a shaping prior | `Delta E_ind` between the candidate assignments |
+
+The third row needs care. `|E_pol + E_ct|` picks the chemically obvious assignment in 398 of 399
+frames, with a best-versus-second gap of 165–476 kJ/mol, so it is an excellent teacher of *which*
+assignment is better. It cannot teach *how much of each to keep*: it is a ranking signal and the
+degree of mixing is a magnitude. Only the total-energy residual through the crossover can set that,
+and it can — precisely because both decompositions carry the same `E_total` label there while the
+model gives them different answers. The size of that disagreement is a direct measurement of how
+badly each pure assignment is doing, and removing it is what `pi` is for.
+
+So `Delta E_ind` shapes the mediator early and keeps it honest; `E_total` and the forces decide it.
+
+### Open
+
+* **Charges of candidate fragments.** Moving an atom between fragments means deciding what charge
+  goes with it, and an expert needs `(Q_f, 2S_f)` to answer at all. For this corpus the rule is "a
+  transferring hydrogen carries +1", which covers every H3O+/OH− frame. A general rule is not
+  decided and probably should not be invented ahead of data that needs one.
+* **Cost.** Each live candidate re-featurizes and re-evaluates `f ∪ g`. Bounded, but not free; the
+  trigger's tightness is what controls it.
+* **A flat direction.** Intra classical energy is already degenerate with `E_bond`. Letting `pi`
+  move energy across the intra/inter boundary hands the mediator a second route into that
+  degeneracy, and the `r0` barrier of §6 may not be enough on its own.
+* **Concerted swaps** (`|D| > 1`). Out of scope; the corpus contains none.
 
 ---
 
@@ -296,6 +428,12 @@ Each optimizer step draws from both streams:
 
 plus `L_env` from §4.
 
+Both rows describe a *single* fragmentation, which is all the water corpus has. Where competing
+fragmentations exist the cluster row splits: the EDA channels supervise the pure vertices only, and
+`E_total` and the forces carry the mixture, for the reason in §8 — those are the only labels that
+survive `pi` leaving one-hot. The fragment-view row is unaffected either way, since
+`fragment_energy` is defined at the vertices and nowhere else.
+
 There is no freeze and no ordering requirement between them, for the reason given in §4: the
 interaction labels are the *only* constraint on several of the `theta_0` quantities, so they must
 reach `W_h`. A cheap warm-start pass over the fragment-view stream alone — no pair list, no coupled
@@ -310,38 +448,35 @@ clusters arrive, but it is a warm start and nothing depends on it.
 | `\|\|eta\|\|` | how much environment the fit asks for. Exactly zero means weight decay deleted `W_env`, not that the model declined the environment — `W_env` is zero-initialized and must be decay-exempt. |
 | `ind_ff` vs the `E_bond` difference | the split of induction between a real relaxation and a parameter shift. Both are physical; the ratio is the thing to keep honest. |
 | `internal` vs `e_bond` | the unlabeled split inside `fragment_energy`. Only the sum is fitted, so this is a flat direction — watch its spread, not its value. |
-| `v_f` | untrained; watch that it is not silently decaying to a constant. |
+| `v_f` | a diagnostic only (§8); watch that it is not silently decaying to a constant. |
+| `pi` occupancy | the fraction of shared atoms whose membership is genuinely split. Exactly one-hot everywhere means the mediator is off or the trigger never opens; broadly split everywhere means it is hedging rather than deciding. |
+| `E_total` at the crossover | the residual the mediator exists to remove, measured where `pi` is furthest from one-hot. It is the only place the mixture has a label. |
 
 ---
 
 ## 10. Deferred
 
-These need competing fragmentations to mean anything, and water has exactly one sensible
-fragmentation. They are specified here so that adding them is an addition rather than a retrofit.
+These are specified here so that adding them is an addition rather than a retrofit. The router and
+the smooth occupancies that used to head this list have moved into §8, which is where the mediator
+now does their job at the granularity the data actually has.
 
-**Universal router.** The experts describe individual candidate fragments; a separate universal
-model decides which compatible set is active:
+**Ambiguity correction.** The mediator of §8 is deliberately **linear**: it keeps a fraction of each
+expert's answer alive and nothing more. It therefore cannot represent physics that is in neither
+conventional fragmentation. Where two assignments are simultaneously live, `A = 4 pi_1 pi_2` gates a
+correction `E_amb = A * U( z_1 , z_2 , rho_12 , eta )`, which may depend on the environment
+arbitrarily because that is precisely what it is for.
 
-```text
-S_F  =  sum_{f in F} v_f  +  sum_{(f,g)} C( z_f , z_g , rho_fg )  +  S_state
-p_F  =  softmax( S_F / T )
-```
+This is second and not first on purpose. A correction that vanishes at both vertices is
+unidentifiable until the linear mixture is already carrying the crossover: with `pi` untrained,
+`U` would simply absorb whatever the mixture was failing to do, and there would be no way to tell
+which of the two was wrong. Fit the linear mediator, measure what `E_total` still misses through the
+crossover, and only then decide whether a correction is warranted.
 
-where `C` is a fragment-compatibility model and `rho_fg` describes the reactive boundary geometry.
-The router learns the logic of chemical competition; it does not learn any fragment's chemistry.
-Note the division of labor with §8: intrinsic viability is the expert's, competition is the
-router's.
-
-**Smooth bonded occupancies.** Fragmentation weights give smooth occupancies
-`b_ij = sum_F p_F * I_F(ij)`, so connectivity changes without a discrete topology step. The routing
-that currently decides which label a pair answers to (`is_intra`) softens into a mixture weight; the
-accounting identity — every pair appearing exactly once across the buckets — is what must survive
-that.
-
-**Ambiguity correction.** Where two fragmentations are simultaneously viable, `A = 4 p_1 p_2` gates
-a correction `E_amb = A * U(z_1, z_2, rho_12, eta)` representing physics missing from either
-conventional fragmentation. It may depend on the environment arbitrarily, because that is precisely
-what it is for.
+**Concerted and multi-atom swaps.** §8 mediates one atom's membership at a time. A relabeling with
+`|D| > 1` — a concerted double proton transfer, say — needs the candidate enumeration to range over
+sets rather than atoms, at which point the fragmentation-level `p_F = softmax(S_F / T)` of the old
+router becomes the right object after all. Nothing in §8 forecloses that; it is the general case of
+which one-atom mediation is the specialization the corpus supports.
 
 **Slot mixing.** Cross-contractions between the fragment and environment slots' λ≥1 blocks —
 `mu_h · v_env`, `Theta_h : G_env` — which see the *relative orientation* of a fragment and its
@@ -361,8 +496,19 @@ of bonding is now carried by `theta - theta_0`, unrestricted in form (§7).
 
 **The universal parameterization network.** Replaced by per-composition experts (§2).
 
-**Viability depending on the geometric environment** (`V_s(h_f, eta_f)`). Now fragment-slot only,
-for the reason in §8.
+**Applicability as the arbiter between fragmentations.** `v_f` was to be softmaxed across the
+decompositions of a geometry and fitted to `-|E_pol + E_ct|`, and the implementation in
+`rsfff.train.loss.applicability_loss` does exactly that. It answers the wrong question: competition
+is not a property of either fragment, and a score pooled over a whole fragment is not addressed to
+the bond that is actually being relabeled. Replaced by the mediator (§8), which sees the shared atom
+and both candidate hosts. `v_f` survives as a diagnostic.
+
+Two earlier positions on that head are both superseded and worth recording, because the pair of
+them is what showed the framing was wrong. The draft before this one had `V_s(h_f, eta_f)` and was
+narrowed to the fragment slot alone on the argument that viability is a property of the fragment.
+The implementation then widened it back to the joined slot on the argument that competition needs
+`eta` — which is true, and is exactly why the quantity belongs to a third party rather than to
+either expert.
 
 **Free-atom anchoring, the per-species offset, and the free-atom polarizability penalty** (§5).
 
