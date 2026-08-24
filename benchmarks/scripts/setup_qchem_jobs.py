@@ -15,6 +15,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from benchmark_fragment_tools import minimized_oh_groups
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STRUCTURES = REPO_ROOT / "benchmarks" / "structures"
@@ -100,12 +102,29 @@ def plain_molecule(frame: Frame) -> str:
     return "\n".join(lines)
 
 
+def sorted_groups(frame: Frame) -> list[list[int]]:
+    n_oxygen = sum(1 for symbol in frame.symbols if symbol.upper() == "O")
+    return minimized_oh_groups(frame.symbols, frame.coords, [0] * n_oxygen)
+
+
+def sorted_frame(frame: Frame) -> Frame:
+    groups = sorted_groups(frame)
+    indices = [idx for group in groups for idx in group]
+    return Frame(
+        symbols=[frame.symbols[idx] for idx in indices],
+        coords=[frame.coords[idx] for idx in indices],
+        comment=frame.comment,
+        index=frame.index,
+    )
+
+
 def fragmented_molecule(frame: Frame) -> str:
+    groups = sorted_groups(frame)
     lines = ["$molecule", "0 1"]
-    for start in range(0, len(frame.symbols), 3):
+    for group in groups:
         lines.append("--")
         lines.append("0 1")
-        for idx in range(start, start + 3):
+        for idx in group:
             lines.append(atom_line(frame.symbols[idx], frame.coords[idx]))
     lines.append("$end")
     return "\n".join(lines)
@@ -150,7 +169,7 @@ def rem_block(*, jobtype: str, method: str, basis: str, mem_total: int, mem_stat
 
 
 def input_text(frame: Frame, job: JobSpec, args: argparse.Namespace) -> str:
-    molecule = fragmented_molecule(frame) if job.fragmented else plain_molecule(frame)
+    molecule = fragmented_molecule(frame) if job.fragmented else plain_molecule(sorted_frame(frame))
     return (
         molecule
         + "\n\n"
@@ -166,7 +185,12 @@ def input_text(frame: Frame, job: JobSpec, args: argparse.Namespace) -> str:
 
 
 def extxyz_frame(frame: Frame) -> str:
-    n_fragments = len(frame.symbols) // 3
+    groups = sorted_groups(frame)
+    n_fragments = len(groups)
+    fragment_idx = [-1] * len(frame.symbols)
+    for frag, group in enumerate(groups):
+        for idx in group:
+            fragment_idx[idx] = frag
     header = (
         'Properties=species:S:1:pos:R:3:fragment_idx:I:1 charge=0 multiplicity=1 '
         f'n_fragments={n_fragments} '
@@ -175,9 +199,8 @@ def extxyz_frame(frame: Frame) -> str:
     )
     lines = [str(len(frame.symbols)), header]
     for idx, (symbol, coord) in enumerate(zip(frame.symbols, frame.coords)):
-        frag = idx // 3
         x, y, z = coord
-        lines.append(f"{symbol:<2} {x:16.8f} {y:16.8f} {z:16.8f} {frag:d}")
+        lines.append(f"{symbol:<2} {x:16.8f} {y:16.8f} {z:16.8f} {fragment_idx[idx]:d}")
     return "\n".join(lines) + "\n"
 
 
@@ -189,10 +212,20 @@ def write_text(path: Path, text: str, *, overwrite: bool) -> bool:
     return True
 
 
-def frame_stem(path: Path, n_frames: int, frame_index: int) -> str:
+def calculation_slug(method: str, basis: str) -> str:
+    return f"{method.lower().replace('-', '')}_{basis.lower()}"
+
+
+def frame_stem(path: Path, n_frames: int, frame_index: int, *, method: str, basis: str) -> str:
+    stem = path.stem
+    slug = calculation_slug(method, basis)
+    if "_mp2_avtz" in stem:
+        stem = stem.replace("_mp2_avtz", f"_{slug}")
+    else:
+        stem = f"{stem}_{slug}"
     if n_frames == 1:
-        return path.stem
-    return f"{path.stem}_frame{frame_index:04d}"
+        return stem
+    return f"{stem}_frame{frame_index:04d}"
 
 
 def clear_generated(root: Path) -> None:
@@ -231,7 +264,7 @@ def setup_jobs(args: argparse.Namespace) -> dict:
         geom_payload = []
         for frame in frames:
             n_waters = validate_ordered_water(frame, path)
-            stem = frame_stem(path, len(frames), frame.index)
+            stem = frame_stem(path, len(frames), frame.index, method=args.method, basis=args.basis)
             geom_payload.append(extxyz_frame(frame))
             record = {
                 "source": str(path),
@@ -246,9 +279,10 @@ def setup_jobs(args: argparse.Namespace) -> dict:
                 record[f"{job.heading}_written"] = written
             summary["jobs"].append(record)
         text = "".join(geom_payload)
+        geom_stem = frame_stem(path, 1, 0, method=args.method, basis=args.basis)
         for job in JOBS:
             write_text(
-                args.roundtrip_root / job.root_name / "geoms" / f"{path.stem}.extxyz",
+                args.roundtrip_root / job.root_name / "geoms" / f"{geom_stem}.extxyz",
                 text,
                 overwrite=args.overwrite,
             )
