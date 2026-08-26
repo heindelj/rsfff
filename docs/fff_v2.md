@@ -553,6 +553,27 @@ So `L_ct` shapes the mediator early and keeps it honest; `E_total` and the force
   is why its `E_ind` is detached. That closes the route through `L_ct`; it does not close the route
   through `E_total`, and watching `intra_disp` rather than `gate_intra` remains how it is caught.
 * **Concerted swaps** (`|D| > 1`). Out of scope; the corpus contains none.
+* **Parameter mixing is not energy mixing, and it shows.** Measured on the H5O2+ and H3O2−
+  scans in `notebooks/mediator_plotting.ipynb`: at the crossover the mediated energy leaves the
+  interval spanned by the two vertices by **162 kJ/mol** (H5O2+ total) and **181 kJ/mol**
+  (H3O2− electrostatics). The rule mixes `C6`, `r0` and the multipoles at the parameter level
+  because both experts emit the same physical number — which is true — but the classical forms
+  are strongly *nonlinear* in those numbers (a geometric mean under a square root, a Fermi gate
+  on `r0`, Tang–Toennies damping), so a halfway parameter set does not give a halfway energy. A
+  mixed `r0` can open a channel neither vertex opens.
+
+  The mixture stays C² — the weights are smooth and `tests/test_mediator.py` pins the second
+  difference converging as `h²` — but it acquires a large, narrow feature at the crossover, and
+  on H5O2+ that feature is a *spurious 160 kJ/mol well* that would read as a reaction
+  intermediate in dynamics.
+
+  This is very likely also *why* the trained mediator switches within 0.016–0.024 Å rather than
+  smoothly: a wide crossover parks the model in that region, so sharpening `pi` is the cheapest
+  way out. The near-one-hot membership is therefore not only a fact about the data sampling —
+  it is partly the optimizer routing around this defect. Fixing it means either mixing those
+  channels at the *output* rather than the parameter (giving up the "a `C6` is a `C6`"
+  argument for the nonlinear ones), or the §10 ambiguity correction earning its place sooner
+  than planned.
 
 ---
 
