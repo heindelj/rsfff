@@ -653,6 +653,10 @@ def solve_frozen(
     *,
     direct_multipoles: bool,
     with_polarizability: bool = False,
+    bond_index: torch.Tensor | None = None,
+    bond_batch: torch.Tensor | None = None,
+    block_idx: torch.Tensor | None = None,
+    n_blocks: int | None = None,
 ) -> FragmentResponseOutput:
     """The frozen solve, given parameters that are already assembled.
 
@@ -667,10 +671,22 @@ def solve_frozen(
     (:meth:`rsfff.ff.expert.ExpertBank.groups` partitions *by fragment*). One global solve
     and a solve per expert therefore have the same blocks in the same order and differ only
     in how many kernel launches they cost.
+
+    **The mixture overrides all four graph arguments** (``docs/fff_v2.md`` §8). A mediated
+    frame solves on the *union* of its decompositions' channel graphs, whose connected
+    component is the frame rather than the fragment -- a channel only one assignment opens
+    still carries its weight as a compliance scale, so charge genuinely crosses what either
+    assignment alone calls a fragment boundary. ``block_idx``/``n_blocks`` are then
+    ``batch_idx``/``n_systems``, and charge conserves per frame instead of per fragment,
+    which is the correct conservation law for a reacting system and the wrong one for a
+    single fragmentation. Defaults reproduce the fragment-blocked solve exactly.
     """
     positions = batch.positions
     frag = batch.fragment_idx
     n_frag = int(batch.n_fragments)
+    # The blocks charge conserves over, and the rows the per-block outputs are indexed by.
+    blocks = frag if block_idx is None else block_idx
+    n_block = n_frag if n_blocks is None else int(n_blocks)
 
     chi, eta, alpha_i = rp.chi, rp.eta, rp.alpha
     z, b, cquad = rp.z, rp.b, rp.cquad
@@ -680,16 +696,23 @@ def solve_frozen(
     chivec = rp.mu0 if direct_multipoles else rp.chivec
     chiquad = rp.quad0 if direct_multipoles else rp.chiquad
     q0, compliance = rp.q0, rp.compliance
-    bond_index, bond_batch = intra_fragment_channels(frag)
+    if bond_index is None:
+        bond_index, bond_batch = intra_fragment_channels(frag)
+    elif bond_batch is None:
+        raise ValueError(
+            "solve_frozen was given a bond_index with no bond_batch; the two say which "
+            "channels exist and which block each belongs to, and guessing the second from "
+            "the first would assume the fragment blocking the mixture is overriding"
+        )
 
     sol = sqe_solve(
         chi, eta, compliance, q0, positions,
-        bond_index, frag, bond_batch, n_frag,
+        bond_index, blocks, bond_batch, n_block,
         field=None, with_polarizability=with_polarizability,
     )
     polarizability = (
         None if sol.alpha_flow is None
-        else fragment_polarizability(sol.alpha_flow, alpha_i, frag, n_frag)
+        else fragment_polarizability(sol.alpha_flow, alpha_i, blocks, n_block)
     )
 
     mu = None
@@ -703,18 +726,18 @@ def solve_frozen(
         if direct_multipoles:
             mu = chivec
         else:
-            mu = atomic_dipoles(chivec, alpha_i, frag, None)
+            mu = atomic_dipoles(chivec, alpha_i, blocks, None)
             internal = internal + atomic_dipole_energy(
-                chivec, alpha_i, frag, n_frag, None
+                chivec, alpha_i, blocks, n_block, None
             )
     quad_s = None
     if chiquad is not None:
         if direct_multipoles:
             quad_s = chiquad
         else:
-            quad_s = atomic_quadrupoles(chiquad, cquad, frag, None)
+            quad_s = atomic_quadrupoles(chiquad, cquad, blocks, None)
             internal = internal + atomic_quadrupole_energy(
-                chiquad, cquad, frag, n_frag, None
+                chiquad, cquad, blocks, n_block, None
             )
     return FragmentResponseOutput(
         charges=sol.charges,

@@ -407,6 +407,30 @@ class IsolatedStreams:
         return metrics
 
 
+def _freeze_experts(model) -> None:
+    """Freeze everything but the mediator. See ``ExpertConfig.freeze_experts`` for why.
+
+    Applied after the warm start, so the frozen values are the checkpoint's rather than the
+    initialization's -- freezing before loading would pin the experts at random weights.
+    """
+    frozen = live = 0
+    for name, p in model.named_parameters():
+        if name.startswith("mediator"):
+            live += p.numel()
+        else:
+            p.requires_grad_(False)
+            frozen += p.numel()
+    if not live:
+        raise ValueError(
+            "freeze_experts froze every parameter: the model has no `mediator` submodule, so "
+            "this stage would run an optimizer over nothing"
+        )
+    print(
+        f"freeze_experts: {frozen} force-field parameters frozen, {live} mediator ones live",
+        flush=True,
+    )
+
+
 def _freeze_core(model) -> None:
     """The environment-only ablation. **Not** part of the schedule; see the module docstring."""
     n = 0
@@ -527,15 +551,165 @@ def _train_once(config: Config):
         seed=config.data.seed,
     )
 
+    penalties, diagnostics = streams.penalties, streams.diagnostics
+    log_keys = _LOG_KEYS
+    if config.expert.mediator:
+        mixture = _build_mixture_stream(config, model, clusters, train_idx, device, dtype)
+        penalties = _chain_penalties(streams.penalties, mixture.penalties)
+        diagnostics = _chain_diagnostics(streams.diagnostics, mixture.diagnostics)
+        log_keys = _LOG_KEYS + _MIXTURE_LOG_KEYS
+
     return fit(
         model, clusters, config, config, device, train_idx, val_idx,
-        log_keys=_LOG_KEYS,
+        log_keys=log_keys,
         fit_term=strided_fit_term(model, config.expert.force_every),
-        penalties=streams.penalties,
-        diagnostics=streams.diagnostics,
+        penalties=penalties,
+        diagnostics=diagnostics,
         grad_positions=config.expert.force_weight > 0.0,
-        after_warm_start=(_freeze_core if config.expert.freeze_core else None),
+        after_warm_start=_after_warm_start(config),
     )
+
+
+#: What the mixture stream adds to the printed line. ``pi_occ`` is §9's occupancy diagnostic:
+#: exactly 0 everywhere means the mediator is off or the trigger never opens, and broadly split
+#: everywhere means it is hedging rather than deciding.
+_MIXTURE_LOG_KEYS = ("mix_e_mae", "mix_f", "mix_ct", "pi_occ", "pi_split")
+
+
+def _after_warm_start(config: Config):
+    """The freeze hooks this run wants, composed, or ``None``.
+
+    The two are independent and both act after the checkpoint is loaded: ``freeze_core`` is the
+    environment-only *ablation* and ``freeze_experts`` is the mediator *stage*.
+    """
+    hooks = []
+    if config.expert.freeze_core:
+        hooks.append(_freeze_core)
+    if config.expert.freeze_experts:
+        hooks.append(_freeze_experts)
+    if not hooks:
+        return None
+
+    def run(model):
+        for hook in hooks:
+            hook(model)
+
+    return run
+
+
+def _merge(dicts, what: str) -> dict:
+    """Merge, refusing a key collision.
+
+    Two streams quietly contributing to one loss key is the kind of thing that stays invisible
+    until the printed number stops meaning what its name says.
+    """
+    out: dict = {}
+    for d in dicts:
+        clash = set(d) & set(out)
+        if clash:
+            raise ValueError(f"two streams both produce {what} {sorted(clash)}")
+        out.update(d)
+    return out
+
+
+def _chain_penalties(*fns):
+    """Run several ``penalties`` callables and merge the loss terms they return."""
+
+    def combined(out, batch, cfg):
+        return _merge([fn(out, batch, cfg) for fn in fns], "loss term")
+
+    return combined
+
+
+def _chain_diagnostics(*fns):
+    """Run several ``diagnostics`` callables and merge the metrics they return."""
+
+    def combined(out, batch, target):
+        return _merge([fn(out, batch, target) for fn in fns], "metric")
+
+    return combined
+
+
+def _build_mixture_stream(config, model, clusters, train_idx, device, dtype):
+    """The mediator, its geometries, and the stream that trains it (``docs/fff_v2.md`` §8).
+
+    The mediator's input width is read off the model's own slots rather than recomputed from
+    the feature config: the fragment slot carries the ``(Q_f, 2S_f)`` block appended by
+    :class:`rsfff.ff.fragment_state.FragmentStateEmbedding`, so the descriptor is wider than
+    the featurizer's own ``feature_dims`` says and a width computed from the config would be
+    wrong in a way that only shows up as a shape error deep in a training step.
+
+    **Held out by geometry.** The mixture groups are filtered to the geometries in
+    ``train_idx``, so a mediated geometry whose vertices are in validation never trains the
+    mediator either.
+    """
+    from ..ff.mediator import MediatorHead
+    from .mixture_data import load_mixture_groups
+    from .mixture_stream import MixtureStream
+
+    dataset = load_mixture_groups(config.data.path, dtype=dtype)
+    train_geometries = {int(g) for g in clusters._group_id[train_idx].tolist()}
+    groups = [g for g in dataset.groups if g.group_id in train_geometries]
+    held_out = len(dataset.groups) - len(groups)
+    if dataset.groups and not groups:
+        raise ValueError(
+            f"the mediator has {len(dataset.groups)} mediable geometries but none of them fell "
+            f"in the training split; the group ids in mixture_data and load_cluster_datasets "
+            f"have drifted apart and the mediator would train on nothing"
+        )
+    print(
+        f"mediator: {dataset.summary()}; {len(groups)} in training, {held_out} held out",
+        flush=True,
+    )
+
+    widths = _slot_widths(model, groups[0]) if groups else (0, 0)
+    mediator = MediatorHead(
+        widths[0], widths[1],
+        hidden=config.expert.mediator_hidden,
+        depth=config.expert.mediator_depth,
+        bump=dict(
+            lo0=0.0, lo1=0.0,
+            hi1=config.expert.mediator_bump_hi1,
+            hi0=config.expert.mediator_bump_hi0,
+        ),
+    ).to(device=device, dtype=dtype)
+    # The mediator is a *submodule* of the model, so the optimizer built from
+    # `model.parameters()` picks it up and the checkpoint carries it. It owns no force-field
+    # parameter and reads no expert's weights; the coupling is one way.
+    model.mediator = mediator
+    print(
+        f"mediator: {sum(p.numel() for p in mediator.parameters())} parameters, "
+        f"slots {widths[0]}+{widths[1]}",
+        flush=True,
+    )
+
+    return MixtureStream(
+        model, mediator, groups, device,
+        batch_size=config.expert.mixture_batch_size,
+        energy_weight=config.expert.mixture_energy_weight,
+        force_weight=config.expert.mixture_force_weight,
+        energy_scale=config.expert.energy_scale,
+        force_scale=config.expert.force_scale,
+        ct_weight=config.expert.mixture_ct_weight,
+        ct_scale=config.expert.energy_scale,
+        force_every=config.expert.mixture_force_every,
+        induction=config.expert.induction,
+        seed=config.data.seed,
+    )
+
+
+def _slot_widths(model, group) -> tuple[int, int]:
+    """``(p_frag, p_env)`` of the joined descriptor, measured on a real group."""
+    from ..ff.mixture_model import intra_pairs_unsorted
+
+    with torch.no_grad():
+        emission = model.emit(
+            group.batch(0), group.fragments[0],
+            bond_index=intra_pairs_unsorted(group.fragments[0]),
+        )
+    frag = int(emission.iso.inv_feats.shape[-1])
+    joined = int(emission.joined.inv_feats.shape[-1])
+    return frag, joined - frag
 
 
 def _train_staged(config: Config):

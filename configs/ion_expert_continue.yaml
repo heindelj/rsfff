@@ -1,0 +1,268 @@
+# A second cosine cycle of `configs/ion_expert.yaml`, warm started from its result.
+#
+#   python -m rsfff.train.train_expert configs/ion_expert_continue.yaml
+#
+# Identical data, identical hyperparameters, identical architecture. The only differences from
+# `configs/ion_expert.yaml` are the run name, `train.init_from`, and the dropped `isolated`
+# stage (see the note above `stages:`). The first run annealed to its LR floor at epoch 80 with
+# val loss 1483, so this is a warm restart rather than a resumption: the schedule returns to
+# 1e-3 and anneals again from the converged weights.
+#
+# **Nothing about the mediator of docs/fff_v2.md §8 is exercised here** -- that section is
+# design, not code, so this run measures only what a second annealing cycle buys.
+#
+# What is different from `configs/water_expert.yaml`, and why each difference is there.
+#
+# **Three experts.** `H2O`, `H3O`, `HO` -- Hill order over this data's elements, so hydroxide
+# is `HO` and not `OH`. Charge is not part of an expert's key: one `HO` expert covers
+# hydroxide and the OH radical, and `FragmentStateEmbedding` tells it which it is looking at.
+# That block has never been trained before now -- it emits `net(Q,2S) - net(0,0)`, which is
+# identically zero on the neutral singlets water-only data is made of, so it received no
+# gradient at all. Q = +-1 fragments are the first data that can move it.
+#
+# **Every fragmentation of every geometry.** An H3O+(H2O)2 frame carries three ALMO-EDA
+# decompositions, one per placement of the excess proton, and all three are true. Each becomes
+# a training frame; the train/val split is by *geometry* so no decomposition of a frame in
+# training appears in validation.
+#
+# **The applicability head is trained.** It scores whether a decomposition is the best
+# description of the system, fitted within a geometry against `-|E_pol + E_ct|` -- the
+# decomposition that perturbs its reference fragments least. Watch `app_acc`: on this data the
+# EDA-derived answer agrees with the chemically obvious assignment on 398 of 399 frames, so a
+# working head should approach 1.0 and a stuck one will sit near 1/n_fragmentations.
+#
+# **Five monomer files, two anchor streams.** The bare-ion AIMD trajectories carry energies and
+# true one-body forces but no multipoles; the `*_pol` files carry multipoles and
+# polarizabilities. They cannot be concatenated, so they are drawn as separate streams and the
+# per-stream metrics are suffixed `_0` / `_1`.
+#
+# What to watch first, beyond the keys `configs/water_expert.yaml` lists: `ob_mae` and
+# `frag_mae` are now averages over three compositions and will be dominated by whichever is
+# worst, and the ion clusters interact at ~-250 kJ/mol against water's ~-20, so every channel's
+# MAE starts larger simply because the energies are.
+
+run_name: ion_expert_cont
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    # The ion clusters: 399 geometries, each with 2 or 3 competing decompositions.
+    - data/wb97mv_tzvpd/w1_h3o+_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w2_h3o+_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w1_oh-_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w2_oh-_wb97mv_tzvpd.xyz
+    # The neutral water clusters. Not optional: the H2O expert is shared, and nearly all of
+    # its supervision lives here -- ~34k fragment views against the ~600 waters the ion
+    # clusters contain. Dropping them would re-fit water on a handful of spectators.
+    - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+  # Load every decomposition each file carries. Single-fragmentation files ignore this.
+  fragmentations: all
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  monomer_path:
+    # Multipoles and polarizabilities. One stream.
+    - data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
+    - data/wb97mv_tzvpd/h2o_opt_wb97mv_tzvpd_pol.xyz
+    - data/wb97mv_tzvpd/h3o+_opt_wb97mv_tzvpd_pol.xyz
+    - data/wb97mv_tzvpd/oh-_opt_wb97mv_tzvpd_pol.xyz
+    # Energies and true one-body forces only, 500 frames each. A second stream, and the only
+    # place the H3O and HO experts see a one-body gradient.
+    - data/wb97mv_tzvpd/h3o+_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/oh-_wb97mv_tzvpd.xyz
+  # wB97M-V/def2-TZVPD, matching the labels. These seed the per-element chi_0/eta_0 of the SQE
+  # solve. They are an *initialization* only now: the free-atom polarizability penalty is gone,
+  # because pinning alpha at a geometry the water expert does not claim to describe is a
+  # constraint on nothing this model is asked about.
+  atomic_reference_states: data/atomic_reference_states_wb97mv_tzvpd.json
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]   # lambda=1 for chivec/Pauli dipoles, lambda=2 for alpha
+  backend: e3nn
+  density_channels: 8
+
+expert:
+  # Hill order over (H, O), so hydroxide is "HO". A fragment whose composition has no expert
+  # raises: there is no generic head to fall back to, which is the point.
+  compositions: ["H2O", "H3O", "HO"]
+  max_rank: 2                   # must match elec.max_rank
+
+  # The environment slot. Off makes every parameter fragment-confined and the model rigorously
+  # two-body -- a genuinely useful ablation, and what `tests/test_expert_model.py` pins.
+  environment_features: true
+
+  # Range separation: per element (src/ff/range_priors.py), per channel, learnable.
+  alpha_init: 40.0
+  learn_r0: true
+  learn_alpha: true
+  # The only route by which the electrostatic channel can acquire *any* environment dependence,
+  # and that dependence is booked to induction rather than to cls_elec -- eda_cls_elec is the
+  # Coulomb interaction between superimposed frozen monomer densities and so is rigorously
+  # pairwise. Off for the first fit: it competes with the parameters for the same mid-range
+  # energy. Turning it on is what makes `env_gate_elst` meaningful.
+  environment_r0: false
+
+  # Live for the first time: half the fragments here carry Q = +-1, and this block is the only
+  # thing distinguishing an H3O+ from a distorted H2O with a spare proton nearby. Still
+  # identically zero on the neutral waters, so it cannot disturb them.
+  fragment_state_dim: 4
+
+  # The bonding term. No free-atom anchoring and no per-species offset: the readout bias *is*
+  # the one-body constant now, which is the direction the anchoring used to cancel. The cost of
+  # that cancellation was a measured -5.23 kJ/mol per fragment, 99.7% of the one-body loss.
+  bond_hidden: 32
+  bond_depth: 2
+  bond_equiv_channels: 32
+  bond_energy_scale: 0.2        # Hartree; water's two O-H bonds are ~-0.37 Ha
+
+  # There is now something to compete with. The score is fitted within a geometry against
+  # -|E_pol + E_ct|: the decomposition needing the smallest perturbation of its reference
+  # fragments is the best one. Contributes nothing on the neutral water clusters, which have
+  # one fragmentation and so no contested group.
+  applicability: true
+  applicability_weight: 1.0
+  # kJ/mol. The measured best-vs-second gap runs 165-476 kJ/mol, so this is near-one-hot where
+  # the answer is clear and soft where two decompositions genuinely are comparable.
+  applicability_temperature: 50.0
+
+  # Classical reach. The largest sets the one shared pair list.
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+
+  induction: true
+
+  # --- loss. Each term is 1.0 at an error of one energy_scale, so these are dimensionless. ---
+  energy_scale: 3.8093e-4
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  induction_weight: 30.0
+  # Off, and measured rather than assumed: the total is one number per frame against five
+  # well-posed component targets and it admits every wrong split that happens to sum correctly.
+  # At weight 10 on the previous model the coupled solve stopped doing the work entirely.
+  total_energy_weight: 0.0
+  force_weight: 1.0
+  force_scale: 1.0e-3
+  force_every: 2
+
+  # The isolated streams. `fragment_weight` carries the one-body sector now; the anchor adds
+  # the polarizability and the true one-body forces that only the monomer file has.
+  fragment_weight: 10.0
+  fragment_batch_size: 64
+  anchor_weight: 10.0
+  # Per stream, and there are two of them -- so this is 32 frames of multipole-carrying
+  # monomers plus 32 of bare ions per step, not 32 in total.
+  anchor_batch_size: 32
+  anchor_force_every: 5
+
+  # **The dial.** 0 for the first fit, so the first run measures how much environment
+  # dependence the data asks for *unopposed*. Read env_c6 / env_b_disp / env_pauli_multipole /
+  # env_e_bond off that run and set this against them; raising it before knowing the
+  # unconstrained answer is choosing a number with nothing to compare it to.
+  env_penalty_weight: 0.0
+
+  # A one-sided barrier at the element prior, not the unbounded downward pull this used to be:
+  # that pull is what put -39 kJ/mol per fragment of "intramolecular dispersion" between
+  # covalently bonded atoms, with nothing opposing it.
+  r0_weight: 0.05
+  r0_spread_weight: 1.0
+
+  cg_rtol: 1.0e-9
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+
+# Reused verbatim: the response solve and the two parameter heads. What changed is who *owns*
+# the heads these configure, not how they are configured.
+elec:
+  max_rank: 2
+  environment_chi: true
+  environment_eta: true
+  eta_floor: 0.05
+  learn_dipole: true
+  learn_quadrupole: true
+  # Only charges and dipoles move. Each atom keeps a permanent quadrupole, emitted directly,
+  # but no field gradient moves it and the coupled solve carries no quadrupole variable.
+  quadrupole_response: false
+  anisotropic_cquad: true
+  # Output the permanent multipoles directly; alpha/cquad describe only the response to a
+  # field. This stops the permanent moment being a product of two heads -- the entanglement
+  # that let the polarizability be dismantled while the dipole labels looked fine.
+  direct_multipoles: true
+  learn_z: true
+  environment_z: false
+  learn_b: true
+  environment_b: false
+  s_init: 0.5
+  emb_dim: 8
+  hidden: 32
+  depth: 2
+  equiv_channels: 32
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
+
+dispersion:
+  b_prior: per_element
+  learn_c6: true
+  environment_c6: true
+  learn_b: true
+  environment_b: false
+  emb_dim: 8
+  hidden: 16
+  depth: 2
+
+pauli:
+  learn_q: true
+  environment_q: true
+  learn_b: true
+  environment_b: false
+  learn_dipole: true
+  learn_quadrupole: true
+  emb_dim: 8
+  hidden: 16
+  depth: 2
+  equiv_channels: 16
+
+onebody:
+  # Read only for the monomer anchor, where the QC gradient really is -dE_1body/dR.
+  energy_scale: 3.8093e-4
+  force_weight: 1.0
+  force_scale: 1.0e-3
+
+train:
+  epochs: 80
+  # The converged ion_expert_full model, not the water-expert seed. `warm_start` reports what
+  # it loaded -- check that line: this checkpoint has exactly the same architecture, so it
+  # must report nothing skipped and nothing left at initialization.
+  init_from: checkpoints/ion_expert_full/best.pt
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 128
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 5
+
+# One stage only. `configs/ion_expert.yaml` runs a cheap `isolated` pre-train first, to get the
+# one-body and response sectors into the right basin before the coupled solve starts; from a
+# converged checkpoint that stage is a step *backwards*, since it trains with induction off and
+# no cluster forces and would spend 15 epochs pulling the model away from the fit it inherited.
+stages:
+  - name: full
+    train:
+      epochs: 80
+    expert:
+      induction: true

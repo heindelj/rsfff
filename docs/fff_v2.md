@@ -266,6 +266,21 @@ In every H3O+/OH− frame in `data/wb97mv_tzvpd`, `|D| = 1` and the atom is a hy
 competition between fragmentations might mean in general, in the data this model has it means
 **a bond is being relabeled**, and that is the structure to exploit.
 
+> **Corrected on implementation.** `|D| = 1` holds for any *two* decompositions and fails across
+> three. Half this corpus — every `w2_oh-` geometry, 199 of the 399 contested frames — carries
+> **three** decompositions, each one hop from the reference but each moving a *different*
+> hydrogen, so the union has `|D| = 2` while nothing concerted has happened. The mediator
+> therefore sums its per-atom score over `D` rather than reading a single atom, and the check
+> that refuses a frame is *"some decomposition moved more than one atom"*, not `|D| > 1`.
+> Reading it the other way silently discarded half the ion corpus.
+
+Note also what `D` must *not* be. Moving one proton changes the composition of two fragments and
+hence the descriptor of every atom in both, so a co-membership test — "did the set of atoms
+sharing my fragment change" — marks the whole reactive complex as contested. Fragment ids are
+arbitrary labels, so the ids cannot be compared raw either. `rsfff.ff.mediator.align_fragments`
+matches fragments across decompositions by overlap first, and `D` is then the literal definition
+above.
+
 Moving atom `i` from `f` to `g` does the following, and nothing else:
 
 | Changes | Does not change |
@@ -321,8 +336,15 @@ and never a fragment's chemistry. That is the division of labour the deferred ro
 relocated to the object that can actually act on it.
 
 `M` must read only combinations symmetric under swapping the two candidate hosts, so the same
-physical swap enumerated from either end returns the same weights. `AdiabaticCorrection` already
-does this by reading `h^K + h^J` and `(h^K − h^J)^2`; the same trick applies here.
+physical swap enumerated from either end returns the same weights.
+
+> **Superseded on implementation.** `AdiabaticCorrection`'s `h^K + h^J` / `(h^K − h^J)^2` trick
+> is one way and not the best one here: it is defined for *two* states, and a third of this
+> corpus carries three. The implemented head instead computes each decomposition's score **from
+> that decomposition's own descriptor** and softmaxes across them. A softmax is
+> permutation-equivariant, so permuting the enumeration permutes the scores identically and the
+> weight attached to a given decomposition does not move — exact rather than architectural, and
+> it generalizes to any number of candidates.
 
 An atom with one candidate has `pi = 1` and costs nothing, so a neutral water cluster runs the
 model of §5–§7 untouched.
@@ -349,11 +371,99 @@ The solve row has a precedent to reuse rather than invent: the diabatic-mixture 
 this with `finest_common_refinement` plus a compliance switch, where a partially-open channel is
 rescaled by `S` and not `sqrt(S)`, on pain of training NaNs at the closed limit.
 
-Note what the rule does **not** permit. Blending the experts' *features* and decoding once — what
-the diabatic mixture did, and the better answer wherever it is available — is unavailable here by
-construction: the decoder is per-composition, and that is the architecture rather than an accident.
-Mixing therefore happens downstream of the experts, and the price is that it happens separately for
-each kind of quantity.
+Four rows, four different levels — the accounting, the parameters, the output, the equations. That
+is the rule working and not a price being paid: each quantity is mixed at the lowest level at which
+it means the same thing to both experts, and those levels differ because the quantities do.
+
+### Where the routing weight has to reach
+
+`b_ij` is not a bookkeeping label that can be applied at the end. Every place the model branches on
+a hard `is_intra` is a place a soft `b_ij` has to enter instead, and each one missed is a
+discontinuity in the energy. In `rsfff.ff.expert_model`:
+
+| Site | What it becomes |
+| --- | --- |
+| `per_pair` — `torch.where(is_intra, theta_0, theta)` | a lerp on `b_ij`. **The `where` *is* the discontinuity**: a pair's parameters jump the moment it changes bucket. |
+| `electrostatic_environment(..., gate["elst"] * intra, ...)` | `intra` → `b_ij`. `Phi^intra` is what makes the frozen bond energy an isolated-fragment quantity, so this one is load-bearing for §5. |
+| the `energy_intra` pool over `pair_frag[is_intra]` | a `b_ij`-weighted scatter |
+| the `interaction` pool over `inter * e_pair` | `(1 - b_ij) * e_pair`; partition of unity is what keeps every pair counted exactly once across the two |
+| the frozen solve's `intra_fragment_channels` | the union over assignments, per-channel compliance scaled by weight — `finest_common_refinement` and `mixture_channel_graph` already do this |
+
+`Omega` is `rsfff.mlip.switch.validity_bump`, C² already (Invariant 4), and swap symmetry
+(Invariant 3) reuses `AdiabaticCorrection`'s trick of reading only `h^K + h^J` and `(h^K − h^J)^2`.
+
+### Why not mix in feature space
+
+Blending the experts' *features* and decoding once is what the diabatic mixture did, and it is the
+better answer wherever it is available. It is not available here. That deserves more than the one
+sentence it used to get, because the reason is not an impossibility theorem — it is the price of
+§2, and the two cannot both be had.
+
+**1. The decoder is selected by an integer key, and mixing lands between the keys.**
+`ExpertBank.assign` builds each fragment's composition as an integer count vector over species,
+formats it to a string, and looks it up in a `ModuleDict`; an unknown composition raises rather than
+falling back. At `pi = 0.5` the host of a shared proton has composition `H2O·(0.5 H)`. There is no
+key for it, no expert at it, and — decisively — **no continuous family of experts to interpolate
+between**. A dict of independently parameterized networks has no manifold structure over its keys.
+Producing a decoder at a fractional composition means a hypernetwork keyed on the count vector,
+which is the universal parameterization network of §11 wearing a hat.
+
+This is exactly the asymmetry with the diabatic mixture, and stating it is the point, because that
+analogy is what makes feature mixing look available. `MixtureModel` blends `inv/vec/equiv/emb`
+across diabats and decodes **once**, through a *single, universal* set of `MonomerParameterHeads`
+shared by every diabat. Feature blending worked there **because** there was one decoder. This
+design deleted that decoder on purpose. Feature mixing left with it.
+
+**2. Mixing outputs keeps every network on an input it was trained for; mixing features guarantees
+none of them are.** `h_i^A` is a legitimate descriptor of a stretched H3O+ — a geometry the H3O+
+expert saw. `h_i^B` is a legitimate descriptor of an H2O with a close contact, likewise in
+distribution. Their convex combination is a legitimate descriptor of **nothing**: λ-SOAP is a power
+spectrum, quadratic in the density, so `c_A h^A + c_B h^B` is not the power spectrum of any density
+at all. Measured on an H5O2+ geometry with the bridging proton assigned each way, the gap between
+blending the two descriptors and describing the blended density is **82% of the descriptor scale on
+the shared proton**, against 1–6% on the spectator atoms. That is the size of the off-manifold error
+a feature mixture would hand an expert, concentrated exactly on the atom the mediator exists for.
+
+Mixing at the parameter level has the opposite property, and it is what the rule above is really
+testing: a `C6` from the H2O expert and a `C6` from the H3O+ expert are the same physical number in
+the same units. A power spectrum built under a different fragment mask is not.
+
+**3. It destroys the vertex decomposition the labels require.** The EDA channels supervise the pure
+vertices and only `E_total` and the forces carry the mixture. Under output mixing `theta^A` and
+`theta^B` are both computed and sitting there, so the vertex energies come out alongside the mixture
+and Invariant 1 is a decomposition you can *read*. Under feature mixing there is one smeared
+evaluation, the vertices have to be run in a separate pass anyway to get their labels, and vertex
+identity degrades from a decomposition to a limit statement.
+
+**4. `theta_0` loses its referent for a shared atom.** The §4 guarantee is that `theta_0 = P(h, 0)`
+is exactly what the model claims about an isolated fragment, because `eta` is identically zero when
+there are no cross-fragment edges. Under any feature-space mixing a shared atom's `h` is built from
+a *fraction* of its own molecule's edges, and its `eta` is nonzero even in the isolated evaluation.
+`P(h, 0)` becomes the parameter of a fractional fragment — not an isolated-fragment quantity, and
+with no label. `L_env` loses its interpretation on precisely the atoms this section is about.
+
+**5. There is no cost saving**, which is the usual reason to want feature mixing at all. `M` reads
+the pooled host descriptors `H_f` and `H_g`, which exist only once each candidate assignment has
+been featurized, so both vertex featurizations run regardless. Blending them and decoding once saves
+the per-expert decode — a handful of small MLPs, next to a neighbor search, two power spectra and a
+coupled solve.
+
+**The version that nearly works.** The strongest form of feature mixing is not blending two power
+spectra. It is building *one* descriptor with soft edge memberships: give each edge an intra-weight
+`m_ij = sum_g pi_ig pi_jg` and featurize once, the fragment slot over `m` and the environment slot
+over `1 - m`. That is on-manifold — a real power spectrum of a real weighted density — C² in `pi`,
+exact at one-hot `pi`, and the only route that would actually collect the saving in (5);
+`DensityExpansion.scatter_species` already takes an `edge_mask`, and a per-edge weight is a small
+generalization of it. It survives (2) and (3) and still dies on (1) and (4): the descriptor is
+well-defined, the network that reads it is not, and `theta_0` has no referent. It is recorded in §10
+rather than dismissed here, because what defeats it is a property of the dispatch and not of the
+featurization.
+
+**The escape hatch, and its price.** Feature mixing becomes available if the experts are
+restructured as one shared trunk plus per-composition adapters, mixing in the trunk's output space.
+The price is that the trunk's latent has no physical meaning, so the shared gauge is enforced only
+by joint training — which re-imports the §1 failure mode verbatim: when they share one input vector
+nothing prevents the second from quietly doing the first's job. Named, priced, not taken.
 
 ### Invariants
 
@@ -383,17 +493,50 @@ wavefunction. That gives the split:
 | --- | --- |
 | the pure vertices | the four EDA channels, per fragmentation, exactly as §9 already does |
 | the mixture | `E_total` and forces — the only labels defined where `pi` is not one-hot |
-| the mediator, as a shaping prior | `Delta E_ind` between the candidate assignments |
+| the mediator, as a shaping prior | `L_ct`, the weighted magnitude of induction (below) |
 
-The third row needs care. `|E_pol + E_ct|` picks the chemically obvious assignment in 398 of 399
-frames, with a best-versus-second gap of 165–476 kJ/mol, so it is an excellent teacher of *which*
-assignment is better. It cannot teach *how much of each to keep*: it is a ranking signal and the
-degree of mixing is a magnitude. Only the total-energy residual through the crossover can set that,
-and it can — precisely because both decompositions carry the same `E_total` label there while the
-model gives them different answers. The size of that disagreement is a direct measurement of how
-badly each pure assignment is doing, and removing it is what `pi` is for.
+#### The shaping prior
 
-So `Delta E_ind` shapes the mediator early and keeps it honest; `E_total` and the forces decide it.
+An inferior assignment announces itself by needing a large charge transfer: it describes the system
+as fragments that are wrong, and the induction channel then has to do the work of moving the
+electrons back. So the prior is simply that the mediator should keep induction small.
+
+```text
+L_ct  =  lambda_ct * sum_{shared i} sum_g  pi_ig * | E_ind^(g) |.detach()
+```
+
+with `E_ind^(g)` the induction energy of the assignment in which atom `i` lives in host `g`. Three
+properties, each load-bearing:
+
+* **It is the right criterion, and it is measured.** `argmin |E_pol + E_ct|` picks the chemically
+  obvious assignment in 398 of 399 H3O+/OH− frames with a best-versus-second gap of 165–476 kJ/mol
+  — the evidence `ApplicabilityHead` was built on. This is that same statement, moved off the
+  per-fragment score that could not address it and onto the per-atom membership that can.
+* **The `detach` is the safety property, not an optimization detail.** `|E_ind|` can be made small
+  two ways: choose the better assignment, or shrink the induction channel. The second is exactly
+  the flat direction below — a second route into the `E_bond` / intra-classical degeneracy.
+  Detached, the penalty can *reweight* induction and can never *shrink* it, and the EDA induction
+  label keeps sole authority over its magnitude.
+* **It is weak, and mostly self-supervised.** No label appears in it, so it applies at every
+  geometry. `lambda_ct` should be small: this exists to keep the mediator out of a bad basin early,
+  not to decide it.
+
+`E_ind^(g)` is a model prediction and means nothing before the induction channel is fit. On
+contested groups the corpus does carry a per-vertex label, since each fragmentation is its own
+frame with its own EDA, so while induction is still fitting, substitute `|eda_pol + eda_ct|` on
+labeled vertices and fall back to the model's own detached `E_ind` elsewhere. Both are the same
+expression; only the source of the magnitude changes. The `group_id` and log-softmax machinery in
+`rsfff.train.loss.applicability_loss` is already addressed to exactly this data.
+
+#### What actually decides the mixture
+
+`L_ct` is a *ranking* signal, and the degree of mixing is a magnitude — no ranking can set it. Only
+the total-energy residual through the crossover can, and it can, precisely because both
+decompositions carry the same `E_total` label there while the model gives them different answers.
+The size of that disagreement is a direct measurement of how badly each pure assignment is doing,
+and removing it is what `pi` is for.
+
+So `L_ct` shapes the mediator early and keeps it honest; `E_total` and the forces decide it.
 
 ### Open
 
@@ -405,7 +548,10 @@ So `Delta E_ind` shapes the mediator early and keeps it honest; `E_total` and th
   trigger's tightness is what controls it.
 * **A flat direction.** Intra classical energy is already degenerate with `E_bond`. Letting `pi`
   move energy across the intra/inter boundary hands the mediator a second route into that
-  degeneracy, and the `r0` barrier of §6 may not be enough on its own.
+  degeneracy, and the `r0` barrier of §6 may not be enough on its own. `L_ct` *aggravates* this —
+  "make induction small" is satisfiable by shrinking induction rather than by choosing well — which
+  is why its `E_ind` is detached. That closes the route through `L_ct`; it does not close the route
+  through `E_total`, and watching `intra_disp` rather than `gate_intra` remains how it is caught.
 * **Concerted swaps** (`|D| > 1`). Out of scope; the corpus contains none.
 
 ---
@@ -451,6 +597,8 @@ clusters arrive, but it is a warm start and nothing depends on it.
 | `v_f` | a diagnostic only (§8); watch that it is not silently decaying to a constant. |
 | `pi` occupancy | the fraction of shared atoms whose membership is genuinely split. Exactly one-hot everywhere means the mediator is off or the trigger never opens; broadly split everywhere means it is hedging rather than deciding. |
 | `E_total` at the crossover | the residual the mediator exists to remove, measured where `pi` is furthest from one-hot. It is the only place the mixture has a label. |
+| `L_ct` and the induction gap `\|E_ind^A\| − \|E_ind^B\|` | whether the shaping prior is still doing work or the total-energy fit has taken over. It should fade. |
+| the mixture's `\|E_ind\|` against each vertex's | **the quantity the prior is for.** Through the crossover the mixture's induction should sit *below both* pure assignments'. If it sits between them, `pi` is averaging rather than deciding. |
 
 ---
 
@@ -477,6 +625,18 @@ crossover, and only then decide whether a correction is warranted.
 sets rather than atoms, at which point the fragmentation-level `p_F = softmax(S_F / T)` of the old
 router becomes the right object after all. Nothing in §8 forecloses that; it is the general case of
 which one-atom mediation is the specialization the corpus supports.
+
+**Soft-mask featurization.** The one form of feature-space mixing that is not defeated on its own
+terms (§8): build a single descriptor with per-edge intra-weights `m_ij = sum_g pi_ig pi_jg` rather
+than blending two power spectra. On-manifold, C² in `pi`, exact at one-hot, and it collapses the two
+vertex featurizations into one — the only version that is actually cheaper.
+`DensityExpansion.scatter_species` already takes an `edge_mask`, so the change is a per-edge weight
+where a boolean is now.
+
+What it still needs is a network defined at a fractional composition and a meaning for `theta_0` at
+an atom that owns a fraction of its own molecule. Both arrive together with the shared trunk of §8's
+escape hatch, and neither arrives without it. Recorded here so that if the expert bank is ever
+restructured, this is a reachable consequence rather than a rediscovery.
 
 **Slot mixing.** Cross-contractions between the fragment and environment slots' λ≥1 blocks —
 `mu_h · v_env`, `Theta_h : G_env` — which see the *relative orientation* of a fragment and its

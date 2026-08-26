@@ -909,6 +909,49 @@ class ExpertConfig:
     #: away while the barrier above keeps the mean in place.
     r0_spread_weight: float = 1.0
 
+    # --- the mediator (docs/fff_v2.md §8) -----------------------------------------------------
+    #: Build the mediator and add the mixture stream. Off reproduces the single-fragmentation
+    #: model exactly -- not approximately: with no mixture term nothing in this block is
+    #: constructed and no gradient reaches anything the mediator owns.
+    mediator: bool = False
+    #: Freeze every parameter **except** the mediator's. Unlike ``freeze_core`` this *is* part
+    #: of the training schedule, and for a measured reason: the mixture's total-energy loss
+    #: reaches 688k expert parameters directly and the mediator only through a scalar weight,
+    #: so the gradient into the experts is ~10^5 times larger. Left joint from the start, the
+    #: optimizer satisfies the mixture by deforming the experts rather than by sharpening the
+    #: membership -- measured as ``e_tot_mae`` 2.2 -> 30 kJ/mol on the single-fragmentation
+    #: stream while ``pi_occ`` sat still.
+    #:
+    #: This does **not** contradict §4's "no freeze". That argument is about the isolated vs
+    #: environment split *within* a parameterization, where freezing pins quantities the
+    #: monomer stream cannot constrain. Here the experts are already converged against their
+    #: own labels, and §8 says the vertices are supervised by the EDA channels while only the
+    #: mixture is supervised by ``E_total`` -- freezing during the mediator stage is that
+    #: division of labour enforced rather than hoped for.
+    freeze_experts: bool = False
+    mediator_hidden: int = 32
+    mediator_depth: int = 2
+    #: The validity envelope on a contested atom's contact distance, in Angstrom. A candidate
+    #: is fully open inside ``hi1`` and closed past ``hi0``, C2 at both ends
+    #: (:func:`rsfff.mlip.switch.validity_bump`). The default spans a covalent O-H to a long
+    #: hydrogen bond, so both assignments are live through a transfer and a spectator water
+    #: never enumerates one.
+    mediator_bump_hi1: float = 1.35
+    mediator_bump_hi0: float = 2.20
+    #: Mediated geometries per optimizer step. Each one runs ``M`` featurizations and a solve,
+    #: so this is the mixture's whole cost knob.
+    mixture_batch_size: int = 8
+    #: ``E_total`` and forces on the mixture -- **the only labels defined where the membership
+    #: is not one-hot**, and so the terms that actually decide the degree of mixing.
+    mixture_energy_weight: float = 1.0
+    mixture_force_weight: float = 1.0
+    mixture_force_every: int = 2
+    #: The charge-transfer shaping prior of §8. Deliberately small: it keeps the mediator out
+    #: of a bad basin early and must not be what decides it. The magnitude it weights is
+    #: **detached**, so this can reweight induction but never shrink it -- which is what stops
+    #: it opening a second route into the ``E_bond`` / intra-classical degeneracy.
+    mixture_ct_weight: float = 0.02
+
     # --- ablation ---------------------------------------------------------------------------
     #: Freeze everything except the environment slot. **Not part of the training schedule** --
     #: see ``docs/fff_v2.md`` §4 for why freezing after a monomer stage is wrong. It is here to

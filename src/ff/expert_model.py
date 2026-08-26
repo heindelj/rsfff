@@ -97,7 +97,13 @@ from .response import FragmentResponseOutput, ResponseParameters, solve_frozen
 from .slots import SlotFeatures, select_atoms
 from .units import BOHR_ANG
 
-__all__ = ["ClassicalSpec", "DEFAULT_CLASSICAL", "ExpertOutput", "FragmentExpertModel"]
+__all__ = [
+    "ClassicalSpec",
+    "DEFAULT_CLASSICAL",
+    "Emission",
+    "ExpertOutput",
+    "FragmentExpertModel",
+]
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,37 @@ DEFAULT_CLASSICAL: dict[str, ClassicalSpec] = {
     "pauli": ClassicalSpec(7.0),
     "disp": ClassicalSpec(10.0),
 }
+
+
+@dataclass
+class Emission:
+    """One fragmentation's parameters, before any solve or pair list. See ``emit``.
+
+    Every field is either per atom or per channel of *this* decomposition. The mixture
+    (``docs/fff_v2.md`` §8) combines several of these -- the per-atom fields by a weighted sum,
+    because a ``C6`` is a ``C6`` whichever expert emitted it, and the compliances onto the
+    union channel graph, because a channel only one decomposition opens still carries its
+    weight.
+    """
+
+    slots: SlotFeatures
+    groups: list
+    iso: object
+    joined: object
+    has_env: bool
+    rp: ResponseParameters
+    #: The same heads on the **joined** slot -- ``theta`` rather than ``theta_0``. This is what
+    #: the coupled induction level reads; ``None`` when there is no environment slot, where the
+    #: two evaluations are the same object and the second call would be waste.
+    rp_env: ResponseParameters | None
+    channels: torch.Tensor                    # (2, Nc) this decomposition's channel graph
+    r0_iso: dict[str, torch.Tensor]
+    r0_env: dict[str, torch.Tensor]
+    pauli_iso: tuple
+    pauli_env: tuple
+    disp_iso: tuple
+    disp_env: tuple
+    alpha: dict[str, torch.Tensor]
 
 
 @dataclass
@@ -507,6 +544,70 @@ class FragmentExpertModel(nn.Module):
             max_rank=self.max_rank,
         )
         return poly, b
+
+    def emit(self, batch, frag, *, bond_index=None) -> "Emission":
+        """Every parameter this model's experts emit for **one** fragmentation, unassembled.
+
+        ``forward`` assembles an energy from these; :func:`rsfff.ff.mixture_model.
+        mixture_forward` mixes several of them first and assembles once. Factoring the
+        emission out is what lets the mixture reuse the parameterization exactly rather than
+        reimplementing it -- the thing that would otherwise drift.
+
+        No solve happens here and no pair list is built. Both are properties of the
+        *assembly*: a mixture solves on the union of its decompositions' channel graphs, so a
+        solve done per decomposition would be the wrong one and would have to be discarded.
+
+        ``bond_index`` overrides the intra-fragment channel enumeration, which the mixture
+        needs because :func:`rsfff.ff.pairs.intra_fragment_channels` requires atoms grouped by
+        fragment and no atom order satisfies that for more than one decomposition at once.
+        """
+        slots, groups = self.slots(batch, frag)
+        iso, joined = slots.isolated(), slots.joined()
+        has_env = slots.dims.has_env
+        n_atoms = iso.inv_feats.shape[0]
+        if bond_index is None:
+            bond_index, _ = intra_fragment_channels(frag)
+
+        def fan(fn):
+            return self._fan_out(groups, lambda g: fn(g.expert, g.atom_index), n_atoms)
+
+        def both(fn):
+            a = fan(lambda expert, sel: fn(expert, select_atoms(iso, sel)))
+            if not has_env:
+                return a, a
+            return a, fan(lambda expert, sel: fn(expert, select_atoms(joined, sel)))
+
+        first = groups[0].expert
+        r0_iso = fan(
+            lambda expert, sel: expert.range_heads(
+                _select_rows(iso.inv_feats, sel), _select_rows(iso.species_idx, sel)
+            )[0]
+        )
+        r0_env = r0_iso
+        if has_env and first.range_heads.r0_mlp is not None:
+            r0_env = fan(
+                lambda expert, sel: expert.range_heads(
+                    _select_rows(joined.inv_feats, sel),
+                    _select_rows(joined.species_idx, sel),
+                )[0]
+            )
+        pauli_iso, pauli_env = both(self._pauli_multipoles)
+        disp_iso, disp_env = both(
+            lambda expert, f: expert.disp_params(f.inv_feats, f.species_idx)
+        )
+        return Emission(
+            slots=slots, groups=groups, iso=iso, joined=joined, has_env=has_env,
+            rp=self._response_parameters(groups, batch, iso, bond_index=bond_index),
+            rp_env=(
+                self._response_parameters(groups, batch, joined, bond_index=bond_index)
+                if has_env else None
+            ),
+            channels=bond_index,
+            r0_iso=r0_iso, r0_env=r0_env,
+            pauli_iso=pauli_iso, pauli_env=pauli_env,
+            disp_iso=disp_iso, disp_env=disp_env,
+            alpha=first.range_heads.alphas(),
+        )
 
     def forward(
         self,
