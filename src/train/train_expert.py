@@ -410,6 +410,11 @@ class IsolatedStreams:
 def _freeze_experts(model) -> None:
     """Freeze everything but the mediator. See ``ExpertConfig.freeze_experts`` for why.
 
+    v4 note: with the per-composition experts gone this freezes the featurizer, the
+    fragment-state block and the whole decoder -- everything the mediator's weight multiplies.
+    That is still the intent the name records: the mixture's total-energy loss reaches the
+    parameterization directly and the mediator only through a scalar.
+
     Applied after the warm start, so the frozen values are the checkpoint's rather than the
     initialization's -- freezing before loading would pin the experts at random weights.
     """
@@ -536,7 +541,6 @@ def _train_once(config: Config):
         flush=True,
     )
     print(
-        f"experts {sorted(model.experts.experts)}; "
         f"{n_all} parameters, {n_env} ({100 * n_env / n_all:.1f}%) in the environment slot",
         flush=True,
     )

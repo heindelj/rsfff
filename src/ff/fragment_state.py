@@ -21,7 +21,20 @@ __all__ = ["FragmentStateEmbedding"]
 
 
 class FragmentStateEmbedding(nn.Module):
-    """Per-atom block encoding its fragment's ``(Q_f, 2S_f)``, zero at the neutral singlet.
+    """Per-atom block encoding its fragment's ``(Q_f, 2S_f, n_f)``, zero at the neutral singlet.
+
+    **v4: this is the key.** It used to be one block among several ways the model knew what a
+    fragment was -- alongside the per-composition expert that owned the parameter heads, and
+    alongside the latent those encoders learned. Three encodings of one fact, all trainable,
+    all competing. Now there is one, and it is this: the state of a fragment is its charge, its
+    multiplicity and its composition, and nothing else about it is a *state*.
+
+    That is what makes it mixable. A learned latent has no units and no canonical frame, so
+    two experts' latents have whatever relationship training happened to give them and a
+    convex combination of them means nothing in particular. ``(Q, 2S, n)`` are physical labels
+    with an unambiguous fractional reading -- a proton halfway between two waters genuinely
+    leaves its host half-charged -- so the crossover is a *state* being lifted off an integer,
+    not two latents being averaged. See :meth:`mixed`.
 
     The featurizer every force-field term uses (``FlatLambdaSOAPFeaturizer``) carries species
     and geometry only -- no fragment charge, no multiplicity. On water that is invisible,
@@ -59,18 +72,79 @@ class FragmentStateEmbedding(nn.Module):
     #: train, leaving nothing for H5O2+ data to start from.
     no_weight_decay = True
 
-    def __init__(self, dim: int = 4, *, hidden: int = 32, depth: int = 1) -> None:
+    def __init__(
+        self, dim: int = 4, *, n_species: int = 0, hidden: int = 32, depth: int = 1
+    ) -> None:
         super().__init__()
         self.dim = int(dim)
-        self.net = mlp(2, hidden, depth, self.dim) if self.dim else None
+        self.n_species = int(n_species)
+        self.net = mlp(2 + self.n_species, hidden, depth, self.dim) if self.dim else None
 
-    def forward(self, batch, fragment_idx: torch.Tensor, dtype, device) -> torch.Tensor | None:
+    def _embed(self, q, two_s, counts) -> torch.Tensor:
+        """``(*, dim)`` from continuous ``(Q, 2S, n)``, anchored at the neutral singlet.
+
+        The anchor is taken at ``(0, 0, n)`` -- same composition, neutral and closed-shell --
+        so the block stays identically zero for a neutral singlet of *any* composition and
+        water-only data still cannot move it, which is the property the class docstring's
+        argument depends on. Composition then enters only through its interaction with charge
+        and spin: "how does charge sit on *this* fragment", which is the interpretable form.
+        It is also the reason ``n`` is not simply a second additive feature -- an unanchored
+        composition block would receive gradient on water data and drift.
+        """
+        x = torch.cat((q.unsqueeze(-1), two_s.unsqueeze(-1), counts), dim=-1)
+        ref = torch.cat((torch.zeros_like(x[..., :2]), counts), dim=-1)
+        return self.net(x) - self.net(ref)
+
+    def forward(
+        self,
+        batch,
+        fragment_idx: torch.Tensor,
+        dtype,
+        device,
+        *,
+        element_counts: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        """``(N, dim)`` per atom, for a **definite** fragmentation.
+
+        ``element_counts`` is ``(N, n_species)``, the census of each atom's fragment
+        (:func:`rsfff.ff.partition.element_counts`). It is per atom rather than per fragment
+        because that is the form :meth:`mixed` has to produce -- a mixture has no single
+        fragment numbering to state it in -- and carrying one convention is worth more than
+        saving a gather.
+        """
         if self.net is None:
             return None
         n_frag = int(batch.n_fragments)
         zeros = torch.zeros(n_frag, dtype=dtype, device=device)
         q = zeros if batch.fragment_charge is None else batch.fragment_charge.to(dtype)
         s = zeros if batch.fragment_two_s is None else batch.fragment_two_s.to(dtype)
-        x = torch.stack((q, s), dim=-1)
-        ref = self.net(torch.zeros_like(x[:1]))
-        return (self.net(x) - ref)[fragment_idx]
+        counts = self._counts(element_counts, fragment_idx.shape[0], dtype, device)
+        return self._embed(q[fragment_idx], s[fragment_idx], counts)
+
+    def mixed(self, q, two_s, counts) -> torch.Tensor | None:
+        """``(N, dim)`` from **fractional** per-atom state: the mixture's entry point.
+
+        The inputs come from :func:`rsfff.ff.partition.mixed_state`, which mixes the fragment
+        labels themselves. Mixing the *inputs* and never the outputs is the whole point: this
+        net is continuous in ``(Q, 2S, n)``, so a half-charged, 2.5-hydrogen fragment is a
+        point it can be asked about and its answer is a genuine output. Averaging two finished
+        embeddings would place the decoder somewhere nothing produced -- the failure mode this
+        design exists to avoid, and one no quantity of training data repairs.
+
+        At a one-hot membership the fractional inputs are the vertex's own integer labels, so
+        this is bit-identical to :meth:`forward` there.
+        """
+        if self.net is None:
+            return None
+        return self._embed(q, two_s, self._counts(counts, q.shape[0], q.dtype, q.device))
+
+    def _counts(self, counts, n_atoms: int, dtype, device) -> torch.Tensor:
+        if self.n_species == 0:
+            return torch.zeros(n_atoms, 0, dtype=dtype, device=device)
+        if counts is None:
+            raise ValueError(
+                f"FragmentStateEmbedding was built with n_species={self.n_species} and needs "
+                f"the per-atom element census; pass element_counts "
+                f"(rsfff.ff.partition.element_counts)"
+            )
+        return counts.to(dtype)

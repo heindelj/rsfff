@@ -56,7 +56,6 @@ def _config() -> Config:
     cfg.expert.induction = False
     cfg.expert.bond_hidden, cfg.expert.bond_equiv_channels = 16, 4
     cfg.expert.r0_hidden = 16
-    cfg.expert.compositions = ["H2O", "H3O", "HO"]
     cfg.expert.fragment_state_dim = 4
     return cfg
 
@@ -383,93 +382,135 @@ def test_intra_pairs_unsorted_matches_the_sorted_fast_path():
 
 
 # ---------------------------------------------------------------------------------------
-# The key layer (docs/fff_v2.md v3)
+# The soft partition (docs/fff_v2.md v4)
 # ---------------------------------------------------------------------------------------
 
-def test_keys_are_unit_norm(model):
-    """Every key the decoder ever sees lies on the same sphere. Both evaluations."""
-    from rsfff.ff.mixture_model import intra_pairs_unsorted
+def test_the_partition_is_a_partition(model):
+    """``s`` and ``1 - s`` split every edge exactly once, for any membership."""
+    from rsfff.ff.partition import soft_partition
 
     group = _group()
-    em = model.emit(
-        group.batch(0), group.fragments[0],
-        bond_index=intra_pairs_unsorted(group.fragments[0]),
+    edges = model.featurizer._build_edges(
+        group.positions, torch.zeros(group.positions.shape[0], dtype=torch.long)
     )
-    for name, key in (("k", em.key), ("k0", em.key0)):
-        n = key.norm()
-        assert torch.allclose(n, torch.ones_like(n), atol=1e-10), (
-            f"{name} is not unit norm (min {float(n.min()):.6f}, max {float(n.max()):.6f})"
+    for w in ([1.0, 0.0], [0.0, 1.0], [0.5, 0.5], [0.23, 0.77]):
+        s = soft_partition(group.fragments, torch.tensor(w, dtype=torch.float64), edges)
+        assert bool(((s >= 0.0) & (s <= 1.0)).all()), f"s left [0,1] at w={w}"
+        assert torch.equal(s + (1.0 - s), torch.ones_like(s)), (
+            "the two halves must account for every edge exactly once, identically -- this is "
+            "where energy crosses between fragment_energy and the EDA channels"
         )
 
 
-def test_mix_keys_is_the_identity_at_a_vertex(model):
-    """A one-hot membership returns the vertex key to floating-point exactness.
-
-    **Not bitwise, and the reason is worth knowing.** At a vertex the convex sum *is* the
-    vertex key, so renormalizing is mathematically the identity -- but it recomputes a norm
-    from already-normalized components, and that sum of squares is only 1.0 to rounding. The
-    division therefore moves the last bit or two. The energy-level statement (Invariant 1)
-    holds at 1e-9 regardless, which is what actually matters; this pins the key-level one at
-    the tightest tolerance it can honestly carry.
-    """
-    from rsfff.ff.keys import mix_keys
-    from rsfff.ff.mixture_model import intra_pairs_unsorted
+def test_the_partition_is_the_hard_mask_at_a_vertex(model):
+    """A one-hot membership reproduces the boolean membership test, **bitwise**."""
+    from rsfff.ff.partition import soft_partition
 
     group = _group()
-    keys = [
-        model.emit(
-            group.batch(m), group.fragments[m],
-            bond_index=intra_pairs_unsorted(group.fragments[m]),
-        ).key
-        for m in range(2)
-    ]
+    edges = model.featurizer._build_edges(
+        group.positions, torch.zeros(group.positions.shape[0], dtype=torch.long)
+    )
     for vertex in (0, 1):
         w = torch.zeros(2, dtype=torch.float64)
         w[vertex] = 1.0
-        mixed = mix_keys(keys, w)
-        for block in ("k0", "k1", "k2"):
-            got, want = getattr(mixed, block), getattr(keys[vertex], block)
-            if want is None:
-                assert got is None
+        frag = group.fragments[vertex]
+        hard = (frag[edges[0]] == frag[edges[1]]).to(torch.float64)
+        assert torch.equal(soft_partition(group.fragments, w, edges), hard)
+
+
+def test_the_soft_descriptor_matches_the_hard_one_at_a_vertex(model):
+    """``P(A(s))`` at ``s in {0,1}`` is the masked descriptor -- the on-manifold claim's floor.
+
+    Bitwise on CPU: multiplying by an exact ``1.0`` and adding an exact ``0.0`` are both
+    exact, and the surviving edges are accumulated in the same relative order either way. On
+    CUDA ``index_add_`` uses atomics and neither path is bitwise reproducible, so this is a
+    CPU statement about arithmetic rather than a promise about every device.
+    """
+    from rsfff.ff.partition import soft_partition
+
+    group = _group()
+    frag = group.fragments[0]
+    batch = group.batch(0)
+    hard_h, hard_eta = model.featurizer(batch, frag, also_cross=True)
+    soft_h, soft_eta = model.featurizer(
+        batch, frag, also_cross=True,
+        edge_weight=lambda e: soft_partition(
+            group.fragments, torch.tensor([1.0, 0.0], dtype=torch.float64), e
+        ),
+    )
+    for name, a_, b_ in (("h", hard_h, soft_h), ("eta", hard_eta, soft_eta)):
+        for lam in ("inv_feats", "vec_feats", "equiv_feats"):
+            x, y = getattr(a_, lam), getattr(b_, lam)
+            if x is None:
                 continue
-            assert torch.allclose(got, want, atol=1e-14, rtol=0.0), (
-                f"{block} moved at a one-hot membership by "
-                f"{float((got - want).abs().max()):.3e}"
+            assert torch.equal(x, y), (
+                f"{name}.{lam} moved by {float((x - y).abs().max()):.3e} at a vertex"
             )
 
 
-def test_the_key_is_equivariant(model):
-    """Rotate the frame: ``k0`` is invariant, ``k1`` and ``k2`` carry the rotation.
+def test_the_two_halves_sum_to_the_full_density(model):
+    """``A(s) + A(1-s) = A_full`` for any ``s``: a fragmentation moves the boundary, not the total.
 
-    Checked directly rather than through the energy. A normalization that accidentally broke
-    equivariance -- normalizing per ``m`` component, say -- would leave the energy of *this*
-    frame untouched and only show up once a rotated one appeared.
+    This is the identity the whole mixing operator rests on. If it failed, interpolating the
+    partition would not be interpolating *anything* well defined, and the design would have no
+    more claim on being on-manifold than averaging two finished descriptors had.
     """
-    from rsfff.ff.mixture_model import intra_pairs_unsorted
+    from rsfff.ff.partition import soft_partition
 
     group = _group()
-    theta = torch.tensor(0.7, dtype=torch.float64)
-    c, s = theta.cos(), theta.sin()
-    R = torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float64)
-
-    def keys_for(positions):
-        g = MixtureGroup(
-            positions=positions, atomic_numbers=group.atomic_numbers,
-            fragments=group.fragments, atom_charge=group.atom_charge,
-            atom_two_s=group.atom_two_s, contested=group.contested,
+    pos = group.positions
+    n = pos.shape[0]
+    edges = model.featurizer._build_edges(pos, torch.zeros(n, dtype=torch.long))
+    RY = model.featurizer.density.edge_expansion(pos, edges)
+    sp = model.featurizer._species_lut[group.atomic_numbers]
+    full = model.featurizer.density.scatter_species(RY, edges, sp, n)
+    for w in ([1.0, 0.0], [0.5, 0.5], [0.2, 0.8]):
+        s = soft_partition(group.fragments, torch.tensor(w, dtype=torch.float64), edges)
+        a = model.featurizer.density.scatter_species(RY, edges, sp, n, edge_weight=s)
+        b = model.featurizer.density.scatter_species(RY, edges, sp, n, edge_weight=1.0 - s)
+        assert torch.allclose(a + b, full, atol=1e-14), (
+            f"the halves do not reconstitute the full density at w={w}"
         )
-        return model.emit(
-            g.batch(0), g.fragments[0],
-            bond_index=intra_pairs_unsorted(g.fragments[0]),
-        ).key
 
-    plain = keys_for(group.positions)
-    turned = keys_for(group.positions @ R.T)
 
-    assert torch.allclose(plain.k0, turned.k0, atol=1e-10), "k0 is not rotation invariant"
-    if plain.k1 is not None:
-        want = torch.einsum("ab,nbk->nak", R, plain.k1)
-        assert torch.allclose(want, turned.k1, atol=1e-10), "k1 does not carry the rotation"
+def test_the_mixed_state_is_fractional_and_exact_at_a_vertex(model):
+    """``(Q*, 2S*, n*)`` interpolate the *labels*, and the block agrees with the vertex there.
+
+    The state is mixed at the input and never at the output. At a vertex the fractional
+    labels are the vertex's own integers, so the embedding is bit-identical to the one the
+    single-fragmentation path builds -- which is what lets Invariant 1 hold through it.
+    """
+    from rsfff.ff.partition import element_counts, mixed_state
+
+    group = _group()
+    n_sp = model.fragment_state.n_species
+    sp = model.featurizer._species_lut[group.atomic_numbers]
+
+    for vertex in (0, 1):
+        w = torch.zeros(2, dtype=torch.float64)
+        w[vertex] = 1.0
+        q, two_s, counts = mixed_state(
+            group.fragments, w, group.atom_charge, group.atom_two_s, sp, n_sp
+        )
+        assert torch.equal(q, group.atom_charge[vertex].to(q.dtype))
+        assert torch.equal(
+            counts, element_counts(group.fragments[vertex], sp, n_sp)
+        )
+        want = model.fragment_state(
+            group.batch(vertex), group.fragments[vertex], q.dtype, q.device,
+            element_counts=element_counts(group.fragments[vertex], sp, n_sp),
+        )
+        assert torch.equal(model.fragment_state.mixed(q, two_s, counts), want)
+
+    # Halfway, the contested proton's host is genuinely half-charged: the physical reading
+    # this design exists to make available, and the reason the labels are mixed and not the
+    # embeddings.
+    q, _, counts = mixed_state(
+        group.fragments, torch.tensor([0.5, 0.5], dtype=torch.float64),
+        group.atom_charge, group.atom_two_s, sp, n_sp,
+    )
+    assert bool(((q > 0.0) & (q < 1.0)).any()), "no atom ended up fractionally charged"
+    assert bool(((counts % 1.0) != 0.0).any()), "no fragment ended up with a fractional census"
 
 
 def test_the_mixture_stays_inside_the_vertex_interval(model):

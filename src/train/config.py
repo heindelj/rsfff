@@ -779,11 +779,6 @@ class ExpertConfig:
       geometry the expert does not claim to describe.
     """
 
-    #: The fragment compositions with an expert, in Hill notation over the data's elements --
-    #: ``"H2O"``, ``"HO"``, ``"H3O"``. A composition in the data with no expert **raises**: a
-    #: fragment-expert model has no generic head to fall back to, and answering with some other
-    #: molecule's expert is the failure this refuses to make silently.
-    compositions: tuple = ("H2O",)
     max_rank: int = 2
 
     #: Build the environment slot at all. Off makes every parameter fragment-confined and the
@@ -913,17 +908,6 @@ class ExpertConfig:
     #: Build the mediator and add the mixture stream. Off reproduces the single-fragmentation
     #: model exactly -- not approximately: with no mixture term nothing in this block is
     #: constructed and no gradient reaches anything the mediator owns.
-    # --- the key layer (docs/fff_v2.md v3) ----------------------------------------------------
-    #: Widths of the equivariant key: the invariant block and the lambda=1 / lambda=2 blocks.
-    #: This is the space mixtures happen in, so it has to be wide enough to carry a fragment's
-    #: whole description -- everything the parameters are decoded from passes through it.
-    key_dim: int = 64
-    key_dim_l1: int = 32
-    key_dim_l2: int = 32
-    key_emb_dim: int = 16
-    key_hidden: int = 64
-    key_depth: int = 2
-
     mediator: bool = False
     #: Freeze every parameter **except** the mediator's. Unlike ``freeze_core`` this *is* part
     #: of the training schedule, and for a measured reason: the mixture's total-energy loss

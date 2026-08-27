@@ -69,7 +69,6 @@ features:
 expert:
   # One composition in this data. A fragment whose composition has no expert raises: there is
   # no generic head to fall back to, which is the point.
-  compositions: ["H2O"]
   max_rank: 2                   # must match elec.max_rank
 
   # The environment slot. Off makes every parameter fragment-confined and the model rigorously

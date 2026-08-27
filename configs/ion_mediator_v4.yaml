@@ -1,17 +1,21 @@
-# The fragment-expert model fitted jointly on H2O, H3O+ and OH-.
+# The v4 fragment model fitted jointly on H2O, H3O+ and OH-.
 #
-#   python scripts/seed_experts.py --from checkpoints/water_expert_full/best.pt \
-#       --out checkpoints/seed_three_experts.pt
-#   python -m rsfff.train.train_expert configs/ion_expert.yaml
+#   python -m rsfff.train.train_expert configs/ion_mediator_v4.yaml
+#
+# Trains from scratch. No v3 checkpoint migrates: the per-composition encoders are gone and
+# the decoder moved from key widths back to feature widths, so nothing but the featurizer and
+# the reference energies would have loadable shapes. `run_name` is deliberately distinct from
+# `ion_mediator` so the v3 run's checkpoints survive for comparison.
 #
 # What is different from `configs/water_expert.yaml`, and why each difference is there.
 #
-# **Three experts.** `H2O`, `H3O`, `HO` -- Hill order over this data's elements, so hydroxide
-# is `HO` and not `OH`. Charge is not part of an expert's key: one `HO` expert covers
-# hydroxide and the OH radical, and `FragmentStateEmbedding` tells it which it is looking at.
-# That block has never been trained before now -- it emits `net(Q,2S) - net(0,0)`, which is
-# identically zero on the neutral singlets water-only data is made of, so it received no
-# gradient at all. Q = +-1 fragments are the first data that can move it.
+# **No experts.** v4 has one featurizer, one fragment-state embedding and one decoder. A
+# fragment is described by its geometry (`h`) plus its state -- `(Q, 2S, n)`, charge,
+# multiplicity and a per-element census -- and nothing selects a different network for an
+# H3O+ than for an H2O. That block is now the *only* thing distinguishing them beyond
+# geometry, and it emits `net(Q,2S,n) - net(0,0,n)`, identically zero on the neutral singlets
+# water-only data is made of. Q = +-1 fragments are the first data that can move it, which
+# makes this corpus load-bearing rather than merely useful.
 #
 # **Every fragmentation of every geometry.** An H3O+(H2O)2 frame carries three ALMO-EDA
 # decompositions, one per placement of the excess proton, and all three are true. Each becomes
@@ -34,7 +38,7 @@
 # worst, and the ion clusters interact at ~-250 kJ/mol against water's ~-20, so every channel's
 # MAE starts larger simply because the energies are.
 
-run_name: ion_mediator
+run_name: ion_mediator_v4
 device: auto
 dtype: float64
 checkpoint_root: checkpoints
@@ -83,8 +87,6 @@ features:
   density_channels: 8
 
 expert:
-  # Hill order over (H, O), so hydroxide is "HO". A fragment whose composition has no expert
-  # raises: there is no generic head to fall back to, which is the point.
   max_rank: 2                   # must match elec.max_rank
 
   # The environment slot. Off makes every parameter fragment-confined and the model rigorously

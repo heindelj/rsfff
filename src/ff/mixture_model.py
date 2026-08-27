@@ -5,24 +5,32 @@
 choosing discontinuously gives a discontinuous energy. This module evaluates every candidate,
 asks the mediator (:mod:`rsfff.ff.mediator`) for a partition of unity over them, and combines.
 
-The rule, and where each quantity obeys it
-------------------------------------------
-> Mix at the lowest level at which the quantity means the same thing to both experts.
+One operator, not four levels
+-----------------------------
+v2 mixed different quantities at different levels -- the pair routing at the accounting, ``C6``
+and the Pauli multipoles at the parameter, ``E_bond`` at the output, the response at the
+equations -- on the argument that each becomes commensurable somewhere different. The argument
+was true and the result was still wrong: the classical forms are nonlinear enough in those
+parameters that a halfway parameter set is not a halfway energy, and the mediated energy left
+the interval spanned by its two vertices by 162 kJ/mol at a proton transfer.
 
-============================  ==================  ==================================
-Quantity                      Mixed at            Implemented in
-============================  ==================  ==================================
-pair routing ``b_ij``         the accounting      :func:`routing_weight`
-``C6``, ``b``, ``r0``,        the parameter       :func:`_mix`, applied per field
-Pauli multipoles, response
-``E_bond``                    the output          the ``bond`` loop in :meth:`forward`
-the response solve            the equations       union graph + compliance scale
-============================  ==================  ==================================
+v4 mixes in one place, and it is upstream of all of them. A fragmentation is a partition of the
+frame's **edges**, every candidate partitions the *same* edge set, and what a mixture chooses is
+therefore where the boundary sits::
 
-Four levels, because the quantities differ in where they become commensurable. Feature space
-is a fifth candidate and fails the test -- see §8's *Why not mix in feature space*: the two
-experts' descriptors do not mean the same thing, and there is no network defined at a
-fractional composition to read a blend of them anyway.
+    s_e = sum_m w_m [ frag_m(i) == frag_m(j) ]
+
+That one scalar (:mod:`rsfff.ff.partition`) builds the descriptors, scales the SQE channel
+compliances, and routes the pair energies -- three consumers, one definition. Because the
+density is linear in the edge sum, ``h`` and ``eta`` stay genuine power spectra all along the
+path; a convex combination of two *finished* descriptors would not be, since the power spectrum
+is quadratic and their average is the spectrum of no density at all.
+
+The fragment's state -- charge, multiplicity, composition -- is mixed the same way and for the
+same reason: the fractional labels go into one embedding, rather than two embeddings being
+averaged. ``E(Q=0.5)`` is a real output of a network that is continuous in ``Q``. Half a proton
+transferred genuinely leaves a water half-charged with two and a half hydrogens, and that is a
+point the model can be asked about rather than a midpoint between two unrelated encodings.
 
 Why this is a second forward and not a flag on the first
 --------------------------------------------------------
@@ -30,8 +38,13 @@ Why this is a second forward and not a flag on the first
 whole water corpus, and the EDA channel labels depend on it being exactly what it is. Threading
 a soft ``b_ij`` through it would put a lerp on the hot path of a model that mostly does not
 need one. So the mixture is assembled here, reusing ``forward``'s *helpers* -- the featurizer,
-the expert fan-out, the response assembly, the classical backbones -- and duplicating only the
-assembly, where the soft routing genuinely changes every line.
+``emit``, the response assembly, the classical backbones -- and duplicating only the assembly,
+where the soft routing genuinely changes every line.
+
+The gap between the two has narrowed a lot in v4: with ``s_e`` as the parameter, a definite
+fragmentation is the case ``s_e in {0, 1}`` and a mixture the case ``s_e in [0, 1]``, so the
+two differ in the union channel graph and the frame-level charge blocking rather than in how
+anything is parameterized. Collapsing them entirely is a later change, not this one.
 
 The duplication is the cost of Invariant 1 being *checkable*: ``tests/test_mediator.py`` runs
 this forward with a one-hot membership and requires it to reproduce ``forward`` to machine
@@ -57,10 +70,11 @@ import torch
 
 from ..mlip.switch import pairwise_switch
 from .damping import fermi_switch
+from .expert_model import Emission  # noqa: F401  (typing only, for MixtureOutput)
 from .dispersion import tt_damped_c6_energy
 from .electrostatics import slater_elec_pair_energy
 from .environment import electrostatic_environment
-from .keys import key_angle, key_features, mix_keys
+from .partition import mixed_state, soft_partition
 from .mediator import MediatorOutput
 from .pauli import slater_pauli_pair_energy
 from .multipole import (
@@ -196,9 +210,7 @@ def routing_weight(
     the accounting itself. Since ``sum_m w_m = 1``, every pair is still counted exactly once
     across the intra and inter buckets: ``b_ij + (1 - b_ij) = 1`` identically.
     """
-    i, j = pair_index[0], pair_index[1]
-    same = (fragments[:, i] == fragments[:, j]).to(weights.dtype)     # (M, P)
-    return (weights.reshape(-1, 1) * same).sum(0)
+    return soft_partition(fragments, weights, pair_index)
 
 
 @dataclass
@@ -300,6 +312,13 @@ class MixtureOutput:
     #: (M,) each pure vertex's total energy. The disagreement between these through the
     #: crossover is the residual the mixture exists to remove (§8).
     vertex_energy: torch.Tensor | None = None
+    #: The **mixed description** every parameter above was decoded from: ``emission.iso`` is
+    #: ``h`` at the soft partition (with the fractional state block) and ``emission.joined`` is
+    #: ``[h | eta]``. Exposed so a consumer that wants a parameter this output does not already
+    #: carry -- a plot of ``C6`` through the crossover, say -- can decode it from the same
+    #: description rather than rebuilding the partition itself. Rebuilding it is the drift this
+    #: module exists to avoid; there is no second definition of the mixed input.
+    emission: "Emission | None" = None
 
 
 def mixture_forward(
@@ -341,27 +360,47 @@ def mixture_forward(
     )
     w = med.weights
 
-    # --- mix the KEYS, then decode once ---------------------------------------------------
-    # v2 mixed the parameters themselves and the classical forms are nonlinear enough in them
-    # that a halfway parameter set is not a halfway energy: measured, 162 kJ/mol of excursion
-    # beyond the vertex interval at a proton transfer. A convex combination of keys decodes
-    # through the shared decoder to a *self-consistent* parameter set instead -- one the
-    # decoder would emit for some real input -- and the path is trainable rather than fixed
-    # arithmetic.
-    key = mix_keys([e.key for e in emitted], w)
-    key0 = mix_keys([e.key0 for e in emitted], w)
+    # --- one soft partition, and one description built from it ------------------------------
+    # This is the whole mixing operator. Every candidate assignment partitions the *same* edge
+    # set -- `A(s) + A(1-s) = A_full` for any `s` -- so what a mixture chooses is where the
+    # boundary sits, not what the descriptor says. Interpolating the boundary keeps `h` and
+    # `eta` genuine power spectra; interpolating two finished descriptors would not, because
+    # the power spectrum is quadratic and their average is the spectrum of no density at all.
     species = emitted[0].iso.species_idx
     batch_idx = torch.zeros(n_atoms, dtype=torch.long, device=positions.device)
 
-    # --- the solve: one union graph, compliance scaled by weight ------------------------------
+    # The state is mixed at the **input**: fractional charge, multiplicity and element census
+    # into one embedding, rather than an average of two embeddings. `E(Q=0.5)` is a real
+    # output of that net; the midpoint of two latents is a point nothing produced.
+    q_star, two_s_star, counts_star = mixed_state(
+        fragments, w, group.atom_charge, group.atom_two_s, species,
+        model.fragment_state.n_species,
+    )
+    state = model.fragment_state.mixed(q_star, two_s_star, counts_star)
+
     channels = torch.unique(
         torch.cat([e.channels for e in emitted], dim=1).T, dim=0
     ).T                                                                     # (2, Nc)
-    key_ = key_features(key0, species, batch_idx)
-    rp_full = model.decoder.response.response_parameters(
-        frame_batch(group, positions, species), key_, bond_index=channels
+
+    frame = frame_batch(group, positions, species)
+    mixed = model.emit(
+        frame, batch_idx, bond_index=channels,
+        # A callable, so `s_e` is computed on the edge list the featurizer itself builds.
+        edge_weight=lambda edges: soft_partition(fragments, w, edges),
+        state=state,
     )
-    n_atoms_ = n_atoms
+    iso, joined = mixed.iso, mixed.joined
+
+    # --- the solve: one union graph, compliance scaled by the same partition ------------------
+    rp_full = model.decode_response(
+        frame, iso, species, batch_idx, bond_index=channels
+    )
+
+    #: How open each channel of the union graph is -- the *same* scalar the featurizer and the
+    #: pair accounting use. A channel joins two atoms of one fragment, so "open under `m`" is
+    #: exactly "same fragment under `m`", and this used to be written out separately as an
+    #: `isin` over each decomposition's channel list. One definition, three consumers.
+    channel_open = soft_partition(fragments, w, channels)
 
     def scaled_compliance(base):
         """The union graph's compliances, each channel carrying the weight that opens it.
@@ -370,13 +409,7 @@ def mixture_forward(
         way round. A channel no decomposition opens keeps the zero, which is the ``s -> 0``
         limit and contributes nothing to the solve.
         """
-        key_int = channels[0] * n_atoms_ + channels[1]
-        out = torch.zeros(channels.shape[1], dtype=dtype, device=positions.device)
-        for m, e in enumerate(emitted):
-            e_key = e.channels[0] * n_atoms_ + e.channels[1]
-            open_here = torch.isin(key_int, e_key).to(dtype)
-            out = out + w[m] * open_here * base
-        return out
+        return channel_open * base
 
     q0 = mixed_q0(model, group, w, species)
     rp = ResponseParameters(
@@ -391,7 +424,6 @@ def mixture_forward(
         compliance=scaled_compliance(rp_full.compliance),
     )
 
-    frame = group.batch(0)
     block = batch_idx
     res = solve_frozen(
         rp, frame,
@@ -426,10 +458,10 @@ def mixture_forward(
     # not.
     r0_iso, alpha = model.decoder.r0(species)
     r0_env = r0_iso
-    pauli_iso = model._pauli_from(key0, species)
-    pauli_env = model._pauli_from(key, species)
-    disp_iso = model.decoder.dispersion(key0, species)
-    disp_env = model.decoder.dispersion(key, species)
+    pauli_iso = model._pauli_from(iso, species)
+    pauli_env = model._pauli_from(joined, species)
+    disp_iso = model.decoder.dispersion(iso, species)
+    disp_env = model.decoder.dispersion(joined, species)
 
     def build_gate(name, spec, *, use_env):
         base_i = pair_param(r0_iso[name], r0_env[name], i, use_env=use_env)
@@ -486,21 +518,17 @@ def mixture_forward(
         "disp": gate["disp"] * e_disp,
     }
 
-    # --- the bond energy: mixed at the OUTPUT ------------------------------------------------
-    # `FragmentBondEnergy` is per expert and two experts share no input space, so there is
-    # nothing to mix upstream of it. Each expert reads its *own* descriptor and the *shared*
-    # mixed electronic state, and the answers are combined.
+    # --- the bond energy -----------------------------------------------------------------------
     t_point = damped_interaction_tensor(dr_au, None, 1.0 / r_au, max_rank=model.max_rank)
     env_frozen = electrostatic_environment(
         positions, pair_index, t_point, gate["elst"] * b_ij, m_real,
         max_rank=model.max_rank,
     )
     # v2 mixed this at the *output* -- each expert's bond energy, weighted -- because the two
-    # experts shared no input space. They share one now, so it decodes from the mixed key like
-    # everything else. That was the last of §8's four mixing levels; two remain, the key and
-    # the intra/inter accounting.
+    # experts shared no input space. There is one decoder now and one description, so it is
+    # read exactly as `forward` reads it, from the isolated slot.
     energy_bond_atom = model.decoder.bond_energy(
-        key0, species, res.charges, res.mu, res.quad_s, env_frozen
+        iso, species, res.charges, res.mu, res.quad_s, env_frozen
     )
     energy_bond = energy_bond_atom.sum()
 
@@ -529,10 +557,8 @@ def mixture_forward(
     energy_ind = positions.new_zeros(())
     vertex_induction = None
     if with_induction:
-        rp_ind_full = model.decoder.response.response_parameters(
-            frame_batch(group, positions, species),
-            key_features(key, species, batch_idx),
-            bond_index=channels,
+        rp_ind_full = model.decode_response(
+            frame, joined, species, batch_idx, bond_index=channels
         )
         rp_ind = ResponseParameters(
             **{
@@ -573,7 +599,7 @@ def mixture_forward(
         # from the frozen evaluation is the charge transfer: the same weights, read at `theta`
         # instead of `theta_0` and at `M^ind` instead of `M^frozen`.
         energy_bond_ind = model.decoder.bond_energy(
-            key, species, level.charges, level.mu, level.quad_s, env_ind
+            joined, species, level.charges, level.mu, level.quad_s, env_ind
         ).sum()
         energy_ind = (
             (level.energy[0] - frozen_total)
@@ -611,33 +637,5 @@ def mixture_forward(
         energy_induction=energy_ind,
         mediator=med,
         vertex_induction=vertex_induction,
+        emission=mixed,
     )
-
-
-def _rows(value, index):
-    if value is None or index is None:
-        return value
-    return value[index]
-
-
-def _env_rows(env, index):
-    from dataclasses import replace
-
-    if env is None or index is None:
-        return env
-    return replace(
-        env,
-        potential=_rows(env.potential, index),
-        field=_rows(env.field, index),
-        field_gradient=_rows(env.field_gradient, index),
-    )
-
-
-def _scatter_by_key(key: torch.Tensor, src_key: torch.Tensor, src: torch.Tensor):
-    """``src`` re-indexed from ``src_key``'s order onto ``key``'s, zero where absent."""
-    out = torch.zeros(key.shape[0], dtype=src.dtype, device=src.device)
-    # `key` and `src_key` are both sorted-unique integer keys, so a searchsorted lands each
-    # source row on its slot; rows of `key` with no source keep the zero.
-    pos = torch.searchsorted(key, src_key)
-    out[pos] = src
-    return out

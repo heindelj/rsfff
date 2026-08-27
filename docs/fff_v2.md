@@ -394,6 +394,12 @@ discontinuity in the energy. In `rsfff.ff.expert_model`:
 
 ### Why not mix in feature space
 
+> **v4 status.** Both objections below stand, and v4 does not violate either — it does not mix
+> features. It mixes the **edge partition** that the features are built from, which objection 2
+> explicitly leaves open: `P(A(s))` is a genuine power spectrum for every `s`, where
+> `s·P(A_A) + (1-s)·P(A_B)` is the spectrum of nothing. Objection 1 was answered earlier, by
+> giving the model one decoder instead of a dict of them. See §12.
+
 Blending the experts' *features* and decoding once is what the diabatic mixture did, and it is the
 better answer wherever it is available. It is not available here. That deserves more than the one
 sentence it used to get, because the reason is not an impossibility theorem — it is the price of
@@ -746,6 +752,89 @@ either expert.
 **Neural pair corrections** (§6).
 
 ---
+
+## 12. v4: the state key, and one soft edge partition
+
+Two problems closed together, and the second is what made the first tractable.
+
+**`(Q, S)` was encoded three times.** The state block was appended to `h`; the composition *also*
+selected which expert's networks ran; and v3's key was a latent learned from both. Three
+representations of one fact, all trainable, all competing. v4 keeps exactly one: the fragment's
+state is `(Q_f, 2S_f, n_f)` — charge, multiplicity, and a per-element census — embedded by one
+network shared by the whole model. Nothing else about a fragment is a *state*.
+
+The key stops being a learned latent, and that is the point. A latent has no units and no canonical
+frame, so two experts' latents have whatever relationship training happened to give them and their
+midpoint means nothing in particular. `(Q, 2S, n)` are physical labels with an unambiguous
+fractional reading. A crossover is then a **state being lifted off an integer**, not two encodings
+being averaged — which is what the EDA corpus is shaped to teach: it labels fragments at *definite*
+`(Q, S)`, densely, so the constraint is trained and then released.
+
+### One scalar, three consumers
+
+A fragmentation is a partition of the frame's **edges**. Every candidate assignment partitions the
+*same* edge set, and `scatter_species` is a pure `index_add_` over it, so
+
+```
+A_intra,m + A_cross,m = A_full        exactly, and A_full does not depend on m
+```
+
+A fragmentation moves only *where the boundary is drawn*, never the total. So the boundary is what
+a mixture chooses:
+
+```
+s_e = sum_m w_m [ frag_m(i) == frag_m(j) ]        in [0, 1]
+```
+
+Two of that scalar's three jobs already existed under other names — `routing_weight` decided how
+intra a *pair* was for the accounting, and `scaled_compliance` how open a *channel* was for the SQE
+solve, the same sum written twice over two index lists. The third, the featurizer's edge mask, was
+still a hard boolean. One definition now serves all three (`rsfff.ff.partition`).
+
+**What this fixes and what it does not.** It removes the *structural* off-manifold problem: `h` and
+`eta` are genuine power spectra for every `s`, so every prior, positivity constraint and physical
+form in the heads keeps its meaning along the whole path. It does not remove the *statistical* one —
+a fractional `s_e` is a region no definite-fragmentation frame visits. That gap closes with data,
+which is the right dependency to have.
+
+**The isolated guarantee is untouched**, and for a better reason than before: a lone fragment has
+`s_e = 1` on every one of its edges, so `1 - s_e` is exactly zero and `eta` is an exact zero rather
+than a small number. §4 and §5 survive verbatim; `tests/test_one_body_isolation.py` passes
+unchanged.
+
+### Mix the inputs, never the outputs
+
+The state is combined the same way and for the same reason: fractional `(Q*, 2S*, n*)` go into one
+embedding, rather than two embeddings being averaged. `E(Q = 0.5)` is a real output of a network
+continuous in `Q`. Measured on an H5O2+ transfer at the midpoint, both waters carry `Q = 0.5` and a
+census of **2.5 hydrogens** — a point the model can be asked about. At a one-hot membership the
+fractional labels are the vertex's own integers, so the block is bit-identical to the definite path,
+which is what lets Invariant 1 hold through it.
+
+### What was deleted
+
+`ExpertBank`, `FragmentExpert`, `AtomKeyEncoder`, `KeyBundle`, `mix_keys` and the per-composition
+fan-out (`_fan_out`, `_stitch`, `_encode`). §2's thesis — a composition deserves a dedicated network
+— was not so much wrong as **unmixable**: two dedicated networks share no input space, so nothing
+defines what lies between an H3O+ and an H2O description, and every attempt to define it (v2's
+parameters, v3's latents) put the model somewhere neither network was fit. Composition is now
+carried where it can be interpolated: geometrically by `h`, and as a fractional census in the state
+block.
+
+What survived from v3 is the part that was right — **one shared decoder**. The heads read features
+again, with the two-slot narrow-input convention giving `theta_0 = D(h, 0, k)` exactly as before.
+
+### Open
+
+- The mediator still needs each decomposition's own descriptor to choose `w`, so a mixture costs
+  `M` vertex featurizations **plus** one soft one. The `M` vertex passes rebuild the same edge graph
+  and spherical harmonics every time; sharing them is an obvious optimization and is not done.
+- `forward` and `mixture_forward` are still two implementations. With `s_e` as the parameter they
+  now differ only in the union channel graph and the frame-level charge blocking. Collapsing them is
+  deferred, deliberately: two implementations that must agree is what makes Invariant 1 checkable.
+- `ApplicabilityHead` scored "does this expert apply". With experts dissolved it is a global head
+  scoring the fragmentation, which is a coherent job, but its relationship to the mediator's
+  membership is now redundant-looking and unexamined.
 
 ## Guiding principle
 

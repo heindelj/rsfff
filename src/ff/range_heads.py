@@ -111,10 +111,9 @@ class RangeSeparationHeads(nn.Module):
     def alphas(self) -> dict[str, torch.Tensor]:
         """``{channel: alpha () Angstrom^-1}`` on its own, without evaluating ``r0``.
 
-        ``alpha`` has no atom axis, so unlike ``r0`` it cannot be gathered per expert and
-        stitched back. A model with several experts reads it from one of them and ties the
-        parameters so that "one of them" is not a choice --
-        :func:`rsfff.train.build_expert.build_expert_model` does the tying and says why.
+        ``alpha`` has no atom axis. It used to need tying across per-composition copies,
+        with untied copies decaying away silently for want of a gradient; there is one
+        decoder now, so there is exactly one of these and nothing to tie.
         """
         return {
             name: torch.nn.functional.softplus(self.alpha_raw[name])

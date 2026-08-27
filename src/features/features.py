@@ -144,6 +144,7 @@ class DensityExpansion(nn.Module):
         species_idx: torch.Tensor,   # (N,) ints in [0, n_species)
         num_atoms: int,
         edge_mask: torch.Tensor | None = None,   # (E,) bool, which edges contribute
+        edge_weight: torch.Tensor | None = None,  # (E,) float, how much each edge contributes
     ) -> torch.Tensor:
         """Species-resolved density from a prebuilt ``RY``: (N, n_species, n_max, sph).
 
@@ -155,12 +156,46 @@ class DensityExpansion(nn.Module):
         guarantees the two descriptors see identical geometry, so their difference is
         attributable to the environment and nothing else.
 
+        ``edge_weight`` is the **soft** form of the same idea and the one a fragmentation
+        mixture needs (:mod:`rsfff.ff.partition`). The density is linear in the edge sum, so
+
+            A(s) + A(1 - s) = A(1) = A_full        for any s, exactly
+
+        -- a fragmentation moves only *where the boundary is drawn*, never the total. Feeding
+        ``s`` and ``1 - s`` therefore gives a fragment and an environment descriptor that are
+        genuine densities for any ``s in [0, 1]``, and whose power spectra are genuine power
+        spectra. A convex combination of two *finished* descriptors is not: the power spectrum
+        is quadratic, so it is the spectrum of nothing. Interpolating the partition rather
+        than its consequences is what keeps the mixture on the manifold the heads were fit on.
+
+        At ``s in {0, 1}`` this reproduces ``edge_mask`` **bitwise on CPU** -- multiplying by
+        an exact ``1.0`` is exact, adding an exact ``0.0`` is exact, and the surviving edges
+        are added in the same relative order either way. On CUDA ``index_add_`` accumulates
+        with atomics and neither path is bitwise reproducible run to run, so expect agreement
+        to floating point there rather than to the bit. The boolean path stays the default
+        regardless: it allocates a shorter list and every isolated stream then takes exactly
+        the arithmetic it took before this existed.
+
+        The two are alternatives, not composable -- pass one or neither.
+
         Only the scatter and whatever consumes ``A`` are duplicated; the power spectrum is
         still O(Kc^2) per call, so this halves the geometric work, not the total.
         """
+        if edge_mask is not None and edge_weight is not None:
+            raise ValueError(
+                "scatter_species got both edge_mask and edge_weight; they are the hard and "
+                "soft forms of one partition. Pass the boolean mask for a definite "
+                "fragmentation, the float weight for a mixture, and neither for the full "
+                "edge set"
+            )
         i, j = edge_index[0], edge_index[1]
         if edge_mask is not None:
             i, j, RY = i[edge_mask], j[edge_mask], RY[edge_mask]
+        elif edge_weight is not None:
+            # The weight is an invariant scalar per edge, so it scales the contribution and
+            # leaves the `lm` axis alone: equivariance is untouched, exactly as in
+            # `scatter_weighted`.
+            RY = RY * edge_weight.to(RY.dtype).reshape(-1, 1, 1)
         flat_idx = i * self.n_species + species_idx[j]
         A_flat = RY.new_zeros(num_atoms * self.n_species, self.n_max, self.sph_dim)
         A_flat.index_add_(0, flat_idx, RY)
@@ -645,6 +680,7 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         *,
         also_ungrouped: bool = False,
         also_cross: bool = False,
+        edge_weight: torch.Tensor | None = None,
     ) -> "LambdaFeatures | tuple[LambdaFeatures, LambdaFeatures]":
         """``group_idx`` restricts which atoms may be neighbors (default: the frame).
 
@@ -673,6 +709,16 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         That is what lets a parameterizer's isolated evaluation ``theta_0 = P(h, 0)`` be exactly
         what the model says about a fragment on its own, and it is why the one-body energy can
         be environment-independent by construction rather than by a training schedule.
+
+        ``edge_weight`` (with ``also_cross=True``) replaces the boolean membership test with a
+        **soft partition** ``s_e in [0, 1]``, returning ``(P(A(s)), P(A(1-s)))``. That is how a
+        fragmentation *mixture* gets one fragment and one environment descriptor out of several
+        candidate assignments -- see :func:`rsfff.ff.partition.soft_partition` for where ``s``
+        comes from and :meth:`DensityExpansion.scatter_species` for why interpolating the
+        partition is on-manifold where interpolating two finished descriptors is not. The
+        isolated guarantee is unchanged and for the same reason: a lone group has ``s_e = 1`` on
+        every one of its edges, so the cross density is an exact zero rather than a small
+        number.
 
         The two modes cost the same: one neighbor search, one set of spherical harmonics, two
         scatters and two power spectra. They differ only in which mask the second scatter uses
@@ -735,6 +781,40 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
                 ),
                 species_idx, batch.batch_idx, edge_index[:, edge_mask],
             )
+
+        def weighted(w):
+            # Every edge is still present -- `edge_index` is passed whole rather than
+            # subsetted -- because a soft partition drops nothing, it only weighs. Nothing
+            # downstream reads `edge_index` off these two descriptors.
+            return self._features_from_density(
+                self._compress(
+                    self.density.scatter_species(
+                        RY, edge_index, species_idx, n_atoms, edge_weight=w
+                    )
+                ),
+                species_idx, batch.batch_idx, edge_index,
+            )
+
+        if edge_weight is not None:
+            if not also_cross:
+                raise ValueError(
+                    "edge_weight softens the fragment/environment split, which only exists "
+                    "when also_cross=True; the ungrouped descriptor is the union of both "
+                    "halves and does not depend on where the boundary is drawn"
+                )
+            # A callable is handed the edge list this call actually built, which is the point:
+            # the caller cannot compute `s_e` on a *different* neighbor search and have it
+            # silently line up by index. There is one graph and one weight per edge of it.
+            if callable(edge_weight):
+                edge_weight = edge_weight(edge_index)
+            w = edge_weight.reshape(-1)
+            if w.shape[0] != edge_index.shape[1]:
+                raise ValueError(
+                    f"edge_weight has {w.shape[0]} entries for {edge_index.shape[1]} edges; "
+                    f"it is one weight per edge of the frame graph "
+                    f"(see rsfff.ff.partition.soft_partition)"
+                )
+            return weighted(w), weighted(1.0 - w)
 
         grouped = masked(mask)
         return (grouped, masked(~mask)) if also_cross else (grouped, full)

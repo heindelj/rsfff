@@ -660,17 +660,13 @@ def solve_frozen(
 ) -> FragmentResponseOutput:
     """The frozen solve, given parameters that are already assembled.
 
-    Split from :meth:`FragmentResponse.forward` for the fragment-expert model, where the
-    parameters for one batch come from **several** experts: each expert emits the rows for
-    its own fragments, those rows are scattered into full-length tensors, and the solve then
-    runs once for the whole batch.
+    Split from :meth:`FragmentResponse.forward` for the fragment model, where the caller
+    assembles the parameters and this runs the solve once for the whole batch.
 
     Running it once is exact rather than convenient. ``sqe_solve`` couples atoms only along
     :func:`rsfff.ff.pairs.intra_fragment_channels`, so its linear system is block diagonal
-    over fragments, and a fragment never spans two experts
-    (:meth:`rsfff.ff.expert.ExpertBank.groups` partitions *by fragment*). One global solve
-    and a solve per expert therefore have the same blocks in the same order and differ only
-    in how many kernel launches they cost.
+    over fragments, and the blocks are the same in the same order however the parameters
+    were produced.
 
     **The mixture overrides all four graph arguments** (``docs/fff_v2.md`` §8). A mediated
     frame solves on the *union* of its decompositions' channel graphs, whose connected
