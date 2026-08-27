@@ -913,6 +913,17 @@ class ExpertConfig:
     #: Build the mediator and add the mixture stream. Off reproduces the single-fragmentation
     #: model exactly -- not approximately: with no mixture term nothing in this block is
     #: constructed and no gradient reaches anything the mediator owns.
+    # --- the key layer (docs/fff_v2.md v3) ----------------------------------------------------
+    #: Widths of the equivariant key: the invariant block and the lambda=1 / lambda=2 blocks.
+    #: This is the space mixtures happen in, so it has to be wide enough to carry a fragment's
+    #: whole description -- everything the parameters are decoded from passes through it.
+    key_dim: int = 64
+    key_dim_l1: int = 32
+    key_dim_l2: int = 32
+    key_emb_dim: int = 16
+    key_hidden: int = 64
+    key_depth: int = 2
+
     mediator: bool = False
     #: Freeze every parameter **except** the mediator's. Unlike ``freeze_core`` this *is* part
     #: of the training schedule, and for a measured reason: the mixture's total-energy loss
@@ -936,8 +947,20 @@ class ExpertConfig:
     #: (:func:`rsfff.mlip.switch.validity_bump`). The default spans a covalent O-H to a long
     #: hydrogen bond, so both assignments are live through a transfer and a spectator water
     #: never enumerates one.
-    mediator_bump_hi1: float = 1.35
+    mediator_bump_hi1: float = 1.50
     mediator_bump_hi0: float = 2.20
+    #: L2 on the spread of the mediator's raw scores, which is what sets how *sharply* the
+    #: membership turns over inside the envelope.
+    #:
+    #: Without it there is nothing opposing sharpening, and v2 duly collapsed to a 0.016 A
+    #: crossover inside an 0.85 A window -- 2% of the region it was given. Part of that was the
+    #: optimizer routing around a real defect (mixing parameters produced garbage mid-crossover,
+    #: so the cheapest move was to spend no time there), and the key layer removes that
+    #: pressure. This is the mechanism rather than the hope: a wide transition is where the
+    #: model has room to *learn* a smooth path, and `E_total` can only shape a path it visits.
+    #:
+    #: Costs nothing where one candidate is open -- the scores do not reach the weights there.
+    mediator_sharpness_weight: float = 0.0
     #: Mediated geometries per optimizer step. Each one runs ``M`` featurizations and a solve,
     #: so this is the mixture's whole cost knob.
     mixture_batch_size: int = 8

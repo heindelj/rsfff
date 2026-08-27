@@ -60,6 +60,7 @@ from .damping import fermi_switch
 from .dispersion import tt_damped_c6_energy
 from .electrostatics import slater_elec_pair_energy
 from .environment import electrostatic_environment
+from .keys import key_angle, key_features, mix_keys
 from .mediator import MediatorOutput
 from .pauli import slater_pauli_pair_energy
 from .multipole import (
@@ -124,6 +125,64 @@ def union_pair_list(
     return pair_index, (positions[pair_index[0]] - positions[pair_index[1]]).norm(dim=-1)
 
 
+def mixed_q0(model, group, weights, species_idx):
+    """``(N,)`` the baseline charges for a mixture: one prior, the *shifts* mixed.
+
+    ``q0`` is the one response quantity the key cannot carry, and the reason is worth stating.
+    It is a per-**element** prior plus a uniform per-**fragment** shift chosen so that ``q0``
+    sums exactly to each fragment's formal charge -- the shift is bookkeeping about a
+    partition, not a learned parameter, and a mixture has no single partition to read it from.
+
+    So the prior is decoded once and the shifts are combined convexly. Every decomposition's
+    ``q0`` sums to the same *frame* total (fragmentations of one geometry share their nuclei
+    and their charge), so any convex combination of them does too -- SQE then conserves that
+    identically, for any compliances.
+
+    At a one-hot membership this is exactly the vertex's own ``q0``, which is what Invariant 1
+    needs and what a frame-level shift would quietly break: it would spread one fragment's
+    charge over the whole system.
+    """
+    prior = model.decoder.response.params.q0_prior[species_idx]
+    shift = torch.zeros_like(prior)
+    for m in range(group.fragments.shape[0]):
+        frag = group.fragments[m]
+        n_frag = int(frag.max()) + 1
+        counts = torch.bincount(frag, minlength=n_frag).to(prior.dtype)
+        prior_sum = prior.new_zeros(n_frag).index_add_(0, frag, prior)
+        # Each fragment's formal charge, recovered from the per-atom form.
+        order = torch.zeros(n_frag, dtype=torch.long, device=frag.device)
+        order.scatter_(0, frag, torch.arange(frag.shape[0], device=frag.device))
+        frag_q = group.atom_charge[m][order].to(prior.dtype)
+        shift = shift + weights[m] * ((frag_q - prior_sum) / counts.clamp(min=1))[frag]
+    return prior + shift
+
+
+def frame_batch(group, positions, species_idx):
+    """A one-frame :class:`~rsfff.train.data.Batch` for the *mixture*, blocked by frame.
+
+    The decoder's response head needs a batch for ``fragment_idx``/``n_fragments``, but a
+    mixture has no single fragmentation. It is handed one block covering the whole frame, which
+    is the correct conservation law here: with the union channel graph open, charge conserves
+    per frame and is free to cross what either assignment alone calls a fragment boundary.
+    """
+    from ..train.data import Batch
+
+    n = positions.shape[0]
+    zeros = torch.zeros(n, dtype=torch.long, device=positions.device)
+    return Batch(
+        positions=positions,
+        atomic_numbers=group.atomic_numbers,
+        batch_idx=zeros,
+        n_systems=1,
+        energy=positions.new_zeros(1),
+        fragment_idx=zeros,
+        fragment_charge=positions.new_zeros(1),
+        fragment_two_s=positions.new_zeros(1),
+        fragment_to_batch=torch.zeros(1, dtype=torch.long, device=positions.device),
+        n_fragments=1,
+    )
+
+
 def routing_weight(
     fragments: torch.Tensor,       # (M, N)
     weights: torch.Tensor,         # (M,)
@@ -140,19 +199,6 @@ def routing_weight(
     i, j = pair_index[0], pair_index[1]
     same = (fragments[:, i] == fragments[:, j]).to(weights.dtype)     # (M, P)
     return (weights.reshape(-1, 1) * same).sum(0)
-
-
-def _mix(values, weights: torch.Tensor):
-    """``sum_m w_m v_m`` over a list of tensors, broadcasting ``w`` against any trailing shape.
-
-    ``None`` in, ``None`` out -- several response fields are optional and every decomposition
-    agrees about which, because they are all the same heads on the same configuration.
-    """
-    if values[0] is None:
-        return None
-    stacked = torch.stack(list(values))
-    w = weights.reshape(-1, *([1] * (stacked.dim() - 1)))
-    return (w * stacked).sum(0)
 
 
 @dataclass
@@ -236,7 +282,8 @@ class MixtureOutput:
     e_pair: dict[str, torch.Tensor]        # (P,) per channel
     energy_intra: torch.Tensor             # () pairs booked to fragments, by b_ij
     energy_inter: dict[str, torch.Tensor]  # () per channel, booked by (1 - b_ij)
-    energy_bond: torch.Tensor              # () output-mixed bond energy
+    energy_bond: torch.Tensor              # () bond energy, decoded from the mixed key
+    energy_bond_atom: torch.Tensor         # (N,) the same, before summing over atoms
     energy_internal: torch.Tensor          # () union-graph response internal energy
     energy_ref: torch.Tensor               # () sum_i E0[Z_i], fragmentation invariant
     energy_induction: torch.Tensor         # () the coupled relaxation plus the E_bond shift
@@ -294,38 +341,58 @@ def mixture_forward(
     )
     w = med.weights
 
-    # --- mix the parameters (the "same physical number" tier) --------------------------------
-    _RP_FIELDS = (
-        "chi", "eta", "q0", "chivec", "alpha", "chiquad", "cquad", "z", "b", "mu0", "quad0",
-    )
-    fields = {
-        name: _mix([getattr(e.rp, name) for e in emitted], w) for name in _RP_FIELDS
-    }
+    # --- mix the KEYS, then decode once ---------------------------------------------------
+    # v2 mixed the parameters themselves and the classical forms are nonlinear enough in them
+    # that a halfway parameter set is not a halfway energy: measured, 162 kJ/mol of excursion
+    # beyond the vertex interval at a proton transfer. A convex combination of keys decodes
+    # through the shared decoder to a *self-consistent* parameter set instead -- one the
+    # decoder would emit for some real input -- and the path is trainable rather than fixed
+    # arithmetic.
+    key = mix_keys([e.key for e in emitted], w)
+    key0 = mix_keys([e.key0 for e in emitted], w)
+    species = emitted[0].iso.species_idx
+    batch_idx = torch.zeros(n_atoms, dtype=torch.long, device=positions.device)
 
     # --- the solve: one union graph, compliance scaled by weight ------------------------------
     channels = torch.unique(
         torch.cat([e.channels for e in emitted], dim=1).T, dim=0
     ).T                                                                     # (2, Nc)
-    key = channels[0] * n_atoms + channels[1]
+    key_ = key_features(key0, species, batch_idx)
+    rp_full = model.decoder.response.response_parameters(
+        frame_batch(group, positions, species), key_, bond_index=channels
+    )
+    n_atoms_ = n_atoms
 
-    def mixed_compliance(pick):
+    def scaled_compliance(base):
         """The union graph's compliances, each channel carrying the weight that opens it.
 
         Scaled by ``S`` and **not** ``sqrt(S)``: the closed limit is a training NaN the other
         way round. A channel no decomposition opens keeps the zero, which is the ``s -> 0``
         limit and contributes nothing to the solve.
         """
+        key_int = channels[0] * n_atoms_ + channels[1]
         out = torch.zeros(channels.shape[1], dtype=dtype, device=positions.device)
         for m, e in enumerate(emitted):
-            e_key = e.channels[0] * n_atoms + e.channels[1]
-            out = out + w[m] * _scatter_by_key(key, e_key, pick(e))
+            e_key = e.channels[0] * n_atoms_ + e.channels[1]
+            open_here = torch.isin(key_int, e_key).to(dtype)
+            out = out + w[m] * open_here * base
         return out
 
-    compliance = mixed_compliance(lambda e: e.rp.compliance)
-    rp = ResponseParameters(compliance=compliance, **fields)
+    q0 = mixed_q0(model, group, w, species)
+    rp = ResponseParameters(
+        **{
+            name: getattr(rp_full, name)
+            for name in (
+                "chi", "eta", "chivec", "alpha", "chiquad", "cquad", "z", "b",
+                "mu0", "quad0",
+            )
+        },
+        q0=q0,
+        compliance=scaled_compliance(rp_full.compliance),
+    )
 
     frame = group.batch(0)
-    block = torch.zeros(n_atoms, dtype=torch.long, device=positions.device)
+    block = batch_idx
     res = solve_frozen(
         rp, frame,
         direct_multipoles=model._direct_multipoles,
@@ -353,13 +420,16 @@ def mixture_forward(
         shape = b_ij.reshape(-1, *([1] * (a.dim() - 1)))
         return shape * a + (1.0 - shape) * b_
 
-    r0_iso = {k: _mix([e.r0_iso[k] for e in emitted], w) for k in emitted[0].r0_iso}
-    r0_env = {k: _mix([e.r0_env[k] for e in emitted], w) for k in emitted[0].r0_env}
-    pauli_iso = tuple(_mix([e.pauli_iso[t] for e in emitted], w) for t in (0, 1))
-    pauli_env = tuple(_mix([e.pauli_env[t] for e in emitted], w) for t in (0, 1))
-    disp_iso = tuple(_mix([e.disp_iso[t] for e in emitted], w) for t in (0, 1))
-    disp_env = tuple(_mix([e.disp_env[t] for e in emitted], w) for t in (0, 1))
-    alpha = emitted[0].alpha
+    # Decoded from the mixed keys, not averaged across decompositions. `r0` does not appear on
+    # either side of that distinction: it reads the element alone, so it is the same number
+    # whichever description is live -- which is exactly the discontinuity v2 had and this does
+    # not.
+    r0_iso, alpha = model.decoder.r0(species)
+    r0_env = r0_iso
+    pauli_iso = model._pauli_from(key0, species)
+    pauli_env = model._pauli_from(key, species)
+    disp_iso = model.decoder.dispersion(key0, species)
+    disp_env = model.decoder.dispersion(key, species)
 
     def build_gate(name, spec, *, use_env):
         base_i = pair_param(r0_iso[name], r0_env[name], i, use_env=use_env)
@@ -425,11 +495,14 @@ def mixture_forward(
         positions, pair_index, t_point, gate["elst"] * b_ij, m_real,
         max_rank=model.max_rank,
     )
-    bond = [
-        _bond_sum(model, e, e.iso, res.charges, res.mu, res.quad_s, env_frozen)
-        for e in emitted
-    ]
-    energy_bond = (w * torch.stack(bond)).sum()
+    # v2 mixed this at the *output* -- each expert's bond energy, weighted -- because the two
+    # experts shared no input space. They share one now, so it decodes from the mixed key like
+    # everything else. That was the last of §8's four mixing levels; two remain, the key and
+    # the intra/inter accounting.
+    energy_bond_atom = model.decoder.bond_energy(
+        key0, species, res.charges, res.mu, res.quad_s, env_frozen
+    )
+    energy_bond = energy_bond_atom.sum()
 
     # --- induction: the coupled solve on the union graph, at the in-medium parameters --------
     # `E_ind` is a *relaxation*: the same functional the frozen level was evaluated at, now
@@ -455,17 +528,22 @@ def mixture_forward(
 
     energy_ind = positions.new_zeros(())
     vertex_induction = None
-    if with_induction and emitted[0].rp_env is not None:
-        env_fields = {
-            name: _mix([getattr(e.rp_env, name) for e in emitted], w) for name in _RP_FIELDS
-        }
-        # The **joined**-slot compliance, not the isolated one. The compliance head reads
-        # features like every other parameter, so `theta` and `theta_0` give different channel
-        # stiffnesses -- and the induction level is by definition the in-medium evaluation.
-        # Reusing the frozen level's compliance here is a silent 0.1 kJ/mol disagreement with
-        # `forward` at a one-hot membership, which is how this was caught.
+    if with_induction:
+        rp_ind_full = model.decoder.response.response_parameters(
+            frame_batch(group, positions, species),
+            key_features(key, species, batch_idx),
+            bond_index=channels,
+        )
         rp_ind = ResponseParameters(
-            compliance=mixed_compliance(lambda e: e.rp_env.compliance), **env_fields
+            **{
+                name: getattr(rp_ind_full, name)
+                for name in (
+                    "chi", "eta", "chivec", "alpha", "chiquad", "cquad", "z", "b",
+                    "mu0", "quad0",
+                )
+            },
+            q0=q0,
+            compliance=scaled_compliance(rp_ind_full.compliance),
         )
         frozen_total = res.internal_energy.sum() + e_pair["elst"].sum()
         level = coupled_response(
@@ -494,12 +572,9 @@ def mixture_forward(
         # The bond energy at the induced state **and** the in-medium parameters. Its difference
         # from the frozen evaluation is the charge transfer: the same weights, read at `theta`
         # instead of `theta_0` and at `M^ind` instead of `M^frozen`.
-        bond_ind = []
-        for m, e in enumerate(emitted):
-            bond_ind.append(
-                _bond_sum(model, e, e.joined, level.charges, level.mu, level.quad_s, env_ind)
-            )
-        energy_bond_ind = (w * torch.stack(bond_ind)).sum()
+        energy_bond_ind = model.decoder.bond_energy(
+            key, species, level.charges, level.mu, level.quad_s, env_ind
+        ).sum()
         energy_ind = (
             (level.energy[0] - frozen_total)
             + to_induction
@@ -530,32 +605,13 @@ def mixture_forward(
         energy_intra=energy_intra,
         energy_inter=energy_inter,
         energy_bond=energy_bond,
+        energy_bond_atom=energy_bond_atom,
         energy_internal=res.internal_energy.sum(),
         energy_ref=energy_ref,
         energy_induction=energy_ind,
         mediator=med,
         vertex_induction=vertex_induction,
     )
-
-
-def _bond_sum(model, emission, feats, q, mu, quad_s, env):
-    """``sum_i E_bond`` for one decomposition's experts, at a **shared** electronic state.
-
-    Each expert reads its *own* descriptor -- the two share no input space, which is why §8
-    mixes this at the output -- and the state it is evaluated at is the mixture's, because
-    there is only one electronic state once the solve has run.
-    """
-    def one(g):
-        f = select_atoms(feats, g.atom_index)
-        return g.expert.bond(
-            f.inv_feats, f.species_idx, f.vec_feats, f.equiv_feats,
-            _rows(q, g.atom_index),
-            _rows(mu, g.atom_index),
-            _rows(quad_s, g.atom_index),
-            _env_rows(env, g.atom_index),
-        )
-
-    return model._fan_out(emission.groups, one, feats.inv_feats.shape[0]).sum()
 
 
 def _rows(value, index):

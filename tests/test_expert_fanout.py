@@ -196,11 +196,17 @@ def test_gradients_reach_every_expert(build):
 # the pieces
 # ---------------------------------------------------------------------------------------
 
-def test_alpha_is_shared_between_experts():
-    """One number per channel for the whole model -- a pair spanning two experts needs that.
+def test_the_range_separation_exists_exactly_once():
+    """``alpha`` and ``r0`` are the decoder's, so there is nothing left to share.
 
-    Shared by object identity rather than by value, so training moves one tensor and no copy
-    can drift or be decayed away while unused.
+    v2 held a ``RangeSeparationHeads`` per expert and had to *tie* ``alpha`` across them by
+    object identity, with a comment explaining that untied copies receive no gradient and decay
+    away silently. ``r0`` was deliberately left untied -- and the proton-transfer scan then
+    showed an oxygen's ``r0_elst`` jumping 0.905 -> 1.13 Angstrom as the description swapped,
+    moving the Fermi gate for no physical reason and feeding the crossover excursion.
+
+    Both problems are gone the same way: one decoder, one table. This pins that there is no
+    per-expert copy left to drift.
     """
     torch.set_default_dtype(torch.float64)
     e0 = load_reference_energies(
@@ -209,15 +215,14 @@ def test_alpha_is_shared_between_experts():
     cfg = _config(environment=True)
     cfg.expert.compositions = COMPOSITIONS
     model = build_expert_model(cfg, NEIGHBOR_TYPES, e0, None).double()
-    for channel in model.experts["H2O"].range_heads.channel_names:
-        first = model.experts["H2O"].range_heads.alpha_raw[channel]
-        for key in COMPOSITIONS[1:]:
-            assert model.experts[key].range_heads.alpha_raw[channel] is first
-    # r0, by contrast, is per element per expert and must NOT be shared.
-    assert (
-        model.experts["H2O"].range_heads.d_log_r0["elst"]
-        is not model.experts["HO"].range_heads.d_log_r0["elst"]
-    )
+
+    for key in COMPOSITIONS:
+        assert not hasattr(model.experts[key], "range_heads")
+    names = [n for n, _ in model.named_parameters() if "d_log_r0" in n or "alpha_raw" in n]
+    assert names, "the range separation vanished entirely"
+    assert all(n.startswith("decoder.") for n in names), names
+    # r0 is element-only: fragmentation-invariant by construction.
+    assert model.decoder.range_heads.r0_mlp is None
 
 
 def test_stitch_puts_rows_back_where_they_came_from():
@@ -254,22 +259,27 @@ def test_an_unknown_composition_still_raises(build):
         model(batch)
 
 
-def test_experts_must_agree_on_the_multipole_form():
-    """One solve serves the batch, so the experts cannot disagree about what it is solving."""
+def test_the_multipole_form_cannot_be_disagreed_about():
+    """v2 had to *check* the experts agreed; v3 makes disagreement unrepresentable.
+
+    The failure being guarded against was real and silent: two response heads with different
+    ``direct_multipoles`` would make :func:`rsfff.ff.response.solve_frozen` read one expert's
+    permanent dipoles as another's dipole *drives*, with plausible magnitudes and no error.
+    With one shared decoder there is one answer, so the check has nothing left to check.
+    """
     torch.set_default_dtype(torch.float64)
     e0 = load_reference_energies(
         "data/atomic_references_wb97mv_tzvpd.json", NEIGHBOR_TYPES
     ).double()
-    from rsfff.ff.expert_model import FragmentExpertModel
-
     cfg = _config(environment=True)
     cfg.expert.compositions = ("H2O", "HO")
     model = build_expert_model(cfg, NEIGHBOR_TYPES, e0, None).double()
-    model.experts["HO"].response.direct_multipoles = not model._direct_multipoles
-    with pytest.raises(ValueError, match="disagree about `direct_multipoles`"):
-        FragmentExpertModel(
-            model.featurizer, model.experts, e0, max_rank=cfg.expert.max_rank
-        )
+
+    for key in cfg.expert.compositions:
+        assert not hasattr(model.experts[key], "response")
+    responses = {n.split(".params")[0] for n, _ in model.named_parameters() if ".params." in n}
+    assert all(n.startswith("decoder.response") for n in responses), sorted(responses)
+    assert model._direct_multipoles is model.decoder.response.direct_multipoles
 
 
 def test_applicability_is_emitted_per_fragment_by_the_owning_expert(build):

@@ -573,7 +573,9 @@ def _train_once(config: Config):
 #: What the mixture stream adds to the printed line. ``pi_occ`` is §9's occupancy diagnostic:
 #: exactly 0 everywhere means the mediator is off or the trigger never opens, and broadly split
 #: everywhere means it is hedging rather than deciding.
-_MIXTURE_LOG_KEYS = ("mix_e_mae", "mix_f", "mix_ct", "pi_occ", "pi_split")
+_MIXTURE_LOG_KEYS = (
+    "mix_e_mae", "mix_f", "mix_ct", "pi_occ", "pi_split", "pi_sharp",
+)
 
 
 def _after_warm_start(config: Config):
@@ -691,6 +693,7 @@ def _build_mixture_stream(config, model, clusters, train_idx, device, dtype):
         energy_scale=config.expert.energy_scale,
         force_scale=config.expert.force_scale,
         ct_weight=config.expert.mixture_ct_weight,
+        sharpness_weight=config.expert.mediator_sharpness_weight,
         ct_scale=config.expert.energy_scale,
         force_every=config.expert.mixture_force_every,
         induction=config.expert.induction,

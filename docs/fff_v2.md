@@ -570,10 +570,60 @@ So `L_ct` shapes the mediator early and keeps it honest; `E_total` and the force
   This is very likely also *why* the trained mediator switches within 0.016–0.024 Å rather than
   smoothly: a wide crossover parks the model in that region, so sharpening `pi` is the cheapest
   way out. The near-one-hot membership is therefore not only a fact about the data sampling —
-  it is partly the optimizer routing around this defect. Fixing it means either mixing those
-  channels at the *output* rather than the parameter (giving up the "a `C6` is a `C6`"
-  argument for the nonlinear ones), or the §10 ambiguity correction earning its place sooner
-  than planned.
+  it is partly the optimizer routing around this defect.
+
+  **The excursion splits cleanly by mixing level, which is the diagnosis rather than a hint.**
+  Measured on the same scans: `E_bond`, the one quantity mixed at the **output**, has an
+  excursion of **2.4 kJ/mol** on H5O2+ while sweeping 60 kJ/mol between the hydronium-oxygen
+  and water-oxygen values. The intra classical channels, evaluated at **mixed parameters**,
+  come in at **85 kJ/mol** (H5O2+) and **153 kJ/mol** (H3O2−). Output mixing interpolates;
+  parameter mixing does not.
+
+  **v3 result, measured.** The key architecture was built to fix this and the outcome is
+  mixed, so it is recorded rather than summarized:
+
+  | | v2 (mix parameters) | v3 (mix keys), 114 epochs |
+  | --- | --- | --- |
+  | switching width | 0.016 Å | **0.240 Å** |
+  | fraction of scan genuinely split | 2% | **27–32%** |
+  | dispersion excursion | 7.7 kJ/mol | **1.8** |
+  | **total excursion (H5O2+)** | **162 kJ/mol** | **150** |
+  | `e_tot_mae` (val) | 2.072 | **1.886** |
+  | `mix_e_mae` (val) | 3.196 | **2.62** |
+
+  The transition widened 15×, the mechanical defect is gone — no quantity is averaged across
+  incompatible descriptions any more — and with enough training v3 edges past v2 on the total
+  energy, the mixture energy and the excursion alike.
+
+  **But the excursion saturates, and that is the finding.** Across the fit it falls
+  405 → 178 → 150 kJ/mol at epochs 9 / 59 / 114: −227 over the first fifty epochs and −28 over
+  the next fifty-five, an eight-fold slowdown. It is asymptoting somewhere near 130–150, not
+  toward zero. v2's could not move at all, because an arithmetic average has no parameters, so
+  the mechanism is now genuinely trainable — it is simply running out of signal.
+
+  What is left is the decoder not having learned to interpolate along the arc between two keys,
+  and at the shared proton those keys sit **43° apart on average, 66° at worst**. The two
+  channels carrying almost all of it are **induction (213 kJ/mol)** and the **intra classical
+  (228)** — the two quantities with no direct label at a mixture at all.
+
+  Nothing in the corpus teaches that arc. These are AIMD snapshots of stable microsolvation and
+  the crossover is barely sampled, so the wider transition means the model now spends real time
+  in a region it has no data for. The saturation is what that looks like from the inside: more
+  optimization on the same data buys less and less, because the residual is not an optimization
+  failure.
+
+  **The binding constraint has moved from the architecture to the data.** Transition-region
+  sampling — geometries along the transfer, with labels — is what would lift it, and no further
+  tuning of this model will substitute.
+
+  That does *not* make "mix everything at the output" the answer. `E = sum_m w_m E^(m)` cannot
+  excurse by construction, but it is also physically empty at the crossover: each vertex
+  carries its own fragment-blocked solve, so no charge crosses a fragment boundary and the
+  mixture is a linear combination of two *non-reactive* descriptions. It could never represent
+  the shared-proton species that is the whole point. The resolution is a shared decode space —
+  see the v3 key architecture — where a mixed key decodes to a single self-consistent parameter
+  set describing a genuinely intermediate species, and the path through the crossover is
+  supervised by `E_total` and therefore trainable.
 
 ---
 

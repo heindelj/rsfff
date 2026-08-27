@@ -84,7 +84,9 @@ from .damping import fermi_switch
 from .dispersion import tt_damped_c6_energy
 from .electrostatics import slater_elec_pair_energy
 from .environment import OneBodyEnvironment, electrostatic_environment
+from .decoder import ParameterDecoder  # noqa: F401  (re-exported for builders)
 from .expert import ExpertBank
+from .keys import KeyBundle, bundle_tuple, key_angle, key_features
 from .multipole import (
     build_polytensor,
     damped_interaction_tensor,
@@ -170,19 +172,13 @@ class Emission:
     iso: object
     joined: object
     has_env: bool
-    rp: ResponseParameters
-    #: The same heads on the **joined** slot -- ``theta`` rather than ``theta_0``. This is what
-    #: the coupled induction level reads; ``None`` when there is no environment slot, where the
-    #: two evaluations are the same object and the second call would be waste.
-    rp_env: ResponseParameters | None
+    #: ``k = K_s(h, eta)``, the in-medium key, and ``k0 = K_s(h, 0)``, the isolated one. Both
+    #: are unit norm. Everything the force field evaluates is decoded from one of these, which
+    #: is what makes a mixture a convex combination in *one* space rather than a per-quantity
+    #: average in several.
+    key: "KeyBundle"
+    key0: "KeyBundle"
     channels: torch.Tensor                    # (2, Nc) this decomposition's channel graph
-    r0_iso: dict[str, torch.Tensor]
-    r0_env: dict[str, torch.Tensor]
-    pauli_iso: tuple
-    pauli_env: tuple
-    disp_iso: tuple
-    disp_env: tuple
-    alpha: dict[str, torch.Tensor]
 
 
 @dataclass
@@ -222,6 +218,10 @@ class ExpertOutput:
     #: what ``L_env`` penalizes and what says whether a channel's explanation lives in the
     #: fragment or in its surroundings.
     env_shift: dict[str, torch.Tensor]
+    #: (N,) ``energy_bond`` before it is pooled to fragments. The pooled form hides *where* the
+    #: covalent energy sits, which is exactly the question a proton transfer asks -- what became
+    #: of the two oxygens and the shared hydrogen individually.
+    energy_bond_atom: torch.Tensor | None = None
     #: (F,) each fragment's applicability score, or None when the head is not built. Untrained.
     applicability: torch.Tensor | None = None
     #: (B,) the electrostatic channel's ``theta - theta_0`` difference, booked to induction.
@@ -339,6 +339,7 @@ class FragmentExpertModel(nn.Module):
         self,
         featurizer,
         experts: ExpertBank,
+        decoder: "ParameterDecoder",
         reference_energies: torch.Tensor,
         *,
         max_rank: int = 2,
@@ -353,6 +354,9 @@ class FragmentExpertModel(nn.Module):
         super().__init__()
         self.featurizer = featurizer
         self.experts = experts
+        #: The one shared decoder. Every parameter in the model comes out of it, which is what
+        #: makes two compositions' keys commensurable -- see :mod:`rsfff.ff.decoder`.
+        self.decoder = decoder
         self.classical = dict(classical or DEFAULT_CLASSICAL)
         self.max_rank = int(max_rank)
         self.environment_features = bool(environment_features)
@@ -362,33 +366,17 @@ class FragmentExpertModel(nn.Module):
         self.cg = dict(rtol=float(cg_rtol), atol=float(cg_atol), maxiter=int(cg_maxiter))
         self.register_buffer("reference_energies", reference_energies.clone())
 
-        for expert in self.experts.experts.values():
-            missing = set(expert.range_heads.channel_names) - set(self.classical)
-            if missing:
-                raise ValueError(
-                    f"expert {expert.key!r} range-separates channels with no classical form: "
-                    f"{sorted(missing)}"
-                )
-            if int(max_rank) != int(expert.response.max_rank):
-                raise ValueError(
-                    f"max_rank {max_rank} does not match expert {expert.key!r}'s response "
-                    f"heads' {expert.response.max_rank}; the heads decide which multipoles "
-                    f"exist and this decides which ones the interaction tensor carries"
-                )
-
-        # One batch, one frozen solve, whichever experts contributed to it -- so they have to
-        # agree on what their equivariant outputs *mean*. `solve_frozen` reads this once for
-        # the assembled parameters and would otherwise interpret one expert's permanent
-        # dipoles as another's dipole drives, silently and with plausible magnitudes.
-        forms = {
-            expert.key: bool(expert.response.direct_multipoles)
-            for expert in self.experts.experts.values()
-        }
-        if len(set(forms.values())) > 1:
+        missing = set(self.decoder.range_heads.channel_names) - set(self.classical)
+        if missing:
             raise ValueError(
-                f"the experts disagree about `direct_multipoles`: {forms}. Every expert in a "
-                f"bank must use the same multipole parameterization, because one solve serves "
-                f"the whole batch"
+                f"the decoder range-separates channels with no classical form: "
+                f"{sorted(missing)}"
+            )
+        if int(max_rank) != int(self.decoder.response.max_rank):
+            raise ValueError(
+                f"max_rank {max_rank} does not match the decoder's response heads' "
+                f"{self.decoder.response.max_rank}; the heads decide which multipoles exist "
+                f"and this decides which ones the interaction tensor carries"
             )
 
     # -- features ------------------------------------------------------------------------
@@ -477,11 +465,13 @@ class FragmentExpertModel(nn.Module):
     def _direct_multipoles(self) -> bool:
         """Whether the response heads emit permanent multipoles directly.
 
-        A property of the configuration, not of an expert, so every expert agrees on it --
-        checked in ``__init__`` rather than assumed, since disagreement would make
-        :func:`rsfff.ff.response.solve_frozen` interpret one expert's output as the other's.
+        There is one decoder, so there is one answer. The v2 model had to *check* that every
+        expert agreed, because disagreement would have made
+        :func:`rsfff.ff.response.solve_frozen` read one expert's permanent dipoles as another's
+        dipole drives -- silently, and with plausible magnitudes. That failure mode no longer
+        exists.
         """
-        return next(iter(self.experts.experts.values())).response.direct_multipoles
+        return self.decoder.response.direct_multipoles
 
     def _response_parameters(self, groups, batch, feats, *, bond_index=None, envelope=None):
         """Every expert's response parameters for its own atoms, stitched into one set.
@@ -533,11 +523,9 @@ class FragmentExpertModel(nn.Module):
 
     # -- parameters ----------------------------------------------------------------------
 
-    def _pauli_multipoles(self, expert, feats):
-        """``(polytensor (N, K), b (N,))`` for the Slater Pauli term."""
-        q, b, mu, quad_s = expert.pauli_params(
-            feats.inv_feats, feats.species_idx, feats.vec_feats, feats.equiv_feats
-        )
+    def _pauli_from(self, key, species_idx):
+        """``(polytensor (N, K), b (N,))`` for the Slater Pauli term, decoded from a key."""
+        q, b, mu, quad_s = self.decoder.pauli(key, species_idx)
         poly = build_polytensor(
             q, mu,
             None if quad_s is None else spherical_to_cartesian_quadrupole(quad_s),
@@ -568,45 +556,33 @@ class FragmentExpertModel(nn.Module):
         if bond_index is None:
             bond_index, _ = intra_fragment_channels(frag)
 
-        def fan(fn):
-            return self._fan_out(groups, lambda g: fn(g.expert, g.atom_index), n_atoms)
-
-        def both(fn):
-            a = fan(lambda expert, sel: fn(expert, select_atoms(iso, sel)))
-            if not has_env:
-                return a, a
-            return a, fan(lambda expert, sel: fn(expert, select_atoms(joined, sel)))
-
-        first = groups[0].expert
-        r0_iso = fan(
-            lambda expert, sel: expert.range_heads(
-                _select_rows(iso.inv_feats, sel), _select_rows(iso.species_idx, sel)
-            )[0]
-        )
-        r0_env = r0_iso
-        if has_env and first.range_heads.r0_mlp is not None:
-            r0_env = fan(
-                lambda expert, sel: expert.range_heads(
-                    _select_rows(joined.inv_feats, sel),
-                    _select_rows(joined.species_idx, sel),
-                )[0]
-            )
-        pauli_iso, pauli_env = both(self._pauli_multipoles)
-        disp_iso, disp_env = both(
-            lambda expert, f: expert.disp_params(f.inv_feats, f.species_idx)
-        )
+        # Each composition's encoder runs on its own atoms and the keys are stitched into one
+        # full-batch bundle. Everything downstream is then a *single* decode -- the per-expert
+        # fan-out that used to wrap every parameter head is gone, because there is one decoder.
+        key = self._encode(groups, joined, n_atoms)
+        key0 = key if not has_env else self._encode(groups, iso, n_atoms)
         return Emission(
             slots=slots, groups=groups, iso=iso, joined=joined, has_env=has_env,
-            rp=self._response_parameters(groups, batch, iso, bond_index=bond_index),
-            rp_env=(
-                self._response_parameters(groups, batch, joined, bond_index=bond_index)
-                if has_env else None
-            ),
-            channels=bond_index,
-            r0_iso=r0_iso, r0_env=r0_env,
-            pauli_iso=pauli_iso, pauli_env=pauli_env,
-            disp_iso=disp_iso, disp_env=disp_env,
-            alpha=first.range_heads.alphas(),
+            key=key, key0=key0, channels=bond_index,
+        )
+
+    def _encode(self, groups, feats, n_atoms):
+        """``KeyBundle`` for the whole batch, each atom encoded by its composition's expert.
+
+        Stitched as a tuple rather than as a bundle because ``_stitch`` walks tuples and not
+        dataclasses; the bundle is rebuilt on the far side.
+        """
+        parts = self._fan_out(
+            groups,
+            lambda g: bundle_tuple(g.expert.encoder(select_atoms(feats, g.atom_index))),
+            n_atoms,
+        )
+        return KeyBundle(k0=parts[0], k1=parts[1], k2=parts[2])
+
+    def decode_response(self, batch, key, species_idx, batch_idx, *, bond_index):
+        """Response parameters from a key. The decoder is shared, so this runs once."""
+        return self.decoder.response.response_parameters(
+            batch, key_features(key, species_idx, batch_idx), bond_index=bond_index
         )
 
     def forward(
@@ -653,12 +629,18 @@ class FragmentExpertModel(nn.Module):
         n_atoms = slots.frag.inv_feats.shape[0]
         iso, joined = slots.isolated(), slots.joined()
         has_env = slots.dims.has_env
+        # One key per atom from its composition's encoder, then one decode for the batch.
+        key = self._encode(groups, joined, n_atoms)
+        key0 = key if not has_env else self._encode(groups, iso, n_atoms)
 
         # --- the frozen response solve, on the ISOLATED slot ----------------------------
         # `fragment_energy` is an isolated-fragment label, so a one-body term built on anything
         # else is fitting a function that cannot match its target.
         res = solve_frozen(
-            self._response_parameters(groups, batch, iso),
+            self.decode_response(
+                batch, key0, iso.species_idx, batch.batch_idx,
+                bond_index=intra_fragment_channels(frag)[0],
+            ),
             batch,
             direct_multipoles=self._direct_multipoles,
             with_polarizability=with_polarizability,
@@ -680,51 +662,23 @@ class FragmentExpertModel(nn.Module):
             return x.new_zeros(n_sys).index_add_(0, pair_batch, x)
 
         # --- every parameter, at both evaluations ---------------------------------------
-        # `theta_0` from the isolated slot, `theta` from the joined one. With no environment
-        # slot the two calls are the same object and the second is skipped rather than wasted.
+        # `theta_0 = D(k_0)` and `theta = D(k)`. Both come from the **one** shared decoder, so
+        # what separates them is which key it was handed and nothing else -- the per-expert
+        # fan-out that used to wrap every head is gone with the per-expert heads.
         env_shift: dict[str, torch.Tensor] = {}
+        species = iso.species_idx
 
-        def fan(fn):
-            """One per-atom head as ``fn(expert, atom_index)``, evaluated by every expert."""
-            return self._fan_out(groups, lambda g: fn(g.expert, g.atom_index), n_atoms)
-
-        def both(fn):
-            a = fan(lambda expert, sel: fn(expert, select_atoms(iso, sel)))
-            if not has_env:
-                return a, a
-            return a, fan(lambda expert, sel: fn(expert, select_atoms(joined, sel)))
-
-        first_expert = groups[0].expert
-        r0_iso = fan(
-            lambda expert, sel: expert.range_heads(
-                _select_rows(iso.inv_feats, sel), _select_rows(iso.species_idx, sel)
-            )[0]
-        )
-        # `alpha` has no atom axis -- it is one number per channel for the whole model, and a
-        # pair spanning two experts would otherwise have no defined sharpness. The experts
-        # share the parameter object (see `build_expert_model`), so reading it from the first
-        # is reading the model's, not one composition's.
-        alpha = first_expert.range_heads.alphas()
+        # `r0` reads the element and nothing else, so it is identical at both evaluations and
+        # identical across compositions. That is the point: in v2 it was per expert, and an
+        # oxygen's `r0_elst` jumped 0.905 -> 1.13 Angstrom as the description swapped, moving
+        # the Fermi gate a long way for no physical reason. It cannot now.
+        r0_iso, alpha = self.decoder.r0(species)
         r0_env = r0_iso
-        # `r0_mlp is None` means r0 is a per-element constant, the same at both evaluations.
-        # Every expert is built from one config, so they agree on that; taking the first is
-        # reading the configuration, not one expert's opinion.
-        if has_env and first_expert.range_heads.r0_mlp is not None:
-            r0_env = fan(
-                lambda expert, sel: expert.range_heads(
-                    _select_rows(joined.inv_feats, sel),
-                    _select_rows(joined.species_idx, sel),
-                )[0]
-            )
-            for name in r0_iso:
-                env_shift[f"r0_{name}"] = (
-                    r0_env[name].log() - r0_iso[name].log()
-                ).abs().mean()
 
-        pauli_iso, pauli_env = both(self._pauli_multipoles)
-        disp_iso, disp_env = both(
-            lambda expert, f: expert.disp_params(f.inv_feats, f.species_idx)
-        )
+        pauli_iso = self._pauli_from(key0, species)
+        pauli_env = pauli_iso if not has_env else self._pauli_from(key, species)
+        disp_iso = self.decoder.dispersion(key0, species)
+        disp_env = disp_iso if not has_env else self.decoder.dispersion(key, species)
         if has_env:
             env_shift["c6"] = (disp_env[0].log() - disp_iso[0].log()).abs().mean()
             env_shift["b_disp"] = (disp_env[1].log() - disp_iso[1].log()).abs().mean()
@@ -732,6 +686,9 @@ class FragmentExpertModel(nn.Module):
                 pauli_env[0] - pauli_iso[0]
             ).norm(dim=-1).mean()
             env_shift["b_pauli"] = (pauli_env[1].log() - pauli_iso[1].log()).abs().mean()
+            # The key's own excursion, reported but **not penalized** -- `L_env` acts on the
+            # decoded parameters, because a latent-space norm has no defensible weight (§4).
+            env_shift["key_angle"] = key_angle(key, key0).mean()
 
         def per_pair(iso_atom, env_atom, index, *, use_env: bool):
             """Select each pair's per-atom parameter: intra always isolated, inter by channel."""
@@ -741,16 +698,11 @@ class FragmentExpertModel(nn.Module):
             mask = is_intra.reshape(-1, *([1] * (a.dim() - 1)))
             return torch.where(mask, a, b_)
 
-        # Per element and per channel, so it is a lookup rather than a head -- but it is each
-        # expert's own buffer, and an expert is free to have been built with a different
-        # prior, so it is gathered per expert like everything else.
-        channel_names = tuple(first_expert.range_heads.channel_names)
+        # Per element and per channel, a lookup rather than a head, and now a single shared
+        # table rather than one per expert.
+        channel_names = tuple(self.decoder.range_heads.channel_names)
         log_r0_prior = {
-            name: fan(
-                lambda expert, sel, c=c: expert.range_heads.log_r0_prior[c][
-                    _select_rows(iso.species_idx, sel)
-                ]
-            )
+            name: self.decoder.range_heads.log_r0_prior[c][species]
             for c, name in enumerate(channel_names)
         }
 
@@ -832,20 +784,24 @@ class FragmentExpertModel(nn.Module):
         # --- the per-atom energy of the electronic state ---------------------------------
         t_point = damped_interaction_tensor(dr_au, None, 1.0 / r_au, max_rank=self.max_rank)
 
+        def bond_energy_atoms(feats, q_, mu_, quad_s_, env_):
+            # `feats` is a KeyBundle here: `key0` for the frozen evaluation, `key` for the
+            # induced one. One decoder, so which key it is *is* the whole difference.
+            """The **per-atom** bond energy from each expert, unpooled.
+
+            Exposed because the pooled quantity hides where the covalent energy actually sits.
+            On a proton transfer the interesting question is what happens to the two oxygens
+            and the shared hydrogen individually, and a per-fragment sum cannot answer it --
+            `notebooks/mediator_plotting.ipynb` reads this.
+            """
+
+            return self.decoder.bond_energy(
+                feats, species, q_, mu_, quad_s_, env_
+            )
+
         def bond_energy(feats, q_, mu_, quad_s_, env_):
             """Per-atom bond energy from each expert, pooled to its fragment."""
-
-            def one(expert, sel):
-                f = select_atoms(feats, sel)
-                return expert.bond(
-                    f.inv_feats, f.species_idx, f.vec_feats, f.equiv_feats,
-                    _select_rows(q_, sel),
-                    _select_rows(mu_, sel),
-                    _select_rows(quad_s_, sel),
-                    _select_environment(env_, sel),
-                )
-
-            e = fan(one)
+            e = bond_energy_atoms(feats, q_, mu_, quad_s_, env_)
             return e.new_zeros(n_frag).index_add_(0, frag, e)
 
         # `Phi^intra`: gating the environment down to intra-fragment pairs is what makes the
@@ -855,7 +811,12 @@ class FragmentExpertModel(nn.Module):
             positions, pair_index, t_point, gate["elst"] * intra, m_real,
             max_rank=self.max_rank,
         )
-        energy_bond = bond_energy(iso, res.charges, res.mu, res.quad_s, env_frozen)
+        energy_bond_atom = bond_energy_atoms(
+            key0, res.charges, res.mu, res.quad_s, env_frozen
+        )
+        energy_bond = energy_bond_atom.new_zeros(n_frag).index_add_(
+            0, frag, energy_bond_atom
+        )
 
         f2b = batch.fragment_to_batch
         if f2b is None:
@@ -878,8 +839,8 @@ class FragmentExpertModel(nn.Module):
             # runs once for the whole batch, which it must: unlike the frozen solve it
             # couples *across* fragments through the electrostatic gate, so there is no
             # per-expert block structure to exploit even if one wanted to.
-            rp = self._response_parameters(
-                groups, batch, joined, bond_index=ch_ind, envelope=None
+            rp = self.decode_response(
+                batch, key, iso.species_idx, batch.batch_idx, bond_index=ch_ind
             )
             level_ind = coupled_response(
                 rp, positions=positions, batch_idx=batch.batch_idx, n_systems=n_sys,
@@ -905,14 +866,14 @@ class FragmentExpertModel(nn.Module):
             # from the frozen evaluation is the charge transfer: same weights, read at theta
             # instead of theta_0 and at M^ind instead of M^frozen.
             energy_bond_ind = bond_energy(
-                joined, level_ind.charges, level_ind.mu, level_ind.quad_s, environment
+                key, level_ind.charges, level_ind.mu, level_ind.quad_s, environment
             )
             # The same state at `theta_0`. Nothing consumes it; it makes the *slot* swap
             # measurable separately from the state relaxation. That separation matters: the
             # swap alone was 100% of the old `ct` channel, with 4.6e-5 e crossing a boundary,
             # and nothing in the printed line said so.
             energy_bond_ind_iso = bond_energy(
-                iso, level_ind.charges, level_ind.mu, level_ind.quad_s, environment
+                key0, level_ind.charges, level_ind.mu, level_ind.quad_s, environment
             )
 
             d_bond = energy_bond_ind - energy_bond
@@ -939,7 +900,7 @@ class FragmentExpertModel(nn.Module):
             energy = energy + value
 
         applicability = None
-        if first_expert.applicability is not None:
+        if groups[0].expert.applicability is not None:
             # The joined slot, deliberately: the score says whether *this decomposition* is
             # the best description of the system, which no fragment-confined descriptor can
             # answer. See `ApplicabilityHead`. Each expert scores its own fragments; the head
@@ -969,6 +930,7 @@ class FragmentExpertModel(nn.Module):
             energy_internal=res.internal_energy,
             energy_intra=energy_intra,
             energy_bond=energy_bond,
+            energy_bond_atom=energy_bond_atom,
             pair_index=pair_index,
             r=r,
             is_intra=is_intra,

@@ -380,3 +380,123 @@ def test_intra_pairs_unsorted_matches_the_sorted_fast_path():
     fast, _ = intra_fragment_channels(frag)
     slow = intra_pairs_unsorted(frag)
     assert torch.equal(fast, slow)
+
+
+# ---------------------------------------------------------------------------------------
+# The key layer (docs/fff_v2.md v3)
+# ---------------------------------------------------------------------------------------
+
+def test_keys_are_unit_norm(model):
+    """Every key the decoder ever sees lies on the same sphere. Both evaluations."""
+    from rsfff.ff.mixture_model import intra_pairs_unsorted
+
+    group = _group()
+    em = model.emit(
+        group.batch(0), group.fragments[0],
+        bond_index=intra_pairs_unsorted(group.fragments[0]),
+    )
+    for name, key in (("k", em.key), ("k0", em.key0)):
+        n = key.norm()
+        assert torch.allclose(n, torch.ones_like(n), atol=1e-10), (
+            f"{name} is not unit norm (min {float(n.min()):.6f}, max {float(n.max()):.6f})"
+        )
+
+
+def test_mix_keys_is_the_identity_at_a_vertex(model):
+    """A one-hot membership returns the vertex key to floating-point exactness.
+
+    **Not bitwise, and the reason is worth knowing.** At a vertex the convex sum *is* the
+    vertex key, so renormalizing is mathematically the identity -- but it recomputes a norm
+    from already-normalized components, and that sum of squares is only 1.0 to rounding. The
+    division therefore moves the last bit or two. The energy-level statement (Invariant 1)
+    holds at 1e-9 regardless, which is what actually matters; this pins the key-level one at
+    the tightest tolerance it can honestly carry.
+    """
+    from rsfff.ff.keys import mix_keys
+    from rsfff.ff.mixture_model import intra_pairs_unsorted
+
+    group = _group()
+    keys = [
+        model.emit(
+            group.batch(m), group.fragments[m],
+            bond_index=intra_pairs_unsorted(group.fragments[m]),
+        ).key
+        for m in range(2)
+    ]
+    for vertex in (0, 1):
+        w = torch.zeros(2, dtype=torch.float64)
+        w[vertex] = 1.0
+        mixed = mix_keys(keys, w)
+        for block in ("k0", "k1", "k2"):
+            got, want = getattr(mixed, block), getattr(keys[vertex], block)
+            if want is None:
+                assert got is None
+                continue
+            assert torch.allclose(got, want, atol=1e-14, rtol=0.0), (
+                f"{block} moved at a one-hot membership by "
+                f"{float((got - want).abs().max()):.3e}"
+            )
+
+
+def test_the_key_is_equivariant(model):
+    """Rotate the frame: ``k0`` is invariant, ``k1`` and ``k2`` carry the rotation.
+
+    Checked directly rather than through the energy. A normalization that accidentally broke
+    equivariance -- normalizing per ``m`` component, say -- would leave the energy of *this*
+    frame untouched and only show up once a rotated one appeared.
+    """
+    from rsfff.ff.mixture_model import intra_pairs_unsorted
+
+    group = _group()
+    theta = torch.tensor(0.7, dtype=torch.float64)
+    c, s = theta.cos(), theta.sin()
+    R = torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float64)
+
+    def keys_for(positions):
+        g = MixtureGroup(
+            positions=positions, atomic_numbers=group.atomic_numbers,
+            fragments=group.fragments, atom_charge=group.atom_charge,
+            atom_two_s=group.atom_two_s, contested=group.contested,
+        )
+        return model.emit(
+            g.batch(0), g.fragments[0],
+            bond_index=intra_pairs_unsorted(g.fragments[0]),
+        ).key
+
+    plain = keys_for(group.positions)
+    turned = keys_for(group.positions @ R.T)
+
+    assert torch.allclose(plain.k0, turned.k0, atol=1e-10), "k0 is not rotation invariant"
+    if plain.k1 is not None:
+        want = torch.einsum("ab,nbk->nak", R, plain.k1)
+        assert torch.allclose(want, turned.k1, atol=1e-10), "k1 does not carry the rotation"
+
+
+def test_the_mixture_stays_inside_the_vertex_interval(model):
+    """**The defect v3 exists to remove**, pinned so it cannot come back.
+
+    v2 mixed parameters, and because the classical forms are nonlinear in them the mediated
+    energy left the interval spanned by the two vertices by 162 kJ/mol (H5O2+ total) at the
+    crossover. Mixing keys and decoding once should keep the mixture between its endpoints, up
+    to the genuine nonlinearity of a single decode.
+
+    The tolerance is generous on purpose: the claim is "no longer a spurious well of order the
+    bond energy", not "exactly linear", which key mixing does not promise and should not.
+    """
+    from rsfff.ff.units import KJMOL_PER_HARTREE
+
+    worst = 0.0
+    for r in torch.linspace(1.10, 1.35, 11, dtype=torch.float64):
+        g = _group(float(r))
+        vertices = []
+        for vertex in (0, 1):
+            w = [0.0, 0.0]
+            w[vertex] = 1.0
+            vertices.append(float(mixture_forward(model, g, _Fixed(w)).energy.detach()))
+        mixed = float(mixture_forward(model, g, _Fixed([0.5, 0.5])).energy.detach())
+        lo, hi = min(vertices), max(vertices)
+        worst = max(worst, (lo - mixed), (mixed - hi))
+    assert worst * KJMOL_PER_HARTREE < 40.0, (
+        f"the mixture leaves the vertex interval by {worst * KJMOL_PER_HARTREE:.1f} kJ/mol; "
+        f"v2 parameter mixing gave 162 and that is the regression this guards"
+    )

@@ -18,11 +18,10 @@ SYMBOLS = ("H", "O")
 
 def _expert(key: str) -> FragmentExpert:
     """A container full of stand-ins: dispatch does not care what the heads are."""
+    # v3: an expert is an *encoder* plus its fragment-state block. The parameter heads it
+    # used to hold live once, in the shared `ParameterDecoder`.
     return FragmentExpert(
-        key,
-        response=nn.Linear(2, 2), disp_params=nn.Linear(2, 2),
-        pauli_params=nn.Linear(2, 2), range_heads=nn.Linear(2, 2),
-        bond=nn.Linear(2, 2), fragment_state=nn.Linear(2, 2),
+        key, encoder=nn.Linear(2, 2), fragment_state=nn.Linear(2, 2)
     )
 
 

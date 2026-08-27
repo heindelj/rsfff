@@ -180,8 +180,24 @@ def _many_body(model, name, w3):
 
 @pytest.mark.parametrize("name", ["pauli", "disp"])
 def test_the_many_body_channels_have_real_three_body_content(build, w3, name):
-    """These labels are not pairwise, so their parameters read the environment slot."""
-    assert _many_body(build(environment=True), name, w3) > 1e-8
+    """These labels are not pairwise, so their parameters read the environment slot.
+
+    Stated **against the ablation** rather than against an absolute floor. The claim is that
+    the environment reaches this channel at all, and the natural null is the same model with
+    the slot switched off -- which is exactly zero up to float noise. An absolute threshold
+    measures the magnitude a randomized model happens to produce instead, and that is
+    architecture-dependent: under the v3 key layer the key is *normalized*, so a perturbation
+    of the environment weights is partly divided back out and the 3-body content at random
+    initialization is a few times smaller than the per-head two-slot MLPs used to give. The
+    pathway is unchanged; only its gain at init is.
+    """
+    live = _many_body(build(environment=True), name, w3)
+    dead = _many_body(build(environment=False), name, w3)
+    assert live > 1e-9, f"{name} has no many-body content at all ({live:.3e})"
+    assert live > 1e6 * max(dead, 1e-18), (
+        f"{name} many-body content {live:.3e} is not meaningfully above the "
+        f"environment-off baseline {dead:.3e}"
+    )
 
 
 @pytest.mark.parametrize("name", ["elst", "pauli", "disp"])

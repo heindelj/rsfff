@@ -34,7 +34,7 @@
 # worst, and the ion clusters interact at ~-250 kJ/mol against water's ~-20, so every channel's
 # MAE starts larger simply because the energies are.
 
-run_name: ion_mediator
+run_name: ion_mediator_x
 device: auto
 dtype: float64
 checkpoint_root: checkpoints
@@ -291,37 +291,20 @@ train:
 # cannot constrain them at all, and force the environment weights to carry the whole dispersion
 # and Pauli parameterization. See docs/fff_v2.md §4.
 stages:
-  # --- stage 1: the cheap isolated warm start ------------------------------------------------
-  # Mirrors `configs/ion_expert.yaml`'s first stage, which is the recipe known to work on this
-  # data: no coupled solve and no cluster forces, so the one-body and response sectors reach a
-  # sane basin before the expensive machinery starts. v3 trains from scratch -- no v2 checkpoint
-  # has loadable shapes -- so this matters again in a way it did not for the v2 mediator run,
-  # which inherited a converged model.
-  #
-  # The mediator is live here but has little to do: `mix_e_mae` is dominated by the model being
-  # untrained rather than by the membership being wrong.
-  - name: isolated
+  - name: extend
     train:
-      epochs: 15
-      lr_schedule: none
-      init_from: ""
-    expert:
-      induction: false
-      force_weight: 0.0
-      fragment_weight: 30.0
-      mixture_energy_weight: 0.3
-      mixture_force_weight: 0.0
-
-  # --- stage 2: everything -------------------------------------------------------------------
-  # What to watch, in order:
-  #   `mix_e_mae`  -- against the v2 baseline's 3.196 kJ/mol.
-  #   `pi_occ` / `pi_sharp` -- v2 collapsed to a 0.016 A crossover. A *wider* transition is the
-  #                  goal now, so `pi_occ` staying meaningfully above zero is success, not
-  #                  hedging -- read it together with the excursion in the notebook.
-  #   `env_c6` etc. -- the environment now reaches the parameters only through the key, so
-  #                  these being nonzero is the check that the one route actually carries.
-  - name: full
-    train:
-      epochs: 60
+      epochs: 120
+      # Warm restart at 1e-4 -- five times the 2e-5 floor the previous fit annealed to, and
+      # **not** more.
+      #
+      # Measured, because the first attempt at this got it wrong: restarting at 5e-4 threw the
+      # model out of its basin rather than refining it. One epoch took the loss 3183 -> 7336
+      # and `ob_mae` 0.337 -> 5.1, an eight-fold regression in the one-body sector, and three
+      # epochs later it was still 10% worse than where it started with the schedule barely
+      # annealed. The diagnostic that motivated this run said as much in advance: a fit still
+      # descending at ~17/epoch on a 2e-5 floor wants more *steps*, not larger ones.
+      learning_rate: 1.0e-4
+      lr_schedule: cosine
+      init_from: checkpoints/ion_mediator_full/best.pt
     expert:
       induction: true

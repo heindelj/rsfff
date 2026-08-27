@@ -16,7 +16,9 @@ import torch
 
 from ..ff.bond_energy import FragmentBondEnergy
 from ..ff.dispersion import DispersionParameterHeads, build_log_priors
+from ..ff.decoder import ParameterDecoder
 from ..ff.expert import ApplicabilityHead, ExpertBank, FragmentExpert
+from ..ff.keys import AtomKeyEncoder
 from ..ff.expert_model import ClassicalSpec, FragmentExpertModel
 from ..ff.fragment_state import FragmentStateEmbedding
 from ..ff.multipole import irrep2_to_spherical
@@ -61,8 +63,14 @@ def build_expert(
     *,
     environment: bool = True,
 ) -> FragmentExpert:
-    """One composition's full set of heads."""
-    xcfg, ecfg, fcfg = config.expert, config.elec, config.features
+    """One composition's **encoder**, plus its fragment-state block and applicability score.
+
+    v3: the parameter heads are no longer here. They live once, in the shared
+    :class:`rsfff.ff.decoder.ParameterDecoder` (:func:`build_decoder`), and this emits the key
+    that feeds them. §2 is unchanged -- a composition still gets its own network -- but the
+    network now ends at a latent, which is what makes two experts' outputs mixable at all.
+    """
+    xcfg = config.expert
     n_species = len(neighbor_types)
 
     fragment_state = FragmentStateEmbedding(
@@ -73,68 +81,108 @@ def build_expert(
     dims = slot_dims(
         featurizer, p0_extra=fragment_state.dim, environment=environment
     )
-    p0, p_env = dims.p0_frag, dims.p0_env
-    p1, p1_env = dims.p1_frag, dims.p1_env
-    p2, p2_env = dims.p2_frag, dims.p2_env
-    to_spherical = (
-        irrep2_to_spherical(featurizer.backend.irrep6_to_voigt()) if p2 is not None else None
-    )
 
-    response = build_response(
-        featurizer, fcfg, ecfg, neighbor_types, atomic_states,
-        p0_extra=fragment_state.dim, slots=dims,
-    )
-
-    log_c6, log_b_disp = build_log_priors(neighbor_types, b_prior=config.dispersion.b_prior)
-    disp_params = DispersionParameterHeads(
-        p0, n_species, log_c6_prior=log_c6, log_b_prior=log_b_disp, p_env=p_env,
-        emb_dim=config.dispersion.emb_dim, hidden=config.dispersion.hidden,
-        depth=config.dispersion.depth,
-        learn_c6=config.dispersion.learn_c6, environment_c6=config.dispersion.environment_c6,
-        learn_b=config.dispersion.learn_b, environment_b=config.dispersion.environment_b,
-    )
-
-    log_q, log_b_pauli, mu_scale, quad_scale = build_pauli_priors(neighbor_types)
-    pauli_params = PauliMultipoleHeads(
-        p0, p1, n_species,
-        log_q_prior=log_q, log_b_prior=log_b_pauli, dipole_scale=mu_scale,
-        p2=p2, quad_scale=quad_scale, irrep2_to_spherical=to_spherical,
-        p_env=p_env, p1_env=p1_env, p2_env=p2_env,
-        emb_dim=config.pauli.emb_dim, hidden=config.pauli.hidden, depth=config.pauli.depth,
-        equiv_channels=config.pauli.equiv_channels, max_rank=xcfg.max_rank,
-        learn_q=config.pauli.learn_q, environment_q=config.pauli.environment_q,
-        learn_b=config.pauli.learn_b, environment_b=config.pauli.environment_b,
-        learn_dipole=config.pauli.learn_dipole,
-        learn_quadrupole=config.pauli.learn_quadrupole,
-    )
-
-    range_heads = RangeSeparationHeads(
-        p0, n_species, log_r0_prior=build_range_priors(neighbor_types),
-        alpha_init=xcfg.alpha_init, p_env=p_env, channels=RANGE_CHANNELS,
-        emb_dim=xcfg.r0_emb_dim, hidden=xcfg.r0_hidden, depth=xcfg.r0_depth,
-        learn_r0=xcfg.learn_r0, environment_r0=xcfg.environment_r0,
-        learn_alpha=xcfg.learn_alpha,
-    )
-
-    bond = FragmentBondEnergy(
-        p0, n_species, p1=p1, p2=p2, p_env=p_env, p1_env=p1_env, p2_env=p2_env,
-        irrep2_to_spherical=to_spherical,
-        emb_dim=xcfg.bond_emb_dim, hidden=xcfg.bond_hidden, depth=xcfg.bond_depth,
-        equiv_channels=xcfg.bond_equiv_channels, energy_scale=xcfg.bond_energy_scale,
+    encoder = AtomKeyEncoder(
+        dims.p0_frag, dims.p0_env,
+        dims.p1_frag, dims.p1_env,
+        dims.p2_frag, dims.p2_env,
+        n_species,
+        k0=xcfg.key_dim, k1=xcfg.key_dim_l1, k2=xcfg.key_dim_l2,
+        emb_dim=xcfg.key_emb_dim, hidden=xcfg.key_hidden, depth=xcfg.key_depth,
     )
 
     applicability = (
         ApplicabilityHead(
-            p0, p_env, hidden=xcfg.applicability_hidden, depth=xcfg.applicability_depth
+            dims.p0_frag, dims.p0_env,
+            hidden=xcfg.applicability_hidden, depth=xcfg.applicability_depth,
         )
         if xcfg.applicability else None
     )
 
     return FragmentExpert(
         key,
-        response=response, disp_params=disp_params, pauli_params=pauli_params,
-        range_heads=range_heads, bond=bond, fragment_state=fragment_state,
+        encoder=encoder,
+        fragment_state=fragment_state,
         applicability=applicability,
+    )
+
+
+def build_decoder(featurizer, config, neighbor_types, atomic_states, key_dims):
+    """The **one** parameter decoder every composition shares.
+
+    Built at *key* widths with ``p_env = 0`` throughout: the two-slot split now lives entirely
+    in the encoders, so the environment reaches the parameters through exactly one named,
+    zero-initialized sector instead of one per head. ``env_parameters`` still finds it and the
+    ablation still works.
+
+    The heads are the same classes as before, sized differently. Every physical form, prior,
+    positivity constraint and initialization therefore survives the move untouched, which is
+    most of what makes this a re-plumbing rather than a new model.
+    """
+    from types import SimpleNamespace
+
+    xcfg, ecfg, fcfg = config.expert, config.elec, config.features
+    n_species = len(neighbor_types)
+    k0, k1, k2 = key_dims
+
+    # `build_response` reads only `feature_dims` and `backend`, so a shim at key widths reuses
+    # it verbatim rather than growing a second construction path that could drift.
+    shim = SimpleNamespace(
+        feature_dims={0: k0, **({1: k1} if k1 else {}), **({2: k2} if k2 else {})},
+        backend=featurizer.backend,
+    )
+    to_spherical = (
+        irrep2_to_spherical(featurizer.backend.irrep6_to_voigt()) if k2 else None
+    )
+
+    response = build_response(
+        shim, fcfg, ecfg, neighbor_types, atomic_states, p0_extra=0, slots=None
+    )
+
+    log_c6, log_b_disp = build_log_priors(neighbor_types, b_prior=config.dispersion.b_prior)
+    disp_params = DispersionParameterHeads(
+        k0, n_species, log_c6_prior=log_c6, log_b_prior=log_b_disp, p_env=0,
+        emb_dim=config.dispersion.emb_dim, hidden=config.dispersion.hidden,
+        depth=config.dispersion.depth,
+        learn_c6=config.dispersion.learn_c6, environment_c6=config.dispersion.environment_c6,
+        learn_b=config.dispersion.learn_b, environment_b=False,
+    )
+
+    log_q, log_b_pauli, mu_scale, quad_scale = build_pauli_priors(neighbor_types)
+    pauli_params = PauliMultipoleHeads(
+        k0, k1, n_species,
+        log_q_prior=log_q, log_b_prior=log_b_pauli, dipole_scale=mu_scale,
+        p2=k2, quad_scale=quad_scale, irrep2_to_spherical=to_spherical,
+        p_env=0, p1_env=0, p2_env=0,
+        emb_dim=config.pauli.emb_dim, hidden=config.pauli.hidden, depth=config.pauli.depth,
+        equiv_channels=config.pauli.equiv_channels, max_rank=xcfg.max_rank,
+        learn_q=config.pauli.learn_q, environment_q=config.pauli.environment_q,
+        learn_b=config.pauli.learn_b, environment_b=False,
+        learn_dipole=config.pauli.learn_dipole,
+        learn_quadrupole=config.pauli.learn_quadrupole,
+    )
+
+    # `r0` reads the element and nothing else. `environment_r0` is forced off because there is
+    # no feature here for it to read -- the whole point is that `r0` cannot move when the
+    # description of an atom changes. See `rsfff.ff.decoder`.
+    range_heads = RangeSeparationHeads(
+        0, n_species, log_r0_prior=build_range_priors(neighbor_types),
+        alpha_init=xcfg.alpha_init, p_env=0, channels=RANGE_CHANNELS,
+        emb_dim=xcfg.r0_emb_dim, hidden=xcfg.r0_hidden, depth=xcfg.r0_depth,
+        learn_r0=xcfg.learn_r0, environment_r0=False,
+        learn_alpha=xcfg.learn_alpha,
+    )
+
+    bond = FragmentBondEnergy(
+        k0, n_species, p1=k1, p2=k2, p_env=0, p1_env=0, p2_env=0,
+        irrep2_to_spherical=to_spherical,
+        emb_dim=xcfg.bond_emb_dim, hidden=xcfg.bond_hidden, depth=xcfg.bond_depth,
+        equiv_channels=xcfg.bond_equiv_channels, energy_scale=xcfg.bond_energy_scale,
+    )
+
+    return ParameterDecoder(
+        response=response, disp_params=disp_params, pauli_params=pauli_params,
+        range_heads=range_heads, bond=bond,
     )
 
 
@@ -163,25 +211,18 @@ def build_expert_model(config, neighbor_types, reference_energies, atomic_states
         for key in xcfg.compositions
     }
 
-    # `alpha` -- the sharpness of the Fermi handoff -- is one number per channel, with no atom
-    # axis, so a pair whose two atoms belong to different experts has no way to combine two of
-    # them. `r0` has the same problem and solves it by being per atom and combining as a
-    # geometric mean; `alpha` cannot, so it is *shared*: every expert's ParameterDict entry is
-    # made the same Parameter object. One tensor, one gradient, one value in every checkpoint.
-    #
-    # The alternative -- read the first expert's and leave the rest -- is worse than it looks.
-    # Those copies would receive no gradient while `weight_decay` kept acting on them, so they
-    # would decay away silently and a later change of which expert is "first" would move the
-    # model. This repo has been bitten by exactly that (see `zero_init_readout`).
-    if len(experts) > 1:
-        reference = next(iter(experts.values())).range_heads.alpha_raw
-        for expert in experts.values():
-            for name in reference:
-                expert.range_heads.alpha_raw[name] = reference[name]
+    # `alpha` and `r0` used to need tying across experts, with a comment explaining that
+    # untied copies decay away silently because they receive no gradient. That whole class of
+    # bug is gone: there is exactly one decoder, so there is exactly one of each.
+    decoder = build_decoder(
+        featurizer, config, neighbor_types, atomic_states,
+        next(iter(experts.values())).encoder.key_dims,
+    )
 
     return FragmentExpertModel(
         featurizer,
         ExpertBank(experts, symbols),
+        decoder,
         reference_energies,
         max_rank=xcfg.max_rank,
         classical={

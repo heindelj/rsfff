@@ -80,6 +80,7 @@ class MixtureStream:
         force_scale: float = 1.0e-3,
         ct_weight: float = 0.02,
         ct_scale: float = 3.8093e-4,
+        sharpness_weight: float = 0.0,
         force_every: int = 2,
         induction: bool = False,
         seed: int = 0,
@@ -95,6 +96,7 @@ class MixtureStream:
         self.force_scale = float(force_scale)
         self.ct_weight = float(ct_weight)
         self.ct_scale = float(ct_scale)
+        self.sharpness_weight = float(sharpness_weight)
         self.force_every = max(int(force_every), 1)
         self.induction = bool(induction)
         self.generator = torch.Generator().manual_seed(int(seed))
@@ -127,6 +129,7 @@ class MixtureStream:
         want_forces = self.force_weight > 0.0 and (self._step % self.force_every == 0)
 
         e_err, f_err, ct, occ, splits = [], [], [], [], 0
+        sharp = []
         for group in self._sample():
             group = _to(group, self.device)
             if want_forces:
@@ -146,6 +149,12 @@ class MixtureStream:
             magnitude = self._induction_magnitude(group, out_mix)
             if magnitude is not None:
                 ct.append((out_mix.mediator.weights * magnitude).sum() / self.ct_scale)
+
+            # How hard the membership is turning over. Penalizing the score *spread* widens
+            # the crossover; it is not a penalty on deciding, because a candidate the envelope
+            # has closed contributes no score to the weights at all.
+            score = out_mix.mediator.score
+            sharp.append((score - score.mean()).pow(2).mean())
 
             occupancy = float(out_mix.mediator.occupancy.detach())
             occ.append(occupancy)
@@ -167,6 +176,9 @@ class MixtureStream:
         if ct and self.ct_weight > 0.0:
             terms["mix_ct"] = self.ct_weight * torch.stack(ct).mean()
             self._metrics["mix_ct"] = float(torch.stack(ct).detach().mean())
+        if sharp and self.sharpness_weight > 0.0:
+            terms["mix_sharp"] = self.sharpness_weight * torch.stack(sharp).mean()
+            self._metrics["pi_sharp"] = float(torch.stack(sharp).detach().mean())
         if occ:
             self._metrics["pi_occ"] = sum(occ) / len(occ)
             self._metrics["pi_split"] = splits / len(occ)

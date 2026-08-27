@@ -201,21 +201,13 @@ class FragmentExpert(nn.Module):
         self,
         key: str,
         *,
-        response,
-        disp_params,
-        pauli_params,
-        range_heads,
-        bond,
+        encoder,
         fragment_state,
         applicability: ApplicabilityHead | None = None,
     ) -> None:
         super().__init__()
         self.key = str(key)
-        self.response = response
-        self.disp_params = disp_params
-        self.pauli_params = pauli_params
-        self.range_heads = range_heads
-        self.bond = bond
+        self.encoder = encoder
         self.fragment_state = fragment_state
         self.applicability = applicability
 
