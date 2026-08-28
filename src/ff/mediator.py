@@ -139,6 +139,12 @@ def contact_distance(
     validity envelope rather than dividing by nothing.
     """
     atoms = torch.as_tensor(atoms).reshape(-1)
+    if atoms.numel() == 0:
+        # No contested atom: nothing is being relabeled, so there is no contact geometry to
+        # report. Returning an empty `(M, 0)` rather than raising is what lets a spectator
+        # frame -- the common case once this runs under dynamics rather than over a curated
+        # corpus -- pass through the same code path as a reactive one.
+        return positions.new_zeros(fragments.shape[0], 0)
     out = []
     for m in range(fragments.shape[0]):
         row = []
@@ -245,6 +251,21 @@ class MediatorHead(nn.Module):
         """
         n_dec = int(fragments.shape[0])
         atoms = torch.as_tensor(atoms, device=fragments.device).reshape(-1)
+        if atoms.numel() == 0:
+            # `D` empty means every decomposition agrees about every atom, which for distinct
+            # decompositions is impossible -- so in practice this is `M = 1`, the uncontested
+            # frame §8 promises costs nothing ("an atom with one candidate has pi = 1"). The
+            # promise was never exercised by training, where the corpus is contested by
+            # construction; under dynamics it is the majority of steps. There is nothing for
+            # the score net to read, so the membership is uniform by definition.
+            uniform = positions.new_full((n_dec,), 1.0 / n_dec)
+            return MediatorOutput(
+                weights=uniform,
+                omega=torch.ones_like(uniform),
+                score=torch.zeros_like(uniform),
+                rho=positions.new_zeros(n_dec, 0),
+                atoms=atoms,
+            )
         if inv_feats.shape[-1] != self.width:
             raise ValueError(
                 f"MediatorHead got features of width {inv_feats.shape[-1]}, expected "

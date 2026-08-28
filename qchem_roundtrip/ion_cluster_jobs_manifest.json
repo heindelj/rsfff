@@ -1,0 +1,216 @@
+{
+  "method": "wB97M-V",
+  "basis": "def2-TZVPD",
+  "jobs": [
+    {
+      "stem": "h3o+_w1_iso00",
+      "source": "asp-H2O_1--H3O+.xyz[0]",
+      "waters": 1,
+      "charge": 1,
+      "n_atoms": 7,
+      "n_fragments": 2,
+      "fragment_charges": [
+        0,
+        1
+      ]
+    },
+    {
+      "stem": "h3o+_w2_iso00",
+      "source": "asp-H2O_2--H3O+.xyz[0]",
+      "waters": 2,
+      "charge": 1,
+      "n_atoms": 10,
+      "n_fragments": 3,
+      "fragment_charges": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "stem": "h3o+_w3_iso00",
+      "source": "asp-H2O_3--H3O+.xyz[0]",
+      "waters": 3,
+      "charge": 1,
+      "n_atoms": 13,
+      "n_fragments": 4,
+      "fragment_charges": [
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "stem": "h3o+_w4_iso00",
+      "source": "asp-H2O_4--H3O+.xyz[0]",
+      "waters": 4,
+      "charge": 1,
+      "n_atoms": 16,
+      "n_fragments": 5,
+      "fragment_charges": [
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "stem": "h3o+_w5_iso00",
+      "source": "asp-H2O_5--H3O+.xyz[0]",
+      "waters": 5,
+      "charge": 1,
+      "n_atoms": 19,
+      "n_fragments": 6,
+      "fragment_charges": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "stem": "h3o+_w6_iso00",
+      "source": "asp-H2O_6--H3O+.xyz[0]",
+      "waters": 6,
+      "charge": 1,
+      "n_atoms": 22,
+      "n_fragments": 7,
+      "fragment_charges": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "stem": "h3o+_w7_iso00",
+      "source": "asp-H2O_7--H3O+.xyz[0]",
+      "waters": 7,
+      "charge": 1,
+      "n_atoms": 25,
+      "n_fragments": 8,
+      "fragment_charges": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "stem": "oh-_w1_iso00",
+      "source": "jp5b03893_si_002.xyz[1]",
+      "waters": 1,
+      "charge": -1,
+      "n_atoms": 5,
+      "n_fragments": 2,
+      "fragment_charges": [
+        -1,
+        0
+      ]
+    },
+    {
+      "stem": "oh-_w2_iso00",
+      "source": "jp5b03893_si_002.xyz[5]",
+      "waters": 2,
+      "charge": -1,
+      "n_atoms": 8,
+      "n_fragments": 3,
+      "fragment_charges": [
+        -1,
+        0,
+        0
+      ]
+    },
+    {
+      "stem": "oh-_w3_iso00",
+      "source": "jp5b03893_si_002.xyz[12]",
+      "waters": 3,
+      "charge": -1,
+      "n_atoms": 11,
+      "n_fragments": 4,
+      "fragment_charges": [
+        -1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "stem": "oh-_w4_iso00",
+      "source": "jp5b03893_si_002.xyz[25]",
+      "waters": 4,
+      "charge": -1,
+      "n_atoms": 14,
+      "n_fragments": 5,
+      "fragment_charges": [
+        -1,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "stem": "oh-_w5_iso00",
+      "source": "jp5b03893_si_002.xyz[38]",
+      "waters": 5,
+      "charge": -1,
+      "n_atoms": 17,
+      "n_fragments": 6,
+      "fragment_charges": [
+        -1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "stem": "oh-_w6_iso00",
+      "source": "jp5b03893_si_002.xyz[50]",
+      "waters": 6,
+      "charge": -1,
+      "n_atoms": 20,
+      "n_fragments": 7,
+      "fragment_charges": [
+        -1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "stem": "oh-_w7_iso00",
+      "source": "jp5b03893_si_002.xyz[62]",
+      "waters": 7,
+      "charge": -1,
+      "n_atoms": 23,
+      "n_fragments": 8,
+      "fragment_charges": [
+        -1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

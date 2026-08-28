@@ -14,6 +14,7 @@ dependencies = [
     "e3nn",
     "torch-cluster",
     "ase",
+    "scipy",
 ]
 
 [project.optional-dependencies]
@@ -43,4 +44,4 @@ rsfff-train-monomer = "rsfff.train.train_monomer:main"
 
 [tool.setuptools]
 package-dir = { "rsfff" = "src" }
-packages = ["rsfff", "rsfff.features", "rsfff.ff", "rsfff.mlip", "rsfff.train", "rsfff.qcgen"]
+packages = ["rsfff", "rsfff.features", "rsfff.ff", "rsfff.md", "rsfff.mlip", "rsfff.train", "rsfff.qcgen"]

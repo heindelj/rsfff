@@ -7,3 +7,8 @@
 !**/geoms/.gitkeep
 !**/inputs/.gitkeep
 !**/outputs/.gitkeep
+
+# Model-generated sampling output: regenerable from scripts/sweep_cluster_md.py,
+# and the same size as the rest of the harvest the repo already keeps out of git.
+biased_sampling/*/
+biased_sampling/*.log
