@@ -34,11 +34,20 @@ unguarded harvest:
 * a hydrogen sits **more than 1.45 Angstrom from any oxygen in 5.6%** of frames, which is a
   dissociated proton rather than a transferring one.
 
-``--max-oo`` is therefore the guard that does the work and ``--max-oh`` is a backstop. Note that
-an absolute O-H cutoff *cannot* be the main test: on a 2.6 Angstrom bond a genuinely shared
-proton sits at 1.30, so anything tight enough to catch the pathology also throws away good
-transition structures. Guarding costs throughput -- 49 structures/min unguarded against 10 with
-both guards on -- because it rejects precisely the region the bias prefers.
+``--max-oo`` is therefore the guard that does the work and ``--max-oh`` is a backstop. An
+absolute O-H cutoff *cannot* be the main test: on a 2.6 Angstrom bond a genuinely shared proton
+sits at 1.30, so anything tight enough to catch the pathology also throws away good transition
+structures.
+
+``--max-oo`` applies only to hydrogens stretched past ``--transfer-oh``, and that restriction is
+load-bearing rather than a refinement. Applied to whichever hydrogen happens to be most
+stretched, it works on a hydronium -- where that hydrogen is the excess proton on a short bond
+-- and destroys a hydroxide run, where the OH(-) proton is tight at 0.97 and the most-stretched
+hydrogen is an ordinary water donating a normal 2.8 Angstrom bond. Measured: all 72 hydroxide
+isomers of one sweep rejected from step 2, before the bias had ramped in, and harvested nothing.
+
+Guarding costs throughput -- 49 structures/min unguarded against 10 with both guards on --
+because it rejects precisely the region the bias prefers.
 
 Note ``--cv delta``, which restrains the geometric transfer coordinate instead of the
 mediator's own weights. Biasing on ``logit`` samples where *this* model thinks the ambiguity
@@ -194,7 +203,7 @@ class Defect(NamedTuple):
 
 
 def geometry_defect(atoms, *, min_distance: float, max_oh: float,
-                    max_oo: float) -> Defect | None:
+                    max_oo: float, transfer_oh: float = 1.25) -> Defect | None:
     """Why this geometry is not worth keeping as a transition structure, or ``None``.
 
     Purely geometric -- it reads positions and nothing else. An earlier version asked the
@@ -215,12 +224,13 @@ def geometry_defect(atoms, *, min_distance: float, max_oh: float,
     hydrogen bond a genuinely shared proton sits at 1.30, so a cut below ~1.4 throws away the
     structures the run exists to find.
 
-    ``max_oo`` is the one that does the work. Take the most-stretched hydrogen and the two
-    oxygens nearest it: a proton transfer happens on a *compressed* hydrogen bond, and across a
-    3.3 Angstrom O-O the two protonation states are separate minima with a barrier between
-    them. A proton parked in the middle of that is a stretched bond, not a transition
-    structure. Measured over the first, unguarded harvest of 5511 frames: 35% exceed 2.75
-    Angstrom and 15% exceed 3.0.
+    ``max_oo`` is the one that does the work, and it applies **only to hydrogens that are
+    actually being transferred** -- those stretched past ``transfer_oh``. A proton transfer
+    happens on a *compressed* hydrogen bond; across a 3.3 Angstrom O-O the two protonation
+    states are separate minima with a barrier between them, and a proton parked in the middle
+    of that is a stretched bond rather than a transition structure. A hydrogen still sitting at
+    0.97 Angstrom is not in play at all and its host's hydrogen bonds are nobody's business:
+    ordinary water-water contacts are 2.8 Angstrom and would fail this test on every frame.
     """
     d = atoms.get_all_distances()
     np.fill_diagonal(d, np.inf)
@@ -238,13 +248,21 @@ def geometry_defect(atoms, *, min_distance: float, max_oh: float,
         return Defect(f"H stranded {nearest.max():.2f} Angstrom from any O",
                       negative_space=True)
 
+    # Only hydrogens that are actually *in play* -- stretched past `transfer_oh` -- get the
+    # O-O test. Applying it to the globally most-stretched hydrogen instead is wrong, and
+    # expensively so: in a hydronium cluster that hydrogen is the excess proton on a short
+    # ~2.5 Angstrom bond, but in a hydroxide cluster the OH(-) proton is tight at 0.97 and the
+    # most-stretched hydrogen is an ordinary water donating a perfectly normal 2.8 Angstrom
+    # bond. Measured: all 72 hydroxide isomers of one sweep rejected from step 2, before the
+    # bias had even ramped in, and harvested nothing.
     if max_oo > 0 and oxy.size >= 2:
-        loose = int(nearest.argmax())                # the hydrogen furthest from its own oxygen
-        near_two = np.argsort(d_oh[loose])[:2]
-        span = float(d[oxy[near_two[0]], oxy[near_two[1]]])
-        if span > max_oo:
-            return Defect(f"most-stretched H spans a {span:.2f} Angstrom O-O",
-                          negative_space=True)
+        for h in np.flatnonzero(nearest > transfer_oh):
+            near_two = np.argsort(d_oh[h])[:2]
+            span = float(d[oxy[near_two[0]], oxy[near_two[1]]])
+            if span > max_oo:
+                return Defect(
+                    f"transferring H (r={nearest[h]:.2f}) spans a {span:.2f} Angstrom O-O",
+                    negative_space=True)
     return None
 
 
@@ -479,6 +497,15 @@ def main(argv=None) -> int:
                         "reference method will say are expensive -- the label that stops the "
                         "bias walking there again. Only the *geometry* rejects qualify; a "
                         "diverged frame says nothing about the true surface. 0 disables.")
+    p.add_argument("--transfer-oh", type=float, default=1.25,
+                   help="Angstrom; only hydrogens stretched past this get the --max-oo test. "
+                        "Measured over the first harvest, binning every hydrogen by r(O-H): "
+                        "at 0.90-1.05 (ordinary donors) the median O-O is 2.72 and 47%% "
+                        "already exceed 2.75, so testing unstretched hydrogens rejects normal "
+                        "water; at 1.15-1.25 the median O-O falls to 2.40-2.53 with only "
+                        "4-6%% wide, which is a genuine shared proton; past 1.25 it climbs "
+                        "back to 45-62%% wide, which is the stranded-proton pathology. 1.25 "
+                        "is where the two populations separate.")
     p.add_argument("--min-distance", type=float, default=0.6,
                    help="Angstrom; a frame with two atoms closer than this is discarded")
     p.add_argument("--max-oh", type=float, default=1.45,
@@ -620,7 +647,8 @@ def main(argv=None) -> int:
             return Defect(f"|F|max {fmax:.1f} over {args.max_force} eV/Angstrom",
                           negative_space=False)
         return geometry_defect(atoms, min_distance=args.min_distance,
-                               max_oh=args.max_oh, max_oo=args.max_oo)
+                               max_oh=args.max_oh, max_oo=args.max_oo,
+                               transfer_oh=args.transfer_oh)
 
     def record() -> None:
         r = calc.results

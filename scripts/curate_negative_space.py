@@ -70,6 +70,9 @@ def main(argv=None) -> int:
                         "0.6 on purpose -- this set is going to Q-Chem.")
     p.add_argument("--max-oh", type=float, default=1.45)
     p.add_argument("--max-oo", type=float, default=2.75)
+    p.add_argument("--transfer-oh", type=float, default=1.25,
+                   help="only hydrogens stretched past this get the --max-oo test; see "
+                        "run_reactive_md.geometry_defect")
     p.add_argument("--charge", type=int)
     p.add_argument("--stage-force", nargs="?", const="qchem_roundtrip/force/negative_space",
                    help="also write Q-Chem force inputs for the selected structures into this "
@@ -103,7 +106,8 @@ def main(argv=None) -> int:
         for atoms in frames:
             charge = args.charge if args.charge is not None else infer_charge(atoms)
             defect = geometry_defect(atoms, min_distance=args.min_distance,
-                                     max_oh=args.max_oh, max_oo=args.max_oo)
+                                     max_oh=args.max_oh, max_oo=args.max_oo,
+                                     transfer_oh=args.transfer_oh)
             atoms.info["charge"] = charge
             if defect is None:
                 positive.append(atoms)

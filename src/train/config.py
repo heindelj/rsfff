@@ -967,6 +967,109 @@ class ExpertConfig:
 
 
 @dataclass
+class FilmConfig:
+    """The state-conditioned, fragment-projected model of ``docs/fff_film.md``.
+
+    Successor to :class:`ExpertConfig` for the ``rsfff.ff.film`` generation, which it does not
+    touch. The structural differences this block reflects:
+
+    * the NN bond-energy head is replaced by **generated Morse + cosine-angle parameters**
+      (:mod:`rsfff.ff.film.bonded`), so the bond block sizes a parameter head, not an energy;
+    * permanent multipoles are direct heads on the internal features -- there is no frozen
+      SQE solve, hence no ``internal``/``bond`` split to configure or watch;
+    * conditioning is FiLM over ``c_i = [k_i, u_i]`` with per-family modulators
+      (:mod:`rsfff.ff.film.conditioning`); ``conditioning_mode`` is the ablation dial.
+    """
+
+    # --- architecture -------------------------------------------------------------------
+    #: "none" | "concatenate" | "film" ("low_rank" is a reserved hook and raises).
+    conditioning_mode: str = "film"
+    #: Which lambdas the cross block ``rho_in (x) rho_env`` carries. Must include 0.
+    cross_lambdas: tuple = (0,)
+    #: Common width the three feature blocks are embedded into before the trunk.
+    block_dim: int = 64
+    #: Trunk latent width -- also the input width of every family head.
+    hidden: int = 128
+    depth: int = 2
+    film_hidden: int = 32
+    film_depth: int = 1
+    #: The environment gate ``g(a) = a^2/(a^2 + a0^2)`` half-saturation, in units of the
+    #: cutoff-weighted inter-fragment coordination number ``a_env``.
+    gate_a0: float = 0.5
+    max_rank: int = 2
+
+    # --- the fragment-state key ---------------------------------------------------------
+    fragment_state_dim: int = 4
+    fragment_state_hidden: int = 32
+    fragment_state_depth: int = 1
+
+    # --- family heads ---------------------------------------------------------------------
+    emb_dim: int = 16
+    head_hidden: int = 64
+    head_depth: int = 2
+    equiv_channels: int = 32
+    bonded_hidden: int = 64
+    bonded_depth: int = 1
+    bonded_emb_dim: int = 8
+    #: Reserved hook (decision: strict physical form). Setting it raises in the builder.
+    bonded_nn_residual: bool = False
+    eta_init: float = 0.5
+    eta_floor: float = 0.05
+    psd_floor: float = 1e-4
+    s_init: float = 0.5
+    disp_b_prior: str = "per_element"
+
+    # --- range separation ----------------------------------------------------------------
+    alpha_init: float = 40.0
+
+    # --- classical reach -------------------------------------------------------------------
+    elst_cutoff: float = 12.0
+    pauli_cutoff: float = 7.0
+    disp_cutoff: float = 10.0
+    taper_width: float = 1.0
+
+    # --- induction ---------------------------------------------------------------------------
+    induction: bool = True
+    cg_rtol: float = 1.0e-9
+    cg_atol: float = 1.0e-12
+    cg_maxiter: int = 100
+
+    # --- loss ----------------------------------------------------------------------------------
+    #: One kJ/mol in Hartree; every error is divided by this before squaring.
+    energy_scale: float = 3.8093e-4
+    elst_weight: float = 30.0
+    pauli_weight: float = 30.0
+    disp_weight: float = 30.0
+    induction_weight: float = 30.0
+    #: Off by default, measured rather than assumed -- see :class:`ExpertConfig`.
+    total_energy_weight: float = 0.0
+    force_weight: float = 1.0
+    force_scale: float = 1.0e-3
+    force_every: int = 2
+
+    # --- the isolated streams -------------------------------------------------------------------
+    fragment_weight: float = 10.0
+    fragment_batch_size: int = 64
+    anchor_weight: float = 10.0
+    anchor_batch_size: int = 32
+    anchor_force_every: int = 5
+
+    # --- penalties ---------------------------------------------------------------------------------
+    #: L1 on ``|theta - theta_0|`` per quantity (log-space for positives) -- the dial deciding
+    #: how much of each channel's explanation may live in the environment.
+    env_penalty_weight: float = 0.0
+    #: Per-quantity overrides; keys are those of ``FilmParameters.env_shift``.
+    env_penalty_weights: dict = field(default_factory=dict)
+    #: The geometry-independence regularizer: L2 on the bonded heads' feature-dependent
+    #: deviations from the learnable per-type tables. This is what keeps "the parameters are
+    #: functions of geometry" from degenerating into "the parameters are a disguised pair
+    #: energy" -- the interpretability dial of the film design.
+    bonded_variance_weight: float = 1.0e-2
+    r0_weight: float = 0.05
+    r0_spread_weight: float = 1.0
+
+
+@dataclass
 class StageConfig:
     """One stage of a staged fit: a name plus per-block overrides of the parent config.
 
@@ -1001,6 +1104,7 @@ class Config:
     joint: JointConfig = field(default_factory=JointConfig)
     unified: UnifiedConfig = field(default_factory=UnifiedConfig)
     expert: ExpertConfig = field(default_factory=ExpertConfig)
+    film: FilmConfig = field(default_factory=FilmConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
@@ -1126,6 +1230,7 @@ def load_config(path) -> Config:
     joint_cfg = _from_block(JointConfig, raw.get("joint", {}) or {})
     unified_cfg = _from_block(UnifiedConfig, raw.get("unified", {}) or {})
     expert_cfg = _from_block(ExpertConfig, raw.get("expert", {}) or {})
+    film_cfg = _from_block(FilmConfig, raw.get("film", {}) or {})
     train_cfg = TrainConfig(
         seed=int(train.get("seed", TrainConfig.seed)),
         epochs=int(train.get("epochs", TrainConfig.epochs)),
@@ -1179,6 +1284,7 @@ def load_config(path) -> Config:
         joint=joint_cfg,
         unified=unified_cfg,
         expert=expert_cfg,
+        film=film_cfg,
         data=data_cfg,
         train=train_cfg,
     )

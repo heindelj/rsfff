@@ -598,9 +598,12 @@ def test_the_guard_reads_geometry_only():
     from run_reactive_md import geometry_defect
 
     params = list(inspect.signature(geometry_defect).parameters)
-    assert params[0] == "atoms" and len(params) == 4, (
-        f"geometry_defect takes {params}; anything beyond atoms and the three thresholds is a "
-        f"dependency on model or enumeration state"
+    assert params[0] == "atoms", f"geometry_defect takes {params}"
+    forbidden = {"results", "group", "model", "calc", "fragments", "contested", "base"}
+    assert not forbidden & set(params), (
+        f"geometry_defect takes {params}; anything carrying model or enumeration state makes "
+        f"the verdict depend on the held base, so a harvest and the guard that produced it "
+        f"disagree"
     )
 
 
@@ -618,6 +621,71 @@ def test_a_wide_cluster_with_a_compressed_reacting_pair_is_kept():
     oxy = np.flatnonzero(atoms.get_atomic_numbers() == 8)
     assert d[np.ix_(oxy, oxy)].max() > 4.0, "the isomer no longer has distant oxygens"
     assert geometry_defect(atoms, min_distance=0.6, max_oh=1.45, max_oo=2.75) is None
+
+
+@pytest.mark.parametrize("path,frame,charge", [
+    ("data/hydroxide_clusters/jp5b03893_si_002.xyz", 6, -1),
+    ("data/hydroxide_clusters/jp5b03893_si_002.xyz", 25, -1),
+    ("data/hydronium_clusters_ccdb/asp-H2O_3--H3O+.xyz", 0, +1),
+])
+def test_the_guard_accepts_optimized_starting_geometries(path, frame, charge):
+    """**The test that would have caught the bug that cost 72 runs.**
+
+    An optimized cluster is by definition not a stranded proton, so the guard must accept every
+    one of them. It did not: the O-O test was applied to the globally most-stretched hydrogen,
+    which on a hydronium is the excess proton on a short bond but on a hydroxide is an ordinary
+    water donating a normal 2.8 Angstrom hydrogen bond. Every hydroxide isomer was rejected at
+    step 2, before the bias had ramped in, and the whole ion's half of a sweep harvested
+    nothing.
+
+    Both ions are parametrized deliberately. The earlier validation measured only hydronium
+    output and reported the guard as clean; a guard checked on one ion is not checked.
+    """
+    from run_reactive_md import geometry_defect
+
+    if not Path(path).exists():
+        pytest.skip(f"{path} not present")
+    atoms = read(path, index=frame)
+    defect = geometry_defect(atoms, min_distance=0.6, max_oh=1.45, max_oo=2.75,
+                             transfer_oh=1.25)
+    assert defect is None, (
+        f"rejected an optimized {'hydroxide' if charge < 0 else 'hydronium'} cluster: "
+        f"{defect.reason}"
+    )
+
+
+def test_an_unstretched_hydrogen_on_a_wide_bond_is_not_a_defect():
+    """A normal donor sits on a 2.7-2.9 Angstrom bond, and that is not a pathology.
+
+    Measured over the first harvest: of hydrogens at r(O-H) = 0.90-1.05, **46.8% sit between
+    oxygens more than 2.75 Angstrom apart** -- that is simply what a water hydrogen bond is.
+    Only a hydrogen stretched past ``transfer_oh`` is being transferred, and only for those
+    does the O-O distance say anything.
+    """
+    from run_reactive_md import geometry_defect
+
+    # Two waters 3.2 Angstrom apart, every O-H at a normal 0.98: a long hydrogen bond, and
+    # nothing more.
+    atoms = Atoms(
+        numbers=[8, 1, 1, 8, 1, 1],
+        positions=[[0.0, 0.0, 0.0], [0.98, 0.0, 0.0], [-0.24, 0.95, 0.0],
+                   [3.2, 0.0, 0.0], [4.18, 0.0, 0.0], [2.96, 0.95, 0.0]],
+    )
+    nearest = 0.98
+    assert geometry_defect(atoms, min_distance=0.6, max_oh=1.45, max_oo=2.75,
+                           transfer_oh=1.25) is None
+
+    # Move one hydrogen out to 1.30 on the same wide bond and it becomes the pathology.
+    stranded = atoms.copy()
+    p = stranded.get_positions()
+    p[1] = [1.30, 0.0, 0.0]
+    stranded.set_positions(p)
+    defect = geometry_defect(stranded, min_distance=0.6, max_oh=1.45, max_oo=2.75,
+                             transfer_oh=1.25)
+    assert defect is not None and defect.negative_space, (
+        f"a proton at 1.30 Angstrom on a 3.2 Angstrom O-O is the stranded case; got {defect}"
+    )
+    assert nearest < 1.25 < 1.30                      # the threshold sits between the two
 
 
 def test_disabled_guards_accept_everything():

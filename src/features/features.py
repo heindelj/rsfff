@@ -421,6 +421,133 @@ def equivariant_power_spectrum(
     return out
 
 
+def _build_cross_power_spectrum_specs(
+    *,
+    l_max: int,
+    selected_lambdas: Sequence[int],
+    n_channels_a: int,
+    n_channels_b: int,
+    backend: "EquivariantBackend | str" = "e3nn",
+    buffer_prefix: str = "_cross_cg_",
+) -> tuple[dict[int, tuple[_EquivariantPairSpec, ...]], dict[str, torch.Tensor]]:
+    """Spec table for :func:`cross_equivariant_power_spectrum`.
+
+    Unlike :func:`_build_equivariant_power_spectrum_specs` this enumerates **ordered**
+    ``(l1, l2)`` pairs over the full square and never reduces to the upper triangle: the two
+    density factors are *different* tensors, so ``p[a, b] != p[b, a]`` and both orderings carry
+    information. Widths are always ``n_channels_a * n_channels_b``.
+    """
+    backend = _resolve_backend(backend)
+    specs: dict[int, list[_EquivariantPairSpec]] = {}
+    buffers: dict[str, torch.Tensor] = {}
+    cg_index = 0
+    for lam in sorted({int(v) for v in selected_lambdas}):
+        lam_specs: list[_EquivariantPairSpec] = []
+        for l1 in range(l_max + 1):
+            for l2 in range(l_max + 1):
+                if l2 < abs(l1 - lam) or l2 > l1 + lam:
+                    continue
+                if (l1 + l2 + lam) % 2 != 0:
+                    continue
+                cg_name = f"{buffer_prefix}{cg_index}"
+                buffers[cg_name] = backend.wigner_3j(l1, l2, lam).to(
+                    torch.get_default_dtype()
+                )
+                cg_index += 1
+                lam_specs.append(
+                    _EquivariantPairSpec(
+                        lam=lam,
+                        l1=l1,
+                        l2=l2,
+                        width=n_channels_a * n_channels_b,
+                        cg_buffer_name=cg_name,
+                    )
+                )
+        if not lam_specs:
+            raise ValueError(
+                f"no (l1, l2) density pairs couple to lambda={lam} with l_max={l_max}; "
+                "increase max_angular"
+            )
+        specs[lam] = lam_specs
+    return {lam: tuple(v) for lam, v in specs.items()}, buffers
+
+
+def cross_equivariant_power_spectrum(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    l_max: int,
+    selected_lambdas: Sequence[int],
+    specs_by_lam: dict[int, tuple[_EquivariantPairSpec, ...]] | None = None,
+    cg_lookup: dict[str, torch.Tensor] | None = None,
+    cg_buffer_owner: nn.Module | None = None,
+    backend: "EquivariantBackend | str" = "e3nn",
+) -> dict[int, torch.Tensor]:
+    """Equivariant power spectrum of **two different** densities (the cross block).
+
+        p^{lam}_mu[i, a, b] = sum_{m1,m2} W^{l1 l2 lam}_{m1 m2 mu}
+                              * A[i, a, m1] * B[i, b, m2]
+
+    This is the ``rho_in (x) rho_env`` block of ``docs/fff_film.md`` §4.2: it correlates the
+    fragment-internal density against the environment density of the *same* center, which a
+    concatenation of the two finished spectra cannot express (the spectra are each quadratic
+    in one density; this is the bilinear term between them).
+
+    Because ``A != B`` the swap symmetry that lets :func:`equivariant_power_spectrum` keep only
+    unordered ``(l1, l2)`` pairs and the channel upper-triangle does not hold; the full ordered
+    enumeration and the full ``Ca x Cb`` channel matrix are kept.
+
+    The vertex guarantee is inherited, not enforced: if ``B`` is an exact zero (an isolated
+    fragment's environment density is an empty sum) every output block is an exact zero.
+
+    ``A``: ``(N, Za, na, (l_max+1)**2)``, ``B``: ``(N, Zb, nb, (l_max+1)**2)`` -- channel axes
+    may differ. Returns ``{lam: (N, 2*lam+1, P_lam)}``.
+    """
+    n_atoms = A.shape[0]
+    n_channels_a = A.shape[1] * A.shape[2]
+    n_channels_b = B.shape[1] * B.shape[2]
+    A_by_l = [
+        a.reshape(n_atoms, n_channels_a, a.shape[-1]) for a in _split_by_l(A, l_max)
+    ]
+    B_by_l = [
+        b.reshape(n_atoms, n_channels_b, b.shape[-1]) for b in _split_by_l(B, l_max)
+    ]
+    if specs_by_lam is None:
+        specs_by_lam, buffers = _build_cross_power_spectrum_specs(
+            l_max=l_max,
+            selected_lambdas=selected_lambdas,
+            n_channels_a=n_channels_a,
+            n_channels_b=n_channels_b,
+            backend=backend,
+        )
+        cg_lookup = {
+            name: tensor.to(device=A.device, dtype=A.dtype)
+            for name, tensor in buffers.items()
+        }
+    elif cg_lookup is None and cg_buffer_owner is None:
+        raise ValueError("specs_by_lam requires cached Wigner tensors")
+
+    out: dict[int, torch.Tensor] = {}
+    for lam in selected_lambdas:
+        lam = int(lam)
+        lam_specs = specs_by_lam[lam]
+        lam_out = A.new_empty(n_atoms, 2 * lam + 1, sum(spec.width for spec in lam_specs))
+        offset = 0
+        for spec in lam_specs:
+            cg = (
+                cg_lookup[spec.cg_buffer_name]
+                if cg_lookup is not None else getattr(cg_buffer_owner, spec.cg_buffer_name)
+            )
+            if cg.device != A.device or cg.dtype != A.dtype:
+                cg = cg.to(device=A.device, dtype=A.dtype)
+            # -> (N, 2lam+1, Ca, Cb)
+            p = torch.einsum("abc,nia,njb->ncij", cg, A_by_l[spec.l1], B_by_l[spec.l2])
+            next_offset = offset + spec.width
+            lam_out[:, :, offset:next_offset] = p.reshape(n_atoms, p.shape[1], spec.width)
+            offset = next_offset
+        out[lam] = lam_out
+    return out
+
+
 # --------------------------------------------------------------------------
 # Wrapper module
 # --------------------------------------------------------------------------
