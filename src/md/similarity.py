@@ -248,6 +248,59 @@ class FeatureMetric:
         return self.match(self.fragment_descriptors(a, charge_a),
                           self.fragment_descriptors(b, charge_b))
 
+    # -- scalable selection ---------------------------------------------------------------
+
+    def system_descriptor(self, atoms, total_charge: int) -> np.ndarray | None:
+        """One fixed-length vector per structure, for selection over sets too big to match.
+
+        :meth:`match` is the honest comparison -- it says *which* fragment differs -- but it
+        solves an assignment per pair, so a farthest-point pass over 15000 structures is 10^8
+        Hungarian solves and is not going to happen. This is the cheap surrogate: pool the
+        fragment descriptors by composition, so an H3O+(H2O)3 becomes
+        ``[mean over the three waters | the hydronium]`` and plain Euclidean distance in that
+        space stands in for the matched one.
+
+        What it gives up is real. Pooling the waters means two isomers that differ by swapping
+        which water is where look identical, and it carries no fragment count, so it can only
+        be compared *within* one composition and size. Both are handled by stratifying the
+        selection rather than by making the vector cleverer -- a longer vector would still be a
+        surrogate, and the stratification is needed anyway.
+
+        Returns ``None`` when a composition is missing, which is what makes the strata safe to
+        assemble by simply dropping the odd frame out.
+        """
+        desc = self.fragment_descriptors(atoms, total_charge)
+        if len(desc) == 0:
+            return None
+        slots: dict[str, list[np.ndarray]] = {}
+        for i, comp in enumerate(desc.compositions):
+            slots.setdefault(comp, []).append(desc.vectors[i])
+        # Composition order has to be canonical or two frames of the same cluster produce
+        # vectors whose blocks are in different places.
+        return np.concatenate([np.mean(slots[c], axis=0) for c in sorted(slots)])
+
+    @staticmethod
+    def farthest_point_vectors(vectors: np.ndarray, n: int, *, seed: int = 0) -> list[int]:
+        """Greedy farthest-point sampling on plain vectors, vectorized.
+
+        Same 2-approximation as :meth:`farthest_point`, but each round is one ``(N, D)``
+        broadcast instead of ``N`` assignment problems, so it runs on tens of thousands of
+        structures instead of hundreds.
+        """
+        if n <= 0 or len(vectors) == 0:
+            return []
+        n = min(n, len(vectors))
+        rng = np.random.default_rng(seed)
+        first = int(rng.integers(len(vectors)))
+        chosen = [first]
+        dist = np.linalg.norm(vectors - vectors[first], axis=1)
+        for _ in range(n - 1):
+            dist[chosen] = -1.0
+            nxt = int(np.argmax(dist))
+            chosen.append(nxt)
+            dist = np.minimum(dist, np.linalg.norm(vectors - vectors[nxt], axis=1))
+        return chosen
+
     # -- curation -------------------------------------------------------------------------
 
     def novelty(self, descriptors, reference: list[FragmentDescriptors]) -> tuple[float, float]:

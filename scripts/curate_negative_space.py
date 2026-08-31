@@ -74,6 +74,10 @@ def main(argv=None) -> int:
                    help="only hydrogens stretched past this get the --max-oo test; see "
                         "run_reactive_md.geometry_defect")
     p.add_argument("--charge", type=int)
+    p.add_argument("--no-positive", action="store_true",
+                   help="skip writing the frames that pass the guard; by default both halves "
+                        "are written, so one pass turns runs from different code revisions "
+                        "into a single consistently-classified dataset")
     p.add_argument("--stage-force", nargs="?", const="qchem_roundtrip/force/negative_space",
                    help="also write Q-Chem force inputs for the selected structures into this "
                         "job dir (default qchem_roundtrip/force/negative_space). Force and not "
@@ -89,7 +93,9 @@ def main(argv=None) -> int:
     for raw in args.paths:
         path = Path(raw)
         if path.is_dir():
-            files += sorted(path.glob("*.xyz"))
+            # Recurse: a sweep writes one directory per isomer, so the .xyz files sit a level
+            # down from the root the caller naturally points at.
+            files += sorted(path.rglob("*.xyz"))
         elif path.exists():
             files.append(path)
     if not files:
@@ -103,12 +109,16 @@ def main(argv=None) -> int:
         except Exception as exc:                                  # noqa: BLE001
             print(f"  skipping {path}: {exc}", flush=True)
             continue
-        for atoms in frames:
+        for index, atoms in enumerate(frames):
             charge = args.charge if args.charge is not None else infer_charge(atoms)
             defect = geometry_defect(atoms, min_distance=args.min_distance,
                                      max_oh=args.max_oh, max_oo=args.max_oo,
                                      transfer_oh=args.transfer_oh)
             atoms.info["charge"] = charge
+            # Provenance. Without it a curated frame cannot be traced back to the isomer that
+            # produced it, and a staged Q-Chem job named by its index tells you nothing when
+            # its output looks wrong.
+            atoms.info["source"] = f"{path.parent.name}:{index}"
             if defect is None:
                 positive.append(atoms)
             elif defect.negative_space:
@@ -153,6 +163,14 @@ def main(argv=None) -> int:
     neg_path = out / "negative_space.xyz"
     write(str(neg_path), negative, format="extxyz")
     print(f"\nwrote {len(negative)} structures -> {neg_path}", flush=True)
+
+    # The clean half matters just as much. Re-classifying a harvest is what makes a set of runs
+    # from different code revisions into one dataset -- the guard that produced a frame may not
+    # be the guard in force now, and only a single pass over everything gives one verdict.
+    if not args.no_positive:
+        pos_path = out / "transition_structures.xyz"
+        write(str(pos_path), positive, format="extxyz")
+        print(f"wrote {len(positive)} structures -> {pos_path}", flush=True)
     if args.stage_force:
         job = Path(args.stage_force)
         ensure_job_dir(job)

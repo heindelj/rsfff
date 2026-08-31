@@ -36,6 +36,7 @@ wrong on the one malformed frame.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -131,7 +132,7 @@ def main(argv=None) -> int:
     out_root.mkdir(parents=True, exist_ok=True)
     runner = ROOT / "scripts" / "run_reactive_md.py"
     env = dict(os.environ, KMP_DUPLICATE_LIB_OK="TRUE", OMP_NUM_THREADS="1")
-    done = {"n": 0, "structures": 0, "failed": 0, "t0": time.time()}
+    done = {"n": 0, "structures": 0, "negative": 0, "failed": 0, "t0": time.time()}
 
     def run(job: dict) -> None:
         target = out_root / job["label"]
@@ -145,20 +146,32 @@ def main(argv=None) -> int:
             # not take the sweep down with it.
             code = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env,
                                    cwd=str(ROOT))
-        traj = target / "transition_structures.xyz"
-        n = sum(1 for line in traj.open() if line.startswith("Properties=")) if traj.exists() else 0
+        # Read the child's own summary rather than re-counting its output file. An earlier
+        # version counted `Properties=` lines in transition_structures.xyz and reported 0 for
+        # all 72 hydroxide jobs while the files on disk held 5900 structures -- the totals were
+        # wrong by a third and every hydroxide isomer looked like a failure. `run.json` is what
+        # the process that did the work says it did, and it needs no second opinion.
+        n = m = 0
+        summary = target / "run.json"
+        if summary.exists():
+            record = json.loads(summary.read_text())
+            n, m = int(record.get("harvested", 0)), int(record.get("negative", 0))
         done["n"] += 1
         done["structures"] += n
-        done["failed"] += int(code != 0 and n == 0)
+        done["negative"] += m
+        done["failed"] += int(n == 0)
         rate = done["structures"] / max((time.time() - done["t0"]) / 60, 1e-9)
-        print(f"  [{done['n']:3d}/{len(jobs)}] {job['label']:22s} {n:4d} structures  "
-              f"(total {done['structures']}, {rate:.0f}/min)", flush=True)
+        extra = f" +{m} neg" if m else ""
+        print(f"  [{done['n']:3d}/{len(jobs)}] {job['label']:22s} {n:4d} structures{extra:9s}"
+              f"  (total {done['structures']}+{done['negative']}, {rate:.0f}/min, exit {code})",
+              flush=True)
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         list(pool.map(run, jobs))
 
     elapsed = time.time() - done["t0"]
-    print(f"\n{done['structures']} structures from {done['n']} isomers in {elapsed/60:.1f} min "
+    print(f"\n{done['structures']} transition structures and {done['negative']} "
+          f"negative-space structures from {done['n']} isomers in {elapsed/60:.1f} min "
           f"({done['failed']} produced nothing) -> {out_root}")
     return 0
 
