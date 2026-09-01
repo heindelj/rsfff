@@ -8,6 +8,11 @@ Distinct from two other neighbor structures already in the repo, and deliberatel
 - ``Batch.bond_index`` is the SQE charge-transfer channel graph, which comes from the
   diabatic assignment and never from a distance rule.
 
+Every builder takes an explicit ``max_num_neighbors``, defaulting to 512 rather than the
+``rsfff.neighbors`` default of 256 because force-field cutoffs are long enough that a
+condensed-phase frame can genuinely carry hundreds of neighbors per atom. Truncation is
+detected either way -- see :func:`rsfff.neighbors.build_radius_graph`.
+
 Every list here is **undirected** (``i < j``, each pair once) so a pair energy can be summed
 without a factor of a half. Three builders, for two different eras of the model:
 
@@ -26,7 +31,8 @@ without a factor of a half. Three builders, for two different eras of the model:
 from __future__ import annotations
 
 import torch
-from torch_cluster import radius_graph
+
+from ..neighbors import build_radius_graph
 
 
 def inter_fragment_pairs(
@@ -60,21 +66,16 @@ def inter_fragment_pairs(
             "fragment); got an interleaved ordering, which would silently mis-mask pairs"
         )
 
-    # torch_cluster has CPU+CUDA kernels but no MPS kernel; fall back to CPU on MPS.
-    # max_num_neighbors is explicit because the default (32) silently *truncates*, which
-    # a long-range FF cutoff will hit even on modest clusters.
-    if positions.device.type == "mps":
-        edge = radius_graph(
-            positions.detach().cpu(), r=cutoff, batch=batch_idx.cpu(), loop=False,
-            max_num_neighbors=max_num_neighbors,
-        ).to(positions.device)
-    else:
-        edge = radius_graph(
-            positions.detach(), r=cutoff, batch=batch_idx, loop=False,
-            max_num_neighbors=max_num_neighbors,
-        )
+    # `build_radius_graph` handles the MPS fallback and reports truncation; the cap is
+    # explicit everywhere because the library default (32) silently *truncates*, which a
+    # long-range FF cutoff will hit even on modest clusters.
+    edge = build_radius_graph(
+        positions.detach(), cutoff, batch_idx,
+        max_num_neighbors=max_num_neighbors,
+        context="inter_fragment_pairs",
+    )
 
-    mask = edge[0] < edge[1]                       # radius_graph is directed; keep i < j
+    mask = edge[0] < edge[1]                       # the graph is directed; keep i < j
     if fragment_idx is not None:
         mask = mask & (fragment_idx[edge[0]] != fragment_idx[edge[1]])
     pair_index = edge[:, mask]
@@ -127,24 +128,19 @@ def union_pairs(
             "got an interleaved ordering, which intra_fragment_channels cannot enumerate"
         )
 
-    # torch_cluster has CPU+CUDA kernels but no MPS kernel; fall back to CPU on MPS. The
-    # list is built from detached positions -- only `r` below carries gradient.
-    if positions.device.type == "mps":
-        edge = radius_graph(
-            positions.detach().cpu(), r=cutoff, batch=batch_idx.cpu(), loop=False,
-            max_num_neighbors=max_num_neighbors,
-        ).to(positions.device)
-    else:
-        edge = radius_graph(
-            positions.detach(), r=cutoff, batch=batch_idx, loop=False,
-            max_num_neighbors=max_num_neighbors,
-        )
-    edge = edge[:, edge[0] < edge[1]]          # radius_graph is directed; keep i < j
+    # The list is built from detached positions -- only `r` below carries gradient.
+    # `build_radius_graph` owns the MPS fallback and the cap check.
+    edge = build_radius_graph(
+        positions.detach(), cutoff, batch_idx,
+        max_num_neighbors=max_num_neighbors,
+        context="union_pairs",
+    )
+    edge = edge[:, edge[0] < edge[1]]          # the graph is directed; keep i < j
     intra, _ = intra_fragment_channels(fragment_idx)
 
     # Union by a single integer key per pair. n_atoms^2 stays far inside int64 for any
     # batch that fits in memory, and `unique` sorts, so the output order is deterministic
-    # and independent of how radius_graph happened to emit its edges.
+    # and independent of how the neighbor search happened to emit its edges.
     n_atoms = positions.shape[0]
     both = torch.cat((edge, intra), dim=1)
     keys = both[0] * n_atoms + both[1]
@@ -342,18 +338,13 @@ def union_channels(
             torch.zeros(intra.shape[1], dtype=torch.bool, device=device),
         )
 
-    # Same MPS fallback as `union_pairs`: torch_cluster has no MPS kernel, and the list is
-    # built from detached positions because only the compliance carries gradient here.
-    if positions.device.type == "mps":
-        edge = radius_graph(
-            positions.detach().cpu(), r=cutoff, batch=batch_idx.cpu(), loop=False,
-            max_num_neighbors=max_num_neighbors,
-        ).to(device)
-    else:
-        edge = radius_graph(
-            positions.detach(), r=cutoff, batch=batch_idx, loop=False,
-            max_num_neighbors=max_num_neighbors,
-        )
+    # As in `union_pairs`, the list is built from detached positions because only the
+    # compliance carries gradient here.
+    edge = build_radius_graph(
+        positions.detach(), cutoff, batch_idx,
+        max_num_neighbors=max_num_neighbors,
+        context="union_channels",
+    )
     edge = edge[:, edge[0] < edge[1]]
 
     n_atoms = positions.shape[0]

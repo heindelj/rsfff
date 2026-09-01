@@ -96,6 +96,7 @@ from .data import load_datasets, load_monomer_batch, split_indices  # noqa: E402
 from .loss import fragment_multipole_loss  # noqa: E402
 from .term_loop import fit  # noqa: E402
 from .train_eem import resolve_device  # noqa: E402
+from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 _LOG_KEYS = ("loss", "mae", "rmse", "ff_mae", "corr_share", "r0", "q_res", "qO",
              "dchi", "mu", "quad", "dip_mae", "quad_mae")
@@ -113,6 +114,7 @@ def build_featurizer(features_cfg, ecfg, neighbor_types):
         cutoff=features_cfg.cutoff, n_max=features_cfg.n_max, l_max=features_cfg.l_max,
         neighbor_types=neighbor_types, selected_lambdas=lambdas,
         backend=features_cfg.backend, density_channels=features_cfg.density_channels,
+        max_num_neighbors=_max_neighbors(features_cfg),
     )
 
 

@@ -14,6 +14,8 @@ from typing import Sequence
 
 import yaml
 
+from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS
+
 
 @dataclass
 class FeaturesConfig:
@@ -23,6 +25,9 @@ class FeaturesConfig:
     selected_lambdas: Sequence[int] = (0, 2)   # featurizer requires 2; head uses only inv
     backend: str = "e3nn"
     density_channels: int | None = 8
+    # Cap on the radius_graph neighbor list. Explicit everywhere (torch_cluster's own
+    # default of 32 truncates silently); see rsfff.neighbors.
+    max_num_neighbors: int = DEFAULT_MAX_NUM_NEIGHBORS
 
 
 @dataclass
@@ -1185,6 +1190,9 @@ def load_config(path) -> Config:
         selected_lambdas=tuple(feat.get("selected_lambdas", (0, 2))),
         backend=str(feat.get("backend", FeaturesConfig.backend)),
         density_channels=feat.get("density_channels", FeaturesConfig.density_channels),
+        max_num_neighbors=int(
+            feat.get("max_num_neighbors", FeaturesConfig.max_num_neighbors)
+        ),
     )
     mlip_cfg = MLIPConfig(
         emb_dim=int(mlip.get("emb_dim", MLIPConfig.emb_dim)),

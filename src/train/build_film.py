@@ -30,6 +30,7 @@ from ..ff.pauli import PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_heads import RangeSeparationHeads
 from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
 from ..ff.response import build_elec_priors
+from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS
 
 __all__ = ["build_film_model"]
 
@@ -68,6 +69,9 @@ def build_film_model(
         selected_lambdas=lambdas,
         backend=_get(features_cfg, "backend", "e3nn"),
         density_channels=_get(features_cfg, "density_channels", None),
+        max_num_neighbors=_get(
+            features_cfg, "max_num_neighbors", DEFAULT_MAX_NUM_NEIGHBORS
+        ),
     )
     projector = FragmentProjector(
         featurizer, cross_lambdas=tuple(_get(film_cfg, "cross_lambdas", (0,)))

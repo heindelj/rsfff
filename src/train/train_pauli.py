@@ -66,6 +66,7 @@ from .config import Config, load_config  # noqa: E402
 from .data import load_datasets, split_indices  # noqa: E402
 from .term_loop import fit  # noqa: E402
 from .train_eem import resolve_device  # noqa: E402
+from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 
 def build_pauli_model(features_cfg, pcfg, neighbor_types) -> PauliModel:
@@ -78,6 +79,7 @@ def build_pauli_model(features_cfg, pcfg, neighbor_types) -> PauliModel:
         selected_lambdas=features_cfg.selected_lambdas,
         backend=features_cfg.backend,
         density_channels=features_cfg.density_channels,
+        max_num_neighbors=_max_neighbors(features_cfg),
     )
     p0 = featurizer.feature_dims[0]
     p1 = featurizer.feature_dims.get(1)

@@ -52,6 +52,7 @@ from .response_heads import (
     voigt_vector_to_symmetric_matrix,
 )
 from .sqe import PairComplianceHead, atomic_dipole_energy, sqe_solve
+from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 
 class MonomerParameterHeads(nn.Module):
@@ -286,6 +287,7 @@ def build_monomer_model(
         weight_channels=monomer_cfg.weight_channels,
         selected_lambdas=lambdas,
         backend=features_cfg.backend,
+        max_num_neighbors=_max_neighbors(features_cfg),
     )
     chi_init = eta_init = None
     if atomic_states is not None:

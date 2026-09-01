@@ -39,6 +39,7 @@ from .response_heads import (
     AtomicVectorHead,
     voigt_vector_to_symmetric_matrix,
 )
+from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 
 class EEMParameterHeads(nn.Module):
@@ -217,6 +218,7 @@ def build_eem_model(
         selected_lambdas=lambdas,
         backend=features_cfg.backend,
         density_channels=features_cfg.density_channels,
+        max_num_neighbors=_max_neighbors(features_cfg),
     )
     p0 = featurizer.feature_dims[0]
     p1 = featurizer.feature_dims[1]

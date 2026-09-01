@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from ..features import FlatLambdaSOAPFeaturizer
 from .heads import AtomicEnergyHead
+from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 
 class EnergyModel(nn.Module):
@@ -67,6 +68,7 @@ def build_model(
         selected_lambdas=features_cfg.selected_lambdas,
         backend=features_cfg.backend,
         density_channels=features_cfg.density_channels,
+        max_num_neighbors=_max_neighbors(features_cfg),
     )
     p0 = featurizer.feature_dims[0]
     head = AtomicEnergyHead(

@@ -27,7 +27,8 @@ from typing import TYPE_CHECKING, Sequence
 
 import torch
 import torch.nn as nn
-from torch_cluster import radius_graph
+
+from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS, build_radius_graph
 
 if TYPE_CHECKING:
     from .equivariant_backend import EquivariantBackend
@@ -655,6 +656,7 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         backend: "EquivariantBackend | str" = "e3nn",
         bispectrum=None,
         density_channels: int | None = None,
+        max_num_neighbors: int = DEFAULT_MAX_NUM_NEIGHBORS,
     ) -> None:
         super().__init__()
         cleaned = tuple(sorted({int(z) for z in neighbor_types}))
@@ -666,6 +668,7 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
         self.n_species = len(cleaned)
         self.selected_lambdas = tuple(sorted({int(v) for v in selected_lambdas}))
         self.backend = _resolve_backend(backend)
+        self.max_num_neighbors = int(max_num_neighbors)
 
         # Vectorized atomic-number -> species-index lookup (no per-atom Python loop).
         lut = torch.full((max(cleaned) + 1,), -1, dtype=torch.long)
@@ -737,12 +740,13 @@ class FlatLambdaSOAPFeaturizer(nn.Module):
                 self.feature_dims[lam] = self.feature_dims.get(lam, 0) + width
 
     def _build_edges(self, positions: torch.Tensor, batch_idx: torch.Tensor) -> torch.Tensor:
-        # torch_cluster has CPU+CUDA kernels but no MPS kernel; fall back to CPU on MPS.
-        if positions.device.type == "mps":
-            return radius_graph(
-                positions.cpu(), r=self.cutoff, batch=batch_idx.cpu(), loop=False
-            ).to(positions.device)
-        return radius_graph(positions, r=self.cutoff, batch=batch_idx, loop=False)
+        # MPS fallback and the max_num_neighbors cap check both live in `build_radius_graph`;
+        # the library default of 32 would truncate a condensed-phase environment silently.
+        return build_radius_graph(
+            positions, self.cutoff, batch_idx,
+            max_num_neighbors=self.max_num_neighbors,
+            context="FlatLambdaSOAPFeaturizer",
+        )
 
     def _run_bispectrum(self, A: torch.Tensor, species_idx: torch.Tensor) -> dict:
         # cuequivariance has no MPS kernel; off CUDA the cue bispectrum runs on CPU
@@ -980,6 +984,7 @@ class FlatStateSOAPFeaturizer(nn.Module):
         selected_lambdas: Sequence[int] = (0, 1, 2),
         backend: "EquivariantBackend | str" = "e3nn",
         bispectrum=None,
+        max_num_neighbors: int = DEFAULT_MAX_NUM_NEIGHBORS,
     ) -> None:
         super().__init__()
         cleaned = tuple(sorted({int(z) for z in neighbor_types}))
@@ -992,6 +997,7 @@ class FlatStateSOAPFeaturizer(nn.Module):
         self.weight_channels = int(weight_channels)
         self.selected_lambdas = tuple(sorted({int(v) for v in selected_lambdas}))
         self.backend = _resolve_backend(backend)
+        self.max_num_neighbors = int(max_num_neighbors)
 
         lut = torch.full((max(cleaned) + 1,), -1, dtype=torch.long)
         for index, z in enumerate(cleaned):
@@ -1050,12 +1056,13 @@ class FlatStateSOAPFeaturizer(nn.Module):
         return self._species_lut[atomic_numbers]
 
     def _build_edges(self, positions: torch.Tensor, group_idx: torch.Tensor) -> torch.Tensor:
-        # torch_cluster has CPU+CUDA kernels but no MPS kernel; fall back to CPU on MPS.
-        if positions.device.type == "mps":
-            return radius_graph(
-                positions.cpu(), r=self.cutoff, batch=group_idx.cpu(), loop=False
-            ).to(positions.device)
-        return radius_graph(positions, r=self.cutoff, batch=group_idx, loop=False)
+        # MPS fallback and the max_num_neighbors cap check both live in `build_radius_graph`;
+        # the library default of 32 would truncate a condensed-phase environment silently.
+        return build_radius_graph(
+            positions, self.cutoff, group_idx,
+            max_num_neighbors=self.max_num_neighbors,
+            context="FlatStateSOAPFeaturizer",
+        )
 
     def _run_bispectrum(self, A: torch.Tensor, species_idx: torch.Tensor) -> dict:
         if getattr(self, "_bispectrum_on_cpu", False) and A.device.type != "cpu":

@@ -61,6 +61,7 @@ from .data import (  # noqa: E402
 from .loss import onebody_anchor_loss, onebody_fit  # noqa: E402
 from .term_loop import fit  # noqa: E402
 from .train_eem import resolve_device  # noqa: E402
+from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 _LOG_KEYS = ("loss", "mae", "rmse", "bond", "anchor_e", "a_mae", "f_mae")
 
@@ -85,6 +86,7 @@ def build_onebody_model(features_cfg, cfg, neighbor_types, reference_energies):
         cutoff=features_cfg.cutoff, n_max=features_cfg.n_max, l_max=features_cfg.l_max,
         neighbor_types=neighbor_types, selected_lambdas=lambdas,
         backend=features_cfg.backend, density_channels=features_cfg.density_channels,
+        max_num_neighbors=_max_neighbors(features_cfg),
     )
     bond_head = PairEnergyHead(
         featurizer.feature_dims[0], len(neighbor_types),
