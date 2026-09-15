@@ -3,3 +3,4 @@ timer.dat
 *.log
 data/
 benchmarks/results
+chemlab

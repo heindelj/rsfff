@@ -52,12 +52,15 @@ from .damping import fermi_switch, tang_toennies
 from .pairs import inter_fragment_pairs
 from .units import BOHR_ANG
 
-#: Per-element ``(C6 [Ha*bohr^6], b [1/bohr])`` priors, from the fitted CMM water model
-#: (``pyCMM/tests/data/water.xml:32-33``). These are *priors*, not ground truth: they were
-#: fit to a different target than the EDA components trained against here.
+#: Per-element ``(C6 [Ha*bohr^6], b [1/bohr])`` priors. The ``b`` values are the fitted CMM
+#: water model's (``pyCMM/tests/data/water.xml:32-33``, O 1.84302 / H 1.30993); the C6 values
+#: are deliberately *not* CMM's (O 35.8289 / H 1.98954) but a nearby, harder-split starting
+#: point (O 40 / H 1) chosen to steer the fit away from the basin CMM's values converge into.
+#: These are *priors*, not ground truth -- CMM's were fit to a different target than the EDA
+#: components trained against here, and a different C6 split is the point of moving them.
 DEFAULT_C6_PRIOR: dict[int, tuple[float, float]] = {
-    8: (35.8289, 1.84302),   # O
-    1: (1.98954, 1.30993),   # H
+    8: (40.0, 1.84302),   # O
+    1: (1.0, 1.30993),    # H
 }
 
 #: Damping-exponent prior in bohr^-1, applied uniformly across elements.
@@ -91,7 +94,8 @@ def build_log_priors(
 
     ``b_prior`` is either a uniform value in bohr^-1 or the string ``"per_element"``, which
     uses the fitted values in :data:`DEFAULT_C6_PRIOR`. The difference is not cosmetic:
-    measured against ``eda_disp`` on the water clusters, with C6 at its prior and no ML,
+    measured against ``eda_disp`` on the water clusters, with C6 at the *CMM* prior
+    (O 35.8289 / H 1.98954, which the table no longer carries) and no ML,
 
         per-element b (O 1.843, H 1.310)   MAE 0.28 (w2) .. 0.61 (w5) kJ/mol
         uniform b = 2.0                    MAE 2.87 (w2) .. 14.5 (w5) kJ/mol
@@ -144,7 +148,7 @@ class DispersionParameterHeads(nn.Module):
       (``log C6_ij = (log C6_i + log C6_j)/2``), so no ``sqrt`` -- whose derivative is
       unbounded as its argument approaches zero -- ever appears;
     - positivity is structural rather than a floor;
-    - C6 spans a factor of 18 between H and O, so an *additive* residual in log space is a
+    - C6 spans a factor of tens between H and O, so an *additive* residual in log space is a
       *multiplicative* correction, which is the right scaling for a quantity like this.
 
     Because the learnable tensors are deviations from the registered prior, plain
