@@ -1,0 +1,8 @@
+# Campaign bulk data stays out of git; stage.json / campaign.json / events.jsonl / summary.json
+# are small and are the provenance record, so they are kept.
+campaigns/**/*.xyz
+campaigns/**/*.extxyz
+campaigns/**/*.pt
+campaigns/**/scratch/
+campaigns/**/.hash_cache.json
+campaigns/**/.lock
