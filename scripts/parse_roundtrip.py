@@ -5,6 +5,16 @@ Usage
     python scripts/parse_roundtrip.py [--root qchem_roundtrip] [--out-dir data/wb97mv_tzvpd]
                                       [--stems w2_... h2o] [--limit N] [--strict]
 
+The bundle's ``eda``/``force`` pair is selectable, because the round-trip tree also holds
+nested bundles that do not share the top-level names (``eda/benchmark_eda`` against
+``force/benchmark_force``, and likewise ``ion_clusters``, ``transition_structures``)::
+
+    python scripts/parse_roundtrip.py --eda-dir eda/benchmark_eda \
+        --force-dir force/benchmark_force --out-dir data/wb97mv_tzvpd_large
+
+Give those runs their own ``--out-dir``: the output name is built from the *system* label, so
+a ``w4`` stem in a nested bundle would otherwise overwrite the top-level ``w4`` dataset.
+
 For every geometry stem it finds, this merges the ``eda`` and ``force`` outputs
 for the *same frame* into one extxyz frame carrying both the EDA components and
 the analytic forces. Stems that exist only under ``force`` (the isolated ``h2o``
@@ -336,10 +346,10 @@ def build_force_frame(force_path: str, relative_to: str) -> tuple[Frame, list[st
     return frame, [f"force: {m}" for m in check_force(force)]
 
 
-def write_stem(stem: str, root: str, out_dir: str, args) -> str | None:
+def write_stem(stem: str, root: str, out_dir: str, args, eda_dir: str, force_dir: str) -> str | None:
     """Parse every frame of one stem and write its extxyz. Returns the path written."""
-    eda_frames = outputs_by_frame(os.path.join(root, "eda"), stem)
-    force_frames = outputs_by_frame(os.path.join(root, "force"), stem)
+    eda_frames = outputs_by_frame(eda_dir, stem)
+    force_frames = outputs_by_frame(force_dir, stem)
     if not force_frames:
         print(f"{stem}: no force outputs, skipping", file=sys.stderr)
         return None
@@ -407,6 +417,17 @@ def main(argv=None) -> int:
         epilog=__doc__,
     )
     ap.add_argument("--root", default="qchem_roundtrip", help="the round-trip bundle")
+    ap.add_argument(
+        "--eda-dir",
+        default="eda",
+        help="the eda calculation directory, absolute or relative to --root. The nested "
+        "bundles live at eda/benchmark_eda, eda/ion_clusters, ...",
+    )
+    ap.add_argument(
+        "--force-dir",
+        default="force",
+        help="the force calculation directory, absolute or relative to --root",
+    )
     ap.add_argument("--out-dir", default="data/wb97mv_tzvpd", help="where to write extxyz")
     ap.add_argument("--stems", nargs="*", default=None, help="geometry stems (default: all)")
     ap.add_argument("--limit", type=int, default=0, help="only the first N frames per stem")
@@ -416,17 +437,20 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     root = os.path.abspath(os.path.expanduser(args.root))
+    eda_dir = os.path.join(root, os.path.expanduser(args.eda_dir))
+    force_dir = os.path.join(root, os.path.expanduser(args.force_dir))
     stems = args.stems
     if stems is None:
-        stems = sorted(
-            set(geometry_stems(os.path.join(root, "eda")))
-            | set(geometry_stems(os.path.join(root, "force")))
-        )
+        stems = sorted(set(geometry_stems(eda_dir)) | set(geometry_stems(force_dir)))
     if not stems:
-        print(f"error: no geometry stems under {root}", file=sys.stderr)
+        print(
+            f"error: no geometry stems under {eda_dir} or {force_dir}", file=sys.stderr
+        )
         return 1
 
-    written = [write_stem(s, root, args.out_dir, args) for s in stems]
+    written = [
+        write_stem(s, root, args.out_dir, args, eda_dir, force_dir) for s in stems
+    ]
     return 0 if any(written) else 1
 
 

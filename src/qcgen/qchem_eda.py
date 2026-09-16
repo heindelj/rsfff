@@ -386,7 +386,12 @@ def check_consistency(
     Check (c) is what catches a variationally collapsed CT-allowed SCF: the
     fragment energies stay sane while the supersystem falls to a nonsensical
     minimum, so (a) and (b) both still hold internally. ``max_int_energy`` is in
-    kJ/mol regardless of ``rec.units``.
+    kJ/mol regardless of ``rec.units``, and is a bound **per intermolecular link**
+    (``n_fragments - 1``), not on the total: a w22 cluster binds by ~-1030 kJ/mol
+    for entirely ordinary reasons, and a size-blind 1000 kJ/mol cap flags every
+    cluster past ~w21 while catching nothing. The failure mode this exists for is
+    a VV10 grid collapse that puts E_int in the -10^9 kJ/mol range, which survives
+    no bound at all. A dimer's cap is unchanged at ``max_int_energy``.
     """
     msgs = []
     parts = ("prp", "cls_elec", "mod_pauli", "disp", "pol", "ct")
@@ -403,10 +408,12 @@ def check_consistency(
         msgs.append(f"E_total - sum(E_frag) = {direct:.6g} but E_int is {e_int:.6g}")
 
     e_int_kj = e_int * (KJMOL_PER_HARTREE if rec.units == "atomic" else 1.0)
-    if abs(e_int_kj) > max_int_energy:
+    e_int_bound = max_int_energy * max(rec.n_fragments - 1, 1)
+    if abs(e_int_kj) > e_int_bound:
         msgs.append(
             f"implausible interaction energy {e_int_kj:.6g} kJ/mol "
-            "(SCF likely collapsed to a spurious solution)"
+            f"(bound {e_int_bound:.6g} for {rec.n_fragments} fragments; "
+            "SCF likely collapsed to a spurious solution)"
         )
 
     if not rec.converged:

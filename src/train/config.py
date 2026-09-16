@@ -54,6 +54,17 @@ class DataConfig:
     # polarizabilities -- so they cannot be concatenated, and each stream draws its own
     # minibatch. See `rsfff.train.train_expert.load_anchor_datasets`.
     monomer_path: str | list[str] | None = None
+    #: Cluster files trained as a **separate stream** rather than concatenated onto ``path``.
+    #: They carry the same labels; what differs is how often a frame is seen. The large-water
+    #: benchmark set is 81 frames against ~9600 of w2-w5, so concatenating them buys one
+    #: large frame per ~120 samples -- far too little to move a size-extrapolation error.
+    #: A stream draws its own minibatch every step, so ``film.large_weight`` sets the relative
+    #: pull directly instead of leaving it to the frame counts. See
+    #: ``rsfff.train.train_film.FilmStreams``.
+    large_path: str | list[str] | None = None
+    #: Fraction of large-stream *geometries* held out. Reported as ``lg_*`` on the val line,
+    #: which is the number that says whether the large clusters were fitted or memorized.
+    large_holdout_fraction: float = 0.15
     #: Which decompositions to load from a multi-fragmentation cluster file: ``"all"``, a
     #: single index, or a list. Files with one fragmentation per frame ignore it.
     #: ``"all"`` is what makes a geometry contribute every placement of its excess charge.
@@ -1058,6 +1069,14 @@ class FilmConfig:
     anchor_weight: float = 10.0
     anchor_batch_size: int = 32
     anchor_force_every: int = 5
+    #: The large-cluster stream (``data.large_path``): the same :func:`film_fit` loss on its
+    #: own minibatch, scaled by this. 0 disables the stream even if the files are configured,
+    #: which is what makes "same config, stream off" a usable ablation.
+    large_weight: float = 0.0
+    large_batch_size: int = 8
+    #: Force striding for the large stream, counted in its own steps. Kept separate from
+    #: ``force_every`` because the large batch is the expensive second-order backward.
+    large_force_every: int = 2
 
     # --- penalties ---------------------------------------------------------------------------------
     #: L1 on ``|theta - theta_0|`` per quantity (log-space for positives) -- the dial deciding
@@ -1216,10 +1235,23 @@ def load_config(path) -> Config:
             if data.get("atomic_reference_states") else None
         ),
         monomer_path=_monomer_paths(data.get("monomer_path")),
+        large_path=_monomer_paths(data.get("large_path")),
+        large_holdout_fraction=float(
+            data.get("large_holdout_fraction", DataConfig.large_holdout_fraction)
+        ),
         fragmentations=data.get("fragmentations", DataConfig.fragmentations),
         holdout_fraction=float(data.get("holdout_fraction", DataConfig.holdout_fraction)),
         seed=int(data.get("seed", DataConfig.seed)),
     )
+    # This block is assembled field by field, so a key it does not name is silently dropped
+    # -- and a dropped `large_path` looks exactly like a run that was never configured to use
+    # the large clusters. Fail on the typo instead.
+    unknown = set(data) - set(DataConfig.__dataclass_fields__)
+    if unknown:
+        raise ValueError(
+            f"{path}: unknown data keys {sorted(unknown)}; "
+            f"known: {sorted(DataConfig.__dataclass_fields__)}"
+        )
     eem_cfg = EEMConfig(
         emb_dim=int(eem.get("emb_dim", EEMConfig.emb_dim)),
         hidden=int(eem.get("hidden", EEMConfig.hidden)),

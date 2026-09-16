@@ -1,0 +1,196 @@
+# Continue the film fit onto the large water clusters (w4-w23), from the w2-w5 checkpoint.
+#
+#   python -m rsfff.train.train_film configs/water_film_large.yaml
+#
+# Writes to checkpoints/water_film_large/. configs/water_film.yaml and the checkpoint this
+# starts from are untouched.
+#
+# Why this run exists
+# -------------------
+# checkpoints/water_film_full/best.pt is fitted on w2-w5 and does not extrapolate. Measured
+# on the parsed benchmark set (`scripts/parse_roundtrip.py --eda-dir eda/benchmark_eda`),
+# per-frame MAE against the wB97M-V/def2-TZVPD ALMO-EDA labels:
+#
+#     size    elst   pauli   disp    ind      E_int      E_int/water
+#     w4      2.4     1.7    0.01    0.4       1.2          0.30
+#     w8      5.5     0.7    0.31    1.3       5.7          0.72
+#     w13     7.2     1.8    0.33    5.7      10.9          0.84
+#     w19     5.4     4.2    1.43   42.8      42.6          2.24
+#     w23     9.0     5.8    0.96   44.4      46.6          2.02     (kJ/mol)
+#
+# The one-body term is unaffected (ob_mae 0.02 kJ/mol at every size -- the Morse/angle fit
+# transfers exactly). elst drifts up roughly linearly in the number of fragments. **Induction
+# is the failure**: it is fine to w16 and then jumps by an order of magnitude, and it does so
+# per *isomer*, not per size -- w19/w21/w22/w23 blow up while w20 stays at 4.8. That is the
+# many-body polarization response of a dense, highly coordinated environment, which w2-w5
+# never shows the model. E_int error is induction error almost exactly.
+#
+# How the large clusters enter
+# ----------------------------
+# As `data.large_path`, a **separate stream**, not appended to `data.path`. There are 81 large
+# frames against ~9600 of w2-w5; concatenated they would be 0.8% of every gradient, which
+# cannot move a size-extrapolation error. The stream draws its own minibatch every step, so
+# `film.large_weight` sets the pull directly. The w2-w5 stream stays at full strength: it is
+# what keeps the fine-tune from trading small-cluster accuracy for large.
+#
+# What to watch, on top of configs/water_film.yaml's list
+# ------------------------------------------------------
+#   lg_ind_mae   the target of the whole run. Starts near 20-40 kJ/mol.
+#   lg_elst_mae  the other size-dependent drift; should fall without being pushed.
+#   lg_ob_mae    must stay ~0.02. Rising means the large clusters are being fitted by
+#                bending the one-body PES, which is the failure mode this architecture is
+#                built to make visible -- check bond_var and std_* with it.
+#   ind_mae      the w2-w5 induction error, i.e. what the fine-tune is costing. It started
+#                at 0.40 kJ/mol; a run that fixes w23 by doubling this has not helped.
+#   lg_cg_fail   must stay 0. Large clusters are where the induction solve would fail first.
+
+run_name: water_film_large
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  # The w2-w5 anchor, unchanged from configs/water_film.yaml.
+  path:
+    - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+  # The benchmark_eda / benchmark_force round-trip bundle, merged by
+  # `scripts/parse_roundtrip.py --eda-dir eda/benchmark_eda --force-dir force/benchmark_force
+  #  --out-dir data/wb97mv_tzvpd_large`. 81 frames, w4-w23 (no w15), all near-minimum
+  # structures (|F|max ~2e-3 Ha/bohr), w13 carrying 36 isomers of its own.
+  large_path:
+    - data/wb97mv_tzvpd_large/w4_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w5_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w6_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w7_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w8_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w9_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w10_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w11_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w12_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w13_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w14_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w16_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w17_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w18_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w19_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w20_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w21_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w22_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd_large/w23_wb97mv_tzvpd.xyz
+  # 12 of the 81: w4, w6, w10, w13 x5, w16, w19, w20, w23 at seed 0. Expensive -- it gives up
+  # the only w23 frame and one of the two w19 blow-ups -- and it is the only thing that
+  # separates "fitted the large clusters" from "memorized 81 geometries", which at this sample
+  # size is a real risk. Set it to 0.0 for a final production fit once the answer is known.
+  large_holdout_fraction: 0.15
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]
+  backend: e3nn
+  density_channels: 8
+
+film:
+  conditioning_mode: film
+  cross_lambdas: [0]
+  block_dim: 64
+  hidden: 128
+  depth: 2
+  film_hidden: 32
+  film_depth: 1
+  gate_a0: 0.5
+  max_rank: 2
+  fragment_state_dim: 4
+
+  emb_dim: 16
+  head_hidden: 64
+  head_depth: 2
+  equiv_channels: 32
+  bonded_hidden: 64
+  bonded_depth: 1
+  eta_init: 0.5
+  eta_floor: 0.05
+  s_init: 0.5
+  disp_b_prior: per_element
+
+  alpha_init: 40.0
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+
+  induction: true
+  cg_rtol: 1.0e-9
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+
+  energy_scale: 3.8093e-4
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  induction_weight: 30.0
+  total_energy_weight: 0.0
+  force_weight: 1.0
+  force_scale: 1.0e-3
+  force_every: 2
+
+  fragment_weight: 10.0
+  fragment_batch_size: 64
+  anchor_weight: 10.0
+  anchor_batch_size: 32
+  anchor_force_every: 5
+
+  # --- the large-cluster stream -----------------------------------------------------------
+  # Measured at the starting checkpoint: film_fit on a 128-frame w2-w5 batch is ~79, on an
+  # 8-frame large batch ~3e3-3e4 (the spread is the per-isomer induction failure). At
+  # large_weight 0.05 the large stream leads the loss by a factor of a few rather than by four
+  # orders of magnitude -- enough to steer, not enough to make grad_clip discard the w2-w5
+  # direction outright. The balance then anneals itself: the term falls as the *square* of the
+  # large-cluster error, so the stream recedes as it succeeds. Raise toward 0.2 if lg_ind_mae
+  # stalls; lower if ind_mae on w2-w5 climbs.
+  large_weight: 0.05
+  # 8 frames is ~320 atoms, comparable to the 128-frame w2-w5 batch's 1356 but with the whole
+  # size range represented over a few steps.
+  large_batch_size: 8
+  # The large batch's force term is the most expensive second-order backward in the fit.
+  large_force_every: 2
+
+  env_penalty_weight: 0.0
+  bonded_variance_weight: 1.0e-2
+  r0_weight: 0.05
+  r0_spread_weight: 1.0
+
+elec:
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
+
+onebody:
+  energy_scale: 3.8093e-4
+  force_weight: 1.0
+  force_scale: 1.0e-3
+
+train:
+  # A continuation, not a fit: the isolated stage is already done and lives in this file.
+  init_from: checkpoints/water_film_full/best.pt
+  epochs: 60
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 128
+  # 3e-4 rather than water_film.yaml's 1e-3. The starting point is converged on w2-w5 and the
+  # new stream's gradient is the large one; a full-size LR here is how a fine-tune forgets.
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 2

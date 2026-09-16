@@ -14,6 +14,9 @@ the dedicated monomers  ``= 0``  the same, plus molecular polarizability (the re
                                  family) and true one-body forces
 clusters                live     ``eda_cls_elec``, ``eda_mod_pauli``, ``eda_disp``,
                                  ``eda_pol + eda_ct``, cluster forces
+``data.large_path``     live     the same cluster labels on the large (w4-w23) set, drawn
+                                 as its own minibatch so the relative pull is
+                                 ``film.large_weight`` and not the frame count
 ======================  =======  ==================================================
 
 What to watch, in order of what will bite
@@ -74,6 +77,8 @@ _LOG_KEYS = (
     "r0_elst", "r0_pauli", "r0_disp",
     "env_norm", "env_c6", "env_eta", "env_bond_d", "env_bond_r_eq",
     "cg_ind", "cg_fail",
+    "lg_elst_mae", "lg_pauli_mae", "lg_disp_mae", "lg_ind_mae", "lg_e_tot_mae",
+    "lg_ob_mae", "lg_f_clu", "lg_cg_fail",
 )
 
 
@@ -172,6 +177,15 @@ class FilmStreams:
     anchor streams (minibatched -- the fixed 500-frame anchor was once ~95% of wall time),
     same r0 barriers, the env L1 acting on the film's per-quantity shifts, plus the new
     **bonded variance** regularizer.
+
+    The **large-cluster stream** is new and is here rather than concatenated onto the main
+    dataset for one reason: relative weight. 81 large frames against ~9600 small ones is a
+    0.8% share of every gradient, which is not a fine-tune, it is noise. As a stream the
+    large batch is drawn every step and scaled by ``film.large_weight``, so "how hard do we
+    pull toward w10-w23" is a number in the config instead of an accident of how many
+    reference calculations finished. It carries its own held-out split, reported as ``lg_*``:
+    the small-cluster val line cannot tell you whether the large clusters generalized,
+    because ~99% of it is w2-w5.
     """
 
     def __init__(
@@ -184,6 +198,12 @@ class FilmStreams:
         anchor_datasets=(),
         anchor_batch_size: int = 32,
         anchor_force_every: int = 5,
+        large_dataset=None,
+        large_train_idx=None,
+        large_val_idx=None,
+        large_weight: float = 0.0,
+        large_batch_size: int = 8,
+        large_force_every: int = 2,
         seed: int = 0,
     ) -> None:
         self.model = model
@@ -193,19 +213,34 @@ class FilmStreams:
         self.anchors = list(anchor_datasets)
         self.anchor_batch_size = int(anchor_batch_size)
         self.anchor_force_every = max(int(anchor_force_every), 1)
+        self.large = large_dataset
+        self.large_train_idx = large_train_idx
+        self.large_val_idx = large_val_idx
+        self.large_weight = float(large_weight)
+        self.large_batch_size = int(large_batch_size)
+        self.large_force_every = max(int(large_force_every), 1)
         self.generator = torch.Generator().manual_seed(int(seed))
         self._step = 0
+        self._large_step = 0
         self._metrics: dict[str, float] = {}
 
-    def _draw(self, dataset, size, training, *, grad_positions: bool = False):
-        n = len(dataset)
+    def _draw(self, dataset, size, training, *, grad_positions: bool = False, pool=None):
+        """A minibatch of ``dataset``, random while training and a fixed slice otherwise.
+
+        ``pool`` restricts the draw to a subset of frames -- the large stream's train and val
+        halves. Evaluation takes the *leading* slice so the val metric is a number and not
+        itself a random variable.
+        """
+        pool = torch.arange(len(dataset)) if pool is None else torch.as_tensor(pool)
+        n = int(pool.numel())
         if n == 0:
             return None
         size = min(size, n)
-        idx = (
+        take = (
             torch.randperm(n, generator=self.generator)[:size] if training
             else torch.arange(size)
         )
+        idx = pool[take]
         batch = dataset.flat_batch(idx).to(self.device)
         if grad_positions:
             batch.positions.requires_grad_(True)
@@ -308,7 +343,48 @@ class FilmStreams:
             self._metrics.update(
                 {f"{k}{tag}": v for k, v in {**metrics, **ap_metrics}.items()}
             )
+
+        # --- the large-cluster stream ------------------------------------------------------
+        large = self._large_term(cfg, training)
+        if large is not None:
+            extra["large"] = large
         return extra
+
+    def _large_term(self, cfg: Config, training: bool):
+        """:func:`film_fit` on a large-cluster minibatch, weighted and ``lg_``-prefixed.
+
+        Train draws at random from the large training split; evaluation runs the held-out
+        split, which is what ``lg_*`` on the val line reports. The force term is strided on
+        its own counter: it is a second-order backward over the batch with the most atoms in
+        the fit, so it is the one worth paying for every k-th step rather than every step.
+        """
+        if self.large is None or self.large_weight <= 0.0:
+            return None
+        pool = self.large_train_idx if training else self.large_val_idx
+        # Evaluation runs the *whole* held-out split rather than a leading slice of it: it is
+        # a dozen frames, and a truncated slice of a set this small is not a measurement. The
+        # cost is that it repeats once per main-stream val minibatch, which is what a larger
+        # `data.large_holdout_fraction` would start to be paid for.
+        size = self.large_batch_size if training else int(torch.as_tensor(pool).numel())
+        drawn = self._draw(
+            self.large, size, training, grad_positions=True, pool=pool,
+        )
+        if drawn is None:
+            return None
+        batch, _ = drawn
+        if training:
+            self._large_step += 1
+        with_forces = (
+            cfg.film.force_weight > 0.0
+            and ((not training) or self._large_step % self.large_force_every == 0)
+        )
+        with torch.enable_grad():
+            out = self.model(batch)
+            loss, metrics, _ = film_fit(
+                out, batch, cfg, training=training, with_forces=with_forces
+            )
+        self._metrics.update({f"lg_{k}": v for k, v in metrics.items()})
+        return self.large_weight * loss
 
     def diagnostics(self, out, batch, target):
         """Charge-projection residual, r0 per channel, bonded-parameter spread, streams."""
@@ -330,6 +406,26 @@ class FilmStreams:
         return metrics
 
 
+def _load_large_stream(config: Config, dtype):
+    """``(dataset, train_idx, val_idx)`` for ``data.large_path``, or ``(None, None, None)``.
+
+    Split on geometries like the main stream. The held-out fraction is its own config field:
+    the set is small and every size is worth training on, so the choice of how much to give
+    up for an honest ``lg_*`` number is a different trade than the main stream's.
+    """
+    if not config.data.large_path:
+        return None, None, None
+    dataset = load_cluster_datasets(
+        config.data.large_path, dtype=dtype, fragmentations=config.data.fragmentations
+    )
+    if not dataset.has_fragments:
+        raise ValueError("data.large_path frames need a `fragment_idx` column")
+    train_idx, val_idx = split_indices_grouped(
+        dataset._group_id, config.data.large_holdout_fraction, config.data.seed
+    )
+    return dataset, train_idx, val_idx
+
+
 def _train_once(config: Config):
     dtype = torch.float64 if config.dtype == "float64" else torch.float32
     torch.set_default_dtype(dtype)
@@ -349,6 +445,7 @@ def _train_once(config: Config):
     )
     fragments = fragment_view(clusters, train_idx)
     anchors = load_anchor_datasets(config.data.monomer_path, dtype=dtype)
+    large, large_train, large_val = _load_large_stream(config, dtype)
     reference_energies = load_reference_energies(
         config.data.reference_energies, neighbor_types
     ).to(dtype)
@@ -372,6 +469,17 @@ def _train_once(config: Config):
         f"(conditioning_mode={config.film.conditioning_mode})",
         flush=True,
     )
+    if large is not None:
+        state = (
+            f"weight {config.film.large_weight}, batch {config.film.large_batch_size}"
+            if config.film.large_weight > 0.0
+            else "LOADED BUT OFF (film.large_weight = 0)"
+        )
+        print(
+            f"large stream: {len(large)} frames, "
+            f"{len(large_train)}/{len(large_val)} train/val; {state}",
+            flush=True,
+        )
 
     streams = FilmStreams(
         model, device,
@@ -380,6 +488,12 @@ def _train_once(config: Config):
         anchor_datasets=anchors,
         anchor_batch_size=config.film.anchor_batch_size,
         anchor_force_every=config.film.anchor_force_every,
+        large_dataset=large,
+        large_train_idx=large_train,
+        large_val_idx=large_val,
+        large_weight=config.film.large_weight,
+        large_batch_size=config.film.large_batch_size,
+        large_force_every=config.film.large_force_every,
         seed=config.data.seed,
     )
 
