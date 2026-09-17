@@ -200,28 +200,56 @@ def test_duplicate_output_keys_rejected(tmp_path):
 # Q-Chem label flow
 # ------------------------------------------------------------------------------------------
 
-def _roundtrip_copy(tmp_path) -> Path:
-    root = tmp_path / "qchem_roundtrip"
-    root.mkdir()
-    shutil.copy(ION / "config.json", root)
-    shutil.copytree(ION / "templates", root / "templates")
-    return root
-
-
-def test_write_jobs_matches_existing_ion_cluster_inputs(tmp_path):
-    root = _roundtrip_copy(tmp_path)
+def test_bundle_inputs_match_existing_ion_cluster_inputs(tmp_path):
+    bundle = qchem.JobBundle(tmp_path / "anywhere" / "bundle")
     geom = ION / "eda/ion_clusters/geoms/oh-_w3_iso00.extxyz"
-    jobs = qchem.write_jobs(geom, "al_t/iter_000", stem="al_t_it000", roundtrip_root=root)
+    assert bundle.add(geom, "al_t_it000") == 2
     for kind in ("eda", "force"):
-        made = (jobs[kind] / "inputs/al_t_it000_frame0000.in").read_text()
+        made = (bundle.kind_dir(kind) / "inputs/al_t_it000_frame0000.in").read_text()
         assert made == (ION / kind / "ion_clusters/inputs/oh-_w3_iso00.in").read_text()
-    # idempotent, and refuses a different selection under the same name
-    qchem.write_jobs(geom, "al_t/iter_000", stem="al_t_it000", roundtrip_root=root)
+    for name in ("config.json", "worker.py", "worker.slurm", "templates/eda.in", "templates/force.in"):
+        assert (bundle.root / name).exists()
+    # idempotent, and refuses a different selection under the same stem
+    assert bundle.add(geom, "al_t_it000") == 0
     with pytest.raises(FileExistsError):
-        qchem.write_jobs(ION / "eda/ion_clusters/geoms/oh-_w4_iso00.extxyz", "al_t/iter_000",
-                         stem="al_t_it000", roundtrip_root=root)
+        bundle.add(ION / "eda/ion_clusters/geoms/oh-_w4_iso00.extxyz", "al_t_it000")
     with pytest.raises(StagePending):
-        qchem.wait_for_jobs(jobs)
+        bundle.wait()
+
+
+def test_bundle_refuses_template_swap(tmp_path):
+    bundle = qchem.JobBundle(tmp_path / "b").create()
+    other = tmp_path / "eda.in"
+    other.write_text(bundle.templates["eda"].read_text().replace("def2-TZVPD", "def2-SVPD"))
+    with pytest.raises(FileExistsError):
+        qchem.JobBundle(tmp_path / "b", templates={"eda": other}).create()
+
+
+def test_bad_fragment_charges_rejected(tmp_path):
+    src = (ION / "eda/ion_clusters/geoms/oh-_w3_iso00.extxyz").read_text()
+    bad = tmp_path / "bad.extxyz"
+    bad.write_text(src.replace('fragment_charges="-1 0 0 0"', 'fragment_charges="0 0 0 0"'))
+    with pytest.raises(ValueError, match="sum"):
+        qchem.check_frames(bad, fragments=True)
+
+
+def test_worker_runs_bundle_with_fake_qchem(tmp_path):
+    bundle = qchem.JobBundle(tmp_path / "b")
+    bundle.add(ION / "eda/ion_clusters/geoms/oh-_w2_iso00.extxyz", "s")
+    fake = tmp_path / "fake_qchem"
+    # args: -save -nt N input output ; write a finished-looking output for force, a crash for eda
+    fake.write_text('#!/bin/sh\n'
+                    'case "$(pwd)" in */eda) echo partial > "$5"; exit 1;; esac\n'
+                    'echo "Thank you very much for using Q-Chem." > "$5"\n')
+    fake.chmod(0o755)
+    import subprocess
+    subprocess.run([sys.executable, str(bundle.root / "worker.py"), "--qchem", str(fake),
+                    "--threads", "1", "--idle-timeout", "0", "--poll-seconds", "0"], check=True,
+                   capture_output=True)
+    st = bundle.status()
+    assert st["force"]["done"] == ["s_frame0000"]
+    assert st["eda"]["failed"] == ["s_frame0000"]
+    bundle.wait()  # nothing missing or running
 
 
 needs_parser = pytest.mark.skipif(
@@ -231,8 +259,8 @@ needs_parser = pytest.mark.skipif(
 
 
 @needs_parser
-def test_label_stage_end_to_end(tmp_path, monkeypatch):
-    root = _roundtrip_copy(tmp_path)
+@pytest.mark.parametrize("external", [False, True])
+def test_label_stage_end_to_end(tmp_path, external):
     stems = ["oh-_w2_iso00", "h3o+_w3_iso00"]
 
     class Label(LabelFrames):
@@ -244,29 +272,26 @@ def test_label_stage_end_to_end(tmp_path, monkeypatch):
         def evaluate(self, ctx, files):
             return {"n_files": len(files)}
 
-    orig = qchem.write_jobs
-    monkeypatch.setattr(qchem, "write_jobs",
-                        lambda *a, **k: orig(*a, **{**k, "roundtrip_root": root}))
-    monkeypatch.setattr(qchem, "ROUNDTRIP_ROOT", root)
-    orig_parse = qchem.parse_jobs
-    monkeypatch.setattr(qchem, "parse_jobs",
-                        lambda *a, **k: orig_parse(*a, **{**k, "roundtrip_root": root}))
-
-    camp = Campaign(tmp_path / "camp", [ToyBuild(n=1), ToySample(), Label()], repo=REPO)
+    params = {"jobs_root": str(tmp_path / "scratch/{campaign}/it{iteration}")} if external else {}
+    camp = Campaign(tmp_path / "camp", [ToyBuild(n=1), ToySample(), Label(**params)], repo=REPO)
     assert camp.run(1) == "pending"
     rec = camp.read_record(0, "label")
-    assert rec["metrics"]["qchem_eda_inputs"] == 2 and rec["metrics"]["qchem_eda_done"] == 0
+    assert rec["metrics"]["qchem_eda_missing"] == 2
+    root = (tmp_path / "scratch/camp/it0") if external else camp.stage_dir(0, "label") / "qchem"
+    assert rec["extra_outputs"]["qchem_bundle"] == str(root.resolve())
 
-    # "Perlmutter": drop the real outputs in under the generated names.
+    # "the cluster": drop the real outputs in under the generated names.
     for kind in ("eda", "force"):
-        jd = root / kind / "al_camp/iter_000"
         for i, s in enumerate(stems):
             shutil.copy(ION / kind / "ion_clusters/outputs" / f"{s}.out",
-                        jd / "outputs" / f"al_camp_it000_frame{i:04d}.out")
+                        root / kind / "outputs" / f"al_camp_it000_frame{i:04d}.out")
 
     assert camp.run(1) == "complete"
     rec = camp.read_record(0, "label")
     m = rec["metrics"]
     assert (m["n_selected"], m["n_labeled"], m["n_dropped"], m["pre_n_files"]) == (2, 2, 0, 1)
-    assert "qchem_template.eda" in rec["inputs"] and "qchem_outputs.force" in rec["inputs"]
+    assert m["qchem_eda_done"] == 2
+    assert "qchem_bundle.template.eda" in rec["inputs"]
+    assert "qchem_bundle.outputs.force" in rec["inputs"]
     assert (camp.stage_dir(0, "label") / "dataset/al_camp_it000_wb97mv_tzvpd.xyz").exists()
+    assert camp.run(1) == "complete"  # up to date
