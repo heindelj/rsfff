@@ -7,17 +7,36 @@ name = "rsfff"
 version = "0.1.0"
 description = "Reactive/short-range fluctuation force field toolkit: GPU-native SOAP/ACE equivariant features and models."
 requires-python = ">=3.10"
+# torch-cluster is a hard runtime dependency (rsfff.neighbors imports it) but deliberately
+# NOT listed here: it ships only an sdist whose setup.py imports torch, and pip builds it in
+# an isolated environment that has no torch, so listing it makes `pip install .` fail outright
+# with "ModuleNotFoundError: No module named 'torch'" before anything else is installed. It has
+# to be built against an already-installed torch, which is a second command -- see [neighbors]
+# below.
 dependencies = [
     "numpy",
     "pyyaml",
     "torch",
     "e3nn",
-    "torch-cluster",
     "ase",
     "scipy",
 ]
 
 [project.optional-dependencies]
+# Not installable in one shot -- `pip install .[neighbors]` hits the same isolated-build
+# failure. Install torch first, then torch-cluster with isolation off, then this package:
+#     pip install torch
+#     pip install --no-build-isolation torch-cluster
+#     pip install -e .
+# On a cluster with a site torch (NERSC), use the module's torch and keep pip away from it:
+#     pip install --no-build-isolation torch-cluster
+#     pip install --no-deps -e .
+# Building it for GPUs needs the arch explicitly, on a login node (compute nodes have no
+# network): FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST="8.0" MAX_JOBS=8 pip install ...
+neighbors = [
+    "torch-cluster",
+]
+
 cue = [
     "cuequivariance>=0.10",
     "cuequivariance-torch>=0.10",
@@ -43,5 +62,20 @@ rsfff-train-eem = "rsfff.train.train_eem:main"
 rsfff-train-monomer = "rsfff.train.train_monomer:main"
 
 [tool.setuptools]
+# src/ is imported as `rsfff`, which rules out automatic discovery: setuptools can find
+# packages or rename a directory, not both. So this list is maintained by hand, and a
+# subpackage missing from it is silently dropped from an installed (non-editable) rsfff --
+# `pip install -e .` keeps working, `pip install .` gives an import error at runtime. Add
+# every directory under src/ that has an __init__.py:
 package-dir = { "rsfff" = "src" }
-packages = ["rsfff", "rsfff.features", "rsfff.ff", "rsfff.md", "rsfff.mlip", "rsfff.train", "rsfff.qcgen"]
+packages = [
+    "rsfff",
+    "rsfff.features",
+    "rsfff.ff",
+    "rsfff.ff.film",
+    "rsfff.ff.v1",
+    "rsfff.md",
+    "rsfff.mlip",
+    "rsfff.qcgen",
+    "rsfff.train",
+]

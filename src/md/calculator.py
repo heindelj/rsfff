@@ -21,7 +21,7 @@ from ..ff.mediator import MediatorHead
 from ..ff.mixture_model import intra_pairs_unsorted, mixture_forward
 from ..mlip.reference_states import AtomicStateReference
 from ..train.build_expert import build_expert_model
-from ..train.data import load_reference_energies
+from ..train.data import load_reference_energies, resolve_data_path
 from .assign import DEFAULT_BUMP, base_assignment, enumerate_group
 from .bias import HarmonicBias
 from .confine import flat_bottom_sphere
@@ -50,9 +50,17 @@ def load_mediated_model(checkpoint: str, *, device: str = "cpu"):
     dtype = torch.get_default_dtype()
 
     nt = tuple(int(z) for z in state["neighbor_types"])
-    e0 = load_reference_energies(cfg.data.reference_energies, nt).to(dtype)
+    # The reference energies are a buffer in the state dict, so the JSON the config names is
+    # only a fallback for checkpoints older than that buffer: loading a model must not depend
+    # on the current directory being the repository root it was trained in.
+    if "reference_energies" in state["model_state"]:
+        e0 = state["model_state"]["reference_energies"].to(dtype)
+    else:
+        e0 = load_reference_energies(cfg.data.reference_energies, nt).to(dtype)
     states = (
-        AtomicStateReference.from_json(cfg.data.atomic_reference_states, nt, dtype=dtype)
+        AtomicStateReference.from_json(
+            resolve_data_path(cfg.data.atomic_reference_states), nt, dtype=dtype
+        )
         if cfg.data.atomic_reference_states
         else None
     )

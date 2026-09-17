@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -1026,16 +1027,67 @@ def split_indices(n: int, holdout_fraction: float, seed: int = 0):
     return perm[n_val:], perm[:n_val]
 
 
+#: Environment variable naming the directory that holds ``data/`` when rsfff is used away
+#: from the repository it was trained in (an installed copy on a cluster, a run directory on
+#: scratch). See :func:`resolve_data_path`.
+DATA_DIR_ENV = "RSFFF_DATA_DIR"
+
+
+def resolve_data_path(path) -> Path:
+    """A data file named by a config, found without assuming the current directory.
+
+    Configs and the checkpoints that embed them store data paths relative to the repository
+    root, because that is where training ran. Reading them back with ``Path(path)`` therefore
+    only works from that one directory, which is wrong the moment a checkpoint is used from a
+    run directory on scratch or from an installed copy of the package.
+
+    Resolution order: absolute paths and paths that exist relative to the current directory
+    are taken as given; then ``$RSFFF_DATA_DIR``; then the repository root inferred from this
+    file, which is present for an editable install and absent for a wheel. Each root is tried
+    with the path as written and with the bare file name under ``data/``, so a config saying
+    ``data/atomic_references.json`` is found under a root that only has the ``data``
+    directory itself.
+
+    Nothing here is needed to *load a model*: reference energies are a persistent buffer in
+    the state dict (see ``rsfff.md.film_driver.load_film_model``). This is for the cases that
+    genuinely have to read the file -- fitting, diagnostics, a checkpoint old enough to
+    predate the buffer.
+    """
+    p = Path(path)
+    if p.is_absolute() or p.exists():
+        return p
+    roots = []
+    env = os.environ.get(DATA_DIR_ENV)
+    if env:
+        roots.append(Path(env))
+    roots.append(Path(__file__).resolve().parents[2])  # <repo>/src/train/data.py
+    tried = []
+    for root in roots:
+        for candidate in (root / p, root / "data" / p.name):
+            if candidate in tried:
+                continue
+            tried.append(candidate)
+            if candidate.exists():
+                return candidate
+    raise FileNotFoundError(
+        f"{path!r} is relative and does not exist here ({Path.cwd()}). Looked in "
+        + ", ".join(str(t) for t in tried)
+        + f". Run from the repository root, give an absolute path, or set ${DATA_DIR_ENV} to "
+        f"the directory holding data/."
+    )
+
+
 def load_reference_energies(path, neighbor_types) -> torch.Tensor:
     """Load per-species reference energies aligned to ``neighbor_types``.
 
     ``path`` is the JSON written by ``scripts/atomic_references.py`` (element symbol ->
-    Hartree). ``neighbor_types`` is the sorted list of atomic numbers used by the
-    featurizer; the returned tensor is indexed by species index (its position in that
-    sorted list), matching ``LambdaFeatures.species_idx``.
+    Hartree), resolved with :func:`resolve_data_path`. ``neighbor_types`` is the sorted list
+    of atomic numbers used by the featurizer; the returned tensor is indexed by species index
+    (its position in that sorted list), matching ``LambdaFeatures.species_idx``.
     """
     from ase.data import chemical_symbols
 
+    path = resolve_data_path(path)
     ref = json.loads(Path(path).read_text())["energies"]
     e0 = torch.empty(len(neighbor_types), dtype=torch.get_default_dtype())
     for i, z in enumerate(neighbor_types):

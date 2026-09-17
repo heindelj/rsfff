@@ -12,6 +12,7 @@ from .data import (
     load_extxyz,
     load_isolated_species,
     load_reference_energies,
+    resolve_data_path,
     split_indices,
     split_indices_grouped,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "load_monomer_batch",
     "concatenate_datasets",
     "load_reference_energies",
+    "resolve_data_path",
     "split_indices",
     "split_indices_grouped",
     "applicability_loss",

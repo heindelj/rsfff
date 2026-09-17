@@ -54,16 +54,33 @@ def load_film_model(path, *, device: str = "cpu"):
 
     Sets the global default dtype from the checkpoint's config, because every tensor built
     downstream (positions, displacements) has to match the model's parameters.
+
+    **The checkpoint is self-contained.** The isolated-atom reference energies are a
+    persistent buffer on the model (``FilmModel.register_buffer("reference_energies", ...)``),
+    so they come back with the state dict and the JSON that ``config.data.reference_energies``
+    names is never opened. This used to read that file, which made loading a model depend on
+    the current directory being the repository root it was trained in -- a checkpoint copied
+    to a cluster, or used from a run directory on scratch, would raise ``FileNotFoundError``
+    on a path like ``data/atomic_references_wb97mv_tzvpd.json``. The buffer was always in the
+    file; reading the JSON as well was redundant, and the redundancy was the bug.
+
+    The JSON is still the fallback for a checkpoint written before the buffer existed, and
+    :func:`rsfff.train.data.resolve_data_path` finds it without assuming the current
+    directory.
     """
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     config = ckpt["config"]
     torch.set_default_dtype(torch.float64 if config.dtype == "float64" else torch.float32)
     neighbor_types = tuple(int(z) for z in ckpt["neighbor_types"])
-    reference = load_reference_energies(
-        config.data.reference_energies, neighbor_types
-    ).to(torch.get_default_dtype())
+    state = ckpt["model_state"]
+    if "reference_energies" in state:
+        reference = state["reference_energies"].to(torch.get_default_dtype())
+    else:
+        reference = load_reference_energies(
+            config.data.reference_energies, neighbor_types
+        ).to(torch.get_default_dtype())
     model = build_film_model(config.features, config.film, neighbor_types, reference)
-    model.load_state_dict(ckpt["model_state"])
+    model.load_state_dict(state)
     model.eval().to(device)
     return model, config
 
