@@ -37,6 +37,15 @@ def stage_tree(root: Path, dest: Path) -> tuple[int, int]:
         if src_dir.exists():
             shutil.copytree(src_dir, dest / dirname)
 
+    # The active-learning package travels with the bundle; the rsync filter in
+    # sync_inputs_up.sh decides which of its files go up, so copy it whole minus the obvious
+    # junk (runs, logs, bytecode) rather than duplicating that filter here.
+    if (root / "active_learning").exists():
+        shutil.copytree(
+            root / "active_learning", dest / "active_learning",
+            ignore=shutil.ignore_patterns("runs", "logs", "__pycache__", "*.pyc"),
+        )
+
     if (root / "aimd" / "geoms").exists():
         shutil.copytree(root / "aimd" / "geoms", dest / "aimd" / "geoms")
 
