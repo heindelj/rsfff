@@ -26,8 +26,25 @@ _nersc_env_script="${BASH_SOURCE[0]:-$0}"
 # <bundle>/active_learning/scripts/nersc_env.sh -> the checkout is three levels up when the
 # bundle sits inside one, and irrelevant when it does not (RSFFF_REPO wins, and the stages fall
 # back to the installed rsfff).
-RSFFF_REPO="${RSFFF_REPO:-$(cd "$(dirname "$_nersc_env_script")/../../.." && pwd)}"
-export RSFFF_REPO RSFFF_NERSC_ACCOUNT
+#
+# On Perlmutter the bundle does not sit inside a checkout -- three levels up from the pool is
+# just the project directory -- so the checkout under software/ is the default there. Either
+# way RSFFF_REPO is only exported when it really is a checkout: an explicit but wrong value
+# would beat the stages' own fallback to the installed rsfff.
+RSFFF_REPO_NERSC="${RSFFF_REPO_NERSC:-/global/cfs/cdirs/m3196/heindelj/software/rsfff}"
+if [ -z "${RSFFF_REPO:-}" ]; then
+    for _candidate in \
+        "$(cd "$(dirname "$_nersc_env_script")/../../.." && pwd)" \
+        "$RSFFF_REPO_NERSC"; do
+        if [ -f "$_candidate/scripts/parse_roundtrip.py" ]; then
+            RSFFF_REPO="$_candidate"
+            break
+        fi
+    done
+    unset _candidate
+fi
+if [ -n "${RSFFF_REPO:-}" ]; then export RSFFF_REPO; fi
+export RSFFF_NERSC_ACCOUNT
 
 if [ -n "${NERSC_HOST:-}" ]; then
     # --- on Perlmutter: the pool is a local path, and there is nothing to rsync ------------
@@ -45,14 +62,14 @@ if [ -n "${NERSC_HOST:-}" ]; then
         echo "[nersc-env] no env at $RSFFF_CONDA_PREFIX" >&2
     fi
     echo "[nersc-env] pool:  $RSFFF_QCHEM_ROOT"
-    echo "[nersc-env] repo:  $RSFFF_REPO"
+    echo "[nersc-env] repo:  ${RSFFF_REPO:-<installed rsfff>}"
     echo "[nersc-env] account $RSFFF_NERSC_ACCOUNT  (salloc -A $RSFFF_NERSC_ACCOUNT -N 1 -C cpu -q interactive -t 02:00:00)"
 else
     # --- on a laptop: the pool is remote, reached by the sync scripts ----------------------
     export REMOTE
     export REMOTE_DIR="$RSFFF_POOL_REMOTE"
     echo "[nersc-env] REMOTE=$REMOTE  REMOTE_DIR=$REMOTE_DIR"
-    echo "[nersc-env] repo:  $RSFFF_REPO"
+    echo "[nersc-env] repo:  ${RSFFF_REPO:-<installed rsfff>}"
     echo "[nersc-env] hooks: submit=['bash scripts/sync_inputs_up.sh',"
     echo "[nersc-env]                \"ssh \$REMOTE 'cd \$REMOTE_DIR && bash scripts/submit_workers.sh --target 16'\"]"
     echo "[nersc-env]        sync=['bash scripts/sync_outputs_down.sh']"

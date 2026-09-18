@@ -78,6 +78,49 @@ anywhere, the checkpoint carries its own reference energies, and the stages find
 through `$RSFFF_QCHEM_ROOT` (falling back to `<repo>/qchem_roundtrip`). `$RSFFF_REPO` points at
 the checkout when the loop runs from somewhere else with rsfff installed.
 
+## Production run on Perlmutter
+
+`scripts/launch_production.sh` starts a run; everything after that is batch jobs.
+
+```bash
+module load python
+source /global/cfs/cdirs/m3196/heindelj/rsfff_data/active_learning/scripts/nersc_env.sh
+bash $RSFFF_QCHEM_ROOT/active_learning/scripts/launch_production.sh \
+    --root $SCRATCH/water_al \
+    --checkpoint $RSFFF_REPO/checkpoints/water_film_full/best.pt \
+    --workers 16 \
+    -- --train-config $RSFFF_REPO/configs/water_film.yaml
+```
+
+It runs `preflight.py`, writes every setting to `<root>/driver.env`, and queues two kinds of job:
+
+- **driver** (`scripts/driver.slurm`, one CPU node, `rsfff_al_<name>`): runs the loop until
+  the label stage is waiting on Q-Chem (after polling `--wait`, default 15 min), then exits and
+  requeues itself `--resubmit-delay` minutes later, so no node idles through the labeling. It
+  stops at the end of the size walk (`driver_state/DONE`) or when a stage raises
+  (`driver_state/FAILED`). `--dependency=singleton` keeps it to one driver per run, and 10 min
+  before its wall clock it requeues immediately, so a stage longer than one driver carries on in
+  the next. Four committee members train at once, 32 threads each (`--train-parallel`,
+  `--train-threads`).
+- **workers** (`qchem_al_worker`, `--qos=premium`, 24 h): submitted by the label stage's
+  hooks through `scripts/al_workers.sh`, which is both the `submit` and the `sync` hook, so
+  every check tops the pool back up to `--workers`. They use `config.al.json` (the pool's config
+  with only eda and force enabled), and the target is capped at the outstanding eda/force jobs,
+  so once the last input is claimed nothing new is queued to idle out. They will also run any
+  other unfinished eda/force input in the pool.
+
+```bash
+squeue -u $USER -n rsfff_al_water_al,qchem_al_worker
+cat $SCRATCH/water_al/driver_state/history          # every driver: start, exit, outcome
+python3 $RSFFF_QCHEM_ROOT/active_learning/workflows.py water --root $SCRATCH/water_al --status
+bash $RSFFF_QCHEM_ROOT/active_learning/scripts/launch_production.sh --resume $SCRATCH/water_al
+```
+
+Worker count, QOS and wall clocks can be changed in `driver.env` between drivers; they reach the
+hooks through the environment, so the label stage's recorded parameters don't change. The
+loop's own flags (`AL_EXTRA_ARGS`) are fixed for the life of the run. To stop: `scancel` the
+driver (and the workers if you want them gone); `--resume` picks it up again.
+
 ## Testing it on an interactive node
 
 Two tools under `scripts/`, so a problem shows up in seconds rather than after a queue wait.

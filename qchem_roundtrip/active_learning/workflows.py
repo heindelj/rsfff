@@ -226,6 +226,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=20260917)
     p.add_argument("--device", default="cpu")
     p.add_argument("--status", action="store_true", help="print the status and exit")
+    p.add_argument("--outcome-file", type=Path, default=None,
+                   help="write the run's outcome (converged | pending | max_iterations) here, "
+                        "for a batch driver deciding whether to requeue itself")
 
     g = p.add_argument_group("build (packmol)")
     g.add_argument("--sizes", type=int, nargs=2, default=None, metavar=("LO", "HI"),
@@ -239,6 +242,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     g.add_argument("--train-config", type=Path, default=None,
                    help="training YAML, e.g. configs/water_film.yaml")
     g.add_argument("--members", type=int, default=None, help="committee size (default 4)")
+    g.add_argument("--train-parallel", type=int, default=None,
+                   help="members fitted at once (default: one per GPU, else 1)")
+    g.add_argument("--train-threads", type=int, default=None,
+                   help="CPU threads per member process (default: the node's cores split "
+                        "evenly between the members running at once)")
     g.add_argument("--no-warm-start", action="store_true",
                    help="fit every member from scratch instead of continuing the last one")
     g.add_argument("--epochs", type=int, default=None, help="override train.epochs")
@@ -298,6 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             overrides["stages"] = []
         train = _only(config=str(args.train_config) if args.train_config else None,
                       n_members=args.members, overrides=overrides or None,
+                      parallel=args.train_parallel, threads_per_member=args.train_threads,
                       warm_start=False if args.no_warm_start else None)
         label = _only(submit=args.submit, sync=args.sync,
                       max_failed_fraction=args.max_failed_fraction,
@@ -313,6 +322,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(loop.status())
         return 0
     outcome = loop.run(max_iterations=iterations)
+    if args.outcome_file is not None:
+        args.outcome_file.parent.mkdir(parents=True, exist_ok=True)
+        args.outcome_file.write_text(f"{outcome}\n")
     print(f"\n[{outcome}]\n{loop.status()}")
     if outcome == "pending":
         print("\nwaiting on the cluster; run the same command again when the jobs are done")

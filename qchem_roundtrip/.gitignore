@@ -12,3 +12,4 @@
 # and the same size as the rest of the harvest the repo already keeps out of git.
 biased_sampling/*/
 biased_sampling/*.log
+config.al.json

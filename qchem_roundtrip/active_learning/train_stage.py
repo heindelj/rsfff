@@ -80,6 +80,9 @@ class CommitteeTrain(Train):
     ``split_seed``    ``data.seed``, shared by every member so they have one holdout
     ``warm_start``    continue each member from the same index of the previous iteration
     ``parallel``      members at once: an integer, or ``"auto"`` (one per visible GPU, else 1)
+    ``threads_per_member``  CPU threads each member process may use (``OMP_NUM_THREADS``).
+                      Unset, members that share a CPU-only node split its cores evenly, so four
+                      members on a 128-core node do not each spawn 128 threads
     ``overrides``     dotted keys written into every member's config, e.g.
                       ``{"train.epochs": 200, "device": "cuda"}``
     ``python``        interpreter for the member processes (default: this one)
@@ -111,6 +114,29 @@ class CommitteeTrain(Train):
         except Exception:
             visible = 0
         return max(1, min(visible or 1, n_members))
+
+    def _member_threads(self, lanes: int) -> int | None:
+        """Threads per member process, or ``None`` to leave the environment alone.
+
+        Read with ``.get`` rather than defaulted in ``__init__`` so loops started before this
+        existed keep the parameters their ``stage.json`` recorded.
+        """
+        explicit = self.params.get("threads_per_member")
+        if explicit:
+            return max(1, int(explicit))
+        if lanes <= 1:
+            return None
+        try:
+            import torch
+            if torch.cuda.device_count() > 0:
+                return None
+        except Exception:
+            pass
+        try:
+            cores = len(os.sched_getaffinity(0))
+        except AttributeError:
+            cores = os.cpu_count() or 1
+        return max(1, cores // lanes)
 
     @staticmethod
     def _previous_members(model_path) -> list[Path]:
@@ -235,6 +261,10 @@ class CommitteeTrain(Train):
                 env = dict(os.environ)
                 if lanes > 1:
                     env["CUDA_VISIBLE_DEVICES"] = str(lane)   # each member sees "cuda:0"
+                threads = self._member_threads(lanes)
+                if threads:
+                    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+                        env[var] = str(threads)
                 log = open(member / "train.log", "w")
                 t0 = time.time()
                 running.append((index, member, t0, log, subprocess.Popen(

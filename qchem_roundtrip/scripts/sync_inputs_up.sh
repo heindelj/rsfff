@@ -47,6 +47,7 @@ rsync -av \
     --include='/scripts/***' \
     --include='/active_learning/**.py' \
     --include='/active_learning/**.sh' \
+    --include='/active_learning/**.slurm' \
     --include='/active_learning/**.md' \
     --include='/active_learning/**.in' \
     --include='/active_learning/**.yaml' \
