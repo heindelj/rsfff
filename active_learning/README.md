@@ -20,6 +20,7 @@ the existing `qchem_roundtrip/` job pool on Perlmutter.
 | `model.py`       | the film checkpoint loaded once, and an ASE calculator with the wall folded in |
 | `label_stage.py` | `QChemLabel`: eda+force jobs into the pool, merged back into training frames |
 | `train_stage.py` / `assess_stage.py` | placeholders, with what they should become |
+| `scripts/nersc_env.sh` | the pool path and the conda prefix, for either side of the round trip |
 | `scripts/preflight.py` | check every prerequisite without queueing anything |
 | `scripts/smoke_test.sh` | one full iteration on an interactive node, workers included |
 | `templates/*_fast.in` | the cheap level of theory the smoke test can use |
@@ -69,7 +70,7 @@ that same allocation and the label stage polling for them instead of stopping at
 ```bash
 salloc -A m3196 -N 1 -C cpu -q interactive -t 02:00:00
 module load python qchem
-conda activate rsfff                     # whatever has torch + rsfff + easyal
+source active_learning/scripts/nersc_env.sh
 bash active_learning/scripts/smoke_test.sh --fast
 ```
 
@@ -88,6 +89,30 @@ The mechanism behind the waiting is `QChemLabel(wait_seconds=..., poll_seconds=.
 CLI as `--wait` and `--poll`. With `wait_seconds=0` (the default, and what a queued run wants)
 the stage looks once and reports `Pending`; with a budget it keeps running the `sync` hooks
 and checking until the jobs land. Nothing else differs between the two.
+
+## Where the job pool lives
+
+`scripts/nersc_env.sh` holds the two paths and sets whatever side you are on:
+
+```bash
+source active_learning/scripts/nersc_env.sh
+```
+
+On Perlmutter (`$NERSC_HOST` is set) it exports
+`RSFFF_QCHEM_ROOT=/global/cfs/cdirs/m3196/heindelj/rsfff_data` — the bundle itself, so
+`config.json`, `templates/`, `scripts/` and the `eda/`/`force/` trees sit directly under that
+path — and activates the conda **prefix**
+`/global/cfs/cdirs/m3196/heindelj/rsfff` (`conda activate <path>`, not a name). Nothing is
+rsynced: the label stage writes straight into the pool.
+
+On a laptop it exports `REMOTE=perlmutter` and
+`REMOTE_DIR=/global/cfs/cdirs/m3196/heindelj/rsfff_data`, which is all that
+`qchem_roundtrip/scripts/sync_*.sh` read. The label stage runs its hooks as subprocesses, so
+they inherit both. Override any of `RSFFF_POOL_REMOTE`, `RSFFF_CONDA_PREFIX`, `REMOTE` or
+`RSFFF_NERSC_ACCOUNT` by exporting it before sourcing.
+
+Q-Chem's own scratch is separate from all of this — check `$QCSCRATCH` points somewhere on
+`$SCRATCH` rather than CFS before running many workers.
 
 Driving it from a laptop instead, the hooks become the round trip:
 

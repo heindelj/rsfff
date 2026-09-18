@@ -6,8 +6,12 @@
 #
 #   salloc -A m3196 -N 1 -C cpu -q interactive -t 02:00:00
 #   module load python qchem
-#   conda activate rsfff                       # whatever has torch + rsfff + easyal
+#   source active_learning/scripts/nersc_env.sh   # conda prefix + $RSFFF_QCHEM_ROOT
 #   bash active_learning/scripts/smoke_test.sh --fast
+#
+# nersc_env.sh activates /global/cfs/cdirs/m3196/heindelj/rsfff and points the stages at the
+# pool on CFS; do those two by hand instead if you prefer. --pool overrides the pool for one
+# run.
 #
 # It works in its own directory ($SCRATCH/rsfff_al_smoke by default) with its own copy of the
 # job pool's config and templates, so the production pool under qchem_roundtrip/ is never
@@ -23,6 +27,8 @@
 #   --timeout SECONDS  how long to wait for the jobs (default 3600)
 #   --skip-preflight   go straight to the loop
 #   --reuse            keep an existing --root instead of starting clean
+#   --pool DIR         the job pool to copy config and templates from
+#                      (default $RSFFF_QCHEM_ROOT, else <repo>/qchem_roundtrip)
 
 set -euo pipefail
 
@@ -45,6 +51,7 @@ REUSE=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --root)           ROOT="${2:?}"; shift 2 ;;
+        --pool)           POOL_SRC="${2:?}"; shift 2 ;;
         --checkpoint)     CHECKPOINT="${2:?}"; shift 2 ;;
         --waters)         WATERS="${2:?}"; shift 2 ;;
         --frames)         FRAMES="${2:?}"; shift 2 ;;
