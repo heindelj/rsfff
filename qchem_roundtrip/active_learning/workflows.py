@@ -62,10 +62,46 @@ from easyal import ActiveLearning  # noqa: E402
 from assess_stage import ValidationAssess  # noqa: E402
 from build import PackmolWaterClusters  # noqa: E402
 from label_stage import QChemLabel  # noqa: E402
-from sampling import DynamicsSample, MinimizeSample  # noqa: E402
-from train_stage import FilmTrain  # noqa: E402
+from sampling import DynamicsSample, MinimizeSample, SelectByCommittee  # noqa: E402
+from train_stage import CommitteeTrain  # noqa: E402
 
-__all__ = ["WORKFLOWS", "water_loop", "loop_from_spec", "last_model"]
+__all__ = ["SIZE_SCHEDULE", "WORKFLOWS", "water_loop", "loop_from_spec", "last_model",
+           "schedules"]
+
+#: The walk. One entry per iteration: which cluster sizes to sample, and how many structures
+#: of **each** size to label. Small clusters first and most of them -- they are where the
+#: reference is cheap and where the model's short-range behaviour is set -- then fewer of each
+#: as the clusters grow and each label costs more. The totals are 1000, 800, 600, 400 and 200
+#: labeled structures.
+SIZE_SCHEDULE = (
+    {"sizes": (2, 3, 4, 5), "labels_per_size": 250},            # 1000
+    {"sizes": (6, 7, 8, 9, 10), "labels_per_size": 160},        #  800
+    {"sizes": (11, 12, 13, 14, 15), "labels_per_size": 120},    #  600
+    {"sizes": (16, 17, 18, 19, 20), "labels_per_size": 80},     #  400
+    {"sizes": (21, 22, 23, 24, 25), "labels_per_size": 40},     #  200
+)
+
+#: Candidates sampled per label. Selecting the most uncertain 250 of 1000 is a real choice;
+#: selecting 250 of 250 is not a choice at all, and the committee would be along for the ride.
+POOL_MULTIPLIER = 4
+
+
+def schedules(pool_multiplier: int = POOL_MULTIPLIER, frames_per_trajectory: int = 20,
+              schedule=SIZE_SCHEDULE) -> tuple[list[dict], list[dict]]:
+    """``(what to build, what to keep)`` per iteration, from the size schedule.
+
+    The build stage makes *structures* and the dynamics stage turns each into
+    ``frames_per_trajectory`` frames, so the number of structures to pack is the candidate
+    count divided by that -- keep the two in step or the pool comes out the wrong size.
+    """
+    build, select = [], []
+    for entry in schedule:
+        labels = int(entry["labels_per_size"])
+        candidates = labels * int(pool_multiplier)
+        build.append({"sizes": list(entry["sizes"]),
+                      "per_size": max(1, -(-candidates // max(frames_per_trajectory, 1)))})
+        select.append({"sizes": list(entry["sizes"]), "per_size": labels})
+    return build, select
 
 
 def _merged(defaults: dict, overrides: dict | None) -> dict:
@@ -73,32 +109,44 @@ def _merged(defaults: dict, overrides: dict | None) -> dict:
 
 
 def water_loop(
-    root, *, initial_model=None, initial_data: Sequence[str] = (),
+    root, *, initial_model=None, initial_data: Sequence[str] = (), train_config=None,
+    pool_multiplier: int = POOL_MULTIPLIER, size_schedule=SIZE_SCHEDULE,
     build: dict | None = None, optimize: dict | None = None, dynamics: dict | None = None,
-    label: dict | None = None, train: dict | None = None, assess: dict | None = None,
+    select: dict | None = None, label: dict | None = None, train: dict | None = None,
+    assess: dict | None = None,
 ) -> ActiveLearning:
-    """Neutral water clusters: pack, minimize, heat, label with Q-Chem, refit.
+    """Neutral water clusters: pack, minimize, heat, choose, label with Q-Chem, refit.
 
-    Every stage's parameters can be overridden by passing that stage's dict, e.g.
-    ``water_loop(root, build=dict(sizes=(2, 30)), label=dict(submit=[...]))``.
+    The loop walks up in cluster size on a fixed schedule -- one entry per iteration, so it
+    runs ``len(size_schedule)`` iterations and stops because the walk is finished, not because
+    a threshold was met. Every stage's parameters can still be overridden by passing that
+    stage's dict, e.g. ``water_loop(root, dynamics=dict(steps=4000), train=dict(n_members=8))``.
     """
+    dynamics = dict(dynamics or {})
+    steps = int(dynamics.get("steps", 2000))
+    stride = int(dynamics.get("stride", 100))
+    build_schedule, select_schedule = schedules(
+        pool_multiplier, max(steps // max(stride, 1), 1), size_schedule)
     return ActiveLearning(
         root,
-        build=PackmolWaterClusters(**_merged(
-            dict(sizes=(2, 20), per_size=2), build)),
-        # Two samplers in sequence: where are this model's minima, then what does it do at
-        # temperature around them. easyal runs a list of Sample stages in order, each reading
-        # the previous one's output, each with its own directory and record.
+        build=PackmolWaterClusters(**_merged(dict(schedule=build_schedule), build)),
+        # Three samplers in sequence: where are this model's minima, what does it do at
+        # temperature around them, and which of those frames is worth a reference calculation.
+        # easyal runs a list of Sample stages in order, each reading the previous one's
+        # output, each with its own directory, contract and record.
         sample=[
             MinimizeSample(**_merged(dict(gtol=1e-3, keep="converged"), optimize)),
             DynamicsSample(**_merged(
                 dict(temperature_K=300.0, timestep_fs=0.5, equilibrate_steps=1000,
-                     steps=2000, stride=100), dynamics)),
+                     steps=steps, stride=stride), dynamics)),
+            SelectByCommittee(**_merged(
+                dict(schedule=select_schedule, select_on="both"), select)),
         ],
-        # Every kept frame is two Q-Chem jobs, so this is the expensive stage and the one
+        # Every selected frame is two Q-Chem jobs, so this is the expensive stage and the one
         # that makes the loop wait.
         label=QChemLabel(**_merged(dict(max_failed_fraction=0.05), label)),
-        train=FilmTrain(**_merged({}, train)),
+        train=CommitteeTrain(**_merged(
+            dict(config=train_config, n_members=4, warm_start=True), train)),
         assess=ValidationAssess(**_merged(dict(patience=2), assess)),
         initial_model=initial_model,
         initial_data=list(initial_data),
@@ -106,13 +154,13 @@ def water_loop(
 
 
 def last_model(root):
-    """The trained model of the last completed iteration of a loop."""
+    """The committee of the last completed iteration of a loop."""
     loop_root = Path(root)
     for iteration in sorted(
         (int(p.name[5:]) for p in loop_root.glob("iter_*") if p.name[5:].isdigit()),
         reverse=True,
     ):
-        candidate = loop_root / f"iter_{iteration:03d}" / "train" / "model"
+        candidate = loop_root / f"iter_{iteration:03d}" / "train" / "committee"
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"no finished model under {loop_root}")
@@ -143,7 +191,7 @@ def loop_from_spec(spec: dict, root) -> ActiveLearning:
     if name not in WORKFLOWS:
         raise ValueError(f"unknown workflow {name!r}; use one of {sorted(WORKFLOWS)}")
     stages = dict(spec.get("stages") or {})
-    known = {"build", "optimize", "dynamics", "label", "train", "assess"}
+    known = {"build", "optimize", "dynamics", "select", "label", "train", "assess"}
     unknown = set(stages) - known
     if unknown:
         raise ValueError(f"unknown stage(s) {sorted(unknown)} in the task spec; "
@@ -170,15 +218,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="model iteration 0 samples with (easyal's initial_model)")
     p.add_argument("--spec", type=Path, default=None,
                    help="task spec JSON; --root still says where the loop lives")
-    p.add_argument("--iterations", type=int, default=1)
+    p.add_argument("--iterations", type=int, default=len(SIZE_SCHEDULE),
+                   help=f"the size schedule has {len(SIZE_SCHEDULE)} entries")
     p.add_argument("--seed", type=int, default=20260917)
     p.add_argument("--device", default="cpu")
     p.add_argument("--status", action="store_true", help="print the status and exit")
 
     g = p.add_argument_group("build (packmol)")
-    g.add_argument("--sizes", type=int, nargs=2, default=None, metavar=("LO", "HI"))
+    g.add_argument("--sizes", type=int, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="override the schedule with one fixed size range (for a smoke test)")
     g.add_argument("--per-size", type=int, default=None)
+    g.add_argument("--pool-multiplier", type=int, default=None,
+                   help=f"candidates sampled per label (default {POOL_MULTIPLIER})")
     g.add_argument("--packmol", default=None, help="packmol executable")
+
+    g = p.add_argument_group("train (committee)")
+    g.add_argument("--train-config", type=Path, default=None,
+                   help="training YAML, e.g. configs/water_film.yaml")
+    g.add_argument("--members", type=int, default=None, help="committee size (default 4)")
+    g.add_argument("--no-warm-start", action="store_true",
+                   help="fit every member from scratch instead of continuing the last one")
+    g.add_argument("--epochs", type=int, default=None, help="override train.epochs")
 
     g = p.add_argument_group("sampling")
     g.add_argument("--gtol", type=float, default=None, help="max |dE/dR|, Hartree/A")
@@ -210,18 +270,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         loop = loop_from_spec(spec, args.root)
         iterations = int(spec.get("max_iterations", args.iterations))
     else:
-        build = _only(sizes=tuple(args.sizes) if args.sizes else None,
-                      per_size=args.per_size, packmol=args.packmol, seed=args.seed)
+        build = _only(per_size=args.per_size, packmol=args.packmol, seed=args.seed)
+        select = _only(device=args.device)
+        if args.sizes:   # a fixed range instead of the walk, for a smoke test
+            build["schedule"] = None
+            build["sizes"] = tuple(args.sizes)
+            select["schedule"] = None
+            select["per_size"] = args.per_size or 2
         optimize = _only(gtol=args.gtol, device=args.device)
         dynamics = _only(temperature_K=args.temperature, steps=args.steps, stride=args.stride,
                          equilibrate_steps=args.equilibrate, seed=args.seed,
                          device=args.device)
+        overrides = {"train.epochs": args.epochs} if args.epochs else None
+        train = _only(config=str(args.train_config) if args.train_config else None,
+                      n_members=args.members, overrides=overrides,
+                      warm_start=False if args.no_warm_start else None)
         label = _only(submit=args.submit, sync=args.sync,
                       max_failed_fraction=args.max_failed_fraction,
                       wait_seconds=args.wait, poll_seconds=args.poll,
                       roundtrip_root=str(args.roundtrip_root) if args.roundtrip_root else None)
         loop = water_loop(args.root, initial_model=args.checkpoint, build=build,
-                          optimize=optimize, dynamics=dynamics, label=label)
+                          optimize=optimize, dynamics=dynamics, select=select, label=label,
+                          train=train, pool_multiplier=args.pool_multiplier or POOL_MULTIPLIER)
         iterations = args.iterations
 
     if args.status:

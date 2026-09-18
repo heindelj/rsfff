@@ -24,10 +24,12 @@ import tempfile
 import time
 from pathlib import Path
 
-AL_ROOT = Path(__file__).resolve().parent.parent
-REPO_ROOT = Path(os.environ.get("RSFFF_REPO") or AL_ROOT.parent).resolve()
+AL_ROOT = Path(__file__).resolve().parent.parent          # <bundle>/active_learning
+ROUNDTRIP_ROOT = Path(os.environ.get("RSFFF_QCHEM_ROOT") or AL_ROOT.parent).resolve()
 if str(AL_ROOT) not in sys.path:
     sys.path.insert(0, str(AL_ROOT))
+import common  # noqa: E402  -- it owns the root resolution; don't duplicate it here
+REPO_ROOT = common.REPO_ROOT
 
 #: torch-cluster ships only an sdist whose setup.py imports torch, so pip cannot build it in
 #: an isolated environment -- it has to be built against the torch already installed here.
@@ -231,8 +233,7 @@ def main(argv=None) -> int:
                    help="skip the checks that compute (packmol, one model gradient)")
     args = p.parse_args(argv)
 
-    pool = args.roundtrip_root or Path(
-        os.environ.get("RSFFF_QCHEM_ROOT") or REPO_ROOT / "qchem_roundtrip")
+    pool = args.roundtrip_root or ROUNDTRIP_ROOT
 
     print(f"rsfff active-learning preflight\n  repo   {REPO_ROOT}\n  pool   {pool}\n"
           f"  host   {os.uname().nodename}\n")

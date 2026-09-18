@@ -94,7 +94,13 @@ class PackmolWaterClusters(Build):
 
     Parameters (all keyword, all recorded in ``stage.json``)
 
-    ``sizes``       cluster sizes: ``(lo, hi)`` inclusive, or an explicit list. Default (2, 20)
+    ``schedule``    one entry per iteration, ``{"sizes": [...], "per_size": N}``; iteration
+                    ``i`` builds entry ``i``. This is how the loop walks up in cluster size --
+                    small clusters first, where the model is cheap to evaluate and the
+                    reference is cheap to compute, and each iteration extends the range rather
+                    than resampling it. Overrides ``sizes`` and ``per_size``
+    ``sizes``       cluster sizes when there is no schedule: ``(lo, hi)`` inclusive, or an
+                    explicit list. Default (2, 20)
     ``per_size``    structures per size (default 2)
     ``density``     g/cm^3 the cavity radius is computed from (default 1.0)
     ``padding``     A added to that radius (default 1.5)
@@ -124,11 +130,23 @@ class PackmolWaterClusters(Build):
             )
         ctx.track("packmol", exe)
 
-        sizes = p.get("sizes", (2, 20))
-        if len(sizes) == 2 and all(isinstance(v, int) for v in sizes) and sizes[0] <= sizes[1]:
-            sizes = list(range(int(sizes[0]), int(sizes[1]) + 1))
-        sizes = [int(v) for v in sizes]
-        per_size = int(p.get("per_size", 2))
+        schedule = p.get("schedule")
+        if schedule is not None:
+            if ctx.iteration >= len(schedule):
+                raise ValueError(
+                    f"the schedule has {len(schedule)} entries and this is iteration "
+                    f"{ctx.iteration}; the walk is finished"
+                )
+            entry = schedule[ctx.iteration]
+            sizes = [int(v) for v in entry["sizes"]]
+            per_size = int(entry["per_size"])
+        else:
+            sizes = p.get("sizes", (2, 20))
+            if (len(sizes) == 2 and all(isinstance(v, int) for v in sizes)
+                    and sizes[0] <= sizes[1]):
+                sizes = list(range(int(sizes[0]), int(sizes[1]) + 1))
+            sizes = [int(v) for v in sizes]
+            per_size = int(p.get("per_size", 2))
         tolerance = float(p.get("tolerance", 2.0))
         nloop = int(p.get("nloop", 200))
         seed0 = int(p.get("seed", 20260917)) + 10000 * ctx.iteration

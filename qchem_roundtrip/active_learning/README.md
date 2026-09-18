@@ -1,15 +1,42 @@
 # Active learning for the water film model
 
-An [easyAL](../../easyAL) loop that grows the training set for the range-separated force-field
-functional by sampling with the model itself and labeling what it finds with Q-Chem, through
-the existing `qchem_roundtrip/` job pool on Perlmutter.
+An easyAL loop that grows the training set for the range-separated force-field functional by
+sampling with the model itself and labeling what it finds with Q-Chem. It lives **inside** the
+job-pool bundle, so it travels with it: the bundle is rsynced to Perlmutter and lives outside
+any checkout there, and active learning is just another job type it can run.
 
     build      packmol packs (H2O)n into a spherical cavity        structures.extxyz
     optimize   relax every packing on the model's own surface      samples.extxyz
     dynamics   Langevin NVT from each minimum, inside a soft wall  samples.extxyz
+    select     keep the frames the committee disagrees about       samples.extxyz
     label      Q-Chem EDA + force from the round-trip job pool     labeled.extxyz
-    train      refit the film model on everything labeled so far   model          (TODO)
-    assess     measure the new model on its holdout                metrics.json   (TODO)
+    train      refit as a committee of independent fits            committee/
+    assess     score the new committee on what it just learned     metrics.json
+
+## The walk
+
+The loop is **schedule-driven**: it walks up in cluster size, one size group per iteration,
+and stops after five because the walk is finished, not because a threshold was met.
+
+| iteration | sizes | structures packed / size | labeled / size | labeled |
+|---|---|---|---|---|
+| 0 | 2-5   | 50 | 250 | 1000 |
+| 1 | 6-10  | 32 | 160 |  800 |
+| 2 | 11-15 | 24 | 120 |  600 |
+| 3 | 16-20 | 16 |  80 |  400 |
+| 4 | 21-25 |  8 |  40 |  200 |
+| | | | **total** | **3000** |
+
+Small clusters first and most of them -- they are where the reference is cheap and where the
+short-range behaviour is set -- then fewer of each as they grow and each label costs more. The
+same number of every size within a group, so no size is quietly skipped.
+
+`POOL_MULTIPLIER` (4) is how many candidates are sampled per label: selecting the most
+uncertain 250 of 1000 is a choice, selecting 250 of 250 is not. The structures-per-size column
+is that pool divided by the frames one trajectory yields (`steps // stride`), so changing the
+trajectory length changes how many structures get packed, automatically.
+
+Edit `SIZE_SCHEDULE` in `workflows.py` to change any of it.
 
 | file | contents |
 |------|----------|
@@ -19,7 +46,9 @@ the existing `qchem_roundtrip/` job pool on Perlmutter.
 | `sampling.py`    | `MinimizeSample` and `DynamicsSample`: the two sampling stages |
 | `model.py`       | the film checkpoint loaded once, and an ASE calculator with the wall folded in |
 | `label_stage.py` | `QChemLabel`: eda+force jobs into the pool, merged back into training frames |
-| `train_stage.py` / `assess_stage.py` | placeholders, with what they should become |
+| `committee.py` | load a committee, predict with it, and measure its disagreement |
+| `train_stage.py` | `CommitteeTrain`: N members, one process each, warm started per index |
+| `assess_stage.py` | `ValidationAssess`: what the new committee does on what it just learned |
 | `scripts/nersc_env.sh` | the pool path and the conda prefix, for either side of the round trip |
 | `scripts/preflight.py` | check every prerequisite without queueing anything |
 | `scripts/smoke_test.sh` | one full iteration on an interactive node, workers included |
@@ -192,6 +221,23 @@ not the model, and the `model_energy` stored on a frame excludes it. A trajector
 everything before it is kept — when the energy is not finite, the temperature passes
 `max_temperature`, `|F|max` passes `max_force`, or a water stops being intact.
 
+### `select` — `SelectByCommittee`
+
+Every frame that survives this stage is two Q-Chem jobs, so this is where the loop decides what
+its compute is spent on. It ranks the pool by the committee's own disagreement and keeps the
+schedule's budget **per size** -- the force spread grows with cluster size for reasons that
+have nothing to do with how badly that size is described, so a global ranking would quietly
+relabel pentamers all iteration.
+
+`select_on="both"` (the default) divides each frame's `sigma_energy` and `sigma_forces` by its
+median over the pool and takes the larger, so the two are compared on the scale the pool itself
+sets rather than through a constant nobody can justify. In a test on a 12-frame pool this
+picked the highest-force-spread trimer *and* a dimer whose force spread was mid-pack but whose
+energy spread was the pool's largest -- which is the point of using both.
+
+In iteration 0 there is one starting checkpoint, so there is no spread. The stage says so and
+takes an even stride through each size's pool instead of pretending to a preference.
+
 ### `label` — `QChemLabel`
 
 Writes this iteration's frames as one extxyz file into the pool
@@ -222,6 +268,42 @@ Labeled frames carry the schema `scripts/parse_roundtrip.py` writes (`energy`, `
 `qcgen/__init__.py` pulls in the pyscf compute backend, and a loop's environment has no reason
 to carry pyscf. The three parser modules need numpy and each other, nothing more.
 
+### `train` — `CommitteeTrain`
+
+Four fits of the same data, differing in their initialization, each a separate
+`rsfff.train.train_film` process on a config this stage writes out in full. A separate process
+is not just for parallelism: `train_film` sets the global torch default dtype and builds
+module-level state, and four models in one interpreter would share it.
+
+```
+iter_000/train/committee/
+    committee.json                 members, checkpoints, split seed, what it warm started from
+    member_00/
+        config.resolved.yaml       exactly what was fitted -- rerunnable by hand
+        train.log
+        member_00/best.pt          (or member_00_<laststage>/best.pt for a staged config)
+    member_01/ ...
+```
+
+A member that finished writes `done.json` and is never refitted, so a driver killed by the wall
+clock loses only what was in flight. `parallel="auto"` runs one member per visible GPU, each
+with its own `CUDA_VISIBLE_DEVICES`.
+
+**Warm starting** points each member's `train.init_from` at the *same member index* of the
+iteration before, so member 2 always continues member 2. That is what makes the size walk
+affordable. It has a cost worth watching: members that share a history agree for reasons other
+than the data, and a committee like that understates its own uncertainty. `warm_start=False`
+for an iteration is the remedy.
+
+### `assess` — `ValidationAssess`
+
+Reports, on this iteration's labeled frames, the committee's fit error and its mean spread, and
+`sigma_drop` -- this iteration's mean `sigma_forces` over the last one's. Those frames were
+chosen *because* the previous committee disagreed about them, so after labeling and refitting
+the spread on them should have fallen; a ratio near 1 means the new data taught the model
+nothing it did not already have. Note these frames are in the training set, so the fit error
+flatters the model; a real holdout assessment is the next thing to build here.
+
 ## Provenance
 
 ```
@@ -232,8 +314,9 @@ $SCRATCH/water_al/
         build/      stage.json  structures.extxyz  scratch/{*.inp,*.xyz,*.log}
         optimize/   stage.json  samples.extxyz
         dynamics/   stage.json  samples.extxyz
+        select/     stage.json  samples.extxyz
         label/      stage.json  labeled.extxyz     scratch/{jobs.json,submitted.json,dropped.json}
-        train/      stage.json  model
+        train/      stage.json  committee/{committee.json,member_NN/...}
         assess/     stage.json  metrics.json
 ```
 

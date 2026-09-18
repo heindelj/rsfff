@@ -1,6 +1,8 @@
-# Source this on either side of the round trip:
+# Source this on either side of the round trip. It lives inside the job-pool bundle, which is
+# what gets rsynced to the cluster, so the same file is there and here:
 #
-#     source active_learning/scripts/nersc_env.sh
+#     source qchem_roundtrip/active_learning/scripts/nersc_env.sh     # from a checkout
+#     source $RSFFF_QCHEM_ROOT/active_learning/scripts/nersc_env.sh   # on Perlmutter
 #
 # On Perlmutter it points the stages at the job pool on CFS and activates the conda prefix.
 # On a laptop it sets REMOTE/REMOTE_DIR, which is all the sync scripts under
@@ -21,7 +23,10 @@ RSFFF_CONDA_PREFIX="${RSFFF_CONDA_PREFIX:-/global/cfs/cdirs/m3196/heindelj/rsfff
 REMOTE="${REMOTE:-perlmutter}"
 
 _nersc_env_script="${BASH_SOURCE[0]:-$0}"
-RSFFF_REPO="${RSFFF_REPO:-$(cd "$(dirname "$_nersc_env_script")/../.." && pwd)}"
+# <bundle>/active_learning/scripts/nersc_env.sh -> the checkout is three levels up when the
+# bundle sits inside one, and irrelevant when it does not (RSFFF_REPO wins, and the stages fall
+# back to the installed rsfff).
+RSFFF_REPO="${RSFFF_REPO:-$(cd "$(dirname "$_nersc_env_script")/../../.." && pwd)}"
 export RSFFF_REPO RSFFF_NERSC_ACCOUNT
 
 if [ -n "${NERSC_HOST:-}" ]; then

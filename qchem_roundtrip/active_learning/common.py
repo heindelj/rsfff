@@ -14,10 +14,14 @@ builds a stand-in ``qcgen`` package out of the three files the parsers actually 
 installed ``rsfff.qcgen`` when there is one and from the checkout otherwise. One copy of the
 eda/force merge then serves both, with no pyscf and no duplicated parsing code.
 
-Three roots, because a loop run on scratch is not inside the checkout:
+Three roots. This package lives *inside* the job-pool bundle, so that it travels with it --
+the bundle is rsynced to the cluster and lives outside any checkout there, and active learning
+is just another job type it can run. The repository is therefore a separate thing to find:
 
-``REPO_ROOT``       ``$RSFFF_REPO``, else the directory holding this package
-``ROUNDTRIP_ROOT``  ``$RSFFF_QCHEM_ROOT``, else ``<repo>/qchem_roundtrip``
+``ROUNDTRIP_ROOT``  the bundle holding this package (``$RSFFF_QCHEM_ROOT`` wins)
+``REPO_ROOT``       ``$RSFFF_REPO``, else wherever the installed ``rsfff`` came from, else the
+                    directory above the bundle. Only ``scripts/parse_roundtrip.py`` is read
+                    from it; everything else comes from the installed package.
 ``DEFAULT_CONFIG``  ``<roundtrip>/config.json``
 
     from common import ROUNDTRIP_ROOT, qchem_roundtrip, roundtrip_parser
@@ -33,11 +37,27 @@ import types
 from pathlib import Path
 
 AL_ROOT = Path(__file__).resolve().parent
-REPO_ROOT = Path(os.environ.get("RSFFF_REPO") or AL_ROOT.parent).resolve()
-ROUNDTRIP_ROOT = Path(
-    os.environ.get("RSFFF_QCHEM_ROOT") or (REPO_ROOT / "qchem_roundtrip")
-).resolve()
+ROUNDTRIP_ROOT = Path(os.environ.get("RSFFF_QCHEM_ROOT") or AL_ROOT.parent).resolve()
 DEFAULT_CONFIG = ROUNDTRIP_ROOT / "config.json"
+
+
+def _repo_root() -> Path:
+    """The rsfff checkout, for the one script that is only there."""
+    explicit = os.environ.get("RSFFF_REPO")
+    if explicit:
+        return Path(explicit).resolve()
+    try:  # an editable install points at <repo>/src, so its parent is the checkout
+        spec = importlib.util.find_spec("rsfff")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        candidate = Path(list(spec.submodule_search_locations)[0]).resolve().parent
+        if (candidate / "scripts" / "parse_roundtrip.py").exists():
+            return candidate
+    return ROUNDTRIP_ROOT.parent
+
+
+REPO_ROOT = _repo_root()
 
 __all__ = ["AL_ROOT", "REPO_ROOT", "ROUNDTRIP_ROOT", "DEFAULT_CONFIG", "qchem_roundtrip",
            "roundtrip_parser"]

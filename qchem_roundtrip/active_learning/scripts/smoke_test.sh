@@ -7,7 +7,7 @@
 #   salloc -A m3196 -N 1 -C cpu -q interactive -t 02:00:00
 #   module load python qchem
 #   source active_learning/scripts/nersc_env.sh   # conda prefix + $RSFFF_QCHEM_ROOT
-#   bash active_learning/scripts/smoke_test.sh --fast
+#   bash $RSFFF_QCHEM_ROOT/active_learning/scripts/smoke_test.sh --fast
 #
 # nersc_env.sh activates /global/cfs/cdirs/m3196/heindelj/rsfff and points the stages at the
 # pool on CFS; do those two by hand instead if you prefer. --pool overrides the pool for one
@@ -33,9 +33,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="${RSFFF_REPO:-$(cd "$AL_ROOT/.." && pwd)}"
-POOL_SRC="${RSFFF_QCHEM_ROOT:-$REPO_ROOT/qchem_roundtrip}"
+AL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"                 # <bundle>/active_learning
+POOL_SRC="${RSFFF_QCHEM_ROOT:-$(cd "$AL_ROOT/.." && pwd)}"
+REPO_ROOT="${RSFFF_REPO:-$(cd "$POOL_SRC/.." && pwd)}"
 
 ROOT="${SCRATCH:-/tmp}/rsfff_al_smoke"
 CHECKPOINT="$REPO_ROOT/checkpoints/water_film_full/best.pt"

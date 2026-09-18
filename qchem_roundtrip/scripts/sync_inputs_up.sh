@@ -45,6 +45,14 @@ rsync -av \
     --include='/README.md' \
     --include='/templates/***' \
     --include='/scripts/***' \
+    --include='/active_learning/**.py' \
+    --include='/active_learning/**.sh' \
+    --include='/active_learning/**.md' \
+    --include='/active_learning/**.in' \
+    --include='/active_learning/**.yaml' \
+    --exclude='/active_learning/runs/***' \
+    --exclude='/active_learning/logs/***' \
+    --exclude='/active_learning/**/__pycache__/***' \
     --include='/aimd/geoms/***' \
     --include='/**/' \
     --include='/**/inputs/***' \

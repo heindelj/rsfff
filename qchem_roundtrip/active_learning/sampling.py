@@ -27,6 +27,7 @@ excluded -- it is a prediction to compare against, never a label.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import numpy as np
 from ase import Atoms, units
@@ -36,9 +37,11 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from easyal import Contract, Sample, new_frame
 from rsfff.md.film_driver import optimize
 
+from committee import Committee, sampling_checkpoint
 from model import HARTREE_TO_EV, FilmCalculator, LoadedFilmModel, fragment_or_none
 
-__all__ = ["MinimizeSample", "DynamicsSample", "CARRIED", "STRUCTURE", "SAMPLED"]
+__all__ = ["MinimizeSample", "DynamicsSample", "SelectByCommittee", "CARRIED", "STRUCTURE",
+           "SAMPLED"]
 
 #: Frame info a sampling stage passes through untouched. The fragmentation travels with the
 #: structure rather than being recomputed per stage: it is what the film model is evaluated
@@ -60,12 +63,22 @@ def _carry(frame: dict) -> dict:
 
 
 def _model(ctx) -> LoadedFilmModel:
+    """The model this stage drives with.
+
+    From iteration 1 on, ``ctx.model`` is a *committee directory* rather than a checkpoint --
+    the train stage fits several. A trajectory is driven by one member (see
+    :func:`committee.sampling_checkpoint`); the committee comes back in the select stage, to
+    judge the frames rather than to make them.
+    """
     if ctx.model is None:
         raise RuntimeError(
             f"stage {ctx.stage.name!r} needs a model: pass initial_model=<checkpoint> to "
             f"ActiveLearning (iteration 0 has no trained model to fall back on)"
         )
-    return LoadedFilmModel(ctx.model, device=ctx.params.get("device", "cpu"))
+    checkpoint = sampling_checkpoint(ctx.model)
+    if Path(checkpoint) != Path(ctx.model):
+        ctx.note(f"driving with committee member {Path(checkpoint).parent.name}: {checkpoint}")
+    return LoadedFilmModel(checkpoint, device=ctx.params.get("device", "cpu"))
 
 
 class MinimizeSample(Sample):
@@ -274,4 +287,134 @@ class DynamicsSample(Sample):
         if aborted:
             ctx.note("aborted: " + "; ".join(f"{s} after {k} frames: {r}"
                                              for s, r, k in aborted[:8]))
+        return out
+
+
+class SelectByCommittee(Sample):
+    """Keep the frames the committee disagrees about most, a fixed number per cluster size.
+
+    Every frame that survives this stage is two Q-Chem jobs, so this is where the loop decides
+    what its compute is spent on. The measure is the committee's own disagreement (see
+    :mod:`committee`): where several fits of the same data predict the same forces, labeling
+    another such structure teaches nothing.
+
+    **Per size, not globally.** The budget is spent size by size so a size group cannot be
+    swallowed by its largest members -- the force spread grows with cluster size for reasons
+    that have nothing to do with how badly that size is described, and a global ranking would
+    quietly relabel pentamers all iteration.
+
+    ``schedule``   one entry per iteration, ``{"sizes": [...], "per_size": N}``; iteration
+                   ``i`` uses entry ``i``. Without it, ``per_size`` applies to every size
+                   present
+    ``per_size``   frames to keep per size when there is no schedule
+    ``select_on``  ``"both"`` (default), ``"forces"`` or ``"energy"``. ``"both"`` divides each
+                   spread by its median over the pool and takes the larger, so the two are
+                   compared on the scale the pool itself sets rather than through a constant
+                   nobody can justify
+    ``device``     where to evaluate the committee
+
+    In iteration 0 there is one starting checkpoint, so there is no spread to rank by. The
+    stage says so and takes an even stride through each size's pool instead -- which spreads
+    the choice over the trajectories rather than pretending to a preference.
+    """
+
+    name = "select"
+    requires = SAMPLED
+    produces = SAMPLED
+
+    def run(self, ctx):
+        p = ctx.params
+        frames = ctx.read()
+        if not frames:
+            raise ValueError(f"{ctx.input}: nothing to select from")
+
+        schedule = p.get("schedule")
+        if schedule is not None:
+            if ctx.iteration >= len(schedule):
+                raise ValueError(
+                    f"the schedule has {len(schedule)} entries and this is iteration "
+                    f"{ctx.iteration}; the walk is finished"
+                )
+            entry = schedule[ctx.iteration]
+            wanted = {int(n): int(entry["per_size"]) for n in entry["sizes"]}
+        else:
+            per_size = int(p.get("per_size", len(frames)))
+            wanted = {int(f["info"]["n_waters"]): per_size for f in frames}
+
+        committee = Committee.load(ctx.model, device=p.get("device", "cpu"))
+        ctx.log(**{f"committee_{k}": v for k, v in committee.describe().items()})
+        ranked = committee.n_members > 1
+        if not ranked:
+            ctx.note("one model, so no spread to rank by: taking an even stride through each "
+                     "size's pool")
+
+        by_size: dict[int, list[int]] = {}
+        for index, frame in enumerate(frames):
+            by_size.setdefault(int(frame["info"]["n_waters"]), []).append(index)
+
+        t0 = time.perf_counter()
+        spreads: list = [None] * len(frames)
+        if ranked:
+            for index, frame in enumerate(frames):
+                try:
+                    spreads[index] = committee.spread(frame)
+                except Exception as exc:          # a frame the committee cannot evaluate
+                    ctx.note(f"frame {index}: {type(exc).__name__}: {exc}")
+            scored = [s for s in spreads if s is not None]
+            if not scored:
+                raise RuntimeError("the committee could not evaluate any frame")
+            median_e = float(np.median([s.sigma_energy for s in scored])) or 1.0
+            median_f = float(np.median([s.sigma_forces for s in scored])) or 1.0
+            mode = p.get("select_on", "both")
+
+            def score(index: int) -> float:
+                s = spreads[index]
+                if s is None:
+                    return -1.0
+                if mode == "energy":
+                    return s.sigma_energy
+                if mode == "forces":
+                    return s.sigma_forces
+                return max(s.sigma_energy / median_e, s.sigma_forces / median_f)
+
+        out, short = [], {}
+        for size in sorted(by_size):
+            pool = by_size[size]
+            budget = wanted.get(size)
+            if budget is None:                     # a size the schedule did not ask for
+                continue
+            if len(pool) < budget:
+                short[size] = (len(pool), budget)
+                chosen = pool
+            elif ranked:
+                chosen = sorted(pool, key=score, reverse=True)[:budget]
+            else:
+                step = len(pool) / budget
+                chosen = [pool[min(int(i * step), len(pool) - 1)] for i in range(budget)]
+            for index in sorted(chosen):
+                frame = frames[index]
+                info = dict(frame["info"])
+                info["selected_from"] = len(pool)
+                if spreads[index] is not None:
+                    info.update(spreads[index].to_info())
+                out.append({"info": info, "arrays": dict(frame["arrays"])})
+
+        if not out:
+            raise RuntimeError(
+                f"nothing selected: the pool holds sizes {sorted(by_size)} and this "
+                f"iteration wants {sorted(wanted)}"
+            )
+        if short:
+            ctx.note("fewer candidates than the budget for size(s) "
+                     + ", ".join(f"{n}: {have} of {want}" for n, (have, want) in short.items())
+                     + " -- raise the pool multiplier or the trajectory length")
+        kept = {}
+        for frame in out:
+            kept[int(frame["info"]["n_waters"])] = kept.get(int(frame["info"]["n_waters"]), 0) + 1
+        ctx.log(n_in=len(frames), n_out=len(out), ranked=ranked, per_size=kept,
+                n_short=len(short), seconds=round(time.perf_counter() - t0, 2))
+        if ranked:
+            picked = [spreads[i] for i in range(len(frames)) if spreads[i] is not None]
+            ctx.log(pool_median_sigma_forces=round(float(np.median(
+                [s.sigma_forces for s in picked])), 12))
         return out
