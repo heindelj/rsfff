@@ -94,7 +94,7 @@ bash $RSFFF_QCHEM_ROOT/active_learning/scripts/launch_production.sh \
 
 It runs `preflight.py`, writes every setting to `<root>/driver.env`, and queues two kinds of job:
 
-- **driver** (`scripts/driver.slurm`, one CPU node, `rsfff_al_<name>`): runs the loop until
+- **driver** (`scripts/driver.slurm`, one CPU node, `--qos=premium`, `rsfff_al_<name>`): runs the loop until
   the label stage is waiting on Q-Chem (after polling `--wait`, default 15 min), then exits and
   requeues itself `--resubmit-delay` minutes later, so no node idles through the labeling. It
   stops at the end of the size walk (`driver_state/DONE`) or when a stage raises

@@ -28,7 +28,7 @@
 #   --checkpoint PATH     the model iteration 0 samples with                        [required]
 #   --name NAME           driver job name suffix (default: basename of --root)
 #   --time HH:MM:SS       driver wall clock (default 12:00:00)
-#   --qos NAME            driver QOS (default regular)
+#   --qos NAME            driver QOS (default premium)
 #   --workers N           most Q-Chem workers at once (default 16)
 #   --worker-time T       worker wall clock (default 24:00:00)
 #   --worker-qos NAME     worker QOS (default premium)
@@ -55,7 +55,7 @@ say() { echo "[launch] $*"; }
 die() { echo "[launch] $*" >&2; exit 2; }
 
 ROOT=""; CHECKPOINT=""; NAME=""; RESUME=""; BEGIN=""
-DRIVER_TIME="12:00:00"; DRIVER_QOS="regular"
+DRIVER_TIME="12:00:00"; DRIVER_QOS="premium"
 AL_WORKER_TARGET=16; AL_WORKER_TIME="24:00:00"; AL_WORKER_QOS="premium"
 WAIT_SECONDS=900; RESUBMIT_DELAY=30; MAX_RESUBMITS=300
 TRAIN_PARALLEL=4; TRAIN_THREADS=32
