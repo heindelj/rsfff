@@ -25,10 +25,14 @@ so a cluster starts near the density of the liquid rather than as a gas that has
 trajectory getting the molecules into contact). The padding gives packmol room to satisfy the
 tolerance at the surface, where the constraint bites hardest.
 
-Atom order
-----------
+Atom order and fragments
+------------------------
 Packmol writes the molecules one after another, so the output is ``O H H O H H ...``: already
-in fragment order, which ``rsfff.md.film_driver.water_fragment_index`` requires.
+in fragment order, which ``rsfff.md.film_driver.water_fragment_index`` requires, and the
+fragmentation is therefore known without computing it -- molecule ``k`` is atoms ``3k..3k+2``.
+It is written onto the frame (``fragment_idx``, with ``n_fragments``, ``fragment_charges``
+and ``fragment_multiplicities``) because every stage downstream wants it: the film model takes
+a fixed fragmentation, and a Q-Chem EDA input is built out of one.
 """
 
 from __future__ import annotations
@@ -103,7 +107,11 @@ class PackmolWaterClusters(Build):
     """
 
     name = "build"
-    produces = Contract(info=["charge", "multiplicity", "n_waters"])
+    produces = Contract(
+        info=["charge", "multiplicity", "n_waters", "n_fragments", "fragment_charges",
+              "fragment_multiplicities"],
+        arrays=["fragment_idx"],
+    )
 
     def run(self, ctx):
         p = ctx.params
@@ -164,12 +172,15 @@ class PackmolWaterClusters(Build):
                     "charge": 0,
                     "multiplicity": 1,
                     "n_waters": n,
+                    "n_fragments": n,
+                    "fragment_charges": [0] * n,
+                    "fragment_multiplicities": [1] * n,
                     "cavity_radius": round(radius, 4),
                     "packmol_seed": seed,
                     "packmol_tolerance": tolerance,
                     "packmol_converged": "Success" in proc.stdout,
                     "source": f"packmol/{tag}",
-                }))
+                }, fragment_idx=[k for k in range(n) for _ in range(3)]))
 
         if not frames:
             raise RuntimeError(f"packmol produced nothing; see {ctx.scratch}")

@@ -1,0 +1,28 @@
+$molecule
+0 1
+--
+0 1
+  O     0.0000000     0.0000000     0.0000000
+  H     0.9572000     0.0000000     0.0000000
+  H    -0.2400000     0.9266000     0.0000000
+--
+0 1
+  O     2.9000000     0.1000000     0.0000000
+  H     3.2000000     0.9600000     0.3000000
+  H     3.2600000    -0.6000000     0.4800000
+$end
+
+$rem
+   JOBTYPE          =  eda
+   EDA2             =  1
+   METHOD           =  wB97X-D
+   BASIS            =  6-31G*
+   SCF_CONVERGENCE  =  7
+   THRESH           =  12
+   SYMMETRY         =  false
+   EDA_BSSE         =  false
+   FD_MAT_VEC_PROD  =  false
+   MEM_TOTAL        =  16000
+   MEM_STATIC       =  2000
+   SCF_PRINT_FRGM   =  true
+$end

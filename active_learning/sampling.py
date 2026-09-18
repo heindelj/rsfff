@@ -36,18 +36,21 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from easyal import Contract, Sample, new_frame
 from rsfff.md.film_driver import optimize
 
-from .model import HARTREE_TO_EV, FilmCalculator, LoadedFilmModel, fragment_or_none
+from model import HARTREE_TO_EV, FilmCalculator, LoadedFilmModel, fragment_or_none
 
 __all__ = ["MinimizeSample", "DynamicsSample", "CARRIED", "STRUCTURE", "SAMPLED"]
 
-#: Frame info a sampling stage passes through untouched.
-CARRIED = ("charge", "multiplicity", "n_waters")
+#: Frame info a sampling stage passes through untouched. The fragmentation travels with the
+#: structure rather than being recomputed per stage: it is what the film model is evaluated
+#: with and what a Q-Chem EDA input is built from, and those two have to be the same one.
+CARRIED = ("charge", "multiplicity", "n_waters", "n_fragments", "fragment_charges",
+           "fragment_multiplicities")
 
-#: What a stage needs from its input: bare structures that know their charge state.
-STRUCTURE = Contract(info=CARRIED)
+#: What a stage needs from its input: a structure that knows its charge state and fragments.
+STRUCTURE = Contract(info=CARRIED, arrays=["fragment_idx"])
 
 #: What a sampling stage guarantees: the same, plus the model's energy for the frame.
-SAMPLED = Contract(info=(*CARRIED, "model_energy"))
+SAMPLED = Contract(info=(*CARRIED, "model_energy"), arrays=["fragment_idx"])
 
 
 def _carry(frame: dict) -> dict:
@@ -104,8 +107,8 @@ class MinimizeSample(Sample):
             if fragment_or_none(species, start) is None:
                 n_broken += 1
                 continue
-            potential, _ = model.potential(species, start,
-                                           with_induction=p.get("with_induction", True))
+            potential, frag = model.potential(species, start,
+                                              with_induction=p.get("with_induction", True))
             e_start = float(potential.energy(start)[0])
             result = optimize(potential, start, gtol=gtol,
                               max_iter=int(p.get("max_iter", 2000)),
@@ -131,7 +134,8 @@ class MinimizeSample(Sample):
                 opt_iterations=int(result.n_iterations),
                 opt_evaluations=int(result.n_evaluations),
             )
-            out.append(new_frame(species, result.positions, info))
+            out.append(new_frame(species, result.positions, info,
+                                 fragment_idx=[int(v) for v in frag]))
             if (i + 1) % 10 == 0:
                 ctx.note(f"minimized {i + 1}/{len(frames_in)}")
 
@@ -196,8 +200,9 @@ class DynamicsSample(Sample):
             if fragment_or_none(species, start) is None:
                 n_broken += 1
                 continue
-            potential, _ = model.potential(species, start,
-                                           with_induction=p.get("with_induction", True))
+            potential, frag = model.potential(species, start,
+                                              with_induction=p.get("with_induction", True))
+            fragment_idx = [int(v) for v in frag]
             radius = float(np.linalg.norm(start - start.mean(axis=0), axis=1).max())
             radius = max(radius, float(frame["info"].get("cavity_radius", 0.0))) + wall_margin
             atoms = Atoms(symbols=species, positions=start)
@@ -248,7 +253,8 @@ class DynamicsSample(Sample):
                     wall_radius=round(radius, 4),
                     max_force_ev=round(fmax, 6),
                 )
-                out.append(new_frame(species, atoms.get_positions(), info))
+                out.append(new_frame(species, atoms.get_positions(), info,
+                                     fragment_idx=fragment_idx))
                 kept_here += 1
             if reason:
                 aborted.append((info0["parent"], reason, kept_here))
