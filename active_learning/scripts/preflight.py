@@ -29,6 +29,19 @@ REPO_ROOT = Path(os.environ.get("RSFFF_REPO") or AL_ROOT.parent).resolve()
 if str(AL_ROOT) not in sys.path:
     sys.path.insert(0, str(AL_ROOT))
 
+#: torch-cluster ships only an sdist whose setup.py imports torch, so pip cannot build it in
+#: an isolated environment -- it has to be built against the torch already installed here.
+#: Optional: without it rsfff.neighbors uses its own radius_graph, which gives the same graph.
+TORCH_CLUSTER_REMEDY = """
+not required -- rsfff.neighbors falls back to radius_graph_torch, same graph, O(N^2) per
+graph, indistinguishable at cluster sizes and slower for a large periodic box. To install the
+compiled one, on a LOGIN node (compute nodes have no network; it compiles, ~10 min):
+    FORCE_ONLY_CPU=1 MAX_JOBS=8 pip install --no-build-isolation torch-cluster
+or in the same command as the package:
+    FORCE_ONLY_CPU=1 pip install --no-build-isolation -e '.[neighbors]'
+for a GPU build instead: FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST=8.0 (A100), CUDA toolkit loaded
+"""
+
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 _results: list[tuple[str, str, str]] = []
 
@@ -40,12 +53,16 @@ def record(name: str, status: str, detail: str = "") -> str:
     return status
 
 
-def check(name: str, fn, *, required: bool = True) -> str:
-    """Run ``fn``; it returns a detail string, or raises."""
+def check(name: str, fn, *, required: bool = True, remedy: str = "") -> str:
+    """Run ``fn``; it returns a detail string, or raises. ``remedy`` is printed on failure."""
     try:
         detail = fn() or ""
     except Exception as exc:                      # a failing check is a result, not a crash
-        return record(name, FAIL if required else WARN, f"{type(exc).__name__}: {exc}")
+        status = record(name, FAIL if required else WARN, f"{type(exc).__name__}: {exc}")
+        if remedy:
+            for line in remedy.strip().splitlines():
+                print(f"         {line}")
+        return status
     return record(name, OK, detail)
 
 
@@ -81,7 +98,8 @@ def _rsfff_is_complete() -> str:
     import rsfff  # noqa: F401
     for name in ("rsfff.ff.film.model", "rsfff.md.film_driver", "rsfff.train.build_film"):
         importlib.import_module(name)
-    return f"{Path(importlib.import_module('rsfff').__file__).parent}"
+    backend = importlib.import_module("rsfff.neighbors").BACKEND
+    return f"{Path(importlib.import_module('rsfff').__file__).parent}  (neighbors: {backend})"
 
 
 def _packmol(quick: bool) -> str:
@@ -224,7 +242,8 @@ def main(argv=None) -> int:
     check("scipy", _module("scipy"))
     check("ase", _module("ase"))
     check("torch", _module("torch"))
-    check("torch_cluster", _module("torch_cluster", "__file__"))
+    check("torch_cluster", _module("torch_cluster", "__file__"), required=False,
+          remedy=TORCH_CLUSTER_REMEDY)
     check("e3nn", _module("e3nn"))
     check("easyal", _module("easyal"))
     check("easyal sample=[...]", _easyal_takes_several_samplers)

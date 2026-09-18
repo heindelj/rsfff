@@ -25,6 +25,11 @@ Reaching the cap is reported three ways, in increasing order of insistence:
 
 The checking itself can be turned off with ``RSFFF_NEIGHBOR_CAP_CHECK=0`` or
 :func:`set_cap_check`, which is only worth doing in a profiling run.
+
+``torch_cluster`` is optional. When it is not installed, :func:`radius_graph_torch` -- the
+same graph in plain torch -- is used instead and :data:`BACKEND` says so. It is exact and
+O(N^2) per graph, which is the right trade for molecular clusters and the wrong one for a
+large periodic box.
 """
 
 from __future__ import annotations
@@ -33,18 +38,126 @@ import os
 import warnings
 
 import torch
-from torch_cluster import radius_graph
 
 __all__ = [
     "DEFAULT_MAX_NUM_NEIGHBORS",
+    "BACKEND",
     "config_max_num_neighbors",
     "NeighborCapExceeded",
     "CAP_EVENTS",
     "build_radius_graph",
+    "radius_graph_torch",
     "reset_cap_events",
     "set_cap_check",
     "set_strict",
 ]
+
+def radius_graph_torch(
+    x: torch.Tensor,
+    r: float,
+    batch: torch.Tensor | None = None,
+    loop: bool = False,
+    max_num_neighbors: int = 32,
+    flow: str = "source_to_target",
+    chunk: int = 512,
+    **_ignored,
+) -> torch.Tensor:
+    """``torch_cluster.radius_graph`` in plain torch, for when the compiled one is absent.
+
+    ``torch_cluster`` ships only a source distribution whose ``setup.py`` imports torch, so it
+    cannot be pip-installed without ``--no-build-isolation`` and a compiler, which is a real
+    obstacle on a new cluster. Nothing about this codebase actually needs a compiled kernel for
+    the systems it runs on: a water cluster is tens of atoms, and the whole distance matrix is
+    smaller than one feature tensor.
+
+    Same contract as the compiled one. ``batch`` must be non-decreasing (each graph's atoms
+    contiguous), which is what the rest of this codebase builds anyway; edges are directed and
+    returned as ``(source, target)`` rows, so row 1 is the query atom -- the row
+    :func:`_check_cap` counts.
+
+    Two differences, both deliberate:
+
+    **It is O(N^2) per graph**, in chunks of ``chunk`` query atoms, so the peak is
+    ``chunk x N`` distances rather than ``N^2``. That is the right complexity for clusters and
+    the wrong one for a large periodic box; the compiled kernel's cell list wins well before
+    ten thousand atoms in one graph.
+
+    **Truncation keeps the nearest neighbors**, where ``torch_cluster`` documents its picks as
+    random. Either way the environment is wrong -- which is why hitting the cap is reported
+    rather than tolerated -- but the nearest ones are the defensible half to keep, and they
+    make the result deterministic. This also drops the self-pair *before* capping, so an atom
+    comes back with at most ``max_num_neighbors`` neighbors; the compiled one asks its kernel
+    for one extra so it can remove the self-pair afterwards, and an atom can come back with
+    ``max_num_neighbors + 1``.
+    """
+    if flow not in ("source_to_target", "target_to_source"):
+        raise ValueError(f"unknown flow {flow!r}")
+    n_atoms = x.shape[0]
+    if n_atoms == 0:
+        return x.new_empty((2, 0), dtype=torch.long)
+    if batch is None:
+        batch = torch.zeros(n_atoms, dtype=torch.long, device=x.device)
+    if bool((batch[1:] < batch[:-1]).any()):
+        raise ValueError("batch must be non-decreasing: every graph's atoms contiguous")
+
+    counts = torch.bincount(batch)
+    bounds = torch.cat([counts.new_zeros(1), counts.cumsum(0)])
+    cap = int(max_num_neighbors) if max_num_neighbors is not None else None
+    sources: list[torch.Tensor] = []
+    targets: list[torch.Tensor] = []
+
+    for graph in range(counts.numel()):
+        lo, hi = int(bounds[graph]), int(bounds[graph + 1])
+        size = hi - lo
+        if size == 0:
+            continue
+        pos = x[lo:hi]
+        for begin in range(0, size, max(chunk, 1)):
+            end = min(begin + max(chunk, 1), size)
+            # exact distances: cdist's matrix-multiply shortcut loses digits near zero, and an
+            # edge sitting on the cutoff should not depend on that
+            distance = torch.cdist(pos[begin:end], pos,
+                                   compute_mode="donot_use_mm_for_euclid_dist")
+            near = distance < r  # strict, as the compiled kernel is: a pair sitting exactly
+                                 # on the cutoff is out, not in
+            rows = torch.arange(end - begin, device=x.device)
+            if not loop:
+                near[rows, rows + begin] = False
+            if cap is not None and int(near.sum(dim=1).max()) > cap:
+                k = min(cap, size)
+                chosen = distance.masked_fill(~near, float("inf")).topk(
+                    k, dim=1, largest=False
+                ).indices
+                keep = torch.zeros_like(near)
+                keep.scatter_(1, chosen, True)
+                near &= keep
+            query, neighbor = near.nonzero(as_tuple=True)
+            targets.append(query + begin + lo)
+            sources.append(neighbor + lo)
+
+    source = torch.cat(sources) if sources else x.new_empty(0, dtype=torch.long)
+    target = torch.cat(targets) if targets else x.new_empty(0, dtype=torch.long)
+    if flow == "target_to_source":
+        source, target = target, source
+    return torch.stack([source, target], dim=0)
+
+
+try:
+    from torch_cluster import radius_graph
+
+    #: Which implementation :func:`build_radius_graph` calls.
+    BACKEND = "torch_cluster"
+except ImportError:  # pragma: no cover -- exercised by not having it installed
+    radius_graph = radius_graph_torch
+    BACKEND = "torch"
+    warnings.warn(
+        "torch_cluster is not installed; falling back to rsfff.neighbors.radius_graph_torch, "
+        "which is exact but O(N^2) per graph. Fine for clusters, slow for a large periodic "
+        "box. Install the compiled one with: FORCE_ONLY_CPU=1 pip install "
+        "--no-build-isolation torch-cluster",
+        stacklevel=2,
+    )
+
 
 #: Cap handed to every ``radius_graph`` call unless a caller overrides it. Chosen well
 #: above the ~40-60 neighbors a condensed-phase feature cutoff produces, so hitting it

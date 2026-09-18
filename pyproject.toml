@@ -7,12 +7,14 @@ name = "rsfff"
 version = "0.1.0"
 description = "Reactive/short-range fluctuation force field toolkit: GPU-native SOAP/ACE equivariant features and models."
 requires-python = ">=3.10"
-# torch-cluster is a hard runtime dependency (rsfff.neighbors imports it) but deliberately
-# NOT listed here: it ships only an sdist whose setup.py imports torch, and pip builds it in
-# an isolated environment that has no torch, so listing it makes `pip install .` fail outright
-# with "ModuleNotFoundError: No module named 'torch'" before anything else is installed. It has
-# to be built against an already-installed torch, which is a second command -- see [neighbors]
-# below.
+# torch-cluster is optional, and not listed here for two reasons. It ships only an sdist whose
+# setup.py imports torch, and pip builds it in an isolated environment that has no torch, so
+# listing it makes `pip install .` fail outright with "ModuleNotFoundError: No module named
+# 'torch'" before anything else is installed. And rsfff.neighbors no longer needs it:
+# radius_graph_torch produces the same graph in plain torch, at the same speed for molecular
+# clusters (the neighbor list is a rounding error next to one model evaluation) and more slowly
+# for a large periodic box, where the compiled cell list wins. Install it for that case -- see
+# [neighbors] below.
 dependencies = [
     "numpy",
     "pyyaml",
@@ -23,16 +25,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Not installable in one shot -- `pip install .[neighbors]` hits the same isolated-build
-# failure. Install torch first, then torch-cluster with isolation off, then this package:
+# `pip install .[neighbors]` on its own hits the isolated-build failure, but
+# `--no-build-isolation` does not: with isolation off the build sees the environment's own
+# torch, so once torch is installed this is a single command --
 #     pip install torch
-#     pip install --no-build-isolation torch-cluster
-#     pip install -e .
-# On a cluster with a site torch (NERSC), use the module's torch and keep pip away from it:
-#     pip install --no-build-isolation torch-cluster
+#     FORCE_ONLY_CPU=1 pip install --no-build-isolation -e '.[neighbors]'
+# (it needs setuptools and wheel present, since nothing provisions them for it).
+# On a cluster with a site torch (NERSC), use that torch and keep pip away from it:
+#     FORCE_ONLY_CPU=1 pip install --no-build-isolation torch-cluster
 #     pip install --no-deps -e .
-# Building it for GPUs needs the arch explicitly, on a login node (compute nodes have no
-# network): FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST="8.0" MAX_JOBS=8 pip install ...
+# It compiles, so run it on a login node -- compute nodes have no network -- and cap the
+# parallelism with MAX_JOBS. FORCE_ONLY_CPU=1 skips the CUDA kernels, which is what a
+# CPU-node loop wants and is much faster to build; for a GPU build name the arch instead:
+# FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST="8.0" (A100) with the CUDA toolkit loaded.
 neighbors = [
     "torch-cluster",
 ]
