@@ -145,8 +145,11 @@ def water_loop(
         # Every selected frame is two Q-Chem jobs, so this is the expensive stage and the one
         # that makes the loop wait.
         label=QChemLabel(**_merged(dict(max_failed_fraction=0.05), label)),
+        # config= is left out when nothing asked for one, so the stage records the training
+        # YAML it actually resolved rather than a null
         train=CommitteeTrain(**_merged(
-            dict(config=train_config, n_members=4, warm_start=True), train)),
+            dict(n_members=4, warm_start=True,
+                 **({"config": str(train_config)} if train_config else {})), train)),
         assess=ValidationAssess(**_merged(dict(patience=2), assess)),
         initial_model=initial_model,
         initial_data=list(initial_data),
@@ -239,6 +242,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     g.add_argument("--no-warm-start", action="store_true",
                    help="fit every member from scratch instead of continuing the last one")
     g.add_argument("--epochs", type=int, default=None, help="override train.epochs")
+    g.add_argument("--no-stages", action="store_true",
+                   help="clear the config's staged fitting and do one fit. --epochs only "
+                        "touches train.epochs, which a staged config overrides per stage, so "
+                        "a genuinely short fit wants both")
+    g.add_argument("--initial-data", action="append", default=None, metavar="EXTXYZ",
+                   help="labeled data the first committee is fitted on alongside the loop's "
+                        "own; repeat for several")
 
     g = p.add_argument_group("sampling")
     g.add_argument("--gtol", type=float, default=None, help="max |dE/dR|, Hartree/A")
@@ -281,15 +291,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         dynamics = _only(temperature_K=args.temperature, steps=args.steps, stride=args.stride,
                          equilibrate_steps=args.equilibrate, seed=args.seed,
                          device=args.device)
-        overrides = {"train.epochs": args.epochs} if args.epochs else None
+        overrides = {}
+        if args.epochs:
+            overrides["train.epochs"] = args.epochs
+        if args.no_stages:
+            overrides["stages"] = []
         train = _only(config=str(args.train_config) if args.train_config else None,
-                      n_members=args.members, overrides=overrides,
+                      n_members=args.members, overrides=overrides or None,
                       warm_start=False if args.no_warm_start else None)
         label = _only(submit=args.submit, sync=args.sync,
                       max_failed_fraction=args.max_failed_fraction,
                       wait_seconds=args.wait, poll_seconds=args.poll,
                       roundtrip_root=str(args.roundtrip_root) if args.roundtrip_root else None)
-        loop = water_loop(args.root, initial_model=args.checkpoint, build=build,
+        loop = water_loop(args.root, initial_model=args.checkpoint,
+                          initial_data=args.initial_data or (), build=build,
                           optimize=optimize, dynamics=dynamics, select=select, label=label,
                           train=train, pool_multiplier=args.pool_multiplier or POOL_MULTIPLIER)
         iterations = args.iterations

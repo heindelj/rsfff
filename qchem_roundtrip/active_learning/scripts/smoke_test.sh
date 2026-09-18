@@ -25,6 +25,14 @@
 #   --threads N        threads per worker      (default 128/workers)
 #   --fast             wB97X-D/6-31G* instead of the production level of theory
 #   --timeout SECONDS  how long to wait for the jobs (default 3600)
+#   --seed-data PATH   labeled extxyz the committee is fitted on alongside the smoke run's
+#                      own frames. Defaults to the first --seed-frames of
+#                      <repo>/data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz when that exists. Without
+#                      it the train stage has only the handful of frames this run labeled,
+#                      which is too few to split into a train and a holdout set
+#   --seed-frames N    frames to take from it (default 40)
+#   --members N        committee size (default 2 here; the loop's own default is 4)
+#   --epochs N         epochs per member (default 1 -- this is a plumbing test)
 #   --skip-preflight   go straight to the loop
 #   --reuse            keep an existing --root instead of starting clean
 #   --pool DIR         the job pool to copy config and templates from
@@ -47,6 +55,10 @@ FAST=0
 TIMEOUT=3600
 PREFLIGHT=1
 REUSE=0
+SEED_DATA=""
+SEED_FRAMES=40
+MEMBERS=2
+EPOCHS=1
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -58,6 +70,10 @@ while [ "$#" -gt 0 ]; do
         --workers)        WORKERS="${2:?}"; shift 2 ;;
         --threads)        THREADS="${2:?}"; shift 2 ;;
         --timeout)        TIMEOUT="${2:?}"; shift 2 ;;
+        --seed-data)      SEED_DATA="${2:?}"; shift 2 ;;
+        --seed-frames)    SEED_FRAMES="${2:?}"; shift 2 ;;
+        --members)        MEMBERS="${2:?}"; shift 2 ;;
+        --epochs)         EPOCHS="${2:?}"; shift 2 ;;
         --fast)           FAST=1; shift ;;
         --skip-preflight) PREFLIGHT=0; shift ;;
         --reuse)          REUSE=1; shift ;;
@@ -130,6 +146,23 @@ if [ "$PREFLIGHT" -eq 1 ]; then
         say "preflight failed; fix the above before spending the allocation"; exit 1; }
 fi
 
+# --- 2b. seed data, so the committee has something to split ----------------------------------
+# A committee fitted on this run's two or three labeled frames cannot be split into a train and
+# a holdout set, and the train stage would fail for a reason that has nothing to do with the
+# plumbing. A few dozen frames of existing data make it a real fit, briefly.
+SEED_ARG=()
+if [ -z "$SEED_DATA" ] && [ -f "$REPO_ROOT/data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz" ]; then
+    SEED_DATA="$REPO_ROOT/data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz"
+fi
+if [ -n "$SEED_DATA" ]; then
+    SEED_FILE="$ROOT/seed_${SEED_FRAMES}.extxyz"
+    python3 "$AL_ROOT/scripts/take_frames.py" "$SEED_DATA" "$SEED_FILE" "$SEED_FRAMES"
+    SEED_ARG=(--initial-data "$SEED_FILE")
+else
+    say "no seed data found; the train stage will have only this run's labeled frames, which"
+    say "is too few to split. Pass --seed-data <labeled extxyz> to make training meaningful."
+fi
+
 # --- 3. workers, here, in the background ----------------------------------------------------
 WORKER_PIDS=()
 cleanup() {
@@ -165,6 +198,8 @@ python3 "$AL_ROOT/workflows.py" water \
     --steps $(( FRAMES * 100 )) --stride 100 --equilibrate 200 \
     --wait "$TIMEOUT" --poll 15 \
     --max-failed-fraction 0.0 \
+    --members "$MEMBERS" --epochs "$EPOCHS" --no-stages \
+    "${SEED_ARG[@]}" \
     --iterations 1
 STATUS=$?
 set -e
@@ -175,7 +210,7 @@ python3 - "$LOOP" <<'PY'
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
-for stage in ("build", "optimize", "dynamics", "label"):
+for stage in ("build", "optimize", "dynamics", "select", "label", "train", "assess"):
     record = root / "iter_000" / stage / "stage.json"
     if not record.exists():
         print(f"  {stage:<9} not run"); continue

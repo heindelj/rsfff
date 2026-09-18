@@ -52,9 +52,13 @@ import yaml
 from easyal import Train, iter_extxyz, write_extxyz
 
 from committee import MANIFEST
+from common import REPO_ROOT
 from label_stage import QCHEM_TRAINING
 
-__all__ = ["CommitteeTrain"]
+__all__ = ["CommitteeTrain", "DEFAULT_TRAINING_CONFIG"]
+
+#: The config this model is fitted with. Only a default -- ``config=`` overrides it.
+DEFAULT_TRAINING_CONFIG = REPO_ROOT / "configs" / "water_film.yaml"
 
 
 def _set_dotted(tree: dict, dotted: str, value) -> None:
@@ -68,7 +72,9 @@ def _set_dotted(tree: dict, dotted: str, value) -> None:
 class CommitteeTrain(Train):
     """Fit ``n_members`` film models on everything labeled so far.
 
-    ``config``        the training YAML to start from (``configs/water_film.yaml``)
+    ``config``        the training YAML to start from. Defaults to the repository's
+                      ``configs/water_film.yaml`` -- the config this model is fitted with --
+                      which is found through ``$RSFFF_REPO`` or the installed rsfff
     ``n_members``     committee size (default 4)
     ``seed``          member ``k`` fits with ``train.seed = seed + k`` (default 0)
     ``split_seed``    ``data.seed``, shared by every member so they have one holdout
@@ -83,7 +89,7 @@ class CommitteeTrain(Train):
     output = "committee"
 
     def __init__(self, **params):
-        params.setdefault("config", None)
+        params.setdefault("config", str(DEFAULT_TRAINING_CONFIG))
         params.setdefault("n_members", 4)
         params.setdefault("seed", 0)
         params.setdefault("split_seed", 0)
@@ -145,10 +151,14 @@ class CommitteeTrain(Train):
         )
 
     def _member_config(self, ctx, index: int, dataset: Path, parents: list[Path]) -> dict:
-        template = self.params["config"]
-        if template is None:
-            raise ValueError("CommitteeTrain needs config=<training yaml>")
-        tree = copy.deepcopy(yaml.safe_load(Path(template).read_text()) or {})
+        template = Path(self.params["config"] or DEFAULT_TRAINING_CONFIG)
+        if not template.exists():
+            raise FileNotFoundError(
+                f"training config {template} does not exist. Pass config=<yaml> (or "
+                f"--train-config), or point $RSFFF_REPO at a checkout that has "
+                f"configs/water_film.yaml."
+            )
+        tree = copy.deepcopy(yaml.safe_load(template.read_text()) or {})
         data = tree.setdefault("data", {})
         # Every path in the template is relative to the repo it was written in, and each
         # member runs in its own directory, so they are resolved to absolute paths here.
