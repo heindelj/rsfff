@@ -7,8 +7,10 @@ Requires-Dist: numpy
 Requires-Dist: pyyaml
 Requires-Dist: torch
 Requires-Dist: e3nn
-Requires-Dist: torch-cluster
 Requires-Dist: ase
+Requires-Dist: scipy
+Provides-Extra: neighbors
+Requires-Dist: torch-cluster; extra == "neighbors"
 Provides-Extra: cue
 Requires-Dist: cuequivariance>=0.10; extra == "cue"
 Requires-Dist: cuequivariance-torch>=0.10; extra == "cue"

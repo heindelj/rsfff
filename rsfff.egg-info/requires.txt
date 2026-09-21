@@ -2,13 +2,16 @@ numpy
 pyyaml
 torch
 e3nn
-torch-cluster
 ase
+scipy
 
 [cue]
 cuequivariance>=0.10
 cuequivariance-torch>=0.10
 cuequivariance-ops-torch-cu12
+
+[neighbors]
+torch-cluster
 
 [qc]
 pyscf>=2.14

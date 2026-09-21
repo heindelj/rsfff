@@ -235,6 +235,13 @@ def main() -> int:
            f"{len(t_cpu)} terms, worst rel diff {worst_term:.1e}"
            + ("" if not bad_terms else f"; differing: {bad_terms}"))
 
+    # Each tensor is compared against its own largest element, but never against less than
+    # 1e-10 of the largest gradient anywhere. Some gradients are zero analytically and only
+    # round-off survives -- the permanent charge head's output bias, whose uniform shift the
+    # exact per-fragment charge projection removes, comes out ~1e-11 against a global ~1e8 --
+    # and two devices' round-off relative to itself is O(1), which is not a disagreement.
+    top = max((float(g.abs().max()) for g in g_cpu.values() if g is not None), default=0.0)
+    floor = max(1e-10 * top, 1e-30)
     worst, worst_name, missing = 0.0, "", []
     for name, gc in g_cpu.items():
         gd = g_dev[name]
@@ -243,7 +250,7 @@ def main() -> int:
             continue
         if gc is None:
             continue
-        scale = max(float(gc.abs().max()), 1e-12)
+        scale = max(float(gc.abs().max()), floor)
         rel = float((gd - gc).abs().max()) / scale
         if rel > worst:
             worst, worst_name = rel, name
