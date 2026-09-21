@@ -146,9 +146,11 @@ def _timeit(fn, device, repeats):
     return float(np.median(times)), float(np.min(times))
 
 
-def make_calls(model, pos, z, frag, device, *, with_induction, force_weight=1.0):
+def make_calls(model, pos, z, frag, device, *, with_induction, force_weight=1.0, n_frames=1):
+    positions = np.tile(np.asarray(pos, dtype=float), (n_frames, 1))
+
     def batch(requires_grad):
-        b = _batch_to(make_batch(pos, z, frag), device)
+        b = _batch_to(make_batch(positions, z, frag, n_frames=n_frames), device)
         if requires_grad:
             b.positions.requires_grad_(True)
         return b
@@ -187,12 +189,15 @@ def _batch_to(b, device):
     return replace(b, **kw)
 
 
+def _activities(device):
+    return [ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device.type == "cuda" else [])
+
+
 def profile_regions(model, forward, device, repeats):
-    acts = [ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device.type == "cuda" else [])
     with instrumented(model):
         forward()  # warm caches (pair enumerations, compiled paths)
         _sync(device)
-        with profile(activities=acts, record_shapes=False) as prof:
+        with profile(activities=_activities(device), record_shapes=False) as prof:
             for _ in range(repeats):
                 forward()
                 _sync(device)
@@ -208,6 +213,32 @@ def profile_regions(model, forward, device, repeats):
                 calls=ev.count // repeats,
             )
     return rows, prof
+
+
+def write_op_summary(model, fn, device, path, *, top=60):
+    """One profiled call of ``fn``: per-op table (text, a few KB) and a gzipped chrome trace.
+
+    Kept separate from :func:`profile_regions` so the trace holds a single call -- the
+    5-repeat traces were ~75 MB each, which GitHub warns about; one call gzipped is ~1-3 MB
+    and ``*_trace.json.gz`` is gitignored anyway. The text table is what to commit.
+    """
+    with instrumented(model):
+        fn()
+        _sync(device)
+        with profile(activities=_activities(device), record_shapes=False) as prof:
+            fn()
+            _sync(device)
+    sort_by = "cuda_time_total" if device.type == "cuda" else "cpu_time_total"
+    try:
+        table = prof.key_averages().table(sort_by=sort_by, row_limit=top)
+    except Exception:  # older torch spells the cuda column differently
+        table = prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=top)
+    n_events = sum(ev.count for ev in prof.key_averages())
+    with open(path.with_suffix(".txt"), "w") as fh:
+        fh.write(f"# {path.stem}: one call, {n_events} op events, sorted by {sort_by}\n")
+        fh.write(table)
+    prof.export_chrome_trace(str(path) + "_trace.json.gz")
+    return n_events
 
 
 # --------------------------------------------------------------------------------------
@@ -229,9 +260,13 @@ def main(argv=None):
     ap.add_argument("--max-neighbors", type=int, default=1024,
                     help="override FilmModel.max_num_neighbors (12 A in bulk water is ~720)")
     ap.add_argument("--skip-train-step", action="store_true")
+    ap.add_argument("--frames", type=int, default=1,
+                    help="replicate each structure this many times in one batch (training batches "
+                         "many frames, so per-call overhead is amortised; 1 = single frame)")
     ap.add_argument("--out", default=str(REPO_ROOT / "benchmarks/profile/results"))
     ap.add_argument("--tag", default=None)
-    ap.add_argument("--trace", action="store_true", help="also dump a chrome trace per structure")
+    ap.add_argument("--trace", action="store_true",
+                    help="also write a per-op table (.txt) and a gzipped one-call chrome trace per structure")
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
@@ -251,9 +286,9 @@ def main(argv=None):
         print(f"\n== {name}: {n_atoms} atoms, {int(frag.max()) + 1} waters, device {device}", flush=True)
         neighbors.reset_cap_events()
         forward, forward_forces, train_step = make_calls(
-            model, pos, z, frag, device, with_induction=with_induction
+            model, pos, z, frag, device, with_induction=with_induction, n_frames=args.frames
         )
-        rec = dict(structure=name, n_atoms=n_atoms, n_waters=int(frag.max()) + 1,
+        rec = dict(structure=name, n_atoms=n_atoms, n_waters=int(frag.max()) + 1, frames=args.frames,
                    induction=with_induction, device=str(device), tag=tag)
 
         # -- forward region split --------------------------------------------------------
@@ -265,7 +300,9 @@ def main(argv=None):
             rec["cg_iters"] = int(out.solver["ind"][0])
         rec["regions"] = regions
         if args.trace:
-            prof.export_chrome_trace(str(out_dir / f"{tag}_{name}_forward.json"))
+            rec["n_op_events_forward"] = write_op_summary(
+                model, forward, device, out_dir / f"{tag}_{name}_forward"
+            )
 
         # -- whole-call timings ----------------------------------------------------------
         for _ in range(2):
@@ -289,7 +326,8 @@ def main(argv=None):
         print(_format_row(rec), flush=True)
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    base = out_dir / f"{tag}_{'ind' if with_induction else 'noind'}_{stamp}"
+    frames = f"_f{args.frames}" if args.frames != 1 else ""
+    base = out_dir / f"{tag}_{'ind' if with_induction else 'noind'}{frames}_{stamp}"
     with open(base.with_suffix(".json"), "w") as fh:
         json.dump(dict(
             checkpoint=args.checkpoint, torch=torch.__version__, dtype=str(torch.get_default_dtype()),
@@ -313,7 +351,7 @@ def _format_table(results):
     if not results:
         return ""
     key = "cuda_ms" if results[0]["device"].startswith("cuda") else "cpu_ms"
-    cols = ["structure", "n_atoms", "n_pairs", "forward_ms", "forward_forces_ms", "train_step_ms",
+    cols = ["structure", "frames", "n_atoms", "n_pairs", "forward_ms", "forward_forces_ms", "train_step_ms",
             "train_peak_gb"] + REGIONS
     lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for r in results:

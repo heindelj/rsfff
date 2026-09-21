@@ -37,5 +37,8 @@ they differ.
   ordering should change (see the plan note in Obsidian).
 - `cap_events` in the JSON is non-empty when the pair list was truncated by
   `--max-neighbors`; raise it if so (12 Å in bulk water needs ~720).
-- `--trace` writes a chrome trace per structure (open in `chrome://tracing` or Perfetto) for
-  the per-op view, including backward ops.
+- `--trace` writes, per structure, a per-op table (`*_forward.txt`, commit this) and a
+  one-call gzipped chrome trace (`*_trace.json.gz`, gitignored; open in Perfetto).
+- `--frames 128` replicates a structure into one batch of 128 frames, i.e. the shape of a
+  real training step (`batch_size: 128`), which amortises the per-call dispatch overhead
+  that dominates single-frame timings.

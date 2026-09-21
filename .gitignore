@@ -5,3 +5,7 @@ data/
 benchmarks/results
 chemlab
 qchem_roundtrip/train/runs/
+# profiler traces are large; commit the .txt op tables and the .md/.json summaries instead
+benchmarks/profile/results/*_trace.json.gz
+benchmarks/profile/results/*_forward.json
+benchmarks/profile/results/slurm-*.out
