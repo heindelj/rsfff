@@ -38,6 +38,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 warnings.filterwarnings("ignore", message="torch_cluster is not installed")
 
 import torch  # noqa: E402
@@ -175,6 +176,8 @@ def main() -> int:
     resolve_paths(tree, args.config.resolve().parent)
     scratch = Path(os.environ.get("SCRATCH", "/tmp")) / f"rsfff_gpu_check_{os.getpid()}"
     atexit.register(shutil.rmtree, scratch, True)
+    from check_data import frames as _frames
+    n_full = sum(1 for p in tree["data"]["path"] for _ in _frames(Path(p)))
     apply_subset(tree, args.frames, scratch)
     tree["device"] = "cpu"
     tmp = scratch / "config.yaml"
@@ -283,7 +286,7 @@ def main() -> int:
            + ("" if finite else " (non-finite!)"))
 
     # --- 6. timing ------------------------------------------------------------------------------
-    n_train_full = int(0.9 * 9579)
+    n_train_full = int((1 - config.data.holdout_fraction) * n_full)
     steps_per_epoch = math.ceil(n_train_full / config.train.batch_size)
     scale = config.train.batch_size / max(len(idx), 1)
     print(f"\ntiming (batch {len(idx)}, forces on every step, float64):")
@@ -292,7 +295,8 @@ def main() -> int:
     if dev.type == "cuda":
         print(f"  peak GPU memory {torch.cuda.max_memory_allocated(dev) / 2**30:.2f} GiB")
     est = t_step * scale * steps_per_epoch
-    print(f"  rough full-data epoch at batch {config.train.batch_size}: ~{est / 60:.1f} min "
+    print(f"  rough full-data epoch ({n_train_full} train frames, batch {config.train.batch_size}): "
+          f"~{est / 60:.1f} min "
           f"(linear scaling from batch {len(idx)}; forces are every "
           f"{config.film.force_every}nd step in the real fit, so this is pessimistic)")
     return summary()

@@ -26,7 +26,10 @@ one train/holdout split. That is what the loop's committee is, and the only thin
 their disagreement mean "the data does not pin this down".
 
 Data paths in the config are resolved relative to the config file, so the job directory
-(``train/``) carries its own ``data/`` and runs from anywhere. ``--subset N`` keeps the first
+(``train/``) carries its own ``data/`` and runs from anywhere. ``data.path`` may be a glob:
+the default config trains on ``data/clusters/**/*.xyz``, every cluster file of every group,
+with no distinction between them. ``scripts/check_data.py`` runs on those files first and
+refuses anything that is not neutral water at one level of theory. ``--subset N`` keeps the first
 N frames of every file (for a smoke test); ``--quick`` cuts every stage to one epoch.
 
 A member with ``done.json`` is never refitted, so rerunning the same command after a wall
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import glob
 import hashlib
 import json
 import os
@@ -72,18 +76,39 @@ def set_dotted(tree, dotted: str, value) -> None:
         node[last] = value
 
 
+#: keys that name sets of cluster files, where a glob pattern is expanded
+GLOB_KEYS = ("path", "large_path")
+
+
 def resolve_paths(tree: dict, base: Path) -> None:
+    """Make every data path absolute against ``base``; expand globs in ``data.path``.
+
+    ``data.path: [data/clusters/**/*.xyz]`` is how the default config says "every cluster
+    file there is training data": a new group is a new directory, not a config edit. Matches
+    are sorted, so the file order -- and with it the frame indexing and the seeded split --
+    is the same on every machine. A pattern that matches nothing is an error, not an empty
+    dataset.
+    """
     data = tree.setdefault("data", {})
 
-    def absolute(value):
+    def absolute(value, expand=False):
         if isinstance(value, list):
-            return [absolute(v) for v in value]
+            return [q for v in value for q in absolute(v, expand)]
         p = Path(os.path.expandvars(str(value)))
-        return str((p if p.is_absolute() else base / p).resolve())
+        p = p if p.is_absolute() else base / p
+        if expand and glob.has_magic(str(p)):
+            found = sorted(str(Path(q).resolve()) for q in glob.glob(str(p), recursive=True))
+            if not found:
+                raise FileNotFoundError(f"data pattern {p} matches no files")
+            return found
+        return [str(p.resolve())]
 
     for key in PATH_KEYS:
-        if data.get(key):
-            data[key] = absolute(data[key])
+        value = data.get(key)
+        if not value:
+            continue
+        paths = absolute(value, expand=key in GLOB_KEYS)
+        data[key] = paths if (isinstance(value, list) or key in GLOB_KEYS) else paths[0]
 
 
 def data_files(tree: dict) -> list[Path]:
@@ -122,8 +147,8 @@ def apply_subset(tree: dict, n_frames: int, out: Path) -> None:
             continue
         paths = value if isinstance(value, list) else [value]
         new = []
-        for p in paths:
-            dst = out / "data_subset" / Path(p).name
+        for p in paths:   # parent dir in the name: two groups may both have a w4 file
+            dst = out / "data_subset" / f"{Path(p).parent.name}__{Path(p).name}"
             if not dst.exists():
                 subset_extxyz(Path(p), dst, n_frames)
             new.append(str(dst))
@@ -234,6 +259,8 @@ def main(argv=None) -> int:
     ap.add_argument("--set", dest="overrides", action="append", default=[],
                     metavar="KEY=VALUE", help="dotted override, value parsed as YAML; "
                     "repeatable (e.g. --set train.batch_size=64 --set stages.1.train.epochs=40)")
+    ap.add_argument("--skip-data-check", action="store_true",
+                    help="do not run scripts/check_data.py on the cluster files first")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--dry-run", action="store_true", help="write configs, train nothing")
     args = ap.parse_args(argv)
@@ -249,6 +276,18 @@ def main(argv=None) -> int:
         print("missing data files (run scripts/stage_data.sh on the laptop and sync?):\n  "
               + "\n  ".join(missing), file=sys.stderr)
         return 2
+    if base["data"].get("large_path"):
+        print("[committee] note: data.large_path is set -- that is the separate, separately "
+              "weighted large-cluster stream. To treat those clusters like any other, list "
+              "them under data.path instead.", flush=True)
+    cluster_files = [Path(p) for p in base["data"]["path"]]
+    if not args.skip_data_check:
+        sys.path.insert(0, str(HERE / "scripts"))
+        from check_data import main as check_data
+        if check_data([str(p) for p in cluster_files] + ["--quiet"]) != 0:
+            print("[committee] the cluster data failed scripts/check_data.py; not training "
+                  "(--skip-data-check to override)", file=sys.stderr)
+            return 2
     if args.subset:
         apply_subset(base, args.subset, out)
     if args.quick:
@@ -356,6 +395,7 @@ def main(argv=None) -> int:
         "config": str(config),
         "config_sha256": sha256(config),
         "training_data": {str(p): sha256(p) for p in data_files(base)},
+        "cluster_files": [str(p) for p in base["data"]["path"]],
         "subset": args.subset or None,
         "quick": args.quick,
         "overrides": args.overrides,

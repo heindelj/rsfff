@@ -76,10 +76,10 @@ def main() -> int:
     print(f"{c.n_members} member(s) loaded on {args.device}; val losses "
           f"{[m.get('val_loss') for m in manifest['members']]}")
 
-    files = [Path(p) for p in manifest["training_data"]
-             if Path(p).name.startswith("w") and Path(p).suffix == ".xyz"]
+    files = [Path(p) for p in manifest.get("cluster_files") or
+             [q for q in manifest["training_data"] if Path(q).name.startswith("w")]]
     ok = True
-    print(f"{'file':32s} {'n':>3s} {'E_MAE':>9s} {'F_MAE':>8s} {'sigma_E':>9s} {'sigma_F':>8s}")
+    print(f"{'file':44s} {'n':>3s} {'E_MAE':>9s} {'F_MAE':>8s} {'sigma_E':>9s} {'sigma_F':>8s}")
     for path in files:
         e_err, f_err, s_e, s_f = [], [], [], []
         for species, pos, energy, forces in read_frames(path, args.frames):
@@ -96,7 +96,7 @@ def main() -> int:
                 dev = f - f.mean(0, keepdims=True)
                 s_f.append(np.sqrt((dev ** 2).sum(-1).mean(0)).max() * KJMOL)
         mean = lambda v: float(np.mean(v)) if v else math.nan  # noqa: E731
-        print(f"{path.name:32s} {len(e_err) or len(s_f):3d} {mean(e_err):9.3f} "
+        print(f"{path.parent.name + '/' + path.name:44s} {len(e_err) or len(s_f):3d} {mean(e_err):9.3f} "
               f"{mean(f_err):8.3f} {mean(s_e):9.4f} {mean(s_f):8.3f}")
     print("all predictions finite" if ok else "NON-FINITE predictions")
     return 0 if ok else 1

@@ -1,12 +1,20 @@
 # ---------------------------------------------------------------------------------------------
-# qchem_roundtrip/train copy of configs/water_film.yaml -- the config the current film model
-# (checkpoints/water_film_full/best.pt) was fitted with: w2-w5 wB97M-V/def2-TZVPD clusters, the
-# h2o monomer anchor set, and the matching atomic reference energies.
+# qchem_roundtrip/train's fit: configs/water_film.yaml -- the model and schedule the current film
+# checkpoint (checkpoints/water_film_full/best.pt) was fitted with -- on a larger data set:
 #
-# Data paths are relative to THIS file's directory (train_committee.py resolves them so), and
-# point at train/data/, which scripts/stage_data.sh fills from the repository's data/ and which
-# data.sha256 pins. `device` is set by train_committee.py (--device, default cuda);
-# checkpoint_root/run_name/train.seed/data.seed are set per member.
+#   data/clusters/original/    the w2-w5 wB97M-V/def2-TZVPD files water_film_full was fitted on
+#   data/clusters/benchmark/   every finished eda+force pair of the benchmark group (w4-w23,
+#                              both geometry sets), parsed by scripts/collect_group.py
+#
+# All of them are ONE dataset. configs/water_film_large.yaml fed the benchmark clusters in as a
+# separate `data.large_path` stream with its own weight, batch and holdout; here they are just
+# more frames in `data.path`, split, batched and weighted exactly like a dimer. To add clusters,
+# put water-cluster files in a new data/clusters/<group>/ (scripts/collect_group.py makes them
+# from a round-trip group) -- the glob picks them up; scripts/check_data.py rejects anything
+# that is not neutral water at the one level of theory.
+#
+# Paths are relative to THIS file's directory. `device` is set by train_committee.py (--device,
+# default cuda); checkpoint_root/run_name/train.seed/data.seed are set per member.
 # ---------------------------------------------------------------------------------------------
 # The state-conditioned, fragment-projected model of docs/fff_film.md, on nonreactive water.
 #
@@ -42,13 +50,12 @@ dtype: float64
 checkpoint_root: checkpoints
 
 data:
+  # Every cluster file of every group, no distinction (sorted, so the seeded split is stable).
   path:
-    - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
-    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
-    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
-    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+    - data/clusters/**/*.xyz
   reference_energies: data/atomic_references_wb97mv_tzvpd.json
-  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
+  # Isolated monomers: the one-body anchor stream (not clusters -- no EDA to fit).
+  monomer_path: data/monomer/h2o_wb97mv_tzvpd_pol.xyz
   holdout_fraction: 0.1
   seed: 0
 
