@@ -46,6 +46,14 @@ def stage_tree(root: Path, dest: Path) -> tuple[int, int]:
             ignore=shutil.ignore_patterns("runs", "logs", "__pycache__", "*.pyc"),
         )
 
+    # The committee-training job (scripts, config, and its pinned data/) travels the same way;
+    # its runs/ are results that live on the cluster, not inputs.
+    if (root / "train").exists():
+        shutil.copytree(
+            root / "train", dest / "train",
+            ignore=shutil.ignore_patterns("runs", "__pycache__", "*.pyc"),
+        )
+
     if (root / "aimd" / "geoms").exists():
         shutil.copytree(root / "aimd" / "geoms", dest / "aimd" / "geoms")
 

@@ -4,3 +4,4 @@ timer.dat
 data/
 benchmarks/results
 chemlab
+qchem_roundtrip/train/runs/

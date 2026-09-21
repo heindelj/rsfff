@@ -54,6 +54,9 @@ rsync -av \
     --exclude='/active_learning/runs/***' \
     --exclude='/active_learning/logs/***' \
     --exclude='/active_learning/**/__pycache__/***' \
+    --exclude='/train/runs/***' \
+    --exclude='/train/**/__pycache__/***' \
+    --include='/train/***' \
     --include='/aimd/geoms/***' \
     --include='/**/' \
     --include='/**/inputs/***' \

@@ -229,6 +229,10 @@ def build_radius_graph(
         edge = radius_graph(
             positions.cpu(), r=r, batch=batch.cpu(), loop=loop, max_num_neighbors=cap,
         ).to(positions.device)
+    elif positions.device.type == "cuda" and not _compiled_has_cuda():
+        edge = radius_graph_torch(
+            positions, r=r, batch=batch, loop=loop, max_num_neighbors=cap,
+        )
     else:
         edge = radius_graph(
             positions, r=r, batch=batch, loop=loop, max_num_neighbors=cap,
@@ -237,6 +241,37 @@ def build_radius_graph(
     if _CHECK:
         _check_cap(edge, positions.shape[0], r, cap, context)
     return edge
+
+
+_CUDA_OK: bool | None = None
+
+
+def _compiled_has_cuda() -> bool:
+    """Whether ``radius_graph`` can take CUDA tensors, probed once.
+
+    The NERSC install notes build torch_cluster with ``FORCE_ONLY_CPU=1``, which is right for
+    the CPU nodes and makes every CUDA call raise "Not compiled with CUDA support". Training
+    on a GPU node with that same environment then dies on the first neighbor list. Rather
+    than make the GPU path depend on how torch_cluster was compiled, a CPU-only build falls
+    back to :func:`radius_graph_torch` -- the same graph, on the device -- with one warning.
+    """
+    global _CUDA_OK
+    if _CUDA_OK is None:
+        if BACKEND != "torch_cluster":
+            _CUDA_OK = True          # radius_graph *is* radius_graph_torch
+        else:
+            try:
+                x = torch.zeros(2, 3, device="cuda")
+                radius_graph(x, r=1.0, batch=torch.zeros(2, dtype=torch.long, device="cuda"))
+                _CUDA_OK = True
+            except RuntimeError:
+                _CUDA_OK = False
+                warnings.warn(
+                    "torch_cluster was built without CUDA kernels (FORCE_ONLY_CPU=1?); "
+                    "using rsfff.neighbors.radius_graph_torch for CUDA tensors.",
+                    stacklevel=3,
+                )
+    return _CUDA_OK
 
 
 def _check_cap(edge: torch.Tensor, n_atoms: int, r: float, cap: int, context: str) -> None:
