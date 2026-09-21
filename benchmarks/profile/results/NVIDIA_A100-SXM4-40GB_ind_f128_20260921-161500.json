@@ -1,0 +1,137 @@
+{
+  "checkpoint": "/global/cfs/cdirs/m3196/heindelj/software/rsfff/checkpoints/water_film_full/best.pt",
+  "torch": "2.14.0+cu130",
+  "dtype": "torch.float64",
+  "python": "3.11.16",
+  "host": "nid001608",
+  "results": [
+    {
+      "structure": "w6_mp2_avtz",
+      "n_atoms": 18,
+      "n_waters": 6,
+      "frames": 128,
+      "induction": true,
+      "device": "cuda",
+      "tag": "NVIDIA_A100-SXM4-40GB",
+      "n_pairs": 19584,
+      "n_pairs_intra": 2304,
+      "cg_iters": 11,
+      "regions": {
+        "projector_features": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 81.74042866666666,
+          "calls": 1
+        },
+        "neighbor_list": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 64.10635133333331,
+          "calls": 2
+        },
+        "parameter_network": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 18.950946666666663,
+          "calls": 1
+        },
+        "gates": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 1.3186076666666486,
+          "calls": 1
+        },
+        "elst_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 16.266659333333354,
+          "calls": 1
+        },
+        "pauli_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 4.531101666666665,
+          "calls": 1
+        },
+        "disp_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 1.2518566666666593,
+          "calls": 1
+        },
+        "bonded": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.8839146666666395,
+          "calls": 3
+        },
+        "coupled_solve": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 63.69174266666666,
+          "calls": 1
+        }
+      },
+      "forward_ms": 187.00413301121444,
+      "forward_forces_ms": 329.3482509907335,
+      "train_step_ms": 717.6570909796283,
+      "train_peak_gb": 1.948995584,
+      "cap_events": {}
+    },
+    {
+      "structure": "w21_mp2_avtz",
+      "n_atoms": 63,
+      "n_waters": 21,
+      "frames": 128,
+      "induction": true,
+      "device": "cuda",
+      "tag": "NVIDIA_A100-SXM4-40GB",
+      "n_pairs": 249984,
+      "n_pairs_intra": 8064,
+      "cg_iters": 13,
+      "regions": {
+        "projector_features": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 94.67301933333333,
+          "calls": 1
+        },
+        "neighbor_list": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 64.12123266666666,
+          "calls": 2
+        },
+        "parameter_network": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 19.557296999999977,
+          "calls": 1
+        },
+        "gates": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.48416466666661045,
+          "calls": 1
+        },
+        "elst_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 22.932968333333346,
+          "calls": 1
+        },
+        "pauli_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 7.2062270000000135,
+          "calls": 1
+        },
+        "disp_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.32163900000003437,
+          "calls": 1
+        },
+        "bonded": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.2130643333333816,
+          "calls": 3
+        },
+        "coupled_solve": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 116.92029966666666,
+          "calls": 1
+        }
+      },
+      "forward_ms": 298.4048849903047,
+      "forward_forces_ms": 458.5615170071833,
+      "train_step_ms": 1377.2704679868184,
+      "train_peak_gb": 18.350295552,
+      "cap_events": {}
+    }
+  ]
+}
