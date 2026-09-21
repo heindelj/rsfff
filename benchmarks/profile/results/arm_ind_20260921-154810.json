@@ -1,0 +1,133 @@
+{
+  "checkpoint": "/Users/joseph.heindel/dev/rsfff/checkpoints/water_film_full/best.pt",
+  "torch": "2.13.0",
+  "dtype": "torch.float64",
+  "python": "3.11.15",
+  "host": "PNNL-KM3X724WWL",
+  "results": [
+    {
+      "structure": "w6_mp2_avtz",
+      "n_atoms": 18,
+      "n_waters": 6,
+      "induction": true,
+      "device": "cpu",
+      "tag": "arm",
+      "n_pairs": 153,
+      "n_pairs_intra": 18,
+      "cg_iters": 11,
+      "regions": {
+        "projector_features": {
+          "cpu_ms": 4.932416333333333,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "neighbor_list": {
+          "cpu_ms": 0.1993346666666639,
+          "cuda_ms": 0.0,
+          "calls": 2
+        },
+        "parameter_network": {
+          "cpu_ms": 3.042780666666667,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "gates": {
+          "cpu_ms": 0.17401466666666723,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "elst_pairs": {
+          "cpu_ms": 1.5795366666666675,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "pauli_pairs": {
+          "cpu_ms": 0.4129743333333354,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "disp_pairs": {
+          "cpu_ms": 0.09011166666666698,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "bonded": {
+          "cpu_ms": 0.08995933333333293,
+          "cuda_ms": 0.0,
+          "calls": 3
+        },
+        "coupled_solve": {
+          "cpu_ms": 5.787518333333334,
+          "cuda_ms": 0.0,
+          "calls": 1
+        }
+      },
+      "forward_ms": 10.693582706153393,
+      "forward_forces_ms": 23.35549984127283,
+      "train_step_ms": 67.48420838266611,
+      "cap_events": {}
+    },
+    {
+      "structure": "w21_mp2_avtz",
+      "n_atoms": 63,
+      "n_waters": 21,
+      "induction": true,
+      "device": "cpu",
+      "tag": "arm",
+      "n_pairs": 1953,
+      "n_pairs_intra": 63,
+      "cg_iters": 13,
+      "regions": {
+        "projector_features": {
+          "cpu_ms": 6.715558333333334,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "neighbor_list": {
+          "cpu_ms": 0.6531150000000004,
+          "cuda_ms": 0.0,
+          "calls": 2
+        },
+        "parameter_network": {
+          "cpu_ms": 4.804937333333331,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "gates": {
+          "cpu_ms": 0.25842400000000393,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "elst_pairs": {
+          "cpu_ms": 3.3388416666666685,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "pauli_pairs": {
+          "cpu_ms": 0.7000216666666675,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "disp_pairs": {
+          "cpu_ms": 0.16401366666666825,
+          "cuda_ms": 0.0,
+          "calls": 1
+        },
+        "bonded": {
+          "cpu_ms": 0.108852333333336,
+          "cuda_ms": 0.0,
+          "calls": 3
+        },
+        "coupled_solve": {
+          "cpu_ms": 16.47556066666667,
+          "cuda_ms": 0.0,
+          "calls": 1
+        }
+      },
+      "forward_ms": 30.585833359509706,
+      "forward_forces_ms": 69.65804193168879,
+      "train_step_ms": 228.65408286452293,
+      "cap_events": {}
+    }
+  ]
+}
