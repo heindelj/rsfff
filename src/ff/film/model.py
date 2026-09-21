@@ -42,7 +42,7 @@ import torch.nn as nn
 from ...mlip.switch import pairwise_switch
 from ...mlip.sqe import sqe_solve
 from ..damping import fermi_switch
-from ..dispersion import tt_damped_c6_energy
+from .. import backend as ff_backend
 from ..electrostatics import slater_elec_pair_energy
 from ..expert_model import ClassicalSpec
 from ..fragment_state import FragmentStateEmbedding
@@ -293,10 +293,11 @@ class FilmModel(nn.Module):
         c6_j = self._route(c6_0[j], c6_t[j], p_intra)
         bd_i = self._route(bd_0[i], bd_t[i], p_intra)
         bd_j = self._route(bd_0[j], bd_t[j], p_intra)
-        e_disp = tt_damped_c6_energy(
-            r,
+        e_disp = ff_backend.tt_dispersion(
+            positions, pair_index,
             (0.5 * (c6_i.log() + c6_j.log())).exp(),
             (0.5 * (bd_i.log() + bd_j.log())).exp(),
+            r_ang=r,
         )
 
         e_pair = {
@@ -309,8 +310,15 @@ class FilmModel(nn.Module):
         }
 
         # --- bonded -----------------------------------------------------------------------
-        r_bond, cos_t = topo.geometry(positions)
-        e_bond0, e_angle0 = params.bonded0.energy(r_bond, cos_t, topo)
+        # The leaf evaluations go through `rsfff.ff.backend` (torch, or torchff kernels);
+        # the torch path reuses one geometry evaluation for both bonded parameter sets.
+        geom = (
+            topo.geometry(positions)
+            if ff_backend.active_backend(positions) == "torch" else None
+        )
+        e_bond0, e_angle0 = ff_backend.bonded_energy(
+            positions, topo, params.bonded0, geometry=geom
+        )
         energy_bonded = (
             e_bond0.new_zeros(n_frag)
             .index_add_(0, topo.bond_frag, e_bond0)
@@ -368,7 +376,9 @@ class FilmModel(nn.Module):
             )
             e0_ref = e0_internal + pool_batch(gate_ind * (e_point + e_pen))
 
-            e_bond_env, e_angle_env = params.bonded.energy(r_bond, cos_t, topo)
+            e_bond_env, e_angle_env = ff_backend.bonded_energy(
+                positions, topo, params.bonded, geometry=geom
+            )
             energy_bonded_env = (
                 e_bond_env.new_zeros(n_frag)
                 .index_add_(0, topo.bond_frag, e_bond_env)

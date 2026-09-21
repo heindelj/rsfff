@@ -234,6 +234,44 @@ def test_fallback_chunking_does_not_change_the_graph():
     assert _edges(whole) == _edges(chunked)
 
 
+def _per_graph_loop(x, r, batch, loop, cap):
+    """The pre-M1 fallback: one cdist per graph. Kept here as the oracle for the batched one."""
+    counts = torch.bincount(batch)
+    bounds = torch.cat([counts.new_zeros(1), counts.cumsum(0)])
+    src, tgt = [], []
+    for g in range(counts.numel()):
+        lo, hi = int(bounds[g]), int(bounds[g + 1])
+        if hi == lo:
+            continue
+        pos = x[lo:hi]
+        d = torch.cdist(pos, pos, compute_mode="donot_use_mm_for_euclid_dist")
+        near = d < r
+        if not loop:
+            near.fill_diagonal_(False)
+        if int(near.sum(1).max()) > cap:
+            chosen = d.masked_fill(~near, float("inf")).topk(min(cap, hi - lo), dim=1, largest=False).indices
+            keep = torch.zeros_like(near)
+            keep.scatter_(1, chosen, True)
+            near &= keep
+        q, n = near.nonzero(as_tuple=True)
+        tgt.append(q + lo)
+        src.append(n + lo)
+    return torch.stack([torch.cat(src), torch.cat(tgt)])
+
+
+@pytest.mark.parametrize("seed", range(8))
+@pytest.mark.parametrize("loop", [False, True])
+@pytest.mark.parametrize("chunk", [1, 7, 1024])
+def test_batched_fallback_matches_the_per_graph_loop(seed, loop, chunk):
+    """Many small frames in one call (the training shape): same edges, same order, same cap
+    behaviour as building each frame on its own -- the chunk boundaries fall wherever."""
+    pos, batch = _random_system(seed, max_graphs=12, max_size=20)
+    for cap in (256, 4):
+        mine = radius_graph_torch(pos, r=3.0, batch=batch, loop=loop, max_num_neighbors=cap, chunk=chunk)
+        ref = _per_graph_loop(pos, 3.0, batch, loop, cap)
+        assert torch.equal(mine, ref)
+
+
 def test_fallback_edges_and_empties():
     assert radius_graph_torch(torch.zeros(0, 3), r=1.0).shape == (2, 0)
     assert radius_graph_torch(torch.zeros(1, 3), r=1.0, loop=False).shape == (2, 0)

@@ -59,7 +59,7 @@ def radius_graph_torch(
     loop: bool = False,
     max_num_neighbors: int = 32,
     flow: str = "source_to_target",
-    chunk: int = 512,
+    chunk: int = 1024,
     **_ignored,
 ) -> torch.Tensor:
     """``torch_cluster.radius_graph`` in plain torch, for when the compiled one is absent.
@@ -100,40 +100,45 @@ def radius_graph_torch(
     if bool((batch[1:] < batch[:-1]).any()):
         raise ValueError("batch must be non-decreasing: every graph's atoms contiguous")
 
+    # Chunks run over the *concatenated* atom list, not per graph: a training batch is 128
+    # frames of 18-63 atoms, and a Python loop over frames cost a flat ~64 ms per call on an
+    # A100 (benchmarks/profile, M0 of the torchff port) regardless of how small the frames
+    # were. Each chunk's columns are restricted to the frames its query rows touch, so the
+    # distance block stays ~chunk x (a few frames) and the work is still ~sum_g n_g^2 rather
+    # than N_total^2; the frame membership is enforced by a mask on the block.
     counts = torch.bincount(batch)
-    bounds = torch.cat([counts.new_zeros(1), counts.cumsum(0)])
+    bounds = torch.cat([counts.new_zeros(1), counts.cumsum(0)]).tolist()
+    batch_list = batch.tolist()
     cap = int(max_num_neighbors) if max_num_neighbors is not None else None
     sources: list[torch.Tensor] = []
     targets: list[torch.Tensor] = []
+    chunk = max(int(chunk), 1)
 
-    for graph in range(counts.numel()):
-        lo, hi = int(bounds[graph]), int(bounds[graph + 1])
-        size = hi - lo
-        if size == 0:
-            continue
-        pos = x[lo:hi]
-        for begin in range(0, size, max(chunk, 1)):
-            end = min(begin + max(chunk, 1), size)
-            # exact distances: cdist's matrix-multiply shortcut loses digits near zero, and an
-            # edge sitting on the cutoff should not depend on that
-            distance = torch.cdist(pos[begin:end], pos,
-                                   compute_mode="donot_use_mm_for_euclid_dist")
-            near = distance < r  # strict, as the compiled kernel is: a pair sitting exactly
-                                 # on the cutoff is out, not in
-            rows = torch.arange(end - begin, device=x.device)
-            if not loop:
-                near[rows, rows + begin] = False
-            if cap is not None and int(near.sum(dim=1).max()) > cap:
-                k = min(cap, size)
-                chosen = distance.masked_fill(~near, float("inf")).topk(
-                    k, dim=1, largest=False
-                ).indices
-                keep = torch.zeros_like(near)
-                keep.scatter_(1, chosen, True)
-                near &= keep
-            query, neighbor = near.nonzero(as_tuple=True)
-            targets.append(query + begin + lo)
-            sources.append(neighbor + lo)
+    for begin in range(0, n_atoms, chunk):
+        end = min(begin + chunk, n_atoms)
+        col_lo = bounds[batch_list[begin]]
+        col_hi = bounds[batch_list[end - 1] + 1]
+        # exact distances: cdist's matrix-multiply shortcut loses digits near zero, and an
+        # edge sitting on the cutoff should not depend on that
+        distance = torch.cdist(x[begin:end], x[col_lo:col_hi],
+                               compute_mode="donot_use_mm_for_euclid_dist")
+        near = distance < r  # strict, as the compiled kernel is: a pair sitting exactly
+                             # on the cutoff is out, not in
+        near &= batch[begin:end, None] == batch[None, col_lo:col_hi]
+        rows = torch.arange(end - begin, device=x.device)
+        if not loop:
+            near[rows, rows + (begin - col_lo)] = False
+        if cap is not None and int(near.sum(dim=1).max()) > cap:
+            k = min(cap, col_hi - col_lo)
+            chosen = distance.masked_fill(~near, float("inf")).topk(
+                k, dim=1, largest=False
+            ).indices
+            keep = torch.zeros_like(near)
+            keep.scatter_(1, chosen, True)
+            near &= keep
+        query, neighbor = near.nonzero(as_tuple=True)
+        targets.append(query + begin)
+        sources.append(neighbor + col_lo)
 
     source = torch.cat(sources) if sources else x.new_empty(0, dtype=torch.long)
     target = torch.cat(targets) if targets else x.new_empty(0, dtype=torch.long)

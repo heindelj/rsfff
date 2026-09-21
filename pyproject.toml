@@ -42,6 +42,14 @@ neighbors = [
     "torch-cluster",
 ]
 
+# The force-field kernels (torchff port). The submodule at external/torchff-lib is the
+# heindelj fork; it is not on PyPI, so it is installed from the checkout:
+#     TORCHFF_NO_CUDA=1 pip install -e external/torchff-lib      # CPU: pure-torch reference paths
+#     scripts/build_torchff_perlmutter.sh                         # GPU: compiles the CUDA kernels
+# rsfff.ff.backend picks it up when importable (RSFFF_FF_BACKEND=auto|torch|torchff). It is
+# not listed as a dependency: a relative path is not a valid requirement specifier, and the
+# CPU/GPU install commands differ.
+
 cue = [
     "cuequivariance>=0.10",
     "cuequivariance-torch>=0.10",
