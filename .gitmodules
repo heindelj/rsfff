@@ -1,0 +1,3 @@
+[submodule "external/torchff-lib"]
+	path = external/torchff-lib
+	url = https://github.com/heindelj/torchff-lib.git
