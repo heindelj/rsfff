@@ -180,7 +180,11 @@ class ConditionedParameterNetwork(nn.Module):
     ) -> FilmParameters:
         species_idx = pf.x_in.species_idx
         x_iso = self.embed_in(pf.x_in.inv_feats)
-        if bool(pf.a_env.any()):
+        # `any()` is a host sync and a graph break; with `sync_free` the joined trunk always
+        # runs. That is exact: embed_env / embed_cross have no bias, so on a batch with no
+        # environment x_joined == x_iso to the bit. It costs one extra trunk pass on such a
+        # batch (monomer anchors), nothing on a cluster batch.
+        if getattr(self, "sync_free", False) or bool(pf.a_env.any()):
             x_joined = (
                 x_iso + self.embed_env(pf.x_env.inv_feats) + self.embed_cross(pf.cross_inv)
             )

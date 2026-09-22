@@ -84,6 +84,7 @@ Units are atomic units throughout, matching :mod:`rsfff.ff.multipole`: bohr, e, 
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -579,6 +580,60 @@ class _Preconditioner:
 # preconditioned CG
 # ---------------------------------------------------------------------------
 
+def _cg_iteration(sys, d_map, g0, pre, x, r, p, rz, converged, pd_fail, target):
+    """One PCG iteration on every frame at once; converged frames take a zero step.
+
+    Pure tensor work with no host sync, so it can be ``torch.compile``d as one graph
+    (:func:`set_compile`); the loop, the convergence test and the early exit stay in
+    :func:`pcg`.
+    """
+    g = _grad_state(sys, p, d_map)
+    ap = (g[0] - g0[0], g[1] - g0[1], g[2] - g0[2])
+    p_ap = state_dot(sys, p, ap)
+    bad = (p_ap <= _PD_EPS) & ~converged
+    pd_fail = pd_fail | bad
+    active = ~converged & ~bad
+    step = torch.where(active, rz / torch.where(p_ap == 0, torch.ones_like(p_ap), p_ap),
+                       torch.zeros_like(rz))
+    x = state_axpy(sys, step, p, x)
+    r = state_axpy(sys, -step, ap, r)
+    converged = converged | bad | (state_max_abs(sys, r) <= target)
+    z = pre(r)
+    rz_new = state_dot(sys, r, z)
+    beta = torch.where(rz == 0, torch.zeros_like(rz), rz_new / rz)
+    beta = torch.where(converged, torch.zeros_like(beta), beta)
+    p = state_axpy(sys, beta, p, z)
+    return x, r, p, rz_new, converged, pd_fail
+
+
+_COMPILED_ITERATION = None
+_COMPILE = os.environ.get("RSFFF_COMPILE", "").strip().lower()
+
+
+def set_compile(enabled: bool) -> None:
+    """Run the CG iteration through ``torch.compile`` (dynamic shapes, no CUDA graphs).
+
+    Also switched on by ``RSFFF_COMPILE=1`` or ``RSFFF_COMPILE=cg,...``. The iteration is
+    ~100 small kernels in eager mode -- the ~5 ms per iteration floor the M5 profile measured
+    on an A100 -- which inductor fuses into a handful. Shapes change every batch, so the
+    graph is compiled with symbolic sizes once (a few recompiles for e.g. batch-size
+    changes); the torchff kernels inside it are traced through their fake implementations.
+    """
+    global _COMPILED_ITERATION
+    if enabled and _COMPILED_ITERATION is None:
+        import torch._functorch.config as functorch_config
+
+        torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
+        functorch_config.donated_buffer = False       # the adjoint differentiates through it
+        _COMPILED_ITERATION = torch.compile(_cg_iteration, dynamic=True)
+    elif not enabled:
+        _COMPILED_ITERATION = None
+
+
+if _COMPILE in ("1", "true", "all") or "cg" in _COMPILE.split(","):
+    set_compile(True)
+
+
 def pcg(
     sys: CoupledSystem,
     rhs: State | None = None,
@@ -586,12 +641,18 @@ def pcg(
     rtol: float = 1.0e-10,
     atol: float = 1.0e-12,
     maxiter: int = 200,
+    check_every: int = 1,
     d_map=None,
 ) -> tuple[State, CoupledInfo]:
     """Solve ``A x = rhs`` (default ``rhs = -b``, i.e. minimize the functional).
 
     Every scalar is per frame and converged frames are frozen by zeroing their step, so a
     frame's answer does not depend on which others shared the minibatch.
+
+    ``check_every``: test convergence (a host sync) every k iterations instead of every one.
+    Converged frames take exact zero steps meanwhile, so the answer is the same; up to k-1
+    iterations are spent past convergence in exchange for k times fewer syncs and the CPU
+    running ahead of the GPU.
     """
     dtype, device = sys.chi.dtype, sys.chi.device
     if d_map is None:
@@ -599,11 +660,6 @@ def pcg(
 
     zero = zero_state(sys, dtype, device)
     g0 = _grad_state(sys, zero, d_map)              # = b
-
-    def a_mul(p: State) -> State:
-        g = _grad_state(sys, p, d_map)
-        return (g[0] - g0[0], g[1] - g0[1], g[2] - g0[2])
-
     if rhs is None:
         rhs = (-g0[0], -g0[1], -g0[2])
 
@@ -617,27 +673,16 @@ def pcg(
 
     converged = state_max_abs(sys, r) <= target
     pd_fail = torch.zeros(sys.n_systems, dtype=torch.bool, device=device)
+    iterate = _COMPILED_ITERATION or _cg_iteration
+    check_every = max(int(check_every), 1)
     n_iter = 0
     for n_iter in range(1, int(maxiter) + 1):
-        if bool(converged.all()):
+        if (n_iter - 1) % check_every == 0 and bool(converged.all()):
+            n_iter -= 1
             break
-        ap = a_mul(p)
-        p_ap = state_dot(sys, p, ap)
-        bad = (p_ap <= _PD_EPS) & ~converged
-        pd_fail = pd_fail | bad
-        active = ~converged & ~bad
-        step = torch.where(active, rz / torch.where(p_ap == 0, torch.ones_like(p_ap), p_ap),
-                           torch.zeros_like(rz))
-        x = state_axpy(sys, step, p, x)
-        r = state_axpy(sys, -step, ap, r)
-        converged = converged | bad | (state_max_abs(sys, r) <= target)
-        if bool(converged.all()):
-            break
-        z = pre(r)
-        rz_new = state_dot(sys, r, z)
-        beta = torch.where(rz == 0, torch.zeros_like(rz), rz_new / rz)
-        p = state_axpy(sys, beta, p, z)
-        rz = rz_new
+        x, r, p, rz, converged, pd_fail = iterate(
+            sys, d_map, g0, pre, x, r, p, rz, converged, pd_fail, target
+        )
 
     residual = state_max_abs(sys, r)
     return x, CoupledInfo(
@@ -831,6 +876,7 @@ def coupled_solve(
     rtol: float = 1.0e-10,
     atol: float = 1.0e-12,
     maxiter: int = 200,
+    check_every: int = 1,
     info_out: list | None = None,
 ) -> tuple[State, int]:
     """Minimize the coupled functional. Differentiable through the adjoint, to second order.
@@ -842,7 +888,7 @@ def coupled_solve(
     what to log during training and cannot be recovered afterwards.
     """
     params = [getattr(sys, f) for f in _PARAM_FIELDS]
-    kwargs = dict(rtol=rtol, atol=atol, maxiter=maxiter)
+    kwargs = dict(rtol=rtol, atol=atol, maxiter=maxiter, check_every=check_every)
     v, u, w, n_iter = _CoupledSolve.apply(sys, kwargs, info_out, None, None, None, *params)
     return (v, u, w), int(n_iter.item())
 

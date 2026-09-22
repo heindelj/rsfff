@@ -69,3 +69,19 @@ python benchmarks/profile/profile_film.py --device cpu --repeats 2 --frames 4 \
 - `--frames 128` replicates a structure into one batch of 128 frames, i.e. the shape of a
   real training step (`batch_size: 128`), which amortises the per-call dispatch overhead
   that dominates single-frame timings.
+
+## torch.compile and the CG sync stride
+
+`--compile cg` runs the coupled solve's PCG iteration through `torch.compile` (dynamic shapes;
+one graph, no recompiles across batch shapes on CPU) — training-safe, since the solve runs
+under `no_grad` inside the implicit adjoint. `--compile network` / `all` also compiles the
+parameter network's forward as one graph, but inductor does not support double backward, so
+that is **inference only** (`--skip-train-step`; MD, sampling, evaluation). `--cg-check-every k`
+tests convergence every k iterations instead of every one (converged frames take exact zero
+steps, so results are unchanged; up to k-1 extra iterations against k× fewer host syncs).
+The same switches in production: `RSFFF_COMPILE=cg|network|all` (read by
+`load_film_model` and, `cg` only, by `train_film`) and `film.cg_check_every` in the config.
+
+```bash
+bash benchmarks/profile/run_train_split.sh main cg2 cg4 ccg ccg2 cinf
+```

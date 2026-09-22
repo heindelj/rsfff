@@ -198,4 +198,5 @@ def build_film_model(
         cg_rtol=float(_get(film_cfg, "cg_rtol", 1.0e-9)),
         cg_atol=float(_get(film_cfg, "cg_atol", 1.0e-12)),
         cg_maxiter=int(_get(film_cfg, "cg_maxiter", 100)),
+        cg_check_every=int(_get(film_cfg, "cg_check_every", 1)),
     )

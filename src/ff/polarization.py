@@ -161,6 +161,7 @@ def coupled_response(
     rtol: float = 1.0e-9,
     atol: float = 1.0e-12,
     maxiter: int = 100,
+    check_every: int = 1,
 ) -> LevelOutput:
     """Minimize the coupled functional and report what it converged to.
 
@@ -177,7 +178,7 @@ def coupled_response(
     )
     info_out: list = []
     state, n_iter = coupled_solve(
-        sys, rtol=rtol, atol=atol, maxiter=maxiter, info_out=info_out
+        sys, rtol=rtol, atol=atol, maxiter=maxiter, check_every=check_every, info_out=info_out
     )
     info = info_out[0]
     # The exported multipoles keep the full adjoint path: whatever consumes them (the

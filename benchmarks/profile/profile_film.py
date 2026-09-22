@@ -471,11 +471,27 @@ def main(argv=None):
                          "ablation (no double backward)")
     ap.add_argument("--no-train-split", action="store_true",
                     help="skip the per-phase timing and backward attribution of the training step")
+    ap.add_argument("--compile", default="none", choices=["none", "cg", "network", "all"],
+                    help="torch.compile parts (rsfff.ff.film.model.maybe_compile): 'cg' is the PCG "
+                         "iteration (training-safe); 'network' is inference-only, so 'network'/'all' "
+                         "require --skip-train-step")
+    ap.add_argument("--cg-check-every", type=int, default=None,
+                    help="override the coupled solve's convergence-check stride (host syncs)")
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
     model, config = load_film_model(args.checkpoint, device=str(device))
     model.max_num_neighbors = int(args.max_neighbors)
+    if args.cg_check_every is not None:
+        model.cg["check_every"] = int(args.cg_check_every)
+    if args.compile != "none":
+        from rsfff.ff.film.model import maybe_compile
+
+        parts = {"cg", "network"} if args.compile == "all" else {args.compile}
+        if "network" in parts and not args.skip_train_step:
+            raise SystemExit("--compile network/all is inference-only (no double backward through "
+                             "torch.compile): add --skip-train-step, or use --compile cg")
+        maybe_compile(model, parts)
     with_induction = not args.no_induction
     tag = args.tag or (torch.cuda.get_device_name(device).replace(" ", "_") if device.type == "cuda"
                        else platform.processor() or "cpu")
@@ -544,6 +560,10 @@ def main(argv=None):
     frames = f"_f{args.frames}" if args.frames != 1 else ""
     be = ff_backend.active_backend(torch.zeros(1, device=device))
     lossflag = "_eonly" if args.loss == "energy" else ""
+    if args.compile != "none":
+        lossflag += f"_compile-{args.compile}"
+    if args.cg_check_every is not None:
+        lossflag += f"_cg{args.cg_check_every}"
     base = out_dir / f"{tag}_{'ind' if with_induction else 'noind'}{frames}_{be}{lossflag}_{stamp}"
     with open(base.with_suffix(".json"), "w") as fh:
         json.dump(dict(

@@ -853,6 +853,9 @@ class ExpertConfig:
     cg_rtol: float = 1.0e-9
     cg_atol: float = 1.0e-12
     cg_maxiter: int = 100
+    #: Test CG convergence every k iterations (one host sync each) rather than every one;
+    #: converged frames take exact zero steps meanwhile, so the answer is unchanged.
+    cg_check_every: int = 1
 
     # --- loss ---------------------------------------------------------------------------
     #: One kJ/mol in Hartree. Every error is divided by this before squaring, so every weight
@@ -1044,6 +1047,9 @@ class FilmConfig:
     cg_rtol: float = 1.0e-9
     cg_atol: float = 1.0e-12
     cg_maxiter: int = 100
+    #: Test CG convergence every k iterations (one host sync each) rather than every one;
+    #: converged frames take exact zero steps meanwhile, so the answer is unchanged.
+    cg_check_every: int = 1
 
     # --- loss ----------------------------------------------------------------------------------
     #: One kJ/mol in Hartree; every error is divided by this before squaring.

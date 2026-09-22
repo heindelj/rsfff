@@ -49,6 +49,7 @@ import torch
 from ..ff.units import KJMOL_PER_HARTREE
 from ..mlip.heads import env_parameters
 from .build_film import build_film_model
+from ..ff.film.model import maybe_compile
 from .config import Config, load_config, stage_config
 from .data import (
     fragment_view,
@@ -454,6 +455,7 @@ def _train_once(config: Config):
     model = build_film_model(
         config.features, config.film, neighbor_types, reference_energies
     ).to(device=device, dtype=dtype)
+    maybe_compile(model, training=True)       # RSFFF_COMPILE=cg: compiled PCG iteration
 
     n_all = sum(p.numel() for p in model.parameters())
     n_env = sum(p.numel() for _n, p in env_parameters(model))

@@ -119,6 +119,60 @@ class FilmOutput:
         return self.parameters.quad_perm
 
 
+def compile_parts() -> set[str]:
+    """Which parts ``RSFFF_COMPILE`` asks for: ``network``, ``cg`` (or ``1``/``all`` for both)."""
+    import os
+
+    raw = os.environ.get("RSFFF_COMPILE", "").strip().lower()
+    if raw in ("", "0", "false", "none"):
+        return set()
+    if raw in ("1", "true", "all"):
+        return {"network", "cg"}
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def maybe_compile(model: "FilmModel", parts: set[str] | None = None, *, training: bool = False) -> "FilmModel":
+    """Apply ``torch.compile`` to the launch-bound parts of a film model, in place.
+
+    ``cg``: the coupled solve's PCG iteration (:func:`rsfff.ff.coupled_solve.set_compile`) --
+    it runs under ``no_grad`` inside the implicit solve, so this is safe for training too.
+    ``network``: the parameter network's forward (MLP trunks, FiLM, heads) as one dynamic-shape
+    graph, and the network's sync-free branch. **Inference only**: inductor's AOTAutograd does
+    not support double backward, and force training differentiates through the network with
+    ``create_graph=True``; with ``training=True`` the part is dropped with a warning. The
+    featurizer stays eager (e3nn spherical harmonics / CG contractions recompile badly and its
+    cost is cuBLAS anyway), and so do the pair terms (single kernels on the torchff backend).
+
+    Selected by ``RSFFF_COMPILE`` (``cg``, ``network``, ``1``/``all`` for both) when ``parts``
+    is None; a no-op when nothing is selected, so the default path is untouched.
+    """
+    parts = compile_parts() if parts is None else set(parts)
+    if not parts:
+        return model
+    import warnings
+
+    import torch._dynamo
+    import torch._functorch.config as functorch_config
+
+    torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
+    # the compiled forward is backpropagated through with retain/create_graph in places;
+    # AOTAutograd's donated buffers assume a plain backward and refuse that
+    functorch_config.donated_buffer = False
+    if "network" in parts:
+        if training:
+            warnings.warn("RSFFF_COMPILE=network is inference-only (no double backward through "
+                          "torch.compile); training keeps the eager network", stacklevel=2)
+        elif not getattr(model.network, "_rsfff_compiled", False):
+            model.network.sync_free = True
+            model.network.forward = torch.compile(model.network.forward, dynamic=True)
+            model.network._rsfff_compiled = True
+    if "cg" in parts:
+        from ..coupled_solve import set_compile
+
+        set_compile(True)
+    return model
+
+
 class FilmModel(nn.Module):
     """Projector + state conditioning + parameter network + one force-field evaluation.
 
@@ -147,6 +201,7 @@ class FilmModel(nn.Module):
         cg_rtol: float = 1.0e-9,
         cg_atol: float = 1.0e-12,
         cg_maxiter: int = 100,
+        cg_check_every: int = 1,
     ) -> None:
         super().__init__()
         self.projector = projector
@@ -158,7 +213,8 @@ class FilmModel(nn.Module):
         self.induction = bool(induction)
         self.max_num_neighbors = int(max_num_neighbors)
         self.cutoff_max = max(c.cutoff for c in self.classical.values())
-        self.cg = dict(rtol=float(cg_rtol), atol=float(cg_atol), maxiter=int(cg_maxiter))
+        self.cg = dict(rtol=float(cg_rtol), atol=float(cg_atol), maxiter=int(cg_maxiter),
+                       check_every=int(cg_check_every))
         self.register_buffer("reference_energies", reference_energies.clone())
 
     # -- helpers -------------------------------------------------------------------------
