@@ -1,67 +1,67 @@
-# NVIDIA_A100-SXM4-40GB_w6_mp2_avtz_forward: one call, 19941 op events, sorted by cuda_time_total
+# NVIDIA_A100-SXM4-40GB_w6_mp2_avtz_forward: one call, 18862 op events, sorted by cuda_time_total
 -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
                                                    Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
 -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
-                                          coupled_solve         0.00%       0.000us         0.00%       0.000us       0.000us      37.493ms       115.30%      37.493ms      37.493ms             1  
-                                     projector_features         0.00%       0.000us         0.00%       0.000us       0.000us      23.540ms        72.39%      23.540ms      23.540ms             1  
-                                      parameter_network         0.00%       0.000us         0.00%       0.000us       0.000us      19.384ms        59.61%      19.384ms      19.384ms             1  
-                                            aten::cdist         0.01%      10.863us         0.19%     195.678us      32.613us       0.000us         0.00%      12.385ms       2.064ms             6  
-                                   aten::_cdist_forward         0.06%      66.014us         0.17%     184.815us      30.802us      12.385ms        38.09%      12.385ms       2.064ms             6  
-void at::native::(anonymous namespace)::cdist_kernel...         0.00%       0.000us         0.00%       0.000us       0.000us      12.385ms        38.09%      12.385ms       2.064ms             6  
-                                     projector_features         5.46%       5.770ms        22.35%      23.606ms      23.606ms       0.000us         0.00%      10.449ms      10.449ms             1  
-                                          neighbor_list         0.00%       0.000us         0.00%       0.000us       0.000us       9.026ms        27.76%       9.026ms       4.513ms             2  
-                                          coupled_solve         0.72%     757.425us        35.56%      37.563ms      37.563ms       0.000us         0.00%       7.510ms       7.510ms             1  
-                                          _CoupledSolve         6.31%       6.663ms        32.41%      34.238ms      34.238ms       0.000us         0.00%       7.096ms       7.096ms             1  
-                                          neighbor_list         0.66%     701.327us         8.67%       9.157ms       4.578ms       0.000us         0.00%       6.908ms       3.454ms             2  
-                                            pauli_pairs         0.00%       0.000us         0.00%       0.000us       0.000us       4.402ms        13.54%       4.402ms       4.402ms             1  
-                                      parameter_network         4.88%       5.151ms        18.43%      19.469ms      19.469ms       0.000us         0.00%       3.722ms       3.722ms             1  
-                                            aten::index         3.48%       3.674ms         6.58%       6.948ms      23.237us       2.755ms         8.47%       2.933ms       9.808us           299  
-                                              aten::mul         4.14%       4.370ms         6.82%       7.209ms      12.715us       2.682ms         8.25%       2.682ms       4.729us           567  
-                                           aten::einsum         2.01%       2.126ms        11.78%      12.440ms     144.653us       0.000us         0.00%       2.512ms      29.212us            86  
-                                              aten::bmm         4.59%       4.849ms         5.55%       5.859ms      55.800us       2.182ms         6.71%       2.182ms      20.782us           105  
-void at::native::index_elementwise_kernel<128, 4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.772ms         5.45%       1.772ms       7.542us           235  
-void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.728ms         5.31%       1.728ms       5.519us           313  
-                                   aten::scatter_reduce         0.40%     420.998us         1.13%       1.191ms      42.547us       1.500ms         4.61%       1.636ms      58.439us            28  
-void at::native::_scatter_gather_elementwise_kernel<...         0.00%       0.000us         0.00%       0.000us       0.000us       1.500ms         4.61%       1.500ms      53.577us            28  
-                                                  gates         0.00%       0.000us         0.00%       0.000us       0.000us       1.255ms         3.86%       1.255ms       1.255ms             1  
-                                              aten::add         2.65%       2.802ms         4.33%       4.569ms      12.483us       1.216ms         3.74%       1.216ms       3.322us           366  
-void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.181ms         3.63%       1.181ms       3.083us           383  
-                                            aten::copy_         1.68%       1.779ms        16.68%      17.623ms      55.947us       1.117ms         3.43%       1.117ms       3.546us           315  
-sm80_xmma_gemm_f64f64_f64f64_f64_nt_n_tilesize64x128...         0.00%       0.000us         0.00%       0.000us       0.000us       1.072ms         3.30%       1.072ms      82.471us            13  
-                                           aten::linear         0.28%     290.549us         4.05%       4.278ms      38.192us       0.000us         0.00%       1.052ms       9.397us           112  
-void at::native::vectorized_gather_kernel<16, long>(...         0.00%       0.000us         0.00%       0.000us       0.000us       1.035ms         3.18%       1.035ms      13.802us            75  
-                                            aten::addmm         2.35%       2.487ms         3.19%       3.367ms      30.608us       1.027ms         3.16%       1.027ms       9.332us           110  
-                                            pauli_pairs         1.00%       1.055ms         4.20%       4.436ms       4.436ms       0.000us         0.00%     985.110us     985.110us             1  
-                                     aten::scatter_add_         0.72%     761.529us         1.27%       1.346ms      14.320us     817.022us         2.51%     817.022us       8.692us            94  
-                                        aten::index_add         0.80%     842.002us         3.14%       3.322ms      43.140us       0.000us         0.00%     797.054us      10.351us            77  
-void at::native::_scatter_gather_elementwise_kernel<...         0.00%       0.000us         0.00%       0.000us       0.000us     748.926us         2.30%     748.926us       8.140us            92  
-                                              aten::cat         1.11%       1.167ms         1.80%       1.901ms      16.244us     713.753us         2.19%     713.753us       6.100us           117  
-                                              aten::sum         0.49%     513.687us         0.86%     907.369us      23.878us     547.069us         1.68%     613.437us      16.143us            38  
-void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us     562.685us         1.73%     562.685us       5.210us           108  
-                                                 bonded         0.00%       0.000us         0.00%       0.000us       0.000us     542.814us         1.67%     542.814us     271.407us             2  
-void cutlass::Kernel2<cutlass_80_tensorop_d884gemm_6...         0.00%       0.000us         0.00%       0.000us       0.000us     537.791us         1.65%     537.791us      10.147us            53  
-                                              aten::sub         1.18%       1.241ms         1.90%       2.004ms      11.860us     484.921us         1.49%     484.921us       2.869us           169  
-void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us     480.827us         1.48%     480.827us       4.808us           100  
-void cutlass::Kernel2<cutlass_80_tensorop_d884gemm_3...         0.00%       0.000us         0.00%       0.000us       0.000us     475.874us         1.46%     475.874us       7.675us            62  
-                                            aten::fill_         0.83%     878.686us         1.89%       1.996ms      10.451us     453.851us         1.40%     453.851us       2.376us           191  
-void at::native::reduce_kernel<512, 1, at::native::R...         0.00%       0.000us         0.00%       0.000us       0.000us     451.806us         1.39%     451.806us      15.580us            29  
-                                            aten::clone         0.27%     281.746us         2.23%       2.358ms      25.912us       0.000us         0.00%     439.039us       4.825us            91  
-                                                 _Field         0.27%     288.734us         0.66%     702.414us      58.535us       0.000us         0.00%     424.068us      35.339us            12  
-                             torchff::slater_elec_field         0.07%      73.392us         0.36%     383.521us      31.960us     395.297us         1.22%     424.068us      35.339us            12  
-void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us     405.563us         1.25%     405.563us       2.400us           169  
-                                            aten::zero_         0.34%     359.966us         2.03%       2.147ms      12.556us       0.000us         0.00%     399.163us       2.334us           171  
-void (anonymous namespace)::field_kernel<double>(dou...         0.00%       0.000us         0.00%       0.000us       0.000us     395.297us         1.22%     395.297us      32.941us            12  
-                                            aten::stack         0.25%     266.468us         1.31%       1.379ms      26.018us       0.000us         0.00%     393.339us       7.421us            53  
-                                                  gates         0.48%     505.936us         1.69%       1.787ms       1.787ms       0.000us         0.00%     392.445us     392.445us             1  
-                                             aten::silu         0.65%     688.893us         1.05%       1.109ms      15.840us     379.615us         1.17%     379.615us       5.423us            70  
-void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us     379.615us         1.17%     379.615us       5.423us            70  
-                         Memcpy DtoD (Device -> Device)         0.00%       0.000us         0.00%       0.000us       0.000us     363.520us         1.12%     363.520us       2.473us           147  
-                                          aten::nonzero         0.55%     579.148us         1.30%       1.371ms      80.665us     360.280us         1.11%     360.280us      21.193us            17  
-void at::native::(anonymous namespace)::CatArrayBatc...         0.00%       0.000us         0.00%       0.000us       0.000us     346.110us         1.06%     346.110us       6.786us            51  
-                                          aten::reshape         0.68%     717.347us         2.77%       2.921ms       4.564us       0.000us         0.00%     331.039us       0.517us           640  
-                                  aten::linalg_lu_solve         0.28%     296.557us         1.02%       1.080ms      90.004us     242.881us         0.75%     325.570us      27.131us            12  
-void cutlass::Kernel2<cutlass_80_tensorop_d884gemm_3...         0.00%       0.000us         0.00%       0.000us       0.000us     315.935us         0.97%     315.935us      16.628us            19  
-                                              aten::div         0.79%     830.919us         1.28%       1.348ms      13.483us     310.015us         0.95%     310.015us       3.100us           100  
+                                          coupled_solve         0.00%       0.000us         0.00%       0.000us       0.000us      35.906ms       113.13%      35.906ms      35.906ms             1  
+                                     projector_features         0.00%       0.000us         0.00%       0.000us       0.000us      23.021ms        72.53%      23.021ms      23.021ms             1  
+                                      parameter_network         0.00%       0.000us         0.00%       0.000us       0.000us      18.709ms        58.95%      18.709ms      18.709ms             1  
+                                            aten::cdist         0.01%      10.530us         0.19%     180.348us      30.058us       0.000us         0.00%      12.385ms       2.064ms             6  
+                                   aten::_cdist_forward         0.07%      64.644us         0.18%     169.818us      28.303us      12.385ms        39.02%      12.385ms       2.064ms             6  
+void at::native::(anonymous namespace)::cdist_kernel...         0.00%       0.000us         0.00%       0.000us       0.000us      12.385ms        39.02%      12.385ms       2.064ms             6  
+                                     projector_features         5.92%       5.741ms        23.81%      23.082ms      23.082ms       0.000us         0.00%      10.575ms      10.575ms             1  
+                                          neighbor_list         0.00%       0.000us         0.00%       0.000us       0.000us       8.931ms        28.14%       8.931ms       4.466ms             2  
+                                          coupled_solve         0.75%     727.526us        37.11%      35.974ms      35.974ms       0.000us         0.00%       7.523ms       7.523ms             1  
+                                          _CoupledSolve         6.61%       6.406ms        33.92%      32.875ms      32.875ms       0.000us         0.00%       7.109ms       7.109ms             1  
+                                          neighbor_list         0.70%     676.553us         9.35%       9.064ms       4.532ms       0.000us         0.00%       6.979ms       3.489ms             2  
+                                      parameter_network         5.14%       4.986ms        19.39%      18.795ms      18.795ms       0.000us         0.00%       3.718ms       3.718ms             1  
+                                            aten::index         3.70%       3.590ms         7.01%       6.793ms      22.718us       2.748ms         8.66%       2.925ms       9.782us           299  
+                                           aten::einsum         2.06%       2.000ms        12.04%      11.672ms     137.321us       0.000us         0.00%       2.438ms      28.684us            85  
+                                              aten::mul         3.19%       3.088ms         5.21%       5.051ms      12.918us       2.153ms         6.78%       2.153ms       5.506us           391  
+                                              aten::bmm         4.58%       4.436ms         5.57%       5.401ms      52.441us       2.109ms         6.64%       2.109ms      20.473us           103  
+void at::native::index_elementwise_kernel<128, 4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.763ms         5.55%       1.763ms       7.502us           235  
+                                   aten::scatter_reduce         0.38%     369.935us         1.14%       1.102ms      39.360us       1.522ms         4.79%       1.657ms      59.191us            28  
+void at::native::_scatter_gather_elementwise_kernel<...         0.00%       0.000us         0.00%       0.000us       0.000us       1.522ms         4.79%       1.522ms      54.339us            28  
+void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.443ms         4.55%       1.443ms       6.649us           217  
+                                                  gates         0.00%       0.000us         0.00%       0.000us       0.000us       1.245ms         3.92%       1.245ms       1.245ms             1  
+                                            aten::copy_         1.74%       1.683ms        16.74%      16.226ms      51.348us       1.121ms         3.53%       1.121ms       3.548us           316  
+                                              aten::add         2.60%       2.524ms         4.20%       4.075ms      12.236us       1.118ms         3.52%       1.118ms       3.359us           333  
+sm80_xmma_gemm_f64f64_f64f64_f64_nt_n_tilesize64x128...         0.00%       0.000us         0.00%       0.000us       0.000us       1.073ms         3.38%       1.073ms      82.503us            13  
+                                           aten::linear         0.29%     285.244us         4.20%       4.071ms      36.352us       0.000us         0.00%       1.052ms       9.395us           112  
+void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.038ms         3.27%       1.038ms       3.100us           335  
+void at::native::vectorized_gather_kernel<16, long>(...         0.00%       0.000us         0.00%       0.000us       0.000us       1.037ms         3.27%       1.037ms      13.825us            75  
+                                            aten::addmm         2.44%       2.368ms         3.31%       3.204ms      29.128us       1.026ms         3.23%       1.026ms       9.331us           110  
+                                     aten::scatter_add_         0.74%     714.546us         1.32%       1.276ms      13.575us     818.015us         2.58%     818.015us       8.702us            94  
+                                        aten::index_add         0.81%     789.608us         3.23%       3.134ms      40.699us       0.000us         0.00%     799.897us      10.388us            77  
+void at::native::_scatter_gather_elementwise_kernel<...         0.00%       0.000us         0.00%       0.000us       0.000us     749.567us         2.36%     749.567us       8.147us            92  
+                                              aten::sum         0.51%     498.165us         0.90%     875.035us      23.027us     543.583us         1.71%     611.807us      16.100us            38  
+                                              aten::cat         1.16%       1.125ms         1.87%       1.814ms      15.775us     606.262us         1.91%     606.262us       5.272us           115  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us     562.434us         1.77%     562.434us       5.208us           108  
+                                          aten::nonzero         0.57%     554.102us         1.35%       1.309ms      76.973us     556.316us         1.75%     556.316us      32.724us            17  
+void cutlass::Kernel2<cutlass_80_tensorop_d884gemm_6...         0.00%       0.000us         0.00%       0.000us       0.000us     537.600us         1.69%     537.600us      10.143us            53  
+                                                 bonded         0.00%       0.000us         0.00%       0.000us       0.000us     481.662us         1.52%     481.662us     240.831us             2  
+void cutlass::Kernel2<cutlass_80_tensorop_d884gemm_3...         0.00%       0.000us         0.00%       0.000us       0.000us     476.001us         1.50%     476.001us       7.677us            62  
+                                            aten::fill_         0.89%     864.087us         1.99%       1.931ms      10.109us     455.719us         1.44%     455.719us       2.386us           191  
+void at::native::reduce_kernel<512, 1, at::native::R...         0.00%       0.000us         0.00%       0.000us       0.000us     450.623us         1.42%     450.623us      15.539us            29  
+                                            aten::clone         0.24%     228.724us         2.31%       2.238ms      24.330us       0.000us         0.00%     441.374us       4.798us            92  
+                                              aten::sub         1.14%       1.101ms         1.83%       1.776ms      11.761us     431.804us         1.36%     431.804us       2.860us           151  
+                                                 _Field         0.29%     279.060us         0.71%     692.123us      57.677us       0.000us         0.00%     423.169us      35.264us            12  
+                             torchff::slater_elec_field         0.08%      74.192us         0.39%     382.857us      31.905us     394.305us         1.24%     423.169us      35.264us            12  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us     420.123us         1.32%     420.123us       4.943us            85  
+void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us     407.333us         1.28%     407.333us       2.410us           169  
+                                            aten::zero_         0.38%     369.133us         2.17%       2.099ms      12.274us       0.000us         0.00%     400.809us       2.344us           171  
+void (anonymous namespace)::field_kernel<double>(dou...         0.00%       0.000us         0.00%       0.000us       0.000us     394.305us         1.24%     394.305us      32.859us            12  
+                                                  gates         0.51%     494.891us         1.83%       1.770ms       1.770ms       0.000us         0.00%     392.255us     392.255us             1  
+                                    aten::nonzero_numpy         0.01%      13.421us         0.59%     572.675us      95.446us       0.000us         0.00%     379.741us      63.290us             6  
+                                             aten::silu         0.66%     638.170us         1.06%       1.030ms      14.708us     377.957us         1.19%     377.957us       5.399us            70  
+void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us     377.957us         1.19%     377.957us       5.399us            70  
+                         Memcpy DtoD (Device -> Device)         0.00%       0.000us         0.00%       0.000us       0.000us     363.585us         1.15%     363.585us       2.473us           147  
+                                          aten::reshape         0.73%     706.047us         2.92%       2.830ms       4.457us       0.000us         0.00%     330.079us       0.520us           635  
+                                  aten::linalg_lu_solve         0.30%     290.630us         1.08%       1.044ms      87.023us     243.902us         0.77%     326.623us      27.219us            12  
+void at_cuda_detail::cub::detail::select::DeviceSele...         0.00%       0.000us         0.00%       0.000us       0.000us     326.241us         1.03%     326.241us      19.191us            17  
+void cutlass::Kernel2<cutlass_80_tensorop_d884gemm_3...         0.00%       0.000us         0.00%       0.000us       0.000us     315.806us         0.99%     315.806us      16.621us            19  
+                                            aten::stack         0.23%     222.236us         1.21%       1.168ms      22.907us       0.000us         0.00%     285.946us       5.607us            51  
+                                              aten::div         0.76%     733.263us         1.22%       1.181ms      13.421us     277.629us         0.87%     277.629us       3.155us            88  
+void cutlass::Kernel2<cutlass_80_tensorop_d884gemm_3...         0.00%       0.000us         0.00%       0.000us       0.000us     271.328us         0.85%     271.328us      30.148us             9  
 -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
-Self CPU time total: 105.633ms
-Self CUDA time total: 32.517ms
+Self CPU time total: 96.926ms
+Self CUDA time total: 31.739ms
