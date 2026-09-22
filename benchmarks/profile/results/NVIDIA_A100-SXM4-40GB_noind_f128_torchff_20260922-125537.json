@@ -1,0 +1,263 @@
+{
+  "checkpoint": "/global/cfs/cdirs/m3196/heindelj/software/rsfff/checkpoints/water_film_full/best.pt",
+  "torch": "2.14.0+cu130",
+  "dtype": "torch.float64",
+  "python": "3.11.16",
+  "host": "nid002728",
+  "results": [
+    {
+      "structure": "w6_mp2_avtz",
+      "n_atoms": 18,
+      "n_waters": 6,
+      "frames": 128,
+      "induction": false,
+      "device": "cuda",
+      "tag": "NVIDIA_A100-SXM4-40GB",
+      "ff_backend": "torchff",
+      "loss": "energy_forces",
+      "n_pairs": 19584,
+      "n_pairs_intra": 2304,
+      "regions": {
+        "projector_features": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 22.905151999999994,
+          "calls": 1
+        },
+        "neighbor_list": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 8.84289919999998,
+          "calls": 2
+        },
+        "parameter_network": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 18.8275904,
+          "calls": 1
+        },
+        "gates": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 1.2257470000000044,
+          "calls": 1
+        },
+        "elst_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 16.293446400000004,
+          "calls": 1
+        },
+        "pauli_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 4.687391999999993,
+          "calls": 1
+        },
+        "disp_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.07753600000001315,
+          "calls": 1
+        },
+        "bonded": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.2321472000000009,
+          "calls": 1
+        }
+      },
+      "forward_ms": 62.345971004106104,
+      "forward_forces_ms": 133.8514790404588,
+      "train_step_ms": 315.20505697699264,
+      "train_peak_gb": 1.392536576,
+      "train_phases_ms": {
+        "forward": 68.03831004071981,
+        "first_backward": 74.45043395273387,
+        "second_backward": 172.86058195168152
+      },
+      "train_attrib_ms": {
+        "forward": {
+          "other": 2.220836999999688,
+          "projector_features": 9.93734300000001,
+          "neighbor_list": 6.528651999999958,
+          "parameter_network": 3.5019109999999856,
+          "gates": 0.37004800000003163,
+          "elst_pairs": 3.7421289999998555,
+          "pauli_pairs": 0.9415679999999411,
+          "disp_pairs": 0.011199999999997089,
+          "bonded": 0.03522999999998137
+        },
+        "first_backward": {
+          "other": 1.4299529999999505,
+          "bonded": 0.024960000000006404,
+          "disp_pairs": 0.012192000000010013,
+          "pauli_pairs": 2.1137369999999644,
+          "elst_pairs": 8.39900500000034,
+          "gates": 0.24038000000000465,
+          "neighbor_list": 0.1608310000000347,
+          "parameter_network": 2.394405000000319,
+          "projector_features": 4.539196000000433
+        },
+        "second_backward": {
+          "other": 2.9041909999990603,
+          "bonded": 0.06988899999982096,
+          "projector_features": 10.711997999999586,
+          "parameter_network": 13.385215999999781,
+          "neighbor_list": 0.24198300000003656,
+          "gates": 1.7784570000001112,
+          "elst_pairs": 22.35171900000132,
+          "pauli_pairs": 5.740116999998223,
+          "disp_pairs": 0.0412160000000149
+        }
+      },
+      "train_second_backward_top_nodes_ms": {
+        "MulBackward0": 24.26662699999829,
+        "BmmBackward0": 7.595717999999819,
+        "IndexBackward0": 7.576873999999108,
+        "AddmmBackward0": 3.321626000000164,
+        "NegBackward0": 2.31339300000036,
+        "EmbeddingBackward0": 1.3350119999999297,
+        "MmBackward0": 1.2715150000000721,
+        "SelectBackward0": 1.0775930000002263,
+        "torch::autograd::CopySlices": 0.9058550000000396,
+        "_StackBackward": 0.8434869999999646,
+        "DivBackward0": 0.8096319999999251,
+        "SliceBackward0": 0.7481350000003003,
+        "SubBackward0": 0.6771530000001367,
+        "UnbindBackward0": 0.5665249999998195,
+        "AsStridedBackward0": 0.5089950000000827,
+        "SiluBackward0": 0.4700169999997597,
+        "ViewBackward0": 0.4191350000000093,
+        "IndexPutImplBackward0": 0.4188749999998836,
+        "SigmoidBackward0": 0.2731479999998992,
+        "UnsqueezeBackward0": 0.25369799999997483,
+        "AddBackward0": 0.23379599999982748,
+        "PowBackward0": 0.2034250000002794,
+        "IndexAddBackward0": 0.13273599999997532,
+        "TBackward0": 0.08326299999997719,
+        "IndexSelectBackward0": 0.07465600000001724
+      },
+      "cap_events": {}
+    },
+    {
+      "structure": "w21_mp2_avtz",
+      "n_atoms": 63,
+      "n_waters": 21,
+      "frames": 128,
+      "induction": false,
+      "device": "cuda",
+      "tag": "NVIDIA_A100-SXM4-40GB",
+      "ff_backend": "torchff",
+      "loss": "energy_forces",
+      "n_pairs": 249984,
+      "n_pairs_intra": 8064,
+      "regions": {
+        "projector_features": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 54.095884199999986,
+          "calls": 1
+        },
+        "neighbor_list": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 23.37140720000003,
+          "calls": 2
+        },
+        "parameter_network": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 18.626997199999984,
+          "calls": 1
+        },
+        "gates": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.4871108000000327,
+          "calls": 1
+        },
+        "elst_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 22.79608519999999,
+          "calls": 1
+        },
+        "pauli_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 6.948800999999989,
+          "calls": 1
+        },
+        "disp_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.01732480000000796,
+          "calls": 1
+        },
+        "bonded": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.040601600000011964,
+          "calls": 1
+        }
+      },
+      "forward_ms": 146.52398298494518,
+      "forward_forces_ms": 220.79972800565884,
+      "train_step_ms": 420.22855899995193,
+      "train_peak_gb": 18.344792576,
+      "train_phases_ms": {
+        "forward": 148.89266103273258,
+        "first_backward": 76.15675998385996,
+        "second_backward": 180.8673159684986
+      },
+      "train_attrib_ms": {
+        "forward": {
+          "other": 28.41062600000009,
+          "projector_features": 50.037828999999924,
+          "neighbor_list": 19.93334999999981,
+          "parameter_network": 5.995043999999987,
+          "gates": 0.40348899999998683,
+          "elst_pairs": 19.842863999999537,
+          "pauli_pairs": 4.6504660000000735,
+          "disp_pairs": 0.01603200000000652,
+          "bonded": 0.03113600000005681
+        },
+        "first_backward": {
+          "other": 2.246529000000126,
+          "bonded": 0.024829999999928985,
+          "disp_pairs": 0.0652160000000149,
+          "pauli_pairs": 6.15589000000013,
+          "elst_pairs": 24.200317999999942,
+          "gates": 0.31001600000009055,
+          "neighbor_list": 0.3372159999999276,
+          "parameter_network": 4.925754999999946,
+          "projector_features": 11.779241999999824
+        },
+        "second_backward": {
+          "other": 5.264030000000959,
+          "bonded": 0.05951999999978579,
+          "projector_features": 28.72253499999945,
+          "parameter_network": 23.95153299999755,
+          "neighbor_list": 0.4726069999994943,
+          "gates": 3.0676090000005787,
+          "elst_pairs": 67.99937300000177,
+          "pauli_pairs": 17.19278299999889,
+          "disp_pairs": 0.14723199999990175
+        }
+      },
+      "train_second_backward_top_nodes_ms": {
+        "MulBackward0": 40.4987200000009,
+        "BmmBackward0": 35.36821799999999,
+        "IndexBackward0": 17.237410999997287,
+        "UnbindBackward0": 14.106663999999931,
+        "NegBackward0": 6.4700390000004555,
+        "_StackBackward": 6.000034000000393,
+        "AddmmBackward0": 4.617215999999666,
+        "SelectBackward0": 2.825761000000173,
+        "torch::autograd::CopySlices": 2.461799000000232,
+        "IndexPutImplBackward0": 2.1694740000000454,
+        "MmBackward0": 2.1473919999997597,
+        "ViewBackward0": 1.7107520000005025,
+        "AsStridedBackward0": 1.6753579999997745,
+        "SliceBackward0": 1.3946339999997872,
+        "DivBackward0": 1.3180189999997964,
+        "SubBackward0": 1.2781780000000145,
+        "SiluBackward0": 0.7790700000001234,
+        "UnsqueezeBackward0": 0.6428150000000024,
+        "SigmoidBackward0": 0.5531519999998854,
+        "MvBackward0": 0.5412480000000214,
+        "IndexSelectBackward0": 0.44867400000005725,
+        "IndexAddBackward0": 0.42768000000005124,
+        "EmbeddingBackward0": 0.4115159999995958,
+        "AddBackward0": 0.32626900000002934,
+        "PowBackward0": 0.25616499999939696
+      },
+      "cap_events": {}
+    }
+  ]
+}
