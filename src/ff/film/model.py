@@ -43,12 +43,11 @@ from ...mlip.switch import pairwise_switch
 from ...mlip.sqe import sqe_solve
 from ..damping import fermi_switch
 from .. import backend as ff_backend
-from ..backend import slater_elec_pair_energy
+from ..backend import slater_elec_pair_energy, slater_pauli_pair_energy
 from ..expert_model import ClassicalSpec
 from ..fragment_state import FragmentStateEmbedding
 from ..multipole import build_polytensor, spherical_to_cartesian_quadrupole
 from ..pairs import intra_fragment_channels, union_channels, union_pairs
-from ..pauli import slater_pauli_pair_energy
 from ..polarization import LevelOutput, coupled_response
 from ..response import ResponseParameters, fragment_polarizability
 from ..units import BOHR_ANG
@@ -281,8 +280,8 @@ class FilmModel(nn.Module):
         b_p_i = self._route(pb0[i], pb[i], p_intra)
         b_p_j = self._route(pb0[j], pb[j], p_intra)
         e_pauli = slater_pauli_pair_energy(
-            dr_au, r_au, poly_i, poly_j,
-            (0.5 * (b_p_i.log() + b_p_j.log())).exp(), max_rank=self.max_rank,
+            positions, pair_index, poly_i, poly_j,
+            (0.5 * (b_p_i.log() + b_p_j.log())).exp(), dr_au=dr_au, r_au=r_au,
         )
 
         spec_disp = self.classical["disp"]

@@ -33,7 +33,7 @@ import torch
 from .units import BOHR_ANG
 
 __all__ = ["active_backend", "set_backend", "tt_dispersion", "bonded_energy", "slater_elec_field",
-           "slater_elec_pair_energy", "HAVE_TORCHFF"]
+           "slater_elec_pair_energy", "slater_pauli_pair_energy", "HAVE_TORCHFF"]
 
 try:
     from torchff import ffterms as _ffterms
@@ -200,3 +200,33 @@ def slater_elec_pair_energy(
     if gate is None:
         gate = torch.ones(pair_index.shape[1], dtype=positions_ang.dtype, device=positions_ang.device)
     return slaterelec.slater_elec_pair_energy(positions_ang / BOHR_ANG, pair_index.t(), b, gate, m, m_nuc)
+
+
+# --------------------------------------------------------------------------------------
+# Slater multipolar Pauli repulsion
+# --------------------------------------------------------------------------------------
+
+def slater_pauli_pair_energy(
+    positions_ang: torch.Tensor,   # (N, 3) Angstrom
+    pair_index: torch.Tensor,      # (2, P)
+    poly_i: torch.Tensor,          # (P, K) Pauli polytensor gathered onto i
+    poly_j: torch.Tensor,          # (P, K) Pauli polytensor gathered onto j
+    b_ij: torch.Tensor,            # (P,) combined exponent, 1/bohr
+    *,
+    dr_au: torch.Tensor | None = None,   # torch path: reuse the model's (P, 3) r_j - r_i in bohr
+    r_au: torch.Tensor | None = None,    # torch path: reuse the model's (P,) distances in bohr
+) -> torch.Tensor:
+    """``(P,)`` ``poly_j^T f_2c(b_ij r) T poly_i`` in Hartree; double backward on both paths (M3)."""
+    if active_backend(positions_ang) == "torch":
+        from .pauli import slater_pauli_pair_energy as _torch_pauli
+
+        if dr_au is None:
+            i, j = pair_index[0], pair_index[1]
+            dr_au = (positions_ang[j] - positions_ang[i]) / BOHR_ANG
+        if r_au is None:
+            r_au = dr_au.norm(dim=-1)
+        max_rank = {1: 0, 4: 1, 10: 2}[int(poly_i.shape[1])]
+        return _torch_pauli(dr_au, r_au, poly_i, poly_j, b_ij, max_rank=max_rank)
+    from torchff import slaterelec
+
+    return slaterelec.slater_pauli_pair_energy(positions_ang / BOHR_ANG, pair_index.t(), b_ij, poly_i, poly_j)

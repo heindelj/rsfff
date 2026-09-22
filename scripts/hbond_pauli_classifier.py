@@ -14,8 +14,16 @@ to ALMO-EDA energy components alone.
 The signed distance from that line is the classifier score, and the two histograms are the
 score split by the ``r``-``psi`` label.
 
-**Panel B.** The 2-body / many-body split of induction, dispersion and exchange (Pauli) for
-one large cluster, by direct subtraction:
+**Panel B.** The monomer molecular polarizability against its Q-Chem label, as the three
+sorted eigenvalues plus the isotropic mean. Eigenvalues and not tensor components, because
+the reference geometries sit in arbitrary orientations: a component-wise comparison would be
+reporting the sampling of Euler angles, not the response.
+
+**Panel C.** Predicted-vs-reference correlation for each ALMO-EDA component the model fits
+(frozen electrostatics, Pauli repulsion, dispersion, induction = pol + CT).
+
+Also computed, and written to the ``.npz`` although no longer plotted, is the 2-body /
+many-body split of those channels for one large cluster by direct subtraction:
 
     E^(2) = sum_{i<j} E(dimer ij),    E^(>2) = E(cluster) - E^(2)
 
@@ -43,13 +51,24 @@ from rsfff.ff.hbond import dimer_geometry, hbond_labels, hbonds_per_molecule
 from rsfff.ff.many_body import subset_batch
 from rsfff.train.build_film import build_film_model
 from rsfff.train.data import load_extxyz, load_reference_energies
-from rsfff.ff.units import KJMOL_PER_HARTREE
+from rsfff.ff.units import BOHR_ANG, KJMOL_PER_HARTREE
 
 #: Thermally sampled small clusters, many frames each -- these supply the *non*-hydrogen-
 #: bonded population. The optimized large clusters below are almost entirely bonded, so a
 #: set made only of them would make the classification trivially easy.
 SMALL = [f"data/wb97mv_tzvpd/w{n}_wb97mv_tzvpd.xyz" for n in (2, 3, 4, 5)]
 LARGE_DIR = Path("data/wb97mv_tzvpd_large")
+
+#: The ALMO-EDA components the model has a channel for, mapped to the ``batch.eda`` keys
+#: that make up their label. ``induction`` is the one that is a sum: the model solves
+#: polarization and charge transfer together, so ``pol`` and ``ct`` are only separable in
+#: the reference, not in the prediction.
+EDA_TERMS: dict[str, tuple[str, ...]] = {
+    "elst": ("cls_elec",),
+    "pauli": ("mod_pauli",),
+    "disp": ("disp",),
+    "induction": ("pol", "ct"),
+}
 
 
 def load_film_checkpoint(path: str, device: str = "cpu"):
@@ -86,6 +105,11 @@ def collect_pairs(model, datasets, *, r_max: float, device: str, batch_size: int
                                  "q_h", "hb_occ", "hb_pmf", "size", "frame", "acceptor_uid",
                                  "donor_uid")}
     n_by_size: dict[int, list[float]] = {}
+    # Predicted vs reference interaction energies, harvested from the same forward pass the
+    # pair rows come from -- running the model twice over the same frames would be the only
+    # way these two halves of the figure could ever disagree.
+    energies: dict[str, list] = {f"{k}_{w}": [] for k in EDA_TERMS for w in ("pred", "ref")}
+    energies["n_frag"] = []
     # A running counter so an (acceptor oxygen, frame) pair has one id across the whole run:
     # `q_O` is a per-atom quantity shared by every pair that oxygen appears in, and grouping
     # on it is the only way to see what it can and cannot resolve.
@@ -97,6 +121,24 @@ def collect_pairs(model, datasets, *, r_max: float, device: str, batch_size: int
             batch = ds.flat_batch(indices).to(device)
             with torch.no_grad():
                 out = model(batch)
+            if batch.eda is not None:
+                for name, components in EDA_TERMS.items():
+                    if name not in out.interaction:
+                        continue
+                    if any(c not in batch.eda for c in components):
+                        continue
+                    energies[f"{name}_pred"].append(
+                        out.interaction[name].detach().cpu().numpy() * KJMOL_PER_HARTREE
+                    )
+                    energies[f"{name}_ref"].append(
+                        sum(batch.eda[c] for c in components).cpu().numpy()
+                        * KJMOL_PER_HARTREE
+                    )
+                energies["n_frag"].append(
+                    np.bincount(batch.fragment_to_batch.cpu().numpy(),
+                                minlength=batch.n_systems)
+                )
+
             q = out.parameters.pauli[0].detach().cpu().numpy()
             q_iso = out.parameters.pauli0[0].detach().cpu().numpy()
             b_idx = batch.batch_idx.cpu().numpy()
@@ -134,7 +176,9 @@ def collect_pairs(model, datasets, *, r_max: float, device: str, batch_size: int
         print(f"  {tag}: {len(frames)} frames, {sum(len(c) for c in columns['r'])} pairs so far",
               flush=True)
 
-    return {k: np.concatenate(v) for k, v in columns.items()}, n_by_size
+    pairs = {k: np.concatenate(v) for k, v in columns.items()}
+    energy = {f"e_{k}": np.concatenate(v) for k, v in energies.items() if v}
+    return pairs, energy, n_by_size
 
 
 def _best_threshold(score, label):
@@ -220,6 +264,29 @@ def classification_metrics(pred, label):
 
 
 @torch.no_grad()
+def collect_polarizability(model, dataset, *, device: str, batch_size: int = 64):
+    """``(pred, ref)`` molecular polarizability tensors, ``(M, 3, 3)`` each.
+
+    Only the dedicated monomer file carries this label, and only monomers may carry it: a
+    cluster's polarizability is not the sum of its fragments' isolated values, so
+    :func:`rsfff.train.loss.fragment_polarizability_loss` refuses a multi-fragment frame
+    outright. Both tensors are in the label's own units, ``e^2 Angstrom^2 / Ha``; the caller
+    converts.
+    """
+    pred, ref = [], []
+    for start in range(0, len(dataset), batch_size):
+        batch = dataset.flat_batch(
+            list(range(start, min(start + batch_size, len(dataset))))
+        ).to(device)
+        if batch.polarizability is None:
+            raise ValueError("this dataset carries no polarizability label")
+        out = model(batch, with_polarizability=True)
+        pred.append(out.polarizability.detach().cpu().numpy())
+        ref.append(batch.polarizability.cpu().numpy())
+    return np.concatenate(pred), np.concatenate(ref)
+
+
+@torch.no_grad()
 def two_body_split(model, batch, *, channels, device, dimer_chunk: int = 64):
     """``{channel: (total, two_body)}`` in Hartree for a single cluster frame.
 
@@ -282,8 +349,8 @@ def main() -> None:
         ds = load_extxyz(str(path), dtype=dtype)
         datasets[path.stem.split("_")[0] + "-opt"] = (ds, list(range(len(ds))))
 
-    print("collecting pairs ...", flush=True)
-    data, n_by_size = collect_pairs(
+    print("collecting pairs and interaction energies ...", flush=True)
+    data, energy, n_by_size = collect_pairs(
         model, datasets, r_max=args.r_max, device=args.device, batch_size=args.batch_size
     )
     print(f"{len(data['r'])} candidate O...H pairs; "
@@ -329,7 +396,32 @@ def main() -> None:
     for k, v in acc_counts.items():
         print(f"    {k} accepted: n={v.size:5d}  q_O = {v.mean():.4f} +- {v.std():.4f} e")
 
-    # --- panel B ---------------------------------------------------------------------------
+    # --- panel C: how well each EDA channel is reproduced -------------------------------
+    print(f"EDA channels over {energy['e_n_frag'].size} frames (kJ/mol):")
+    for name in EDA_TERMS:
+        pr, rf = energy[f"e_{name}_pred"], energy[f"e_{name}_ref"]
+        mae = float(np.abs(pr - rf).mean())
+        r2 = 1.0 - float(((pr - rf) ** 2).sum() / ((rf - rf.mean()) ** 2).sum())
+        print(f"  {name:>10s}: MAE {mae:7.3f}   R2 {r2:.5f}   range [{rf.min():.1f}, {rf.max():.1f}]")
+
+    # --- panel B: monomer polarizability ------------------------------------------------
+    print(f"polarizability on {cfg.data.monomer_path} ...", flush=True)
+    monomers = load_extxyz(cfg.data.monomer_path, dtype=dtype)
+    alpha_pred, alpha_ref = collect_polarizability(
+        model, monomers, device=args.device, batch_size=args.batch_size
+    )
+    # e^2 Ang^2 / Ha -> a0^3, the unit polarizabilities are quoted in.
+    to_au = 1.0 / (BOHR_ANG * BOHR_ANG)
+    eig_pred = np.linalg.eigvalsh(alpha_pred)[:, ::-1] * to_au
+    eig_ref = np.linalg.eigvalsh(alpha_ref)[:, ::-1] * to_au
+    iso_pred, iso_ref = eig_pred.mean(axis=1), eig_ref.mean(axis=1)
+    for k, name in enumerate(("alpha_1", "alpha_2", "alpha_3")):
+        print(f"  {name}: model {eig_pred[:, k].mean():6.3f}  QM {eig_ref[:, k].mean():6.3f}"
+              f"  MAE {np.abs(eig_pred[:, k] - eig_ref[:, k]).mean():.4f} a.u.")
+    print(f"  isotropic: model {iso_pred.mean():6.3f}  QM {iso_ref.mean():6.3f}"
+          f"  MAE {np.abs(iso_pred - iso_ref).mean():.4f} a.u.")
+
+    # --- the many-body split (kept in the npz, no longer plotted) -----------------------
     mbe_path = LARGE_DIR / f"{args.mbe_cluster}_wb97mv_tzvpd.xyz"
     mbe_ds = load_extxyz(str(mbe_path), dtype=dtype)
     frame = mbe_ds.flat_batch([args.mbe_frame]).to(args.device)
@@ -360,6 +452,10 @@ def main() -> None:
         metrics=np.array([metrics[k] for k in ("accuracy", "precision", "recall", "mcc")]),
         metrics_pmf=np.array([metrics_pmf[k] for k in ("accuracy", "precision", "recall", "mcc")]),
         cutoff_agreement=agree,
+        eda_terms=np.array(list(EDA_TERMS)),
+        alpha_eig_pred=eig_pred, alpha_eig_ref=eig_ref,
+        alpha_iso_pred=iso_pred, alpha_iso_ref=iso_ref,
+        **energy,
         **data,
     )
     print(f"wrote {out.with_suffix('.npz')}")

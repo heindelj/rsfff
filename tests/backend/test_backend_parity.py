@@ -131,6 +131,39 @@ def test_leaf_slater_elec_matches_to_second_order(both_backends, K):
 
 
 @needs_torchff
+@pytest.mark.parametrize("K", [1, 4, 10])
+def test_leaf_slater_pauli_matches_to_second_order(both_backends, K):
+    """The Pauli leaf (M3): energies, first derivatives and the force-loss double backward."""
+    torch.manual_seed(0)
+    n = 9
+    pos = (torch.rand(n, 3, dtype=torch.float64, device=DEVICE) * 4).requires_grad_(True)
+    ii, jj = torch.triu_indices(n, n, 1)
+    pair_index = torch.stack([ii, jj]).to(DEVICE)
+    P = pair_index.shape[1]
+    b = (torch.rand(P, dtype=torch.float64, device=DEVICE) + 1.5).requires_grad_(True)
+    a_i = (torch.randn(P, K, dtype=torch.float64, device=DEVICE) * 0.3).requires_grad_(True)
+    a_j = (torch.randn(P, K, dtype=torch.float64, device=DEVICE) * 0.3).requires_grad_(True)
+    leaves = (pos, b, a_i, a_j)
+
+    def run(name):
+        backend.set_backend(name)
+        e = backend.slater_pauli_pair_energy(pos, pair_index, a_i, a_j, b)
+        w = torch.linspace(0.5, 1.5, e.numel(), dtype=e.dtype, device=e.device)
+        g = torch.autograd.grad((e * w).sum(), leaves, create_graph=True)
+        loss = sum((gk * gk).sum() for gk in g)
+        h = torch.autograd.grad(loss, leaves)
+        return e.detach(), [x.detach() for x in g], [x.detach() for x in h]
+
+    e_t, g_t, h_t = run("torch")
+    e_f, g_f, h_f = run("torchff")
+    assert torch.allclose(e_t, e_f, rtol=1e-12, atol=1e-15)
+    for x, y in zip(g_t, g_f):
+        assert torch.allclose(x, y, rtol=1e-10, atol=1e-13)
+    for x, y in zip(h_t, h_f):
+        assert torch.allclose(x, y, rtol=1e-9, atol=1e-12)
+
+
+@needs_torchff
 def test_leaf_bonded_matches(both_backends):
     from rsfff.ff.film.state import StateDescriptor
     from film_helpers import make_projector
