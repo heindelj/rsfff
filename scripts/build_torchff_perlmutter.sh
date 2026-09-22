@@ -11,7 +11,7 @@
 set -euo pipefail
 
 RSFFF_ENV="${RSFFF_ENV:-/global/cfs/cdirs/m3196/heindelj/rsfff}"
-CUDA_MODULE="${CUDA_MODULE:-cudatoolkit/12.4}"
+CUDA_MODULE="${CUDA_MODULE:-cudatoolkit/13.0}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"   # A100
 export MAX_JOBS="${MAX_JOBS:-8}"
 # Only the extensions rsfff uses. The full set is 15 nvcc builds in sequence (pme/cmm/
