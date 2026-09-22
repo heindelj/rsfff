@@ -27,6 +27,33 @@ sbatch benchmarks/profile/perlmutter.sbatch
 run with `--skip-train-step` guarded against OOM. Edit the account/env paths at the top if
 they differ.
 
+## Training-step split (post-M5)
+
+The training step is 70-80 % backward, which the forward region split cannot see. Every run
+now also times the step per phase (forward / first backward = dE/dR with `create_graph` /
+second backward = the loss) with a sync between phases, and profiles one step attributing
+each backward kernel to the forward region whose autograd node ran it (autograd sequence
+numbers; custom `autograd.Function`s such as the torchff kernels and `_CoupledSolve` fall
+back to the last op recorded before them). The `.md` gets one extra table per structure:
+wall per phase vs kernel-busy per phase (the gap is dispatch/sync idle), then busy ms per
+region and phase, plus the top autograd nodes of the second backward.
+
+```bash
+sbatch benchmarks/profile/perlmutter_train_split.sbatch
+```
+
+runs w6 + w21 at 128 frames four ways: torchff E+F, torchff `--loss energy` (no double
+backward), torchff `--no-induction` (no solve anywhere), and torch E+F for reference. Local
+smoke test of the same code path (CPU, seconds):
+
+```bash
+python benchmarks/profile/profile_film.py --device cpu --repeats 2 --frames 4 \
+    --structures benchmarks/structures/w6_mp2_avtz.xyz
+```
+
+`--no-train-split` turns the extra profiling off; `--trace` additionally writes a one-step
+`*_train_trace.json.gz`.
+
 ## Reading the table
 
 - Region columns are **forward-only** CUDA (or CPU) time per call; autograd runs the
