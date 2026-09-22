@@ -1,0 +1,283 @@
+{
+  "checkpoint": "/global/cfs/cdirs/m3196/heindelj/software/rsfff/checkpoints/water_film_full/best.pt",
+  "torch": "2.14.0+cu130",
+  "dtype": "torch.float64",
+  "python": "3.11.16",
+  "host": "nid001041",
+  "results": [
+    {
+      "structure": "w6_mp2_avtz",
+      "n_atoms": 18,
+      "n_waters": 6,
+      "frames": 128,
+      "induction": true,
+      "device": "cuda",
+      "tag": "NVIDIA_A100-SXM4-40GB",
+      "ff_backend": "torchff",
+      "loss": "energy_forces",
+      "n_pairs": 19584,
+      "n_pairs_intra": 2304,
+      "cg_iters": 11,
+      "regions": {
+        "projector_features": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 16.4920828,
+          "calls": 1
+        },
+        "neighbor_list": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 2.2400191999999914,
+          "calls": 2
+        },
+        "parameter_network": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 19.10575819999999,
+          "calls": 1
+        },
+        "gates": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 1.3399068,
+          "calls": 1
+        },
+        "elst_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.10427480000000507,
+          "calls": 1
+        },
+        "pauli_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.07832959999999875,
+          "calls": 1
+        },
+        "disp_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.07114220000000787,
+          "calls": 1
+        },
+        "bonded": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.49048220000002035,
+          "calls": 2
+        },
+        "coupled_solve": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 37.09988439999999,
+          "calls": 1
+        }
+      },
+      "n_op_events_forward": 18366,
+      "forward_ms": 63.63533600051596,
+      "forward_forces_ms": 117.81947899999068,
+      "train_step_ms": 249.92503900011798,
+      "train_peak_gb": 1.171057152,
+      "train_phases_ms": {
+        "forward": 67.49934099934762,
+        "first_backward": 45.549574999313336,
+        "second_backward": 131.08246800038614
+      },
+      "train_attrib_ms": {
+        "forward": {
+          "other": 2.4152279999999675,
+          "projector_features": 4.0672280000000285,
+          "neighbor_list": 0.5275510000000322,
+          "parameter_network": 3.7403729999999196,
+          "gates": 0.3882839999999851,
+          "elst_pairs": 0.022047000000005937,
+          "pauli_pairs": 0.013790999999997439,
+          "disp_pairs": 0.010815999999998894,
+          "bonded": 0.07350400000000809,
+          "coupled_solve": 7.508959999999774
+        },
+        "first_backward": {
+          "other": 1.4637919999999867,
+          "bonded": 0.06006599999999162,
+          "coupled_solve": 0.5344950000001117,
+          "disp_pairs": 0.013760000000009313,
+          "pauli_pairs": 0.042048999999999066,
+          "elst_pairs": 0.1399670000000042,
+          "gates": 0.2535020000000368,
+          "neighbor_list": 0.09673400000002584,
+          "parameter_network": 4.802689999999915,
+          "projector_features": 4.952334999999905
+        },
+        "second_backward": {
+          "other": 2.9704590000000315,
+          "bonded": 0.14553599999984726,
+          "coupled_solve": 8.384214999999356,
+          "projector_features": 11.324330999999104,
+          "parameter_network": 23.009542999998782,
+          "neighbor_list": 0.16498799999975017,
+          "gates": 1.8165979999996489,
+          "elst_pairs": 0.7218209999999672,
+          "pauli_pairs": 0.1893749999999709,
+          "disp_pairs": 0.04214400000000023
+        }
+      },
+      "train_second_backward_top_nodes_ms": {
+        "IndexBackward0": 9.501516999998916,
+        "_CoupledSolveBackward": 6.937472999999241,
+        "MulBackward0": 6.01623599999983,
+        "BmmBackward0": 5.79359499999971,
+        "AddmmBackward0": 4.396270000000019,
+        "EmbeddingBackward0": 2.2956739999999116,
+        "MmBackward0": 1.7650210000000661,
+        "DivBackward0": 1.3199929999996967,
+        "SelectBackward0": 1.23938899999985,
+        "_EnergyGradBackward": 1.1555790000000852,
+        "SliceBackward0": 1.0540239999998884,
+        "torch::autograd::CopySlices": 0.9202799999998824,
+        "SiluBackward0": 0.6146839999998046,
+        "_FieldBackward": 0.5843190000000177,
+        "SubBackward0": 0.5264889999995649,
+        "AsStridedBackward0": 0.5193569999999309,
+        "IndexPutImplBackward0": 0.43359700000006707,
+        "SigmoidBackward0": 0.37484900000013294,
+        "PowBackward0": 0.3570909999998694,
+        "NegBackward0": 0.34121300000007615,
+        "ViewBackward0": 0.32770999999984635,
+        "UnsqueezeBackward0": 0.3116459999998915,
+        "IndexAddBackward0": 0.290783999999956,
+        "_EnergyBackward": 0.284320000000007,
+        "AddBackward0": 0.15688999999989756
+      },
+      "cap_events": {}
+    },
+    {
+      "structure": "w21_mp2_avtz",
+      "n_atoms": 63,
+      "n_waters": 21,
+      "frames": 128,
+      "induction": true,
+      "device": "cuda",
+      "tag": "NVIDIA_A100-SXM4-40GB",
+      "ff_backend": "torchff",
+      "loss": "energy_forces",
+      "n_pairs": 249984,
+      "n_pairs_intra": 8064,
+      "cg_iters": 13,
+      "regions": {
+        "projector_features": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 33.29737419999999,
+          "calls": 1
+        },
+        "neighbor_list": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 2.19971280000002,
+          "calls": 2
+        },
+        "parameter_network": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 20.184959599999992,
+          "calls": 1
+        },
+        "gates": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.4904756000000023,
+          "calls": 1
+        },
+        "elst_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.15357980000002136,
+          "calls": 1
+        },
+        "pauli_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.05902660000000033,
+          "calls": 1
+        },
+        "disp_pairs": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.08133760000000766,
+          "calls": 1
+        },
+        "bonded": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 0.2542069999999891,
+          "calls": 2
+        },
+        "coupled_solve": {
+          "cpu_ms": 0.0,
+          "cuda_ms": 43.2172402,
+          "calls": 1
+        }
+      },
+      "n_op_events_forward": 19790,
+      "forward_ms": 111.5539259999423,
+      "forward_forces_ms": 175.14626999945904,
+      "train_step_ms": 302.98022700026195,
+      "train_peak_gb": 18.346381824,
+      "train_phases_ms": {
+        "forward": 113.23055699995166,
+        "first_backward": 44.529158999466745,
+        "second_backward": 144.49247999982617
+      },
+      "train_attrib_ms": {
+        "forward": {
+          "other": 28.611467999999956,
+          "projector_features": 30.67172000000002,
+          "neighbor_list": 0.5733339999999661,
+          "parameter_network": 6.025041000000077,
+          "gates": 0.40467800000004356,
+          "elst_pairs": 0.07235099999999511,
+          "pauli_pairs": 0.05641600000001199,
+          "disp_pairs": 0.015423999999999069,
+          "bonded": 0.06342400000001362,
+          "coupled_solve": 12.243414000000207
+        },
+        "first_backward": {
+          "other": 2.1182299999997487,
+          "bonded": 0.049821999999985565,
+          "coupled_solve": 1.4482749999997904,
+          "disp_pairs": 0.061568000000028406,
+          "pauli_pairs": 0.21449500000005356,
+          "elst_pairs": 1.09932600000003,
+          "gates": 0.3104309999999241,
+          "neighbor_list": 0.18099599999998464,
+          "parameter_network": 8.167827000000223,
+          "projector_features": 12.199766999999673
+        },
+        "second_backward": {
+          "other": 5.217126000000629,
+          "bonded": 0.12009600000019419,
+          "coupled_solve": 25.963926999999238,
+          "projector_features": 29.384170999999593,
+          "parameter_network": 37.367559999999884,
+          "neighbor_list": 0.309089999999851,
+          "gates": 3.081109000000346,
+          "elst_pairs": 7.949007999999914,
+          "pauli_pairs": 1.7781410000000033,
+          "disp_pairs": 0.14402999999991153
+        }
+      },
+      "train_second_backward_top_nodes_ms": {
+        "IndexBackward0": 21.182673000000126,
+        "_CoupledSolveBackward": 17.33458899999957,
+        "BmmBackward0": 13.907679999999877,
+        "_EnergyGradBackward": 13.676707999999868,
+        "MulBackward0": 12.036494999999501,
+        "_FieldBackward": 7.176465999999957,
+        "AddmmBackward0": 6.037239999999816,
+        "MmBackward0": 2.8304929999999877,
+        "torch::autograd::CopySlices": 2.468124000000098,
+        "SelectBackward0": 2.4587280000007015,
+        "_EnergyBackward": 2.2422679999999526,
+        "SliceBackward0": 1.95791599999959,
+        "AsStridedBackward0": 1.6813429999999643,
+        "DivBackward0": 1.624098000000231,
+        "_PauliGradBackward": 1.4610529999999562,
+        "IndexPutImplBackward0": 1.2039349999999103,
+        "SiluBackward0": 1.0169860000000917,
+        "UnsqueezeBackward0": 0.8232300000000395,
+        "SubBackward0": 0.7881619999998366,
+        "EmbeddingBackward0": 0.7345590000004159,
+        "SigmoidBackward0": 0.701248000000196,
+        "IndexAddBackward0": 0.5584969999999448,
+        "ViewBackward0": 0.5533750000000582,
+        "MvBackward0": 0.537021000000008,
+        "IndexSelectBackward0": 0.4947819999998319
+      },
+      "cap_events": {}
+    }
+  ]
+}
