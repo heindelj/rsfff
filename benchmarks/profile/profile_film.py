@@ -41,6 +41,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from rsfff import neighbors  # noqa: E402
+from rsfff.ff import backend as ff_backend  # noqa: E402
 from rsfff.ff.film import model as film_model  # noqa: E402
 from rsfff.ff.film import bonded as film_bonded  # noqa: E402
 from rsfff.md.film_driver import load_film_model, make_batch, water_fragment_index  # noqa: E402
@@ -102,10 +103,11 @@ def instrumented(model):
     patch(film_model, "union_channels", "neighbor_list")
     patch(film_model, "slater_elec_pair_energy", "elst_pairs")
     patch(film_model, "slater_pauli_pair_energy", "pauli_pairs")
-    patch(film_model, "tt_damped_c6_energy", "disp_pairs")
+    # the dispersion and bonded leaves go through rsfff.ff.backend (torch or torchff kernels)
+    patch(ff_backend, "tt_dispersion", "disp_pairs")
+    patch(ff_backend, "bonded_energy", "bonded")
+    patch(film_bonded.BondedTopology, "geometry", "bonded")  # torch path only, not nested
     patch(film_model, "coupled_response", "coupled_solve")
-    patch(film_bonded.BondedParameters, "energy", "bonded")
-    patch(film_bonded.BondedTopology, "geometry", "bonded")
     # instance-level: nn.Module.__call__ looks up self.forward, so this shadows it
     for attr, name in (("projector", "projector_features"), ("network", "parameter_network")):
         sub = getattr(model, attr)
@@ -289,7 +291,8 @@ def main(argv=None):
             model, pos, z, frag, device, with_induction=with_induction, n_frames=args.frames
         )
         rec = dict(structure=name, n_atoms=n_atoms, n_waters=int(frag.max()) + 1, frames=args.frames,
-                   induction=with_induction, device=str(device), tag=tag)
+                   induction=with_induction, device=str(device), tag=tag,
+                   ff_backend=ff_backend.active_backend(torch.zeros(1, device=device)))
 
         # -- forward region split --------------------------------------------------------
         regions, prof = profile_regions(model, forward, device, args.repeats)
@@ -327,7 +330,8 @@ def main(argv=None):
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     frames = f"_f{args.frames}" if args.frames != 1 else ""
-    base = out_dir / f"{tag}_{'ind' if with_induction else 'noind'}{frames}_{stamp}"
+    be = ff_backend.active_backend(torch.zeros(1, device=device))
+    base = out_dir / f"{tag}_{'ind' if with_induction else 'noind'}{frames}_{be}_{stamp}"
     with open(base.with_suffix(".json"), "w") as fh:
         json.dump(dict(
             checkpoint=args.checkpoint, torch=torch.__version__, dtype=str(torch.get_default_dtype()),
@@ -351,7 +355,7 @@ def _format_table(results):
     if not results:
         return ""
     key = "cuda_ms" if results[0]["device"].startswith("cuda") else "cpu_ms"
-    cols = ["structure", "frames", "n_atoms", "n_pairs", "forward_ms", "forward_forces_ms", "train_step_ms",
+    cols = ["structure", "ff_backend", "frames", "n_atoms", "n_pairs", "forward_ms", "forward_forces_ms", "train_step_ms",
             "train_peak_gb"] + REGIONS
     lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for r in results:
