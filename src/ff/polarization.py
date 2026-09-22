@@ -57,6 +57,7 @@ from .coupled_solve import (
     coupled_energy,
     coupled_solve,
     multipoles_from_state,
+    stationary_view,
 )
 from .electrostatics import slater_elec_pair_energy, slater_elec_tensors
 from .multipole import build_polytensor, spherical_to_cartesian_quadrupole
@@ -178,16 +179,25 @@ def coupled_response(
         sys, rtol=rtol, atol=atol, maxiter=maxiter, info_out=info_out
     )
     info = info_out[0]
+    # The exported multipoles keep the full adjoint path: whatever consumes them (the
+    # environment features, ``atomic_energy``) is not stationary in ``x*``. The energy below
+    # is the minimized functional itself and *is*, so it reads a stationary view -- same
+    # values, same forces, and under a force loss it skips two solves whose contributions
+    # cancel identically (see ``_Stationary``).
     q, mu, theta = multipoles_from_state(sys, state)
     mu = mu if mu.numel() else None
     theta = theta if theta.numel() else None
 
-    energy_internal = coupled_energy(sys, state)
+    state_s = stationary_view(state)
+    energy_internal = coupled_energy(sys, state_s)
+    q_s, mu_s, theta_s = multipoles_from_state(sys, state_s)
+    mu_s = mu_s if mu_s.numel() else None
+    theta_s = theta_s if theta_s.numel() else None
 
     # The pair half, through the frozen channel's own function on the relaxed multipoles.
-    quad_c = None if theta is None else spherical_to_cartesian_quadrupole(theta)
-    m_real = build_polytensor(q, mu, quad_c, max_rank=max_rank)
-    m_shell = build_polytensor(q - rp.z, mu, quad_c, max_rank=max_rank)
+    quad_c = None if theta_s is None else spherical_to_cartesian_quadrupole(theta_s)
+    m_real = build_polytensor(q_s, mu_s, quad_c, max_rank=max_rank)
+    m_shell = build_polytensor(q_s - rp.z, mu_s, quad_c, max_rank=max_rank)
     m_nuc = build_polytensor(rp.z, None, None, max_rank=max_rank)
     i, j = pair_index[0], pair_index[1]
     dr_au = (positions[j] - positions[i]) / BOHR_ANG

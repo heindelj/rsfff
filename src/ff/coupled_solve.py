@@ -348,8 +348,14 @@ def multipoles_from_state(sys: CoupledSystem, x: State, d_map=None):
     return q, mu, theta
 
 
-def _coupling_grad(sys: CoupledSystem, m: torch.Tensor) -> torch.Tensor:
+def _coupling_grad(sys: CoupledSystem, m: torch.Tensor, *, differentiable: bool = False) -> torch.Tensor:
     """``dE_coupling/dM`` at multipoles ``m``: (N, K).
+
+    ``differentiable=True`` asks for an operator whose autograd graph can be differentiated
+    *again* (the adjoint's residual VJP under a force loss, :class:`_CoupledSolve`). The torch
+    path always is. The on-the-fly path's CUDA kernel has a first-order VJP only, so with
+    ``differentiable=True`` it evaluates torchff's pure-torch reference field instead --
+    once per backward, never inside the CG loop.
 
     The coupling energy is exactly what
     :func:`rsfff.ff.electrostatics.slater_elec_pair_energy` sums, with ``m_shell = m - m_nuc``
@@ -368,7 +374,9 @@ def _coupling_grad(sys: CoupledSystem, m: torch.Tensor) -> torch.Tensor:
     if sys.on_the_fly:
         from .backend import slater_elec_field
 
-        return slater_elec_field(sys.positions, sys.pair_index, sys.b, sys.gate, m, sys.m_nuc)
+        return slater_elec_field(
+            sys.positions, sys.pair_index, sys.b, sys.gate, m, sys.m_nuc, reference=differentiable
+        )
 
     i, j = sys.pair_index[0], sys.pair_index[1]
     m_i, m_j = m[i], m[j]
@@ -391,7 +399,7 @@ def _coupling_grad(sys: CoupledSystem, m: torch.Tensor) -> torch.Tensor:
     return out.index_add(0, i, g_i).index_add(0, j, g_j)
 
 
-def _grad_state(sys: CoupledSystem, x: State, d_map) -> State:
+def _grad_state(sys: CoupledSystem, x: State, d_map, *, differentiable: bool = False) -> State:
     """``dE/d(v, u, w)`` at state ``x``. The single source of both ``A`` and ``b``.
 
     ``A x = _grad_state(x) - _grad_state(0)`` and ``b = _grad_state(0)``, because ``E`` is
@@ -403,7 +411,7 @@ def _grad_state(sys: CoupledSystem, x: State, d_map) -> State:
 
     m = _to_polytensor(q, mu, theta, sys.max_rank, d_map)
     g_q, g_mu, g_theta = _from_polytensor(
-        _coupling_grad(sys, m), sys.max_rank, d_map
+        _coupling_grad(sys, m, differentiable=differentiable), sys.max_rank, d_map
     )
 
     # charge sector: chi q + 1/2 eta q^2 + 1/2 s v^2, pulled back through q = q0 + B S v
@@ -661,12 +669,30 @@ def _rebuild(sys: CoupledSystem, params) -> CoupledSystem:
 
 
 class _CoupledSolve(torch.autograd.Function):
-    """Forward: CG under ``no_grad``. Backward: the adjoint of §6.2.
+    """Forward: CG under ``no_grad``. Backward: the adjoint of §6.2, itself differentiable.
 
-    ``R(x, theta) = grad_E(x; theta)`` is the residual the forward drove to zero, so the
-    implicit function theorem gives ``dx/dtheta = -A^-1 dR/dtheta`` and hence
-    ``dL/dtheta = -lambda^T dR/dtheta`` with ``A lambda = dL/dx``. ``A`` is symmetric, so the
-    adjoint reuses the same CG and the same preconditioner.
+    Solves ``A x = c`` with ``c = -b`` (``rhs=None``: minimize the functional) or ``c = rhs``
+    (the adjoint systems below). ``r(x, theta) = A(theta) x - c(theta)`` is the residual the
+    forward drove to zero, so the implicit function theorem gives ``dx/dtheta = -A^-1 dr/dtheta``
+    and hence ``dL/dtheta = -lambda^T dr/dtheta`` with ``A lambda = dL/dx``, and
+    ``dL/drhs = lambda``. ``A`` is symmetric, so the adjoint reuses the same CG and the same
+    preconditioner. Memory is flat in the iteration count: nothing is unrolled.
+
+    **Second order.** A force loss backpropagates through the forces, i.e. through this
+    ``backward``. Everything it produces must therefore itself carry a graph whenever the
+    caller asked for one (``create_graph=True`` puts grad mode on inside ``backward``):
+
+    * ``lambda`` is obtained by calling *this Function again* with ``rhs = dL/dx``, so its
+      dependence on ``theta`` (through ``A``) and on ``dL/dx`` is one more implicit adjoint,
+      not an unrolled CG;
+    * the residual VJP ``-lambda^T dr/dtheta`` is taken with ``create_graph=True`` on the live
+      ``theta`` and on the saved *output* ``x`` -- the graph then runs back into this node,
+      which is how ``dx*/dtheta`` enters the second derivative.
+
+    Without that, ``-lambda^T dr/dX`` (the adjoint part of the force, nonzero exactly when
+    something non-variational consumes ``x*``) enters the force loss as a constant and
+    ``dF/dtheta`` silently drops ``d/dtheta[lambda^T dr/dX]``. ``tests/test_ff_coupled_solve.py``
+    checks the force-loss gradient against central differences with such a consumer on.
 
     When nothing non-variational consumes ``x``, ``dL/dx`` is zero to CG tolerance: the adjoint
     exits on the first convergence test and contributes nothing, leaving exactly the
@@ -675,63 +701,128 @@ class _CoupledSolve(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, sys, cg_kwargs, info_out, *params):
+    def forward(ctx, sys, cg_kwargs, info_out, rhs_v, rhs_u, rhs_w, *params):
+        rhs = None if rhs_v is None else (rhs_v, rhs_u, rhs_w)
+        # unused outputs arrive in backward as None rather than zeros: with only stationary
+        # consumers of x* under create_graph (see _Stationary) that is every output, and the
+        # adjoint is then skipped outright instead of solving for an exactly-zero lambda
+        ctx.set_materialize_grads(False)
         with torch.no_grad():
             live = _rebuild(sys, params)
-            x, info = pcg(live, **cg_kwargs)
+            x, info = pcg(live, rhs=rhs, **cg_kwargs)
         if info_out is not None:
             info_out.append(info)
         ctx.sys = sys
         ctx.cg_kwargs = cg_kwargs
-        ctx.n_params = len(params)
-        ctx.save_for_backward(*x, *params)
+        ctx.has_rhs = rhs is not None
+        ctx.save_for_backward(*x, *(rhs if rhs is not None else ()), *params)
         ctx.info = info
-        return x[0], x[1], x[2], torch.tensor(
-            [info.n_iter], dtype=torch.int64, device=x[0].device
-        )
+        n_iter = torch.tensor([info.n_iter], dtype=torch.int64, device=x[0].device)
+        ctx.mark_non_differentiable(n_iter)
+        return x[0], x[1], x[2], n_iter
 
     @staticmethod
     def backward(ctx, g_v, g_u, g_w, _g_iter):
         saved = ctx.saved_tensors
         x = tuple(saved[:3])
-        params = saved[3:]
+        rhs = tuple(saved[3:6]) if ctx.has_rhs else None
+        params = saved[6:] if ctx.has_rhs else saved[3:]
         sys = ctx.sys
+        create = torch.is_grad_enabled()          # True iff the caller passed create_graph=True
+        if g_v is None and g_u is None and g_w is None:
+            return (None,) * (6 + len(params))
 
-        grad_x = (
-            torch.zeros_like(x[0]) if g_v is None else g_v,
-            torch.zeros_like(x[1]) if g_u is None else g_u,
-            torch.zeros_like(x[2]) if g_w is None else g_w,
+        grad_x = tuple(
+            torch.zeros_like(t) if g is None else g for t, g in zip(x, (g_v, g_u, g_w))
         )
-        with torch.no_grad():
-            live = _rebuild(sys, params)
-            if max(float(t.abs().max()) if t.numel() else 0.0 for t in grad_x) == 0.0:
-                lam = zero_state(live, x[0].dtype, x[0].device)
-            else:
-                lam, _ = pcg(live, rhs=grad_x, **ctx.cg_kwargs)
 
-        # -lambda^T dR/dtheta, with R evaluated at the *fixed* converged x.
-        with torch.enable_grad():
-            leaves = [
-                None if p is None else p.detach().requires_grad_(True) for p in params
-            ]
-            live2 = _rebuild(sys, leaves)
-            d_map = _spherical_to_poly_map(x[0].dtype, x[0].device)
-            res = _grad_state(live2, tuple(t.detach() for t in x), d_map)
-            needed = [p for p in leaves if p is not None]
-            grads = torch.autograd.grad(
-                [t for t in res if t.numel()],
-                needed,
-                grad_outputs=[-l for l, t in zip(lam, res) if t.numel()],
-                allow_unused=True,
-            )
-        out, k = [], 0
-        for p in leaves:
-            if p is None:
-                out.append(None)
-            else:
-                out.append(grads[k])
-                k += 1
-        return (None, None, None, *out)
+        # lambda = A^-1 dL/dx: the same Function, so it is differentiable when it needs to be.
+        if not create and max(float(t.abs().max()) if t.numel() else 0.0 for t in grad_x) == 0.0:
+            lam = zero_state(_rebuild(sys, params), x[0].dtype, x[0].device)
+        else:
+            lam = _CoupledSolve.apply(sys, ctx.cg_kwargs, None, *grad_x, *params)[:3]
+
+        # -lambda^T dr/dtheta at the converged x: a *partial* derivative in theta at fixed x,
+        # and each theta_k on its own (`gate` is a function of `positions`, and the caller's
+        # autograd adds that path itself).
+        #
+        # Without create_graph the leaves are detached copies, as a plain force evaluation
+        # wants. With it, every tensor enters through a fresh view (`view_as`): the VJP below
+        # captures its gradient at that view and never runs the view's history, so the value
+        # is still the partial (and the solve is not re-entered -- `x` is this node's own
+        # output), while the second backward, which follows the whole graph, passes through
+        # the views into the live theta, into `lambda`'s solve and back into this node for
+        # ``dx*/dtheta``.
+        if create:
+            leaves = [None if p is None else p.view_as(p) for p in params]
+            xx = tuple(t.view_as(t) for t in x)
+            rr = None if rhs is None else tuple(t.view_as(t) for t in rhs)
+        else:
+            leaves = [None if p is None else p.detach().requires_grad_(True) for p in params]
+            xx = tuple(t.detach() for t in x)
+            rr = None if rhs is None else tuple(t.detach() for t in rhs)
+        needed = [p for p in leaves if p is not None and p.requires_grad]
+        out = [None] * len(params)
+        if needed:
+            with torch.enable_grad():
+                live2 = _rebuild(sys, leaves)
+                d_map = _spherical_to_poly_map(x[0].dtype, x[0].device)
+                res = _grad_state(live2, xx, d_map, differentiable=create)
+                if rr is not None:                # r = A x - rhs = grad_E(x) - grad_E(0) - rhs
+                    zero = zero_state(live2, x[0].dtype, x[0].device)
+                    res0 = _grad_state(live2, zero, d_map, differentiable=create)
+                    res = tuple(a - b - c for a, b, c in zip(res, res0, rr))
+                sel = [k for k, t in enumerate(res) if t.numel() and t.requires_grad]
+                if sel:
+                    # the views of x / rhs are listed as inputs too: their gradients are
+                    # captured (and dropped) rather than propagated into their history
+                    extra = [t for t in xx if t.requires_grad]
+                    if rr is not None:
+                        extra += [t for t in rr if t.requires_grad]
+                    grads = torch.autograd.grad(
+                        [res[k] for k in sel],
+                        needed + extra,
+                        grad_outputs=[-lam[k] for k in sel],
+                        allow_unused=True,
+                        create_graph=create,
+                    )
+                    k = 0
+                    for idx, p in enumerate(leaves):
+                        if p is not None and p.requires_grad:
+                            out[idx] = grads[k]
+                            k += 1
+        grad_rhs = (None, None, None) if rhs is None else tuple(lam)
+        return (None, None, None, *grad_rhs, *out)
+
+
+class _Stationary(torch.autograd.Function):
+    """Identity whose first-order cotangent is dropped when a second-order graph is being built.
+
+    For a consumer that is *stationary* in ``x*`` (the functional itself: ``coupled_energy``
+    plus the pair energy), ``dL/dx`` is the residual, zero to CG tolerance, and the adjoint
+    contribution ``-lambda^T dr/dtheta`` it would produce is ``O(tol)``. Under a force loss
+    that tiny cotangent nevertheless carries a graph, and the second backward then evaluates
+    two full solves (``d lambda / d(dL/dx)`` and the re-entry for ``dx*/dtheta``) whose sum is
+    *identically* zero, because ``r(x*(theta), theta) == 0`` along the solution manifold. This
+    view drops the residual cotangent exactly when ``create_graph`` is on (grad mode is enabled
+    inside ``backward`` only then), skipping both solves; it passes everything else through --
+    in particular the second backward's own cotangent, which is how ``dx*/dtheta`` enters the
+    Hellmann-Feynman force's parameter gradient, and the ordinary first-order cotangent of a
+    plain force or energy evaluation. Never use it on a non-variational consumer of ``x*``.
+    """
+
+    @staticmethod
+    def forward(ctx, t):
+        return t.view_as(t)
+
+    @staticmethod
+    def backward(ctx, g):
+        return None if torch.is_grad_enabled() else g
+
+
+def stationary_view(x: State) -> State:
+    """``x`` for a consumer that is stationary in it; see :class:`_Stationary`."""
+    return tuple(_Stationary.apply(t) for t in x)
 
 
 def coupled_solve(
@@ -742,7 +833,7 @@ def coupled_solve(
     maxiter: int = 200,
     info_out: list | None = None,
 ) -> tuple[State, int]:
-    """Minimize the coupled functional. Differentiable through the adjoint.
+    """Minimize the coupled functional. Differentiable through the adjoint, to second order.
 
     Returns the rescaled state and the iteration count. Feed the state to
     :func:`multipoles_from_state` for ``(q, mu, Theta)`` and to :func:`coupled_energy` for the
@@ -752,7 +843,7 @@ def coupled_solve(
     """
     params = [getattr(sys, f) for f in _PARAM_FIELDS]
     kwargs = dict(rtol=rtol, atol=atol, maxiter=maxiter)
-    v, u, w, n_iter = _CoupledSolve.apply(sys, kwargs, info_out, *params)
+    v, u, w, n_iter = _CoupledSolve.apply(sys, kwargs, info_out, None, None, None, *params)
     return (v, u, w), int(n_iter.item())
 
 

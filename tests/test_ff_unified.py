@@ -1708,33 +1708,17 @@ def test_energy_gradient_stays_exact_once_the_coupled_solve_is_on():
         assert max(errs.values()) < 1e-4, (levels, errs)
 
 
-def test_cluster_force_gradient_carries_a_known_bias_at_the_coupled_levels():
-    """The measurement behind ``UnifiedConfig.force_weight``'s warning, pinned.
+def test_cluster_force_gradient_is_exact_at_the_coupled_levels():
+    """The force-loss parameter gradient through the coupled solve, against central differences.
 
-    ``_CoupledSolve.backward`` runs its adjoint CG under ``no_grad`` and detaches the
-    parameters, so it is not double-differentiable and the second-order path through
-    ``lambda`` is dropped. A force loss needs exactly that path.
-
-    The bounds below are deliberately two-sided. The lower bound says the bias is still there,
-    so that making the adjoint differentiable in its own right (a nested implicit solve for
-    ``d lambda / d theta``) shows up here as a *failure* rather than passing silently -- at
-    which point the fix is to tighten this test, not to widen it. The upper bound says the
-    bias has not grown into something that would actually corrupt a fit.
-
-    It is not a convergence artifact: sweeping ``cg_rtol`` over 1e-8 to 1e-14 leaves these
-    numbers unchanged to three digits.
-
-    The band was widened from ``1e-6 < worst < 1e-2`` when ``atomic_energy`` was added, and
-    the reason is the mechanism rather than the tolerance: ``E_atom`` reads the converged
-    multipoles at the polarized and CT levels, so it is a **second** non-variational consumer
-    of ``M*`` and it leans on the missing second-order path harder than the electrostatic
-    correction alone did. Measured, ``cquad0_raw`` moved from under 1e-2 to 2.5e-2.
-
-    The *energy* gradient is unaffected and stays exact -- checked directly against finite
-    differences on ``fragment_energy`` and on the total at all three levels, where
-    ``atomic_energy.equiv_reduce`` agrees to 1.4e-7 relative and the apparent looseness on
-    ``vec_reduce`` is a 1e-7-magnitude gradient in the denominator, not a wrong one. That is
-    the case that matters here, because ``unified.force_weight`` is 0.
+    Until M5b of the torchff port this test pinned a *known bias*: ``_CoupledSolve.backward``
+    ran its adjoint CG under ``no_grad`` and detached the parameters, so the second-order path
+    through ``lambda`` was dropped and a force loss -- which needs exactly that path -- saw a
+    parameter gradient 1e-5 to 2.5e-2 wrong in relative terms (``atomic_energy`` reads the
+    converged multipoles, a second non-variational consumer of ``M*``, and leaned on the
+    missing term hardest). The adjoint is now differentiable in its own right (``lambda`` from
+    a second implicit solve, the residual VJP recorded), and the same measurement agrees with
+    finite differences to ~1e-9 -- the frozen level's number, where no solve runs at all.
     """
     positions, numbers, frag = water_cluster(2, seed=3)
     model = randomize(
@@ -1746,10 +1730,7 @@ def test_cluster_force_gradient_carries_a_known_bias_at_the_coupled_levels():
         _weighted_force_loss, _FD_PARAMS,
     )
     worst = max(errs.values())
-    assert 1e-4 < worst < 1e-1, (
-        f"the force-gradient bias moved: {errs}. If it shrank, the adjoint became "
-        f"double-differentiable and this test and UnifiedConfig.force_weight should say so."
-    )
+    assert worst < 1e-6, f"the force gradient through the coupled solve is biased again: {errs}"
 
 
 def test_total_energy_and_force_terms_enter_the_loss_only_when_weighted():

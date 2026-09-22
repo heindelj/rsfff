@@ -552,3 +552,74 @@ def test_direct_and_drive_parameterizations_are_the_same_functional():
     assert abs(predicted - observed) < 1e-11, (
         f"the energy that left the on-site sectors is {observed:.10f}, expected {predicted:.10f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# second order: the force loss
+# ---------------------------------------------------------------------------
+
+def _force_loss_grads(sys, dense, d_map, wrt=PARAMS):
+    """``d/dtheta`` of ``|dE_tot/dt_point|^2`` where ``E_tot`` has a non-variational consumer.
+
+    ``t_point`` plays the role of the positions: the "force" ``g = dE_tot/dt_point`` carries
+    the adjoint term ``-lambda^T dr/dt_point`` (lambda != 0 because of the consumer), and the
+    loss backpropagates *through* ``g`` -- exactly what force training does.
+    """
+    leaves = {n: getattr(sys, n).clone().requires_grad_(True) for n in PARAMS}
+    live = replace(sys, **leaves)
+    x = coupled_solve_dense(live) if dense else coupled_solve(live, rtol=1e-14, atol=1e-16)[0]
+    q, mu, theta = multipoles_from_state(live, x, d_map)
+    e_tot = total_energy(live, x, d_map) + q.pow(3).sum() + (mu * mu).sum().sqrt() + theta.tanh().sum()
+    (g,) = torch.autograd.grad(e_tot, leaves["t_point"], create_graph=True)
+    loss = g.pow(2).sum()
+    grads = torch.autograd.grad(loss, [leaves[n] for n in wrt], allow_unused=True)
+    return loss.detach(), dict(zip(wrt, grads))
+
+
+def test_force_loss_gradient_matches_autograd_through_the_dense_solve():
+    """Second order through the adjoint (M5b).
+
+    The dense oracle differentiates ``torch.linalg.solve`` twice by ordinary autograd. The
+    implicit adjoint must agree: that requires ``lambda`` to be differentiable (a second
+    implicit solve) and the residual VJP to be taken with ``create_graph``, so that
+    ``d/dtheta [lambda^T dr/dtheta']`` and ``dx*/dtheta`` both reach the loss. Before M5b the
+    adjoint's contribution to the force entered the loss as a constant and this failed at the
+    percent level.
+    """
+    d_map = _spherical_to_poly_map(torch.float64, torch.device("cpu"))
+    sys = make_system(max_rank=2, seed=7)
+    loss_a, adjoint = _force_loss_grads(sys, False, d_map)
+    loss_d, dense = _force_loss_grads(sys, True, d_map)
+    assert torch.allclose(loss_a, loss_d, rtol=1e-10)
+    for name, ga in adjoint.items():
+        gd = dense[name]
+        if ga is None or gd is None:
+            assert ga is None and gd is None, name
+            continue
+        if name == "alpha":
+            # alpha is symmetric by construction (the head emits it PSD). Its antisymmetric
+            # gradient direction is a gauge on which the two solvers legitimately differ: CG
+            # assumes A = A^T, the dense oracle does not, so an asymmetric perturbation of
+            # alpha is a different operator to each. Compare the symmetric part only.
+            ga, gd = (0.5 * (t + t.transpose(-1, -2)) for t in (ga, gd))
+        scale = max(float(gd.abs().max()), 1e-10)
+        err = float((ga - gd).abs().max()) / scale
+        assert err < 1e-7, f"{name}: relative {err:.2e}"
+
+
+def test_force_loss_gradient_matches_central_differences():
+    """The same, against finite differences of the (adjoint) force loss in ``chi``."""
+    d_map = _spherical_to_poly_map(torch.float64, torch.device("cpu"))
+    sys = make_system(max_rank=2, seed=7)
+    _, grads = _force_loss_grads(sys, False, d_map, wrt=("chi",))
+    g_chi = grads["chi"]
+    h = 1e-5
+    for k in range(min(3, sys.chi.numel())):
+        vals = []
+        for sign in (+1.0, -1.0):
+            chi = sys.chi.clone()
+            chi[k] += sign * h
+            loss, _ = _force_loss_grads(replace(sys, chi=chi), False, d_map, wrt=("chi",))
+            vals.append(float(loss))
+        fd = (vals[0] - vals[1]) / (2 * h)
+        assert abs(fd - float(g_chi[k])) < 1e-6 * max(1.0, abs(fd)), (k, fd, float(g_chi[k]))

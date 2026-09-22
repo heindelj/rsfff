@@ -344,10 +344,9 @@ def unified_fit(out, batch, cfg: Config, *, training: bool = True, with_forces: 
                 "loop must be entered with grad_positions=True"
             )
         # A training step needs the second-order graph, an evaluation epoch does not and should
-        # not pay for one. See UnifiedConfig.force_weight for the measured bias this carries at
-        # the induction level -- the forces are exact, the derivative of the force with respect
-        # to the parameters is ~1e-4 relative off, because the coupled solve's adjoint is not
-        # itself double-differentiable.
+        # not pay for one. The graph runs through the coupled solve's adjoint, which is itself
+        # differentiable (see UnifiedConfig.force_weight), so the force gradient is exact at the
+        # induction level too.
         forces = compute_forces(out.energy, batch.positions, create_graph=training)
         f_err = (forces - batch.forces) / u.force_scale
         loss = loss + u.force_weight * f_err.pow(2).sum(-1).mean()

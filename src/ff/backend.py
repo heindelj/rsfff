@@ -136,6 +136,8 @@ def slater_elec_field(
     gate: torch.Tensor,            # (P,) the elst gate
     m: torch.Tensor,               # (N, K) polytensor, a.u.
     m_nuc: torch.Tensor,           # (N, K) nuclear point charges
+    *,
+    reference: bool = False,       # pure-torch reference formulas (differentiable to any order)
 ) -> torch.Tensor:
     """``d/dm`` of the gated point + penetration energy: ``(N, K)``, the coupled-solve matvec.
 
@@ -144,13 +146,19 @@ def slater_elec_field(
     them per CG iteration in torch. The kernel rebuilds them per pair on the fly instead, so
     nothing of size ``P x K x K`` is ever materialised; its backward is the exact VJP with
     respect to positions, ``b``, ``gate``, ``m`` and ``m_nuc`` (first order), which is all the
-    adjoint of :class:`rsfff.ff.coupled_solve._CoupledSolve` asks of it.
+    adjoint of :class:`rsfff.ff.coupled_solve._CoupledSolve` asks of it *inside the CG loop*.
+    The adjoint's one recorded residual VJP under a force loss needs a second derivative, which
+    the kernel does not have yet; ``reference=True`` returns torchff's pure-torch reference
+    field for that call (same formulas, ordinary autograd, ``(P, K, K)`` tensors materialised).
     """
     if not HAVE_TORCHFF:
         raise RuntimeError("slater_elec_field needs torchff")
     from torchff import slaterelec
 
-    return slaterelec.slater_elec_field(positions_ang / BOHR_ANG, pair_index.t(), b, gate, m, m_nuc)
+    return slaterelec.slater_elec_field(
+        positions_ang / BOHR_ANG, pair_index.t(), b, gate, m, m_nuc,
+        use_customized_ops=False if reference else None,
+    )
 
 
 def slater_elec_pair_energy(

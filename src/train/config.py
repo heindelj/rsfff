@@ -616,23 +616,18 @@ class UnifiedConfig:
     #: same pull rather than a different one. Evaluation always computes it, so ``f_clu`` means
     #: the same thing on every validation line.
     force_every: int = 1
-    #: **Known bias in the force gradient at the pol/CT levels.** ``rsfff.ff.coupled_solve``
-    #: solves the response with a custom ``autograd.Function`` whose backward is the adjoint of
-    #: docs §6.2. That adjoint is correct -- checked against the dense oracle, and an *energy*
-    #: loss reproduces finite differences to CG tolerance (5e-8 relative). It is not, however,
-    #: **double**-differentiable: the adjoint CG runs under ``no_grad`` and detaches its
-    #: parameters, so the second-order path through ``lambda`` is dropped. A force loss needs
-    #: exactly that path, and its parameter gradient measures 1e-5 to 6e-4 wrong in relative
-    #: terms -- independent of ``cg_rtol``, which is what proves it is a missing term and not
-    #: convergence. At the frozen level, where no coupled solve runs, the same check agrees to
-    #: 4e-12.
-    #:
-    #: The *forces themselves* are exact; only the derivative of the force with respect to the
-    #: parameters is biased. A relative bias of 1e-4 is well under minibatch noise, so this is
-    #: a real but small systematic pull, not a broken fit. Removing it means making the adjoint
-    #: solve differentiable in its own right (a nested implicit solve for ``d lambda / d
-    #: theta``), which is not implemented. ``tests/test_ff_unified.py`` pins the measurement so
-    #: the number moves if that changes.
+    #: **The force gradient at the pol/CT levels is exact.** ``rsfff.ff.coupled_solve`` solves
+    #: the response with a custom ``autograd.Function`` whose backward is the adjoint of docs
+    #: §6.2, and since M5b of the torchff port that adjoint is differentiable in its own right:
+    #: ``lambda`` comes from a second implicit solve and the residual VJP is recorded, so a
+    #: force loss (``create_graph=True`` through the solve) sees ``d lambda / d theta`` and
+    #: ``d x* / d theta``. Before that the second-order path through ``lambda`` was dropped and
+    #: the force-loss parameter gradient measured 1e-5 to 6e-4 wrong in relative terms (2.5e-2
+    #: on ``cquad0_raw`` once ``atomic_energy`` read the converged multipoles). Now it agrees
+    #: with central differences to ~1e-9, the same as the frozen level, where no solve runs.
+    #: ``tests/test_ff_unified.py::test_cluster_force_gradient_is_exact_at_the_coupled_levels``
+    #: pins that, and ``tests/test_ff_coupled_solve.py`` checks the second order against the
+    #: dense oracle.
     #: Monomer frames drawn per step for the anchor term; 0 uses the whole file every step.
     #: The anchor carries a force term, so evaluating it is a second-order backward, and at
     #: the full 500 frames that is ~95% of the wall time of a training step -- the identical

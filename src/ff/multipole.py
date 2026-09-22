@@ -56,6 +56,33 @@ import torch
 _POLYTENSOR_WIDTH = {0: 1, 1: 4, 2: 10}
 
 
+class _Stack(torch.autograd.Function):
+    """``torch.stack`` with an O(n) double backward.
+
+    ``torch.stack``'s own backward is recorded, under ``create_graph=True``, as one ``select``
+    per component; the second backward of each ``SelectBackward0`` then allocates a zeros
+    tensor of the *whole* stacked shape and copies one slice in. For the 100-component
+    (P, 10, 10) interaction tensor that is O(n^2) memory traffic -- ~20 GB per training step
+    at 250k pairs, and two thirds of the force-loss backward on an A100. Returning
+    ``grad.unbind(dim)`` instead records a single ``UnbindBackward0`` whose backward is one
+    stack. Forward values are bit-identical to ``torch.stack``.
+    """
+
+    @staticmethod
+    def forward(ctx, dim, *tensors):
+        ctx.dim = dim
+        return torch.stack(tensors, dim=dim)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return (None, *grad.unbind(ctx.dim))
+
+
+def _stack(tensors, dim: int = 0) -> torch.Tensor:
+    """See :class:`_Stack`. Drop-in for ``torch.stack(tensors, dim=dim)``."""
+    return _Stack.apply(dim, *tensors)
+
+
 #: Quadrupole polytensor weights on ``(xx, xy, xz, yy, yz, zz)``. The 1/3 is the
 #: quadrupole convention and the 2/3 on the off-diagonals accounts for storing only the
 #: upper triangle of a symmetric tensor whose contraction runs over all nine index pairs.
@@ -89,7 +116,7 @@ def slater_two_center_damp(u: torch.Tensor, max_rank: int = 1) -> torch.Tensor:
     exp_u = torch.exp(-u)
     p1 = 1.0 + 11.0 * u / 16.0 + 3.0 * u2 / 16.0 + u3 / 48.0
     if max_rank == 0:
-        return torch.stack([p1 * exp_u], dim=0)
+        return _stack([p1 * exp_u], dim=0)
     u4 = u3 * u
     u5 = u4 * u
     p3 = 1.0 + u + u2 / 2.0 + 7.0 * u3 / 48.0 + u4 / 48.0
@@ -97,11 +124,11 @@ def slater_two_center_damp(u: torch.Tensor, max_rank: int = 1) -> torch.Tensor:
     head = 1.0 + u + u2 / 2.0 + u3 / 6.0 + u4 / 24.0
     p5 = head + u5 / 144.0
     if max_rank == 1:
-        return torch.stack([p1 * exp_u, p3 * exp_u, p5 * exp_u], dim=0)
+        return _stack([p1 * exp_u, p3 * exp_u, p5 * exp_u], dim=0)
     u6 = u5 * u
     p7 = head + u5 / 120.0 + u6 / 720.0
     p9 = p7 + u6 * u / 5040.0
-    return torch.stack(
+    return _stack(
         [p1 * exp_u, p3 * exp_u, p5 * exp_u, p7 * exp_u, p9 * exp_u], dim=0
     )
 
@@ -119,17 +146,17 @@ def slater_one_center_damp(u: torch.Tensor, max_rank: int = 1) -> torch.Tensor:
     exp_u = torch.exp(-u)
     p1 = 1.0 + u / 2.0
     if max_rank == 0:
-        return torch.stack([p1 * exp_u], dim=0)
+        return _stack([p1 * exp_u], dim=0)
     p3 = 1.0 + u + u2 / 2.0
     p5 = p3 + u2 * u / 6.0
     if max_rank == 1:
-        return torch.stack([p1 * exp_u, p3 * exp_u, p5 * exp_u], dim=0)
+        return _stack([p1 * exp_u, p3 * exp_u, p5 * exp_u], dim=0)
     u4 = u2 * u2
     # Note p9 builds on p5, not on p7 (pyCMM/cmm/short_range.py:17-18) -- transcribed
     # rather than "corrected", since it is the fitted model's actual functional form.
     p7 = p5 + u4 / 30.0
     p9 = p5 + u4 * 4.0 / 105.0 + u4 * u / 210.0
-    return torch.stack(
+    return _stack(
         [p1 * exp_u, p3 * exp_u, p5 * exp_u, p7 * exp_u, p9 * exp_u], dim=0
     )
 
@@ -199,7 +226,7 @@ def damped_interaction_tensor(
     if max_rank == 1:
         # Row/column order [q, mu_x, mu_y, mu_z]; energy is m_j^T T m_i, so the
         # charge-dipole blocks carry opposite signs (pyCMM/cmm/multipole.py:321-327).
-        return torch.stack(
+        return _stack(
             (
                 r_inv1, -tx, -ty, -tz,
                 tx, -txx, -txy, -txz,
@@ -244,7 +271,7 @@ def damped_interaction_tensor(
 
     # Row/column order [q, mu_x, mu_y, mu_z, Q_xx, Q_xy, Q_xz, Q_yy, Q_yz, Q_zz],
     # transcribed from pyCMM/cmm/multipole.py:329-340.
-    return torch.stack(
+    return _stack(
         (
             r_inv1, -tx, -ty, -tz, txx, txy, txz, tyy, tyz, tzz,
             tx, -txx, -txy, -txz, txxx, txxy, txxz, tyyx, txyz, tzzx,
@@ -300,7 +327,7 @@ def build_polytensor(
             w = torch.tensor(
                 _QUAD_POLY_WEIGHTS, dtype=quadrupoles.dtype, device=quadrupoles.device
             )
-            unique = torch.stack(
+            unique = _stack(
                 (
                     quadrupoles[..., 0, 0], quadrupoles[..., 0, 1], quadrupoles[..., 0, 2],
                     quadrupoles[..., 1, 1], quadrupoles[..., 1, 2], quadrupoles[..., 2, 2],
@@ -334,11 +361,11 @@ def spherical_to_cartesian_quadrupole(q_s: torch.Tensor) -> torch.Tensor:
     qyy = -q22c * half_sqrt3 - q20 / 2.0
     qyz = q21s * half_sqrt3
     qzz = q20
-    return torch.stack(
+    return _stack(
         (
-            torch.stack((qxx, qxy, qxz), dim=-1),
-            torch.stack((qxy, qyy, qyz), dim=-1),
-            torch.stack((qxz, qyz, qzz), dim=-1),
+            _stack((qxx, qxy, qxz), dim=-1),
+            _stack((qxy, qyy, qyz), dim=-1),
+            _stack((qxz, qyz, qzz), dim=-1),
         ),
         dim=-2,
     )
@@ -347,7 +374,7 @@ def spherical_to_cartesian_quadrupole(q_s: torch.Tensor) -> torch.Tensor:
 def cartesian_to_spherical_quadrupole(q_c: torch.Tensor) -> torch.Tensor:
     """Inverse of :func:`spherical_to_cartesian_quadrupole`, for tests and inspection."""
     half_sqrt3 = math.sqrt(3.0) / 2.0
-    return torch.stack(
+    return _stack(
         (
             q_c[..., 2, 2],
             q_c[..., 0, 2] / half_sqrt3,
