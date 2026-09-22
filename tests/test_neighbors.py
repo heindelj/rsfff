@@ -287,3 +287,21 @@ def test_fallback_refuses_an_unsorted_batch():
 def test_backend_says_which_one_is_in_use():
     assert BACKEND in ("torch_cluster", "torch")
     assert (BACKEND == "torch_cluster") == (radius_graph is not None)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("cap", [None, 3, 8])
+def test_padded_and_chunked_fallbacks_agree(monkeypatch, seed, cap):
+    """The padded (F, n_max, n_max) path and the chunked path are the same graph, edge for
+    edge and in the same order, including truncation to the cap."""
+    from rsfff import neighbors as nb
+
+    g = torch.Generator().manual_seed(seed)
+    sizes = [int(k) for k in torch.randint(1, 12, (7,), generator=g)]
+    x = torch.cat([torch.rand(n, 3, generator=g, dtype=torch.float64) * 4.0 for n in sizes])
+    batch = torch.repeat_interleave(torch.arange(len(sizes)), torch.tensor(sizes))
+    kw = dict(r=2.5, batch=batch, loop=False, max_num_neighbors=cap)
+    padded = nb.radius_graph_torch(x, chunk=5, **kw)
+    monkeypatch.setattr(nb, "_PADDED_BLOCK_BYTES", 0)
+    chunked = nb.radius_graph_torch(x, chunk=5, **kw)
+    assert torch.equal(padded, chunked)

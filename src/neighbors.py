@@ -100,16 +100,29 @@ def radius_graph_torch(
     if bool((batch[1:] < batch[:-1]).any()):
         raise ValueError("batch must be non-decreasing: every graph's atoms contiguous")
 
+    counts = torch.bincount(batch)
+    cap = int(max_num_neighbors) if max_num_neighbors is not None else None
+
+    # Padded per-frame blocks: (F, n_max, n_max) distances in one shot. A training batch is
+    # 128 frames of 18-63 atoms; the earlier chunked block (1024 query rows x every frame
+    # those rows touch) computed ~17x more distances than needed and spent them in
+    # ``torch.cdist``'s generic p-norm kernel -- 38 ms of a 117 ms forward at w21 on an A100
+    # (benchmarks/profile, after M4). Padding wastes only n_max^2 / n_g^2 per frame, the
+    # arithmetic is three elementwise kernels, and there is no host sync unless a row can
+    # actually exceed the cap. Falls back to the chunked path when the padded block would be
+    # large (one big frame), where the chunking is what keeps the peak memory bounded.
+    n_max = int(counts.max())
+    if counts.numel() * n_max * n_max * 3 * x.element_size() <= _PADDED_BLOCK_BYTES:
+        return _radius_graph_padded(x, r, batch, counts, n_max, loop, cap, flow)
+
     # Chunks run over the *concatenated* atom list, not per graph: a training batch is 128
     # frames of 18-63 atoms, and a Python loop over frames cost a flat ~64 ms per call on an
     # A100 (benchmarks/profile, M0 of the torchff port) regardless of how small the frames
     # were. Each chunk's columns are restricted to the frames its query rows touch, so the
     # distance block stays ~chunk x (a few frames) and the work is still ~sum_g n_g^2 rather
     # than N_total^2; the frame membership is enforced by a mask on the block.
-    counts = torch.bincount(batch)
     bounds = torch.cat([counts.new_zeros(1), counts.cumsum(0)]).tolist()
     batch_list = batch.tolist()
-    cap = int(max_num_neighbors) if max_num_neighbors is not None else None
     sources: list[torch.Tensor] = []
     targets: list[torch.Tensor] = []
     chunk = max(int(chunk), 1)
@@ -142,6 +155,42 @@ def radius_graph_torch(
 
     source = torch.cat(sources) if sources else x.new_empty(0, dtype=torch.long)
     target = torch.cat(targets) if targets else x.new_empty(0, dtype=torch.long)
+    if flow == "target_to_source":
+        source, target = target, source
+    return torch.stack([source, target], dim=0)
+
+
+#: Above this many bytes of padded (F, n_max, n_max, 3) difference block, the chunked path
+#: is used instead (512 MB: a single 4,700-atom frame in float64).
+_PADDED_BLOCK_BYTES = 512 * 1024 ** 2
+
+
+def _radius_graph_padded(x, r, batch, counts, n_max, loop, cap, flow):
+    """All frames at once on a padded ``(F, n_max, n_max)`` block; same contract and the same
+    edge order (by query atom, then neighbor) as the chunked path."""
+    device = x.device
+    n_atoms = x.shape[0]
+    n_frames = counts.numel()
+    offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0)[:-1]])
+    local = torch.arange(n_max, device=device)
+    valid = local[None, :] < counts[:, None]                          # (F, n_max)
+    idx = (offsets[:, None] + local[None, :]).clamp_(max=max(n_atoms - 1, 0))
+    xp = x[idx]                                                        # (F, n_max, 3)
+    # exact distances (no matrix-multiply shortcut): an edge sitting on the cutoff must not
+    # depend on cancellation, and the chunked path / compiled kernel agree with this form
+    diff = xp[:, :, None, :] - xp[:, None, :, :]
+    distance = (diff * diff).sum(-1).sqrt_()                           # (F, n_max, n_max)
+    near = (distance < r) & valid[:, :, None] & valid[:, None, :]
+    if not loop:
+        near[:, local, local] = False
+    if cap is not None and n_max - 1 > cap and int(near.sum(dim=-1).max()) > cap:
+        chosen = distance.masked_fill(~near, float("inf")).topk(cap, dim=-1, largest=False).indices
+        keep = torch.zeros_like(near)
+        keep.scatter_(-1, chosen, True)
+        near &= keep
+    frame, query, neighbor = near.nonzero(as_tuple=True)
+    target = idx[frame, query]
+    source = idx[frame, neighbor]
     if flow == "target_to_source":
         source, target = target, source
     return torch.stack([source, target], dim=0)
