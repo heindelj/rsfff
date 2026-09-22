@@ -133,3 +133,64 @@ def test_backend_selection():
         backend.set_backend("nope")
     backend.set_backend("auto")
     assert backend.active_backend(torch.zeros(1)) == "torch"  # CPU tensor -> torch path
+
+
+@needs_torchff
+def test_coupled_solve_on_the_fly_operator_matches_precomputed(both_backends):
+    """The torchff path hands the solve no (P, K, K) tensors; the kernel (or its reference)
+    rebuilds the pair operator per matvec. Same solution, same energy, same adjoint."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from rsfff.ff.coupled_solve import coupled_solve, coupled_energy, multipoles_from_state
+    from rsfff.ff.polarization import build_coupled_system
+    from rsfff.ff.response import ResponseParameters
+    torch.manual_seed(4)
+    n, dt = 9, torch.float64
+    pos = (torch.rand(n, 3, dtype=dt) * 4).to(DEVICE)
+    batch_idx = torch.zeros(n, dtype=torch.long, device=DEVICE)
+    bond_index = torch.tensor([[0, 0, 3, 3, 6, 6], [1, 2, 4, 5, 7, 8]], device=DEVICE)
+    bond_batch = torch.zeros(6, dtype=torch.long, device=DEVICE)
+    ii, jj = torch.triu_indices(n, n, 1)
+    pair_index = torch.stack([ii, jj]).to(DEVICE)
+    gate = torch.rand(pair_index.shape[1], dtype=dt, device=DEVICE)
+
+    def leaves():
+        return dict(
+            chi=torch.randn(n, dtype=dt, device=DEVICE) * 0.1,
+            eta=torch.rand(n, dtype=dt, device=DEVICE) + 0.5,
+            q0=torch.zeros(n, dtype=dt, device=DEVICE),
+            compliance=torch.rand(6, dtype=dt, device=DEVICE) + 0.1,
+            alpha=torch.eye(3, dtype=dt, device=DEVICE).expand(n, 3, 3) * 2.0,
+            cquad=torch.full((n,), 0.5, dtype=dt, device=DEVICE),
+            z=torch.tensor([6.0, 1, 1] * 3, dtype=dt, device=DEVICE),
+            b=torch.rand(n, dtype=dt, device=DEVICE) + 1.5,
+            mu0=torch.randn(n, 3, dtype=dt, device=DEVICE) * 0.1,
+            quad0=torch.randn(n, 5, dtype=dt, device=DEVICE) * 0.05,
+        )
+
+    def run(name):
+        backend.set_backend(name)
+        torch.manual_seed(11)
+        p = {k: v.clone().requires_grad_(True) for k, v in leaves().items()}
+        pos_ = pos.clone().requires_grad_(True)
+        gate_ = gate.clone().requires_grad_(True)
+        rp = ResponseParameters(chi=p["chi"], eta=p["eta"], q0=p["q0"], compliance=p["compliance"],
+                                chivec=None, alpha=p["alpha"], chiquad=None, cquad=p["cquad"],
+                                z=p["z"], b=p["b"], mu0=p["mu0"], quad0=p["quad0"])
+        sys_, _ = build_coupled_system(rp, positions=pos_, batch_idx=batch_idx, n_systems=1,
+                                       bond_index=bond_index, bond_batch=bond_batch,
+                                       pair_index=pair_index, gate=gate_, max_rank=2)
+        assert sys_.on_the_fly == (name == "torchff")
+        x, n_iter = coupled_solve(sys_, rtol=1e-12, atol=1e-14)
+        q, mu, th = multipoles_from_state(sys_, x)
+        e = coupled_energy(sys_, x)
+        # a non-variational consumer of the solution, so the adjoint path is exercised
+        loss = e.sum() + (q ** 3).sum() + (mu ** 2).sum() * 0.3 + th.abs().sum() * 0.1
+        grads = torch.autograd.grad(loss, [pos_, gate_] + list(p.values()))
+        return q.detach(), mu.detach(), th.detach(), e.detach(), [g.detach() for g in grads]
+
+    a = run("torch")
+    b_ = run("torchff")
+    for x, y in zip(a[:4], b_[:4]):
+        assert torch.allclose(x, y, rtol=1e-8, atol=1e-10)
+    for x, y in zip(a[4], b_[4]):
+        assert torch.allclose(x, y, rtol=1e-7, atol=1e-9)

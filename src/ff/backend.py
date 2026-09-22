@@ -32,7 +32,8 @@ import torch
 
 from .units import BOHR_ANG
 
-__all__ = ["active_backend", "set_backend", "tt_dispersion", "bonded_energy", "HAVE_TORCHFF"]
+__all__ = ["active_backend", "set_backend", "tt_dispersion", "bonded_energy", "slater_elec_field",
+           "slater_elec_pair_energy", "HAVE_TORCHFF"]
 
 try:
     from torchff import ffterms as _ffterms
@@ -122,3 +123,61 @@ def bonded_energy(
         coords, topo.angle_index.t(), params.cos_theta_eq, params.k_theta
     )
     return e_bond, e_angle
+
+
+# --------------------------------------------------------------------------------------
+# Slater-penetrated multipole electrostatics
+# --------------------------------------------------------------------------------------
+
+def slater_elec_field(
+    positions_ang: torch.Tensor,   # (N, 3) Angstrom
+    pair_index: torch.Tensor,      # (2, P)
+    b: torch.Tensor,               # (N,) 1/bohr
+    gate: torch.Tensor,            # (P,) the elst gate
+    m: torch.Tensor,               # (N, K) polytensor, a.u.
+    m_nuc: torch.Tensor,           # (N, K) nuclear point charges
+) -> torch.Tensor:
+    """``d/dm`` of the gated point + penetration energy: ``(N, K)``, the coupled-solve matvec.
+
+    torchff only -- the torch path of the coupled solve keeps its precomputed ``(P, K, K)``
+    tensors (:func:`rsfff.ff.coupled_solve._coupling_grad`), which is faster than rebuilding
+    them per CG iteration in torch. The kernel rebuilds them per pair on the fly instead, so
+    nothing of size ``P x K x K`` is ever materialised; its backward is the exact VJP with
+    respect to positions, ``b``, ``gate``, ``m`` and ``m_nuc`` (first order), which is all the
+    adjoint of :class:`rsfff.ff.coupled_solve._CoupledSolve` asks of it.
+    """
+    if not HAVE_TORCHFF:
+        raise RuntimeError("slater_elec_field needs torchff")
+    from torchff import slaterelec
+
+    return slaterelec.slater_elec_field(positions_ang / BOHR_ANG, pair_index.t(), b, gate, m, m_nuc)
+
+
+def slater_elec_pair_energy(
+    positions_ang: torch.Tensor,
+    pair_index: torch.Tensor,
+    b: torch.Tensor,
+    gate: torch.Tensor,
+    m: torch.Tensor,
+    m_nuc: torch.Tensor,
+) -> torch.Tensor:
+    """``(P,)`` gated point + penetration energies in Hartree.
+
+    **First-order autograd only on the torchff path** (double backward through the kernel is
+    the M4 milestone), so the film model's force-trained elst channel keeps calling
+    :func:`rsfff.ff.electrostatics.slater_elec_pair_energy` directly for now. Use this where a
+    single backward is enough.
+    """
+    if active_backend(positions_ang) == "torch":
+        from .electrostatics import slater_elec_pair_energy as _torch_pair
+
+        i, j = pair_index[0], pair_index[1]
+        dr_au = (positions_ang[j] - positions_ang[i]) / BOHR_ANG
+        max_rank = {1: 0, 4: 1, 10: 2}[int(m.shape[1])]
+        e_point, e_pen = _torch_pair(
+            dr_au, dr_au.norm(dim=-1), m, m - m_nuc, m_nuc, b, pair_index, max_rank=max_rank
+        )
+        return gate * (e_point + e_pen)
+    from torchff import slaterelec
+
+    return slaterelec.slater_elec_pair_energy(positions_ang / BOHR_ANG, pair_index.t(), b, gate, m, m_nuc)

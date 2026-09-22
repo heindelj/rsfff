@@ -136,10 +136,16 @@ class CoupledSystem:
     #: :class:`rsfff.mlip.response_heads.AxialQuadrupolePolarizabilityHead`. Both are
     #: applied, never inverted, so the rescaling ``Theta = C w`` works unchanged.
     cquad: torch.Tensor | None     # (N,) or (N, 5, 5), PSD
-    t_point: torch.Tensor          # (P, K, K), gate-scaled
-    t_ss: torch.Tensor             # (P, K, K), gate-scaled
-    t_1c_i: torch.Tensor           # (P, K, K), gate-scaled
-    t_1c_j: torch.Tensor           # (P, K, K), gate-scaled
+    #: The pair operator, in one of two forms. **Precomputed**: the four gate-scaled
+    #: ``(P, K, K)`` tensors below (the torch path). **On the fly**: ``t_*`` are ``None`` and
+    #: ``positions``/``b``/``gate`` are set, and the matvec is ``rsfff.ff.backend.slater_elec_field``
+    #: -- the torchff kernel rebuilds each pair's damped tensors from ``(dr, b_i, b_j)`` as it
+    #: goes, so nothing of size ``P x K x K`` exists and the memory-bound matvec at 10^5-10^6
+    #: pairs reads ~20x less. Both are leaves of the adjoint (:data:`_PARAM_FIELDS`).
+    t_point: torch.Tensor | None   # (P, K, K), gate-scaled
+    t_ss: torch.Tensor | None      # (P, K, K), gate-scaled
+    t_1c_i: torch.Tensor | None    # (P, K, K), gate-scaled
+    t_1c_j: torch.Tensor | None    # (P, K, K), gate-scaled
     m_nuc: torch.Tensor            # (N, K) point nuclear multipoles, constant in x
 
     #: **The two parameterizations of the same functional.** Exactly one of ``chivec`` and
@@ -161,6 +167,14 @@ class CoupledSystem:
     #: quadratic.
     mu0: torch.Tensor | None = None     # (N, 3)
     quad0: torch.Tensor | None = None   # (N, 5) spherical
+    # on-the-fly operator inputs (torchff path); None when the t_* tensors are precomputed
+    positions: torch.Tensor | None = None   # (N, 3) Angstrom
+    b: torch.Tensor | None = None           # (N,) 1/bohr
+    gate: torch.Tensor | None = None        # (P,)
+
+    @property
+    def on_the_fly(self) -> bool:
+        return self.t_point is None
 
     @property
     def has_dipole(self) -> bool:
@@ -351,6 +365,11 @@ def _coupling_grad(sys: CoupledSystem, m: torch.Tensor) -> torch.Tensor:
     a pair contract opposite index orders. The assembled operator *is* symmetric
     (``H[i,j] = T^T`` and ``H[j,i] = T``), which is what CG requires.
     """
+    if sys.on_the_fly:
+        from .backend import slater_elec_field
+
+        return slater_elec_field(sys.positions, sys.pair_index, sys.b, sys.gate, m, sys.m_nuc)
+
     i, j = sys.pair_index[0], sys.pair_index[1]
     m_i, m_j = m[i], m[j]
     n_i, n_j = sys.m_nuc[i], sys.m_nuc[j]
@@ -632,6 +651,7 @@ def pcg(
 _PARAM_FIELDS = (
     "chi", "eta", "q0", "compliance", "chivec", "alpha", "chiquad", "cquad",
     "t_point", "t_ss", "t_1c_i", "t_1c_j", "m_nuc", "mu0", "quad0",
+    "positions", "b", "gate",
 )
 
 

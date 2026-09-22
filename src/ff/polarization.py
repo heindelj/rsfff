@@ -27,11 +27,12 @@ introduce. Two consequences, both wanted:
   two nearly-agreeing operators. Since ``M0`` minimizes only the internal part, the coupled
   minimum can only be lower, so ``E_pol <= 0`` holds by the variational principle wherever the
   two levels share response parameters -- which they do exactly at initialization.
-* The polarization catastrophe is already handled. An ungated dipole-dipole coupling at bonded
-  range drives the smallest eigenvalue of the functional negative (measured: -0.80 against
-  +0.13 gated, ``tests/test_ff_coupled_solve.py``), turning the "solution" into a saddle and
-  the energy unbounded below. The range separation switches that region off before it can
-  happen, so no Thole-style damper is needed and none is introduced.
+* The polarization catastrophe is guarded against by the same gate. (The -0.80 minimum
+  eigenvalue once measured for the ungated rank-2 functional in
+  ``tests/test_ff_coupled_solve.py`` was an artifact of a sign error in the rank-2 damped
+  tensor blocks, fixed in the torchff port; with per-power damping that fixture is convex
+  ungated as well, 0.129 against 0.133 gated. The gate still switches the near-field off
+  before any short-range blow-up could occur, so no Thole-style damper is introduced.)
 
 What the levels do *not* share is the response parameters: the polarized and CT levels evaluate
 the same heads on the environment-aware descriptor, which is where genuine many-body content
@@ -99,11 +100,21 @@ def build_coupled_system(
     handed back so the pair energy at the converged multipoles can reuse it instead of
     rebuilding four ``(P, K, K)`` blocks.
     """
-    i, j = pair_index[0], pair_index[1]
-    dr_au = (positions[j] - positions[i]) / BOHR_ANG
-    r_au = (positions[i] - positions[j]).norm(dim=-1) / BOHR_ANG
-    tensors = slater_elec_tensors(dr_au, r_au, rp.b, pair_index, max_rank=max_rank)
-    w = gate[:, None, None]
+    from .backend import active_backend
+
+    on_the_fly = active_backend(positions) == "torchff"
+    if on_the_fly:
+        # the kernel rebuilds the pair operator per matvec; nothing to precompute and the
+        # caller gets no tensors back (it rebuilds them once for the energy at the solution)
+        tensors = None
+        t_point = t_ss = t_1c_i = t_1c_j = None
+    else:
+        i, j = pair_index[0], pair_index[1]
+        dr_au = (positions[j] - positions[i]) / BOHR_ANG
+        r_au = (positions[i] - positions[j]).norm(dim=-1) / BOHR_ANG
+        tensors = slater_elec_tensors(dr_au, r_au, rp.b, pair_index, max_rank=max_rank)
+        w = gate[:, None, None]
+        t_point, t_ss, t_1c_i, t_1c_j = (w * t for t in tensors)
     sys = CoupledSystem(
         n_systems=int(n_systems),
         n_atoms=int(positions.shape[0]),
@@ -122,11 +133,14 @@ def build_coupled_system(
         alpha=rp.alpha,
         chiquad=rp.chiquad,
         cquad=rp.cquad,
-        t_point=w * tensors[0],
-        t_ss=w * tensors[1],
-        t_1c_i=w * tensors[2],
-        t_1c_j=w * tensors[3],
+        t_point=t_point,
+        t_ss=t_ss,
+        t_1c_i=t_1c_i,
+        t_1c_j=t_1c_j,
         m_nuc=build_polytensor(rp.z, None, None, max_rank=max_rank),
+        positions=positions if on_the_fly else None,
+        b=rp.b if on_the_fly else None,
+        gate=gate if on_the_fly else None,
     )
     return sys, tensors
 

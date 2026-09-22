@@ -166,9 +166,19 @@ def damped_interaction_tensor(
     if max_rank == 0:
         return r_inv1.reshape(-1, 1, 1)
 
+    # Every inverse power is formed from the *undamped* r_inv before any damping is applied.
+    # Until the torchff port (M5) this built r_inv7 and r_inv9 from the already-damped
+    # r_inv5, so the rank-2 blocks carried damp[2] * damp[3] and damp[2] * damp[4] instead
+    # of damp[3] and damp[4] -- and, with the overlap-complement minus the callers pass, the
+    # wrong *sign*: (-f5)(-f7) = +f5 f7 where -f7 was meant. Charge-charge, charge-dipole,
+    # dipole-dipole and charge-quadrupole blocks were unaffected. Found by checking the
+    # CUDA kernel (torchff csrc/slaterelec) against this function; the kernel implements the
+    # documented per-power form, which is now what this function does too.
     r_inv2 = r_inv * r_inv
     r_inv3 = r_inv2 * r_inv
     r_inv5 = r_inv3 * r_inv2
+    r_inv7 = r_inv5 * r_inv2
+    r_inv9 = r_inv7 * r_inv2
     if damp is not None:
         r_inv3 = r_inv3 * damp[1]
         r_inv5 = r_inv5 * damp[2]
@@ -199,8 +209,6 @@ def damped_interaction_tensor(
             dim=-1,
         ).reshape(-1, 4, 4)
 
-    r_inv7 = r_inv5 * r_inv2
-    r_inv9 = r_inv7 * r_inv2
     if damp is not None:
         r_inv7 = r_inv7 * damp[3]
         r_inv9 = r_inv9 * damp[4]

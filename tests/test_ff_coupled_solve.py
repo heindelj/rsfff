@@ -236,20 +236,24 @@ def test_energy_is_minimized_not_merely_stationary():
         assert float(total_energy(sys, pert, d_map)) > e0
 
 
-def test_ungating_the_coupling_destroys_positive_definiteness():
-    """The polarization catastrophe, made explicit so the guard is not mistaken for free.
+def test_ungating_the_coupling_keeps_the_gate_honest():
+    """The range-separation gate and positive definiteness, measured rather than assumed.
 
-    Removing the range separation from the coupling -- coupling *every* pair at full strength,
-    including bonded ones -- drives the smallest eigenvalue of the functional strongly
-    negative, so the "solution" becomes a saddle and the polarization energy is unbounded
-    below. Reusing the electrostatic gate is what prevents this, and it is why the plan
-    rejected introducing a separate polarization damper.
+    This used to assert that *removing* the gate drives the smallest eigenvalue of the
+    rank-2 functional strongly negative (-0.80 on this fixture): the polarization
+    catastrophe, cited in ``docs`` as the reason the electrostatic gate doubles as the
+    polarization damper. That number was an artifact. The rank-2 blocks of
+    :func:`rsfff.ff.multipole.damped_interaction_tensor` inherited the *negated* ``damp[2]``
+    into ``r^-7`` and ``r^-9``, so the dipole-quadrupole and quadrupole-quadrupole penetration
+    terms came out with the wrong sign -- anti-damped -- and the ungated functional went
+    indefinite because of them. With the per-power damping the docstring always described
+    (fixed in the torchff port, M5), the ungated functional on this fixture is convex too
+    (min eigenvalue 0.129 against 0.133 gated).
 
-    Note what this test does *not* claim: that the solver would notice. CG only reports
-    ``pd_fail`` if it happens to probe a direction of negative curvature, so an indefinite
-    system can converge to a saddle and look healthy. Positive definiteness is protected
-    structurally by the gate, not detected reliably at runtime -- which is why ``E_pol > 0``
-    is the metric to watch during training.
+    What survives: the gated functional must be convex, and gating cannot make it *less*
+    convex than the ungated one. Whether an ungated coupling can still go indefinite at
+    shorter range is an open question the fixture no longer answers; ``E_pol > 0`` during
+    training remains the metric to watch.
     """
     d_map = _spherical_to_poly_map(torch.float64, torch.device("cpu"))
     def min_eig(sys):
@@ -259,11 +263,7 @@ def test_ungating_the_coupling_destroys_positive_definiteness():
     gated = min_eig(make_system(max_rank=2, seed=21))
     ungated = min_eig(make_system(max_rank=2, seed=21, gate=1.0))
     assert gated > 0.0, f"the gated functional must be convex, got min eigenvalue {gated:.3f}"
-    assert ungated < 0.0, (
-        f"ungating should make the functional indefinite; got {ungated:.3f}. If this passes, "
-        f"the fixture geometry has drifted far enough apart that the catastrophe is out of "
-        f"reach and the test no longer demonstrates anything"
-    )
+    assert gated >= ungated - 1e-12, (gated, ungated)
 
 
 # ---------------------------------------------------------------------------
