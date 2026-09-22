@@ -16,7 +16,7 @@ export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"   # A100
 export MAX_JOBS="${MAX_JOBS:-8}"
 # Only the extensions rsfff uses. The full set is 15 nvcc builds in sequence (pme/cmm/
 # multipoles are the slow ones) and takes 20+ minutes on a login node; "all" builds everything.
-export TORCHFF_EXTENSIONS="${TORCHFF_EXTENSIONS:-ffterms,nblist}"
+export TORCHFF_EXTENSIONS="${TORCHFF_EXTENSIONS:-ffterms,slaterelec,nblist}"
 
 module load conda 2>/dev/null || true
 conda activate "$RSFFF_ENV"
@@ -29,10 +29,11 @@ python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version
 pip install -v --no-build-isolation -e .
 python - <<'PY'
 import torch  # first: the extension links against torch's libc10
-import torchff_ffterms
+import torchff_ffterms, torchff_slaterelec
 from torchff import ffterms
-print("torchff_ffterms loaded; kernels available:", ffterms.HAVE_KERNELS)
+from torchff import slaterelec
+print("kernels: ffterms", ffterms.HAVE_KERNELS, "slaterelec", slaterelec.HAVE_KERNELS)
 PY
 echo "now run the kernel tests on a GPU node:"
 echo "  salloc -A m3196 -C gpu -q interactive -t 0:30:00 --gpus 1"
-echo "  pytest external/torchff-lib/tests/test_ffterms.py tests/backend -q"
+echo "  pytest external/torchff-lib/tests/test_ffterms.py external/torchff-lib/tests/test_slaterelec.py tests/backend -q"
