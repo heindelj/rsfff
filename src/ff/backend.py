@@ -165,27 +165,38 @@ def slater_elec_pair_energy(
     positions_ang: torch.Tensor,
     pair_index: torch.Tensor,
     b: torch.Tensor,
-    gate: torch.Tensor,
+    gate: torch.Tensor | None,     # (P,) or None for the ungated sum
     m: torch.Tensor,
     m_nuc: torch.Tensor,
+    *,
+    dr_au: torch.Tensor | None = None,   # torch path: reuse the model's (P, 3) r_j - r_i in bohr
+    r_au: torch.Tensor | None = None,    # torch path: reuse the model's (P,) distances in bohr
+    tensors: tuple | None = None,        # torch path: precomputed slater_elec_tensors
 ) -> torch.Tensor:
-    """``(P,)`` gated point + penetration energies in Hartree.
+    """``(P,)`` point + penetration energies in Hartree, gated if ``gate`` is given.
 
-    **First-order autograd only on the torchff path** (double backward through the kernel is
-    the M4 milestone), so the film model's force-trained elst channel keeps calling
-    :func:`rsfff.ff.electrostatics.slater_elec_pair_energy` directly for now. Use this where a
-    single backward is enough.
+    ``m`` are the full multipoles and ``m_nuc`` the nuclear point charges; the shell
+    ``m - m_nuc`` is formed inside. Double backward on both paths: the torch path is ordinary
+    autograd through :func:`rsfff.ff.electrostatics.slater_elec_pair_energy`, the torchff path
+    is the Energy/Grad kernel pair with the dual-number HVP (M4). The film model's elst channel
+    and the coupled solve's pair energy at the converged multipoles both go through here.
     """
     if active_backend(positions_ang) == "torch":
         from .electrostatics import slater_elec_pair_energy as _torch_pair
 
         i, j = pair_index[0], pair_index[1]
-        dr_au = (positions_ang[j] - positions_ang[i]) / BOHR_ANG
+        if dr_au is None:
+            dr_au = (positions_ang[j] - positions_ang[i]) / BOHR_ANG
+        if r_au is None:
+            r_au = dr_au.norm(dim=-1)
         max_rank = {1: 0, 4: 1, 10: 2}[int(m.shape[1])]
         e_point, e_pen = _torch_pair(
-            dr_au, dr_au.norm(dim=-1), m, m - m_nuc, m_nuc, b, pair_index, max_rank=max_rank
+            dr_au, r_au, m, m - m_nuc, m_nuc, b, pair_index, max_rank=max_rank, tensors=tensors
         )
-        return gate * (e_point + e_pen)
+        e = e_point + e_pen
+        return e if gate is None else gate * e
     from torchff import slaterelec
 
+    if gate is None:
+        gate = torch.ones(pair_index.shape[1], dtype=positions_ang.dtype, device=positions_ang.device)
     return slaterelec.slater_elec_pair_energy(positions_ang / BOHR_ANG, pair_index.t(), b, gate, m, m_nuc)

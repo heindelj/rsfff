@@ -95,6 +95,42 @@ def test_leaf_dispersion_matches(both_backends):
 
 
 @needs_torchff
+@pytest.mark.parametrize("K", [1, 4, 10])
+def test_leaf_slater_elec_matches_to_second_order(both_backends, K):
+    """The elst leaf (M4): energies, first derivatives and the force-loss double backward
+    agree between the torch formulas and torchff (references on CPU, kernels on CUDA)."""
+    torch.manual_seed(0)
+    n = 9
+    pos = (torch.rand(n, 3, dtype=torch.float64, device=DEVICE) * 4).requires_grad_(True)
+    ii, jj = torch.triu_indices(n, n, 1)
+    pair_index = torch.stack([ii, jj]).to(DEVICE)
+    b = (torch.rand(n, dtype=torch.float64, device=DEVICE) + 1.5).requires_grad_(True)
+    gate = torch.rand(pair_index.shape[1], dtype=torch.float64, device=DEVICE).requires_grad_(True)
+    m = (torch.randn(n, K, dtype=torch.float64, device=DEVICE) * 0.3).requires_grad_(True)
+    m_nuc = torch.zeros(n, K, dtype=torch.float64, device=DEVICE)
+    m_nuc[:, 0] = torch.randint(1, 8, (n,)).to(m_nuc)
+    m_nuc.requires_grad_(True)
+    leaves = (pos, b, gate, m, m_nuc)
+
+    def run(name):
+        backend.set_backend(name)
+        e = backend.slater_elec_pair_energy(pos, pair_index, b, gate, m, m_nuc)
+        w = torch.linspace(0.5, 1.5, e.numel(), dtype=e.dtype, device=e.device)
+        g = torch.autograd.grad((e * w).sum(), leaves, create_graph=True)
+        loss = sum((gk * gk).sum() for gk in g)
+        h = torch.autograd.grad(loss, leaves)
+        return e.detach(), [x.detach() for x in g], [x.detach() for x in h]
+
+    e_t, g_t, h_t = run("torch")
+    e_f, g_f, h_f = run("torchff")
+    assert torch.allclose(e_t, e_f, rtol=1e-12, atol=1e-15)
+    for x, y in zip(g_t, g_f):
+        assert torch.allclose(x, y, rtol=1e-10, atol=1e-13)
+    for x, y in zip(h_t, h_f):
+        assert torch.allclose(x, y, rtol=1e-9, atol=1e-12)
+
+
+@needs_torchff
 def test_leaf_bonded_matches(both_backends):
     from rsfff.ff.film.state import StateDescriptor
     from film_helpers import make_projector

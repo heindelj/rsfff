@@ -59,7 +59,8 @@ from .coupled_solve import (
     multipoles_from_state,
     stationary_view,
 )
-from .electrostatics import slater_elec_pair_energy, slater_elec_tensors
+from .backend import slater_elec_pair_energy as backend_slater_elec_pair_energy
+from .electrostatics import slater_elec_tensors
 from .multipole import build_polytensor, spherical_to_cartesian_quadrupole
 from .response import ResponseParameters
 from .units import BOHR_ANG
@@ -194,20 +195,17 @@ def coupled_response(
     mu_s = mu_s if mu_s.numel() else None
     theta_s = theta_s if theta_s.numel() else None
 
-    # The pair half, through the frozen channel's own function on the relaxed multipoles.
+    # The pair half, through the frozen channel's own function on the relaxed multipoles
+    # (the backend seam: the torch path reuses the solve's tensors, the torchff path is the
+    # same kernel the elst channel uses, with double backward).
     quad_c = None if theta_s is None else spherical_to_cartesian_quadrupole(theta_s)
     m_real = build_polytensor(q_s, mu_s, quad_c, max_rank=max_rank)
-    m_shell = build_polytensor(q_s - rp.z, mu_s, quad_c, max_rank=max_rank)
     m_nuc = build_polytensor(rp.z, None, None, max_rank=max_rank)
-    i, j = pair_index[0], pair_index[1]
-    dr_au = (positions[j] - positions[i]) / BOHR_ANG
-    r_au = (positions[i] - positions[j]).norm(dim=-1) / BOHR_ANG
-    e_point, e_pen = slater_elec_pair_energy(
-        dr_au, r_au, m_real, m_shell, m_nuc, rp.b, pair_index,
-        max_rank=max_rank, tensors=tensors,
+    e_pair = backend_slater_elec_pair_energy(
+        positions, pair_index, rp.b, gate, m_real, m_nuc, tensors=tensors
     )
-    e_pair = gate * (e_point + e_pen)
 
+    i = pair_index[0]
     pair_batch = batch_idx[i]
     energy = energy_internal + e_pair.new_zeros(n_systems).index_add(0, pair_batch, e_pair)
 

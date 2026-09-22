@@ -43,7 +43,7 @@ from ...mlip.switch import pairwise_switch
 from ...mlip.sqe import sqe_solve
 from ..damping import fermi_switch
 from .. import backend as ff_backend
-from ..electrostatics import slater_elec_pair_energy
+from ..backend import slater_elec_pair_energy
 from ..expert_model import ClassicalSpec
 from ..fragment_state import FragmentStateEmbedding
 from ..multipole import build_polytensor, spherical_to_cartesian_quadrupole
@@ -254,12 +254,11 @@ class FilmModel(nn.Module):
         m_real = build_polytensor(
             params.q_perm, params.mu_perm, quad_c, max_rank=self.max_rank
         )
-        m_shell = build_polytensor(
-            params.q_perm - z0, params.mu_perm, quad_c, max_rank=self.max_rank
-        )
         m_nuc = build_polytensor(z0, None, None, max_rank=self.max_rank)
-        e_point, e_pen = slater_elec_pair_energy(
-            dr_au, r_au, m_real, m_shell, m_nuc, b0, pair_index, max_rank=self.max_rank
+        # ungated point + penetration per pair; the elst gate and the induction gate are
+        # applied below, each to the same tensor (backend seam: torch or the torchff kernel)
+        e_elst = slater_elec_pair_energy(
+            positions, pair_index, b0, None, m_real, m_nuc, dr_au=dr_au, r_au=r_au
         )
 
         spec_pauli = self.classical["pauli"]
@@ -301,7 +300,7 @@ class FilmModel(nn.Module):
         )
 
         e_pair = {
-            "elst": gate["elst"] * (e_point + e_pen),
+            "elst": gate["elst"] * e_elst,
             "pauli": gate["pauli"] * e_pauli,
             "disp": gate["disp"] * e_disp,
         }
@@ -374,7 +373,7 @@ class FilmModel(nn.Module):
             e0_internal = e0_atom.new_zeros(n_sys).index_add_(
                 0, batch.batch_idx, e0_atom
             )
-            e0_ref = e0_internal + pool_batch(gate_ind * (e_point + e_pen))
+            e0_ref = e0_internal + pool_batch(gate_ind * e_elst)
 
             e_bond_env, e_angle_env = ff_backend.bonded_energy(
                 positions, topo, params.bonded, geometry=geom
