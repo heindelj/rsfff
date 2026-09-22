@@ -81,8 +81,30 @@ def read_water(path: str):
         d -= np.round(d / cell.diagonal()) * cell.diagonal()
         owner = np.linalg.norm(d, axis=-1).argmin(axis=1)
         pos[h_atoms] = pos[o_atoms[owner]] + d[np.arange(h_atoms.size), owner]
+    pos, z = _fragment_order(pos, z)
     frag = water_fragment_index(pos, z)
     return pos, z, frag
+
+
+def _fragment_order(pos, z):
+    """Permute atoms to ``O H H`` per water, each H after its nearest O.
+
+    Some cluster files (w20_mp2_avtz.xyz) list the right species pattern but with the
+    hydrogens of different waters interleaved; ``water_fragment_index`` refuses those, and
+    the model's neighbour graph needs contiguous fragments, so reorder rather than fail.
+    """
+    o_atoms = np.flatnonzero(z == 8)
+    h_atoms = np.flatnonzero(z == 1)
+    d = np.linalg.norm(pos[h_atoms, None, :] - pos[None, o_atoms, :], axis=-1)
+    owner = d.argmin(axis=1)
+    order = []
+    for k, o in enumerate(o_atoms):
+        order.append(o)
+        order.extend(h_atoms[owner == k].tolist())
+    order = np.asarray(order)
+    if order.size != z.size:
+        raise ValueError("not pure water, cannot reorder into O H H fragments")
+    return pos[order], z[order]
 
 
 # --------------------------------------------------------------------------------------
