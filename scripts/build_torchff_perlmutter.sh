@@ -28,7 +28,8 @@ python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version
 # -v streams the nvcc commands so the build is visibly progressing rather than silent.
 pip install -v --no-build-isolation -e .
 python - <<'PY'
-import torchff_ffterms, torch
+import torch  # first: the extension links against torch's libc10
+import torchff_ffterms
 from torchff import ffterms
 print("torchff_ffterms loaded; kernels available:", ffterms.HAVE_KERNELS)
 PY
