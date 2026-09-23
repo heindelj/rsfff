@@ -1,0 +1,15 @@
+{
+  "backend": "pyscf",
+  "basis": "def2-TZVPD",
+  "energies": {
+    "H": -0.4941110651115323,
+    "O": -75.07806560045161
+  },
+  "method": "wB97M-V",
+  "multiplicities": {
+    "H": 2,
+    "O": 3
+  },
+  "reference": "uks/rks (unrestricted for open-shell atoms)",
+  "units": "Hartree"
+}

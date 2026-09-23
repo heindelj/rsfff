@@ -1,0 +1,23 @@
+{
+ "name": "perlmutter_cpu_al",
+ "sbatch": [
+  "-A m3196",
+  "-q regular",
+  "-C cpu"
+ ],
+ "walltime": "48:00:00",
+ "nodes": 1,
+ "setup": [
+  "module load python",
+  "module load qchem"
+ ],
+ "threads": 128,
+ "mem_total_mb": 400000,
+ "mem_static_mb": 16000,
+ "idle_timeout": 1800,
+ "poll_seconds": 30,
+ "code_dir": "_code",
+ "python": "python3",
+ "parse_on_site": false,
+ "job_name": "ccw_qchem_al"
+}

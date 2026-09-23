@@ -1,0 +1,38 @@
+# The production walk: (H2O)2 -> (H2O)64, ~10,000 labels (rsfff_al/schedule.py).
+# Every key below is a stage parameter and is recorded in that stage's stage.json.
+# $VARS are expanded when the loop starts.
+
+root: $SCRATCH/rsfff_al/water_udd
+committee: committees/film_committee_100k        # iteration 0 starts here
+store: /global/cfs/cdirs/m3196/heindelj/rsfff_store
+
+budget:                       # shared by build and select; omit schedule to use the default
+  pool_multiplier: 4
+  candidates_per_trajectory: 100
+  min_trajectories: 2
+
+dynamics:
+  device: cuda
+  max_replicas: 16
+  bias_mode: matched          # decided by the AL1 calibration
+  bias_weight: 0.2
+  time_ps: 10.0
+  time_budget_s: 21000        # < the driver's wall clock; the stage resumes next time
+
+label:
+  submit:
+    - python -m cc_workers.cli submit {store} --site $RSFFF_AL/sites/perlmutter_cpu_al.json --target 16
+  sync:
+    - python -m cc_workers.cli submit {store} --site $RSFFF_AL/sites/perlmutter_cpu_al.json --target 16
+  max_failed_fraction: 0.1
+
+train:
+  mode: sbatch
+  sbatch: -A m3196 -q regular -t 08:00:00
+  members: 4
+  warm_start: true
+  warm_epochs: 40
+  cold_every: 3
+
+assess:
+  device: cuda
