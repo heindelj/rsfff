@@ -50,6 +50,7 @@ class PairingParameters(FilmParameters):
             "pair_q": _log_shift(self.pairing.q, self.pairing0.q),
             "pair_b": _log_shift(self.pairing.b, self.pairing0.b),
             "kappa": _log_shift(self.pairing.kappa, self.pairing0.kappa),
+            "valence": (self.pairing.valence - self.pairing0.valence).abs(),
         }
         if self.response.alpha is not None:
             out["alpha"] = (self.response.alpha - self.response0.alpha).flatten(1).norm(dim=-1)
@@ -93,11 +94,12 @@ class PairingParameterNetwork(ConditionedParameterNetwork):
             z_joined = z_iso
         gate = self.gate(pf.a_env)
 
+        frag = dict(fragment_idx=state.fragment_idx, fragment_charge=state.fragment_charge)
         pairing = self.pairing_heads(
-            z_joined["pairing"], species_idx, pf.x_in.vec_feats, pf.x_in.equiv_feats
+            z_joined["pairing"], species_idx, pf.x_in.vec_feats, pf.x_in.equiv_feats, **frag
         )
         pairing0 = self.pairing_heads(
-            z_iso["pairing"], species_idx, pf.x_in.vec_feats, pf.x_in.equiv_feats
+            z_iso["pairing"], species_idx, pf.x_in.vec_feats, pf.x_in.equiv_feats, **frag
         )
 
         q_perm, mu_perm, quad_perm = self.permanent_heads(

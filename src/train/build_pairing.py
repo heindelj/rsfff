@@ -17,6 +17,7 @@ from ..ff.film import FilmResponseHeads, FragmentProjector, PermanentMultipoleHe
 from ..ff.fragment_state import FragmentStateEmbedding
 from ..ff.multipole import irrep2_to_spherical
 from ..ff.pairing import PairingHeads, PairingModel, PairingParameterNetwork
+from ..ff.pairing.reference import ChargedAtomicReference
 from ..ff.pairing.heads import build_pairing_priors
 from ..ff.pauli import DEFAULT_PAULI_DIPOLE_SCALE, DEFAULT_PAULI_QUAD_SCALE, PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_heads import RangeSeparationHeads
@@ -36,7 +37,10 @@ def build_pairing_model(
     film_cfg,
     neighbor_types,
     reference_energies: torch.Tensor,
+    atomic_states=None,
 ) -> PairingModel:
+    """``atomic_states`` (an ``AtomicStateReference``) turns on the charge-dependent atomic
+    reference ``E0(Z, q)``; without it every atom is referenced neutrally, as in the film."""
     neighbor_types = sorted(int(z) for z in neighbor_types)
     n_species = len(neighbor_types)
 
@@ -131,6 +135,8 @@ def build_pairing_model(
         environment_q=True,
         environment_b=bool(_get(film_cfg, "pairing_environment_b", True)),
         environment_kappa=bool(_get(film_cfg, "pairing_environment_kappa", True)),
+        environment_valence=bool(_get(film_cfg, "pairing_environment_valence", True)),
+        heavy=torch.tensor([int(z) > 1 for z in neighbor_types]),
     )
 
     network = PairingParameterNetwork(
@@ -158,8 +164,9 @@ def build_pairing_model(
         environment_r0=False,
     )
     taper = float(_get(film_cfg, "taper_width", 1.0))
+    reference = ChargedAtomicReference.from_states(reference_energies, atomic_states)
     return PairingModel(
-        projector, state_embedding, network, range_heads, reference_energies,
+        projector, state_embedding, network, range_heads, reference,
         max_rank=max_rank,
         classical={
             "elst": ClassicalSpec(float(_get(film_cfg, "elst_cutoff", 12.0)), taper, environment=False),
@@ -181,13 +188,18 @@ def build_pairing_model(
     )
 
 
-def build_model(features_cfg, film_cfg, neighbor_types, reference_energies):
-    """``film.model`` dispatch: the film model or the pairing model from the same blocks."""
+def build_model(features_cfg, film_cfg, neighbor_types, reference_energies, atomic_states=None):
+    """``film.model`` dispatch: the film model or the pairing model from the same blocks.
+
+    ``atomic_states`` only reaches the pairing model (the film references neutrally).
+    """
     kind = str(_get(film_cfg, "model", "film"))
     if kind == "film":
         from .build_film import build_film_model
 
         return build_film_model(features_cfg, film_cfg, neighbor_types, reference_energies)
     if kind == "pairing":
-        return build_pairing_model(features_cfg, film_cfg, neighbor_types, reference_energies)
+        return build_pairing_model(
+            features_cfg, film_cfg, neighbor_types, reference_energies, atomic_states
+        )
     raise ValueError(f"film.model must be 'film' or 'pairing', got {kind!r}")

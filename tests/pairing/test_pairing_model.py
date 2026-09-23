@@ -139,3 +139,64 @@ def test_film_fit_runs_with_forces_on_a_pairing_output():
     grads = [p.grad for p in model.parameters() if p.grad is not None]
     assert grads and all(torch.isfinite(g).all() for g in grads)
     assert model.network.pairing_heads.d_log_kappa.grad is not None
+
+
+def _ion_batch():
+    """H3O+ and OH- as two fragments in one frame, far apart."""
+    from rsfff.train.data import Batch
+
+    h3o = torch.tensor([
+        [0.0, 0.0, 0.0754], [0.9408, 0.0, -0.2010],
+        [-0.4704, -0.8147, -0.2010], [-0.4704, 0.8147, -0.2010],
+    ])
+    oh = torch.tensor([[0.0, 0.0, -0.1072], [0.0, 0.0, 0.8577]]) + torch.tensor([8.0, 0.0, 0.0])
+    positions = torch.cat((h3o, oh))
+    return Batch(
+        positions=positions.to(torch.get_default_dtype()),
+        atomic_numbers=torch.tensor([8, 1, 1, 1, 8, 1]),
+        batch_idx=torch.zeros(6, dtype=torch.long),
+        n_systems=1,
+        energy=torch.zeros(1),
+        fragment_idx=torch.tensor([0, 0, 0, 0, 1, 1]),
+        fragment_charge=torch.tensor([1.0, -1.0]),
+        fragment_two_s=torch.zeros(2),
+        fragment_to_batch=torch.zeros(2, dtype=torch.long),
+        n_fragments=2,
+    )
+
+
+def test_charge_dependent_valence_lets_hydronium_form_three_bonds():
+    model = make_model()
+    out = model(_ion_batch())
+    v = out.parameters.pairing0.valence
+    assert torch.allclose(v, torch.tensor([3.0, 1.0, 1.0, 1.0, 1.0, 1.0]))
+    p = out.bond_order
+    r = out.r[out.sub_index]
+    bonded = r < 1.2
+    assert torch.allclose(p[bonded], torch.ones_like(p[bonded]), atol=1e-8)
+    assert int(bonded.sum()) == 4
+    assert float(out.unpaired.max()) < 1e-8
+    assert float(out.interaction["cross"].abs()) < 1e-8
+
+
+def test_charged_reference_removes_the_ionization_offset():
+    """With E0(Z, q) each O-H bond of H3O+ and OH- is worth about the same as water's."""
+    from rsfff.ff.pairing.reference import ChargedAtomicReference
+
+    e0 = torch.tensor([-0.4941110651, -75.0780656005])       # H, O at wB97M-V/def2-TZVPD
+    ip = torch.tensor([0.4941110651, 0.5069852060])
+    ea = torch.tensor([0.0019134340, 0.0546502466])
+    ref = ChargedAtomicReference(e0, chi=0.5 * (ip + ea), eta=ip - ea)
+    s = torch.tensor([0, 1])
+    assert torch.allclose(ref(s, torch.ones(2)), e0 + ip)
+    assert torch.allclose(ref(s, -torch.ones(2)), e0 - ea)
+    assert torch.allclose(ref(s, torch.zeros(2)), e0)
+
+    model = make_model()
+    model.reference = ref
+    out = model(_ion_batch())
+    per_bond = (out.fragment_energy - out.energy_ref) / torch.tensor([3.0, 1.0])
+    water = model(water_cluster_batch(1, jitter=0.0))
+    per_bond_water = float((water.fragment_energy - water.energy_ref)[0]) / 2.0
+    assert torch.allclose(out.energy_ref, torch.stack((e0[1] + ip[1] + 3 * e0[0], e0[1] - ea[1] + e0[0])))
+    assert bool(((per_bond - per_bond_water).abs() < 0.08).all())

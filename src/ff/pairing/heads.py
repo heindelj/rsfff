@@ -9,8 +9,20 @@ so the rank-0 model is the initial model exactly.
 
 ``kappa`` (the pairing hardness) is a positive per-atom scalar in log space, per-species prior
 plus a zero-initialized readout of the family latent -- the same construction as ``q`` and
-``b``. The valence capacity ``v`` is a per-species table; its charge dependence is the
-model's business (§3), not the head's.
+``b``.
+
+The valence capacity ``v`` is charge dependent. Its prior puts the fragment's formal charge on
+its heavy atoms::
+
+    v_i = v_0(Z_i) + Q_f w_i           w_i = [i heavy] / n_heavy(f)
+
+so the oxygen of H3O+ can form three bonds (3), that of OH- one (1), and the two oxygens of a
+Zundel cation taken as one fragment get 2.5 each -- which is exactly the pairing a shared
+proton needs. A fragment without heavy atoms puts ``-|Q|`` on its hydrogens (a bare proton or
+hydride pairs nothing). On top of the prior a zero-initialized readout of the family latent
+(FiLM-conditioned on the fragment state, so it can tell H3O+ from H2O) scales it as
+``v = v_prior exp(delta)``. That readout is the reactive-phase extension point: when the
+fragment labels go, ``v`` has to come from the local electron count instead (``docs/fff_pairing.md`` §6).
 """
 
 from __future__ import annotations
@@ -23,6 +35,7 @@ import torch.nn as nn
 from ...mlip.heads import mlp, zero_init_readout
 from ..pauli import PauliMultipoleHeads
 from .bond_order import valence_table
+from .reference import formal_charge_share
 
 __all__ = ["PairingFamily", "PairingHeads", "DEFAULT_PAIRING_PRIOR", "build_pairing_priors"]
 
@@ -107,6 +120,8 @@ class PairingHeads(nn.Module):
         environment_b: bool = True,
         environment_kappa: bool = True,
         learn_kappa: bool = True,
+        environment_valence: bool = True,
+        heavy: torch.Tensor | None = None,     # (n_species,) bool: Z > 1
     ) -> None:
         super().__init__()
         self.multipoles = PauliMultipoleHeads(
@@ -116,13 +131,34 @@ class PairingHeads(nn.Module):
             emb_dim=emb_dim, hidden=hidden, depth=depth, equiv_channels=equiv_channels,
             max_rank=max_rank, environment_q=environment_q, environment_b=environment_b,
         )
-        self.register_buffer("valence_prior", valence.clone())
+        self.register_buffer("valence_prior_table", valence.clone())
         self.register_buffer("log_kappa_prior", log_kappa_prior.clone())
         self.d_log_kappa = nn.Parameter(torch.zeros(n_species), requires_grad=learn_kappa)
         self.kappa_mlp = (
             zero_init_readout(mlp(latent_dim + emb_dim, hidden, depth, 1))
             if environment_kappa else None
         )
+        self.valence_mlp = (
+            zero_init_readout(mlp(latent_dim + emb_dim, hidden, depth, 1))
+            if environment_valence else None
+        )
+        if heavy is None:
+            heavy = torch.ones(n_species, dtype=torch.bool)
+        self.register_buffer("heavy", heavy.clone())
+
+    def valence_prior(
+        self,
+        species_idx: torch.Tensor,        # (N,)
+        fragment_idx: torch.Tensor,       # (N,)
+        fragment_charge: torch.Tensor,    # (F,)
+    ) -> torch.Tensor:
+        """``(N,)`` the charge-dependent valence prior of the class docstring."""
+        v0 = self.valence_prior_table[species_idx]
+        q_share, has_heavy = formal_charge_share(
+            self.heavy[species_idx], fragment_idx, fragment_charge, dtype=v0.dtype
+        )
+        v = torch.where(has_heavy, v0 + q_share, v0 - q_share.abs())
+        return v.clamp(min=0.0)
 
     @property
     def max_rank(self) -> int:
@@ -134,14 +170,24 @@ class PairingHeads(nn.Module):
         species_idx: torch.Tensor,                # (N,)
         vec_feats: torch.Tensor | None = None,    # (N, 3, p1)
         equiv_feats: torch.Tensor | None = None,  # (N, 5, p2)
+        *,
+        fragment_idx: torch.Tensor | None = None,     # (N,)
+        fragment_charge: torch.Tensor | None = None,  # (F,)
     ) -> PairingFamily:
         q, b, mu, quad_s = self.multipoles(z, species_idx, vec_feats, equiv_feats)
+        emb = self.multipoles.species_emb(species_idx)
+        x = torch.cat((z, emb), dim=-1)
         log_kappa = self.log_kappa_prior[species_idx] + self.d_log_kappa[species_idx]
         if self.kappa_mlp is not None:
-            emb = self.multipoles.species_emb(species_idx)
-            log_kappa = log_kappa + self.kappa_mlp(torch.cat((z, emb), dim=-1)).squeeze(-1)
+            log_kappa = log_kappa + self.kappa_mlp(x).squeeze(-1)
+        if fragment_idx is None or fragment_charge is None:
+            valence = self.valence_prior_table[species_idx]
+        else:
+            valence = self.valence_prior(species_idx, fragment_idx, fragment_charge)
+        if self.valence_mlp is not None:
+            valence = valence * self.valence_mlp(x).squeeze(-1).exp()
         return PairingFamily(
             q=q, b=b, mu=mu, quad_s=quad_s,
             kappa=log_kappa.exp(),
-            valence=self.valence_prior[species_idx],
+            valence=valence,
         )

@@ -43,8 +43,11 @@ subject to   sum_j p_ij + u_i = v_i    for every atom i.
   unconstrained, `p = J/kappa` and `E = -J^2 / 2 kappa`, the Heitler-London `S^2` scaling at
   long range; saturated, `p = 1` and `E = -J + kappa/2`. The crossover gives the attractive
   branch its Morse-like shape without a Morse.
-- `v_i` is the **valence capacity** (O: 2, H: 1; `DEFAULT_VALENCE`). Its charge dependence
-  (§6) is not implemented yet.
+- `v_i` is the **valence capacity**: `v_0(Z_i) + Q_f w_i` with the fragment's formal charge
+  shared by its heavy atoms (O in H3O+: 3, in OH-: 1, each O of a one-fragment Zundel: 2.5;
+  a heavy-atom-free fragment puts `-|Q|` on its hydrogens), scaled by a zero-initialized
+  readout of the state-conditioned latent. The fragment label is what carries the charge
+  here; the reactive version has to read it from the local electron count (§6).
 - `T` is the barrier scale (0.002 Ha). Both entropic terms vanish as `T -> 0`; at finite `T`
   they keep `0 < p < 1` and `u > 0`, and they make the minimizer a smooth function of the
   parameters. On a bond `1 - p ~ exp(-(J - kappa)/T) ~ e^{-200}`: saturated to double
@@ -105,12 +108,22 @@ derivative -- has the exact second derivative too. A force loss needs the second
 against central differences through the whole model. The same trick is used inside the
 scalar per-pair equation.
 
-### 2.4 Energy
+### 2.4 Energy and the atomic reference
 
 The reported pairing energy is the minimized functional itself (barriers included), so it
 is stationary in `p`. The per-atom part is referenced to the free atom (`u = v`), so an atom
-without partners contributes exactly zero and the frozen isolated-atom references keep
-their meaning: the film's per-fragment `E0` accounting is already per-atom.
+without partners contributes exactly zero.
+
+Each atom is referenced to **its own charge state** (`reference.py`):
+`E0(Z, q) = E0(Z) + chi_Z q + eta_Z q^2 / 2` with `chi = (IP + EA)/2`, `eta = IP - EA` from
+`data.atomic_reference_states`, evaluated at the atom's formal-charge share (the fragment
+charge split over its heavy atoms -- the same share the valence capacity reads). The
+quadratic runs exactly through `E0 + IP` and `E0 - EA` and is smooth for fractional shares.
+This is what makes a bond transferable across charge states: against `O+ + 3H` hydronium is
+bound by -0.65 Ha, against `O- + H` hydroxide by -0.18, against `O + 2H` water by -0.37 --
+one O-H is ~-0.2 Ha in all three, and at initialization the model already gives that
+(`test_charged_reference_removes_the_ionization_offset`). Without the states file the
+reference is the film's neutral one.
 
 ## 3. Assembly (`model.py`)
 
@@ -180,8 +193,9 @@ heads keep them separate with the option of tying them later.
 
 ## 6. Not yet
 
-- **Charge and multiplicity.** `v_i` is a species table. The plan: per-atom `(q_i, u_i)`
-  conditioning of every head, `v_i` from element and SQE charge, and the multiplicity as
+- **Charge and multiplicity.** `v_i` reads the *fragment* charge, so a proton cannot move
+  between assigned fragments yet. The plan: per-atom `(q_i, u_i)` conditioning of every
+  head, `v_i` from element and local electron count, and the multiplicity as
   the constraint `sum_i u_i >= 2S` (a high-spin state then has no pairing between its
   radical sites and is described by the nonbonded terms alone -- which is also the training
   signal for `J`, `(E_HS - E_LS)/2` along a stretch).
@@ -192,6 +206,13 @@ heads keep them separate with the option of tying them later.
   depend on `p` and `J` on the induced state is non-convex and is left for later.
 - **Kernels.** The pairing coupling goes through `rsfff.ff.backend.slater_pauli_pair_energy`,
   so the torchff Pauli kernel serves it unchanged once the port lands; the solve is torch.
+- **Ions.** `configs/ion_pairing.yaml` trains on the existing H3O+ / OH- data (monomer AIMD +
+  polarizability files, w1/w2 ion clusters with every decomposition), with the charged
+  atomic reference of §2.4 (`data.atomic_reference_states`).
+- **Scans.** `scripts/pairing_scans.py` writes rigid O-H stretches (H2O, H3O+, OH-), an
+  H-O-H bend and shared-proton scans (H5O2+, H3O2- at four O-O distances) into
+  `qchem_roundtrip/force/geoms/` for labeling: the 1-body curves are the kink test and the
+  J-vs-Pauli balance; the proton scans are the valence competition.
 - **Data.** Nothing here needs new labels: on intact water the model reproduces the film's
   accounting and trains on the same streams. Reactive validation needs the stretched /
   high-spin scans of the Obsidian plan.

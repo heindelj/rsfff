@@ -1055,6 +1055,8 @@ class FilmConfig:
     #: Whether the pairing exponent / hardness read the family latent (else per-species only).
     pairing_environment_b: bool = True
     pairing_environment_kappa: bool = True
+    #: Whether the valence capacity reads the family latent on top of its charge prior.
+    pairing_environment_valence: bool = True
 
     # --- classical reach -------------------------------------------------------------------
     elst_cutoff: float = 12.0

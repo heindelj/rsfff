@@ -79,6 +79,7 @@ from .bond_order import (
 )
 from .heads import PairingFamily
 from .network import PairingParameterNetwork, PairingParameters
+from .reference import ChargedAtomicReference, formal_charge_share
 
 __all__ = ["PairingModel", "PairingOutput"]
 
@@ -111,6 +112,7 @@ class PairingModel(nn.Module):
 
     Args (beyond the film model's)
     ------------------------------
+    reference        : :class:`ChargedAtomicReference` (or a plain neutral-energy table).
     pairing_cutoff   : Angstrom, the candidate radius for bond orders and SQE channels.
     pairing_taper    : Angstrom, the taper width on ``J`` below ``pairing_cutoff``.
     temperature      : Hartree, the entropic barrier scale ``T`` of the bond-order functional.
@@ -124,7 +126,7 @@ class PairingModel(nn.Module):
         state_embedding: FragmentStateEmbedding,
         network: PairingParameterNetwork,
         range_heads: nn.Module,
-        reference_energies: torch.Tensor,
+        reference: ChargedAtomicReference | torch.Tensor,
         *,
         max_rank: int = 2,
         classical: dict[str, ClassicalSpec] | None = None,
@@ -164,7 +166,9 @@ class PairingModel(nn.Module):
         self.include_13 = bool(include_13)
         self.bo = dict(tol=float(bo_tol), maxiter=int(bo_maxiter))
         self.register_buffer("temperature", torch.tensor(float(temperature)))
-        self.register_buffer("reference_energies", reference_energies.clone())
+        if not isinstance(reference, ChargedAtomicReference):
+            reference = ChargedAtomicReference(reference)     # neutral, film-style
+        self.reference = reference
 
     # -- helpers -------------------------------------------------------------------------
 
@@ -366,7 +370,12 @@ class PairingModel(nn.Module):
             .index_add_(0, sub_frag[sub_intra], e_pair0[sub_intra])
             .index_add_(0, frag, e_atom0)
         )
-        e0 = self.reference_energies[species_idx]
+        # every atom referenced to its own formal-charge share (docs/fff_pairing.md §2.4)
+        q_share, _ = formal_charge_share(
+            self.network.pairing_heads.heavy[species_idx], frag, state.fragment_charge,
+            dtype=positions.dtype,
+        )
+        e0 = self.reference(species_idx, q_share)
         energy_ref = e0.new_zeros(n_frag).index_add_(0, frag, e0)
         fragment_energy = energy_ref + energy_pairing + energy_intra
 
