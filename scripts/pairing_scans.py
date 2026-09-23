@@ -1,6 +1,9 @@
 """Rigid scan geometries for the pairing model: bond stretches, a bend, and proton transfers.
 
-    python scripts/pairing_scans.py --out qchem_roundtrip/force/geoms
+    python scripts/pairing_scans.py --out qchem_roundtrip/pairing_scans/geoms
+    python scripts/pairing_scans.py --out qchem_roundtrip/pairing_scans_uks_singlet/geoms --uks
+    python scripts/pairing_scans.py --out qchem_roundtrip/pairing_scans_uks_triplet/geoms \
+        --uks --multiplicity 3 --only stretches
 
 Writes one multi-frame extxyz per scan, in the header format the Q-Chem round-trip generator
 expects (``charge`` and ``multiplicity`` per frame; ``scan`` / ``coord`` are bookkeeping keys
@@ -10,6 +13,13 @@ curve reads as a curve: these are diagnostics of the pairing term against the Pa
 (the O-H stretches: where the bond order lets go), of the quadrupolar valence density (the
 bend), and of the valence competition (the shared proton). They are not sampled training
 data; jitter is deliberately absent.
+
+``--multiplicity`` sets the header's multiplicity (3 = the triplet, i.e. the state with the
+stretched bond's two electrons unpaired: the no-pairing reference of the pairing model, and
+with the singlet, the training signal for J as (E_T - E_S)/2). ``--uks`` only tags the
+file names; the unrestricted template is chosen by the calculation folder's config entry.
+``--only stretches`` restricts to the three O-H stretches (the bend and the proton scans
+have no meaningful triplet).
 
 Scans
 -----
@@ -53,7 +63,11 @@ BEND_DEG = np.arange(60.0, 180.0 + 1e-9, 5.0)
 OO_DISTANCES = (2.40, 2.50, 2.70, 2.90)
 
 
+MULTIPLICITY = 1
+
+
 def _frame(species, pos, charge, mult, scan, coord, **extra):
+    mult = MULTIPLICITY
     keys = " ".join(f"{k}={v}" for k, v in extra.items())
     header = (
         f"Properties=species:S:1:pos:R:3 charge={charge} multiplicity={mult} "
@@ -139,8 +153,8 @@ def proton_transfer(name, charge, halves):
     return frames
 
 
-def build():
-    return {
+def build(only=None):
+    scans = {
         "pairing_scan_h2o_stretch": stretch("h2o_stretch", H2O, 0),
         "pairing_scan_h3o+_stretch": stretch("h3o+_stretch", H3O, 1),
         "pairing_scan_oh-_stretch": stretch("oh-_stretch", OH, -1),
@@ -152,16 +166,25 @@ def build():
             "h3o2-_pt", -1, lambda sign, o, twist: hydroxide_half(sign, o, 110.0, twist)[None]
         ),
     }
+    if only == "stretches":
+        scans = {k: v for k, v in scans.items() if k.endswith("_stretch")}
+    return scans
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--out", type=Path, default=Path("qchem_roundtrip/force/geoms"))
+    ap.add_argument("--out", type=Path, default=Path("qchem_roundtrip/pairing_scans/geoms"))
+    ap.add_argument("--multiplicity", type=int, default=1)
+    ap.add_argument("--only", choices=["stretches"], default=None)
+    ap.add_argument("--uks", action="store_true", help="tag the file names as unrestricted")
     args = ap.parse_args()
+    global MULTIPLICITY
+    MULTIPLICITY = int(args.multiplicity)
     args.out.mkdir(parents=True, exist_ok=True)
     total = 0
-    for name, frames in build().items():
-        path = args.out / f"{name}.xyz"
+    tag = ("_uks" if args.uks else "") + (f"_m{MULTIPLICITY}" if MULTIPLICITY != 1 else "")
+    for name, frames in build(args.only).items():
+        path = args.out / f"{name}{tag}.xyz"
         path.write_text("".join(frames))
         print(f"{path}: {len(frames)} frames")
         total += len(frames)

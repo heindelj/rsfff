@@ -1,0 +1,23 @@
+$molecule
+0 1
+  O     1.7154930     0.3835570     0.0802420
+  H     2.1895610    -0.4940910     0.0332330
+  H     0.7577100     0.0649480    -0.1096450
+$end
+
+$rem
+   JOBTYPE          =  force
+   METHOD           =  wB97M-V
+   BASIS            =  def2-TZVPD
+   UNRESTRICTED     =  true
+   SCF_GUESS_MIX    =  5
+   SCF_ALGORITHM    =  DIIS_GDM
+   MAX_SCF_CYCLES   =  200
+   SCF_CONVERGENCE  =  8
+   THRESH           =  14
+   XC_GRID          =  000099000590
+   NL_GRID          =  1
+   SYMMETRY         =  false
+   MEM_TOTAL        =  64000
+   MEM_STATIC       =  10000
+$end
