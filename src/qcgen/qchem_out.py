@@ -110,28 +110,40 @@ def parse_geometry(lines: list[str], start: int) -> tuple[list[str], np.ndarray]
 
 
 def parse_mulliken(lines: list[str], n_atoms: int, start: int | None = None) -> np.ndarray:
-    """Parse a ``Ground-State Mulliken Net Atomic Charges`` table.
+    """Parse a ``Ground-State Mulliken Net Atomic Charges`` table (the charges only).
 
     ``start`` selects which table; the default is the last one in ``lines``,
     which for a supersystem job is the one belonging to the final wavefunction.
+    An unrestricted job prints a fourth ``Spin (a.u.)`` column, which is accepted
+    here and returned by :func:`parse_mulliken_spin`.
     """
+    return _parse_mulliken_table(lines, n_atoms, start)[0]
+
+
+def parse_mulliken_spin(lines: list[str], n_atoms: int, start: int | None = None) -> np.ndarray:
+    """The ``Spin (a.u.)`` column of the Mulliken table; zeros for a restricted job."""
+    return _parse_mulliken_table(lines, n_atoms, start)[1]
+
+
+def _parse_mulliken_table(lines, n_atoms, start):
     if start is None:
         idx = find_all(lines, "Mulliken Net Atomic Charges")
         if not idx:
-            return np.full(n_atoms, np.nan)
+            return np.full(n_atoms, np.nan), np.full(n_atoms, np.nan)
         start = idx[-1]
-    charges = []
+    charges, spins = [], []
     for ln in lines[start:]:
         toks = ln.split()
-        if len(toks) == 3 and toks[0].isdigit() and toks[1].isalpha():
+        if len(toks) in (3, 4) and toks[0].isdigit() and toks[1].isalpha():
             charges.append(float(toks[2]))
+            spins.append(float(toks[3]) if len(toks) == 4 else 0.0)
         elif charges:
             break
     if len(charges) != n_atoms:
         raise QChemParseError(
             f"Mulliken table has {len(charges)} rows but the system has {n_atoms} atoms"
         )
-    return np.array(charges)
+    return np.array(charges), np.array(spins)
 
 
 def expand_multipole(unique: dict[str, float], rank: int) -> np.ndarray:
@@ -317,6 +329,7 @@ __all__ = [
     "parse_geometry",
     "parse_molecule_block",
     "parse_mulliken",
+    "parse_mulliken_spin",
     "parse_multipoles",
     "parse_rem",
     "unique_components",

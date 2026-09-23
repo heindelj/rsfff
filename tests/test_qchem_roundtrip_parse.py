@@ -283,3 +283,27 @@ def test_an_unusable_pair_is_dropped_rather_than_written(tmp_path):
     assert "dropped frame 0" in result.stderr
     assert "Gradient of SCF Energy" in result.stderr
     assert not (tmp_path / "out").exists() or not list((tmp_path / "out").iterdir())
+
+
+def test_mulliken_table_with_spin_column():
+    """An unrestricted job prints a fourth ``Spin (a.u.)`` column; the charges still parse
+    and the spin populations are available separately."""
+    from rsfff.qcgen.qchem_out import parse_mulliken, parse_mulliken_spin
+
+    lines = """
+          Ground-State Mulliken Net Atomic Charges
+
+     Atom                 Charge (a.u.)    Spin (a.u.)
+  --------------------------------------------------------
+      1 O                    -0.345868       1.032502
+      2 H                     0.009121       0.991338
+      3 H                     0.336747      -0.023841
+  --------------------------------------------------------
+  Sum of atomic charges =     0.000000
+""".splitlines()
+    q = parse_mulliken(lines, 3)
+    s = parse_mulliken_spin(lines, 3)
+    assert q.tolist() == pytest.approx([-0.345868, 0.009121, 0.336747])
+    assert s.tolist() == pytest.approx([1.032502, 0.991338, -0.023841])
+    restricted = [ln.replace("       1.032502", "").replace("       0.991338", "").replace("      -0.023841", "") for ln in lines]
+    assert parse_mulliken_spin(restricted, 3).tolist() == [0.0, 0.0, 0.0]
