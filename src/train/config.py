@@ -65,6 +65,14 @@ class DataConfig:
     #: Fraction of large-stream *geometries* held out. Reported as ``lg_*`` on the val line,
     #: which is the number that says whether the large clusters were fitted or memorized.
     large_holdout_fraction: float = 0.15
+    #: Cluster files labeled with energies and forces but **no EDA** -- the active-learning
+    #: labels of clusters too large for an ALMO-EDA. They cannot be concatenated onto ``path``
+    #: (the EDA channels would have no target, and ``concatenate_datasets`` refuses the mix),
+    #: so they are a stream of their own, fitted on total energy per fragment and forces and
+    #: weighted by ``film.force_stream_weight``. Frames with a ``split_group`` header key are
+    #: split by it (whole trajectories held out), like ``path``.
+    force_path: str | list[str] | None = None
+    force_holdout_fraction: float = 0.1
     #: Which decompositions to load from a multi-fragmentation cluster file: ``"all"``, a
     #: single index, or a list. Files with one fragmentation per frame ignore it.
     #: ``"all"`` is what makes a geometry contribute every placement of its excess charge.
@@ -1100,6 +1108,17 @@ class FilmConfig:
     #: Force striding for the large stream, counted in its own steps. Kept separate from
     #: ``force_every`` because the large batch is the expensive second-order backward.
     large_force_every: int = 2
+    #: The force-only stream (``data.force_path``): total energy per fragment and forces on
+    #: its own minibatch, scaled by ``force_stream_weight`` (0 disables it). The energy term is
+    #: per fragment so that a 64-water frame does not outweigh a dimer by its size alone;
+    #: ``force_stream_energy_weight`` sets it relative to the force term, which uses the main
+    #: stream's ``force_scale``.
+    force_stream_weight: float = 0.0
+    force_stream_batch_size: int = 8
+    force_stream_force_every: int = 1
+    force_stream_energy_weight: float = 1.0
+    #: Frames of the held-out split evaluated per validation pass (a leading slice).
+    force_stream_val_size: int = 64
 
     # --- penalties ---------------------------------------------------------------------------------
     #: L1 on ``|theta - theta_0|`` per quantity (log-space for positives) -- the dial deciding
@@ -1261,6 +1280,10 @@ def load_config(path) -> Config:
         large_path=_monomer_paths(data.get("large_path")),
         large_holdout_fraction=float(
             data.get("large_holdout_fraction", DataConfig.large_holdout_fraction)
+        ),
+        force_path=_monomer_paths(data.get("force_path")),
+        force_holdout_fraction=float(
+            data.get("force_holdout_fraction", DataConfig.force_holdout_fraction)
         ),
         fragmentations=data.get("fragmentations", DataConfig.fragmentations),
         holdout_fraction=float(data.get("holdout_fraction", DataConfig.holdout_fraction)),

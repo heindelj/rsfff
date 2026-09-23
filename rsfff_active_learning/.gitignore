@@ -1,0 +1,12 @@
+# Code and configs are versioned (rsfff branch `nonreactive`); data never is. Everything below
+# travels between the laptop and Perlmutter with scripts/sync.sh, not with git.
+runs/
+_transfer/
+_deps/
+train/anchors/*.xyz
+*.pt
+*.npz
+*.extxyz
+*.log
+__pycache__/
+.pytest_cache/
