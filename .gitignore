@@ -9,3 +9,6 @@ qchem_roundtrip/train/runs/
 benchmarks/profile/results/*_trace.json.gz
 benchmarks/profile/results/*_forward.json
 benchmarks/profile/results/slurm-*.out
+
+# active learning workspace (synced to Perlmutter, not versioned here)
+rsfff_active_learning/

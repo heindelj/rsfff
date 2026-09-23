@@ -50,6 +50,7 @@ import torch
 from rsfff.ff.hbond import dimer_geometry, hbond_labels, hbonds_per_molecule
 from rsfff.ff.many_body import subset_batch
 from rsfff.train.build_film import build_film_model
+from rsfff.train.committee import committee_members, data_root_for, localize_data_paths
 from rsfff.train.data import load_extxyz, load_reference_energies
 from rsfff.ff.units import BOHR_ANG, KJMOL_PER_HARTREE
 
@@ -71,15 +72,40 @@ EDA_TERMS: dict[str, tuple[str, ...]] = {
 }
 
 
-def load_film_checkpoint(path: str, device: str = "cpu"):
+def resolve_checkpoint(path: str, member: int) -> Path:
+    """The checkpoint to load, given a committee directory or a plain ``.pt``.
+
+    One member drives, rather than the committee mean: the mean of several fits is a surface
+    no member has, and every number in this figure -- a Pauli charge, a polarizability, an
+    EDA channel -- is a property of one model's parameters, not of an average of them.
+    """
+    members = committee_members(path)
+    if not 0 <= member < len(members):
+        raise IndexError(
+            f"member {member} out of range: {path} has {len(members)} member(s)"
+        )
+    if len(members) > 1:
+        print(f"committee {path}: {len(members)} members, using member {member}")
+    return members[member]
+
+
+def load_film_checkpoint(path, device: str = "cpu"):
     """Rebuild the film model from the checkpoint's own embedded config.
 
     The config travels with the weights, stage overrides already applied; reading a YAML
     instead builds a *different* model than the weights came from and the failure looks
     like a bad fit rather than a mismatch.
+
+    A checkpoint synced back from a cluster carries that cluster's absolute data paths, so
+    the config is localized first -- ``reference_energies`` is read here, and without it a
+    synced checkpoint cannot be rebuilt at all.
     """
     state = torch.load(path, map_location="cpu", weights_only=False)
     cfg = state["config"]
+    moved = localize_data_paths(cfg, data_root_for(Path(path)), Path.cwd())
+    if moved:
+        print(f"  localized {len(moved)} data path(s) from the training machine, e.g.\n"
+              f"    {moved[0][0]}\n    -> {moved[0][1]}")
     torch.set_default_dtype(torch.float64 if cfg.dtype == "float64" else torch.float32)
     neighbor_types = tuple(int(z) for z in state["neighbor_types"])
     ref = load_reference_energies(cfg.data.reference_energies, neighbor_types).to(
@@ -320,7 +346,10 @@ def two_body_split(model, batch, *, channels, device, dimer_chunk: int = 64):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--checkpoint", default="checkpoints/water_film_large/best.pt")
+    p.add_argument("--checkpoint", default="checkpoints/water_film_large/best.pt",
+                   help="a committee directory or a single .pt")
+    p.add_argument("--member", type=int, default=0,
+                   help="which committee member drives the figure; ignored for a plain .pt")
     p.add_argument("--device", default="cpu")
     p.add_argument("--r-max", type=float, default=3.0,
                    help="candidate window for O...H pairs (A); not a hydrogen-bond criterion")
@@ -333,8 +362,9 @@ def main() -> None:
     p.add_argument("--out", default="notebooks/figures/hbond_pauli_manybody")
     args = p.parse_args()
 
-    model, cfg, state = load_film_checkpoint(args.checkpoint, args.device)
-    print(f"checkpoint {args.checkpoint}  epoch {state.get('epoch')}  dtype {cfg.dtype}")
+    checkpoint = resolve_checkpoint(args.checkpoint, args.member)
+    model, cfg, state = load_film_checkpoint(checkpoint, args.device)
+    print(f"checkpoint {checkpoint}  epoch {state.get('epoch')}  dtype {cfg.dtype}")
 
     dtype = torch.get_default_dtype()
     datasets: dict[str, tuple] = {}
