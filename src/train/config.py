@@ -1036,6 +1036,26 @@ class FilmConfig:
     # --- range separation ----------------------------------------------------------------
     alpha_init: float = 40.0
 
+    # --- the pairing model (``model: pairing``) ---------------------------------------------
+    #: "film" (Morse + angle on the assigned topology) or "pairing" (the variational bond
+    #: order of ``docs/fff_pairing.md``; :mod:`rsfff.ff.pairing`). Selects the builder, the
+    #: streams and losses are shared.
+    model: str = "film"
+    #: Angstrom: candidate radius for bond orders and SQE channels, and the taper below it.
+    pairing_cutoff: float = 4.0
+    pairing_taper: float = 1.0
+    #: Hartree: the entropic barrier scale of the bond-order functional.
+    pairing_temperature: float = 0.002
+    #: "bond_order" (cutoff tapers only; the bond order is the range separation) or "fermi"
+    #: (keep the film model's element-table switches as an ablation).
+    range_gate: str = "bond_order"
+    include_13: bool = True
+    bo_tol: float = 1.0e-10
+    bo_maxiter: int = 100
+    #: Whether the pairing exponent / hardness read the family latent (else per-species only).
+    pairing_environment_b: bool = True
+    pairing_environment_kappa: bool = True
+
     # --- classical reach -------------------------------------------------------------------
     elst_cutoff: float = 12.0
     pauli_cutoff: float = 7.0

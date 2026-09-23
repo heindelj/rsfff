@@ -34,7 +34,7 @@ import torch
 from scipy.optimize import minimize
 
 from ..ff.film.model import maybe_compile
-from ..train.build_film import build_film_model
+from ..train.build_pairing import build_model
 from ..train.data import Batch, load_reference_energies
 
 __all__ = [
@@ -80,7 +80,7 @@ def load_film_model(path, *, device: str = "cpu"):
         reference = load_reference_energies(
             config.data.reference_energies, neighbor_types
         ).to(torch.get_default_dtype())
-    model = build_film_model(config.features, config.film, neighbor_types, reference)
+    model = build_model(config.features, config.film, neighbor_types, reference)
     maybe_compile(model)                      # RSFFF_COMPILE: inference use, all parts allowed
     model.load_state_dict(state)
     model.eval().to(device)

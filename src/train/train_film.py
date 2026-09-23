@@ -48,7 +48,7 @@ import torch
 
 from ..ff.units import KJMOL_PER_HARTREE
 from ..mlip.heads import env_parameters
-from .build_film import build_film_model
+from .build_pairing import build_model
 from ..ff.film.model import maybe_compile
 from .config import Config, load_config, stage_config
 from .data import (
@@ -77,7 +77,7 @@ _LOG_KEYS = (
     "bonded", "bond_var", "q_res",
     "r0_elst", "r0_pauli", "r0_disp",
     "env_norm", "env_c6", "env_eta", "env_bond_d", "env_bond_r_eq",
-    "cg_ind", "cg_fail",
+    "cg_ind", "cg_fail", "bo_iter", "bo_fail",
     "lg_elst_mae", "lg_pauli_mae", "lg_disp_mae", "lg_ind_mae", "lg_e_tot_mae",
     "lg_ob_mae", "lg_f_clu", "lg_cg_fail",
 )
@@ -147,6 +147,11 @@ def film_fit(out, batch, cfg: Config, *, training: bool = True, with_forces: boo
         n_iter, converged, pd_fail = out.solver["ind"]
         metrics["cg_ind"] = float(n_iter)
         metrics["cg_fail"] = float((~converged).sum() + pd_fail.sum())
+    bo = getattr(out, "bo_solver", None)
+    if bo:
+        metrics["bo_iter"] = float(max(v[0] for v in bo.values()))
+        metrics["bo_fail"] = float(sum(int((~v[1]).sum()) for v in bo.values()))
+        metrics["bo_pmin"] = float(out.bond_order.detach().max()) if out.bond_order.numel() else 0.0
     return loss, metrics, batch.fragment_energy
 
 
@@ -167,7 +172,8 @@ def strided_fit_term(model, force_every: int = 1):
 
 def _bonded_variance(out) -> torch.Tensor:
     """Mean squared feature-dependent deviation of the bonded parameters (theta_0 branch)."""
-    d = out.parameters.bonded0.delta_iso
+    bonded0 = getattr(out.parameters, "bonded0", None)
+    d = None if bonded0 is None else bonded0.delta_iso
     return d.pow(2).mean() if d is not None and d.numel() else out.energy.new_zeros(())
 
 
@@ -452,7 +458,7 @@ def _train_once(config: Config):
     ).to(dtype)
 
     torch.manual_seed(config.train.seed)
-    model = build_film_model(
+    model = build_model(
         config.features, config.film, neighbor_types, reference_energies
     ).to(device=device, dtype=dtype)
     maybe_compile(model, training=True)       # RSFFF_COMPILE=cg: compiled PCG iteration
