@@ -42,6 +42,13 @@
       "molecule": {
         "mode": "plain"
       }
+    },
+    "pairing_scans": {
+      "priority": 30,
+      "template": "templates/force.in",
+      "molecule": {
+        "mode": "plain"
+      }
     }
   }
 }
