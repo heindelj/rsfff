@@ -17,6 +17,9 @@ clusters                live     ``eda_cls_elec``, ``eda_mod_pauli``, ``eda_disp
 ``data.large_path``     live     the same cluster labels on the large (w4-w23) set, drawn
                                  as its own minibatch so the relative pull is
                                  ``film.large_weight`` and not the frame count
+``data.force_path``     live     total energy per fragment and forces only (clusters
+                                 labeled without an EDA), its own minibatch, weighted
+                                 by ``film.force_stream_weight``
 ======================  =======  ==================================================
 
 What to watch, in order of what will bite
@@ -80,6 +83,7 @@ _LOG_KEYS = (
     "cg_ind", "cg_fail",
     "lg_elst_mae", "lg_pauli_mae", "lg_disp_mae", "lg_ind_mae", "lg_e_tot_mae",
     "lg_ob_mae", "lg_f_clu", "lg_cg_fail",
+    "fs_e_mae", "fs_f_clu", "fs_cg_fail",
 )
 
 
@@ -150,6 +154,34 @@ def film_fit(out, batch, cfg: Config, *, training: bool = True, with_forces: boo
     return loss, metrics, batch.fragment_energy
 
 
+def force_fit(out, batch, cfg: Config, *, training: bool = True, with_forces: bool = True):
+    """The force-only stream's loss: total energy **per fragment** and forces, no EDA.
+
+    For frames labeled with a force calculation alone (clusters past the size where an EDA
+    is affordable). Per fragment, because the frames span 2 to 64 waters and a total-energy
+    error grows with the cluster; forces are per atom already.
+    """
+    x = cfg.film
+    metrics = {}
+    loss = batch.energy.new_zeros(())
+    n_frag = torch.bincount(batch.fragment_to_batch, minlength=int(batch.n_systems)).clamp(min=1)
+    e_err = (out.energy - batch.energy) / n_frag.to(out.energy.dtype)
+    metrics["e_mae"] = float(e_err.detach().abs().mean()) * KJMOL_PER_HARTREE
+    if x.force_stream_energy_weight > 0.0:
+        loss = loss + x.force_stream_energy_weight * (e_err / x.energy_scale).pow(2).mean()
+    if with_forces:
+        if batch.forces is None:
+            raise ValueError("data.force_path frames carry no forces")
+        forces = compute_forces(out.energy, batch.positions, create_graph=training)
+        f_err = (forces - batch.forces) / x.force_scale
+        loss = loss + x.force_weight * f_err.pow(2).sum(-1).mean()
+        metrics["f_clu"] = float((forces - batch.forces).detach().abs().mean())
+    if out.solver:
+        n_iter, converged, pd_fail = out.solver["ind"]
+        metrics["cg_fail"] = float((~converged).sum() + pd_fail.sum())
+    return loss, metrics
+
+
 def strided_fit_term(model, force_every: int = 1):
     """:func:`film_fit` with the cluster force term applied every k-th training step."""
     every = max(int(force_every), 1)
@@ -205,6 +237,13 @@ class FilmStreams:
         large_weight: float = 0.0,
         large_batch_size: int = 8,
         large_force_every: int = 2,
+        force_dataset=None,
+        force_train_idx=None,
+        force_val_idx=None,
+        force_stream_weight: float = 0.0,
+        force_stream_batch_size: int = 8,
+        force_stream_force_every: int = 1,
+        force_stream_val_size: int = 64,
         seed: int = 0,
     ) -> None:
         self.model = model
@@ -223,6 +262,14 @@ class FilmStreams:
         self.generator = torch.Generator().manual_seed(int(seed))
         self._step = 0
         self._large_step = 0
+        self.forces = force_dataset
+        self.force_train_idx = force_train_idx
+        self.force_val_idx = force_val_idx
+        self.force_stream_weight = float(force_stream_weight)
+        self.force_stream_batch_size = int(force_stream_batch_size)
+        self.force_stream_force_every = max(int(force_stream_force_every), 1)
+        self.force_stream_val_size = int(force_stream_val_size)
+        self._force_step = 0
         self._metrics: dict[str, float] = {}
 
     def _draw(self, dataset, size, training, *, grad_positions: bool = False, pool=None):
@@ -349,7 +396,37 @@ class FilmStreams:
         large = self._large_term(cfg, training)
         if large is not None:
             extra["large"] = large
+
+        # --- the force-only stream ---------------------------------------------------------
+        force_only = self._force_term(cfg, training)
+        if force_only is not None:
+            extra["force_stream"] = force_only
         return extra
+
+    def _force_term(self, cfg: Config, training: bool):
+        """:func:`force_fit` on a force-only minibatch, weighted and ``fs_``-prefixed.
+
+        Evaluation takes a leading slice (``film.force_stream_val_size``) of the held-out
+        split: unlike the large stream this one grows by thousands of frames over an
+        active-learning run, and all of it every val minibatch would dominate the epoch.
+        """
+        if self.forces is None or self.force_stream_weight <= 0.0:
+            return None
+        pool = self.force_train_idx if training else self.force_val_idx
+        size = self.force_stream_batch_size if training else self.force_stream_val_size
+        drawn = self._draw(self.forces, size, training, grad_positions=True, pool=pool)
+        if drawn is None:
+            return None
+        batch, _ = drawn
+        if training:
+            self._force_step += 1
+        with_forces = (not training) or self._force_step % self.force_stream_force_every == 0
+        with torch.enable_grad():
+            out = self.model(batch)
+            loss, metrics = force_fit(out, batch, cfg, training=training,
+                                      with_forces=with_forces)
+        self._metrics.update({f"fs_{k}": v for k, v in metrics.items()})
+        return self.force_stream_weight * loss
 
     def _large_term(self, cfg: Config, training: bool):
         """:func:`film_fit` on a large-cluster minibatch, weighted and ``lg_``-prefixed.
@@ -427,6 +504,21 @@ def _load_large_stream(config: Config, dtype):
     return dataset, train_idx, val_idx
 
 
+def _load_force_stream(config: Config, dtype):
+    """``(dataset, train_idx, val_idx)`` for ``data.force_path``, or ``(None, None, None)``."""
+    if not config.data.force_path:
+        return None, None, None
+    dataset = load_cluster_datasets(config.data.force_path, dtype=dtype, fragmentations=0)
+    if not dataset.has_fragments:
+        raise ValueError("data.force_path frames need a `fragment_idx` column")
+    if dataset._forces is None:
+        raise ValueError("data.force_path frames need forces")
+    train_idx, val_idx = split_indices_grouped(
+        dataset._group_id, config.data.force_holdout_fraction, config.data.seed
+    )
+    return dataset, train_idx, val_idx
+
+
 def _train_once(config: Config):
     dtype = torch.float64 if config.dtype == "float64" else torch.float32
     torch.set_default_dtype(dtype)
@@ -447,6 +539,7 @@ def _train_once(config: Config):
     fragments = fragment_view(clusters, train_idx)
     anchors = load_anchor_datasets(config.data.monomer_path, dtype=dtype)
     large, large_train, large_val = _load_large_stream(config, dtype)
+    force_ds, force_train, force_val = _load_force_stream(config, dtype)
     reference_energies = load_reference_energies(
         config.data.reference_energies, neighbor_types
     ).to(dtype)
@@ -483,6 +576,19 @@ def _train_once(config: Config):
             flush=True,
         )
 
+    if force_ds is not None:
+        state = (
+            f"weight {config.film.force_stream_weight}, batch "
+            f"{config.film.force_stream_batch_size}"
+            if config.film.force_stream_weight > 0.0
+            else "LOADED BUT OFF (film.force_stream_weight = 0)"
+        )
+        print(
+            f"force-only stream: {len(force_ds)} frames, "
+            f"{len(force_train)}/{len(force_val)} train/val; {state}",
+            flush=True,
+        )
+
     streams = FilmStreams(
         model, device,
         fragment_dataset=fragments,
@@ -496,6 +602,13 @@ def _train_once(config: Config):
         large_weight=config.film.large_weight,
         large_batch_size=config.film.large_batch_size,
         large_force_every=config.film.large_force_every,
+        force_dataset=force_ds,
+        force_train_idx=force_train,
+        force_val_idx=force_val,
+        force_stream_weight=config.film.force_stream_weight,
+        force_stream_batch_size=config.film.force_stream_batch_size,
+        force_stream_force_every=config.film.force_stream_force_every,
+        force_stream_val_size=config.film.force_stream_val_size,
         seed=config.data.seed,
     )
 
