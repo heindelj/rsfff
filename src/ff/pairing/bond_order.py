@@ -80,6 +80,12 @@ def valence_table(neighbor_types, overrides: dict[int, float] | None = None) -> 
     return torch.tensor([float(table[int(z)]) for z in neighbor_types])
 
 
+def _xlogx(x: torch.Tensor) -> torch.Tensor:
+    """``x ln x`` with a finite gradient at ``x = 0`` (a saturated ``p`` or ``1 - p`` underflows
+    to an exact zero, and ``xlogy``'s ``-inf`` there times a zero ``dp/dR`` is a NaN force)."""
+    return x * torch.log(x.clamp(min=torch.finfo(x.dtype).tiny))
+
+
 # ---------------------------------------------------------------------------
 # the scalar per-pair equation
 
@@ -173,30 +179,22 @@ def _frame_layout(batch_idx: torch.Tensor, n_systems: int):
 def _marginal(lam, J, kappa, temperature, valence, i, j, n_atoms):
     """Everything one Newton iteration needs at the multipliers ``lam``.
 
-    Returns ``(rhs (N,), p (Pb,), w (N,), coef_i (Pb,), coef_j (Pb,), diag (N,), merit (N,))``
-    -- ``merit`` is the unscaled residual ``R`` the line search and the convergence test read.
+    Returns ``(R, p, w, dpda, dpda, diag, |R|, g_pair, g_atom)``:
 
-    The marginal ``sum_j p_ij + u_i = v_i`` (``u = exp(-1 - lam/T)`` the dual slack) is a
-    balance of exponentially small quantities on every saturated atom: its bonds sit at
-    ``p = 1 - e^{-big}``, and what they leave must equal the slack plus the ``e^{-big}``
-    bond orders of the pairs it does not form. So the residual is written as a balance of
-    the two positive sides, each cancellation-free, and Newton is taken on its logarithm::
+    ``R = fill - room`` is the marginal residual, evaluated as a balance of two positive
+    sides so it is cancellation-free on a saturated atom (its bonds sit at ``p = 1 - e^{-big}``
+    and what they leave must equal the slack plus the ``e^{-big}`` bond orders of the pairs it
+    does not form)::
 
         room_i = (v_i - n_sat_i) + sum_{sat j} (1 - p_ij)      [saturated pairs: x > 0,
         fill_i = u_i + sum_{unsat j} p_ij                        1 - p = sigmoid(-x) exactly]
 
-        R_i    = ln fill_i - ln room_i                          (room_i > 0)
-               = fill_i - room_i                                (room_i <= 0: over-saturated)
-
-    Same root as ``fill - room``, but exact in one Newton step where every term is an
-    exponential in ``lam`` (the plain difference converges by one e-fold per step there).
-    Everything is returned scaled by ``fill_i`` so that at the solution the system is the
-    symmetric ``u/T + sum dp/da`` one: ``rhs = fill R``, and the Jacobian of ``fill R`` has
-    diagonal ``diag`` and off-diagonal entries ``coef_i`` (row ``i`` of pair ``ij``) and
-    ``coef_j`` (row ``j``), where a saturated pair's ``dp/da`` enters row ``i`` scaled by
-    ``fill_i / room_i``. ``w = v - sum_j p`` is the primal slack.
+    ``R`` is also the gradient of the dual function ``g(lam) = min_p L`` whose Hessian is
+    ``-K`` with ``K = diag(u/T + sum_j dp/da) + offdiag(dp/da)``: symmetric positive definite,
+    so the Newton step ``K^{-1} R`` is an ascent direction of ``g``, which is what the line
+    search reads. ``w = v - sum_j p`` is the primal slack. ``g_pair`` / ``g_atom`` are the
+    dual function's terms (the atom entropy collapses to ``-T u`` at the optimum).
     """
-    tiny = torch.finfo(J.dtype).tiny
     a = J - lam[i] - lam[j]
     x = _solve_pair_logit(a, kappa, temperature)
     p = torch.sigmoid(x)
@@ -211,23 +209,14 @@ def _marginal(lam, J, kappa, temperature, valence, i, j, n_atoms):
     log_u = (-1.0 - lam / temperature).clamp(-700.0, 60.0)
     u = torch.exp(log_u)
     fill = u.index_add(0, i, fill_pair).index_add(0, j, fill_pair)
-    positive = room > 0.0
-    room_safe = torch.where(positive, room, torch.ones_like(room)).clamp(min=tiny)
-    log_ratio = torch.log(fill.clamp(min=tiny)) - torch.log(room_safe)
-    rhs = torch.where(positive, fill * log_ratio, fill - room)
-    # The line search and the convergence test read the plain imbalance: it is continuous
-    # across the saturated/unsaturated split at p = 1/2 (moving a pair from one side to the
-    # other moves the valence count with it), whereas the log ratio is not, and a merit that
-    # jumps there stalls the line search exactly where an atom's partners compete.
-    merit = (fill - room).abs()
-    # row scaling of the saturated pairs' derivative: fill/room on the log branch, 1 else
-    f = torch.where(positive, fill / room_safe, torch.ones_like(fill))
+    R = fill - room
     dpda = _dp_da(p, pc, kappa, temperature)
-    coef_i = dpda * torch.where(is_sat, f[i], torch.ones_like(p))
-    coef_j = dpda * torch.where(is_sat, f[j], torch.ones_like(p))
-    diag = (u / temperature).index_add(0, i, coef_i).index_add(0, j, coef_j)
+    diag = (u / temperature).index_add(0, i, dpda).index_add(0, j, dpda)
     w = room - (fill - u)
-    return rhs, p, w, coef_i, coef_j, diag, merit
+    ent = _xlogx(p) + _xlogx(pc)
+    g_pair = -J * p + 0.5 * kappa * p * p + temperature * ent + (lam[i] + lam[j]) * p
+    g_atom = -temperature * u - lam * valence
+    return R, p, w, dpda, dpda, diag, R.abs(), g_pair, g_atom
 
 
 def _newton_direction(rhs, coef_i, coef_j, diag, i, j, batch_idx, local, n_systems, n_max):
@@ -299,11 +288,26 @@ def solve_bond_order(
     def state(lam):
         return _marginal(lam, J, kappa, temperature, valence, i, j, n_atoms)
 
+    def dual(g_pair, g_atom):
+        return g_atom.new_zeros(int(n_systems)).index_add_(0, batch_idx, g_atom).index_add_(
+            0, batch_idx[i], g_pair
+        )
+
     with torch.no_grad():
-        # exact for an atom without partners: u = v
+        # Start: an atom without partners has u = v exactly; an atom with a pair that will
+        # saturate (J > kappa) starts at half that pair's excess, which puts the pair at
+        # p = 1/2 and its slack already at e^{-(J - kappa)/2T}. Newton on the exponential
+        # slack converges by one e-fold per step from the over-large side, so starting the
+        # slack small is what keeps a bonded atom from costing ~50 iterations.
         lam = -temperature * (1.0 + valence.clamp(min=1.0e-12).log())
-        rhs, p, w, ci, cj, diag, merit = state(lam)
+        excess = 0.5 * (J - kappa)
+        half = torch.zeros_like(lam).scatter_reduce(0, i, excess, "amax", include_self=True)
+        half = half.scatter_reduce(0, j, excess, "amax", include_self=True)
+        lam = torch.maximum(lam, half)
+        st = state(lam)
+        rhs, p, w, ci, cj, diag, merit = st[:7]
         err = frame_max(merit)
+        g = dual(*st[7:])
         n_iter = 0
         done = err <= tol
         for it in range(maxiter):
@@ -313,19 +317,26 @@ def solve_bond_order(
             delta = _newton_direction(rhs, ci, cj, diag, i, j, batch_idx, local, n_systems, n_max)
             move = frame_max(delta)
             delta = delta * (step_max / move.clamp(min=step_max))[batch_idx]
+            # the Newton step is an ascent direction of the concave dual g (its Hessian is
+            # -K); accept by Armijo on g, or by a decrease of the primal imbalance, whichever
+            # holds -- g is what carries a step across a saturated plateau, the imbalance
+            # what settles the last digits where g's gain is below roundoff
+            slope = (rhs * delta).new_zeros(int(n_systems)).index_add_(0, batch_idx, rhs * delta)
             active = ~done
             step = active.to(J.dtype)
             best = None
             for _ in range(30):
                 lam_try = lam + step[batch_idx] * delta
                 trial = state(lam_try)
-                err_try = frame_max(trial[-1])
-                improved = ~active | (err_try < err)
+                err_try = frame_max(trial[6])
+                g_try = dual(*trial[7:])
+                armijo = g_try >= g + 1.0e-4 * step * slope
+                improved = ~active | armijo | (err_try <= err)
                 if best is None:
-                    best = (lam_try, *trial, err_try, improved)
+                    best = (lam_try, *trial[:7], err_try, g_try, improved)
                 else:
-                    # per frame: keep the first improving step; a frame that has not
-                    # improved yet takes the newest (smallest) trial
+                    # per frame: keep the first accepted step; a frame that has not
+                    # accepted yet takes the newest (smallest) trial
                     take = ~best[-1]
                     take_a = take[batch_idx]
                     take_p = take[batch_idx[i]]
@@ -339,12 +350,13 @@ def solve_bond_order(
                         torch.where(take_a, trial[5], best[6]),
                         torch.where(take_a, trial[6], best[7]),
                         torch.where(take, err_try, best[8]),
+                        torch.where(take, g_try, best[9]),
                         best[-1] | improved,
                     )
                 if bool(best[-1].all()):
                     break
                 step = torch.where(improved, step, 0.5 * step)
-            lam, rhs, p, w, ci, cj, diag, merit, err = best[:9]
+            lam, rhs, p, w, ci, cj, diag, merit, err, g = best[:10]
             done = done | (err <= tol)
         converged = done
 
@@ -352,10 +364,10 @@ def solve_bond_order(
     # inactive there and differentiates as the identity)
     lam = lam.detach()
     for _ in range(2):
-        rhs, p, w, ci, cj, diag, merit = state(lam)
+        rhs, p, w, ci, cj, diag, merit = state(lam)[:7]
         delta = _newton_direction(rhs, ci, cj, diag, i, j, batch_idx, local, n_systems, n_max)
         lam = lam + delta * (step_max / frame_max(delta).clamp(min=step_max))[batch_idx]
-    rhs, p, w, ci, cj, diag, merit = state(lam)
+    rhs, p, w, ci, cj, diag, merit = state(lam)[:7]
     return BondOrderSolution(
         p=p, u=w.clamp(min=0.0), lam=lam, n_iter=n_iter, converged=converged,
         residual=frame_max(merit.detach())
@@ -364,12 +376,6 @@ def solve_bond_order(
 
 # ---------------------------------------------------------------------------
 # energy and co-membership
-
-
-def _xlogx(x: torch.Tensor) -> torch.Tensor:
-    """``x ln x`` with a finite gradient at ``x = 0`` (a saturated ``p`` or ``1 - p`` underflows
-    to an exact zero, and ``xlogy``'s ``-inf`` there times a zero ``dp/dR`` is a NaN force)."""
-    return x * torch.log(x.clamp(min=torch.finfo(x.dtype).tiny))
 
 
 def pairing_energy(

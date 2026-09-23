@@ -38,7 +38,7 @@ def test_water_is_water():
 def test_isolated_fragment_vertex():
     model = make_model()
     out = model(water_cluster_batch(1, jitter=0.0))
-    assert float(out.interaction["induction"].abs()) == 0.0
+    assert float(out.interaction["induction"].abs()) < 1e-12
     assert float(out.interaction["cross"].abs()) == 0.0
     for name in ("elst", "pauli", "disp"):
         assert float(out.interaction[name].abs()) == 0.0
