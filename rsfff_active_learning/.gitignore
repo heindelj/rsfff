@@ -3,7 +3,6 @@
 runs/
 _transfer/
 _deps/
-committees/
 train/anchors/*.xyz
 *.pt
 *.npz

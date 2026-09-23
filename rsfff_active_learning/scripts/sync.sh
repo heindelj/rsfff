@@ -9,7 +9,7 @@
 # `down` is deliberately lean: a production run holds per-frame trajectories, committee
 # checkpoints, a Q-Chem store and training exports that are gigabytes on Perlmutter and are
 # never needed on the laptop to read what happened. Without --full it skips those and any
-# file over 20 MB; pull a specific one by hand (rsync perlmutter:<path> .) when you want it.
+# file over 50 MB; pull a specific one by hand (rsync perlmutter:<path> .) when you want it.
 # REMOTE / REMOTE_DIR override where it goes (defaults: the ssh alias `perlmutter` and the
 # m3196 CFS directory next to the conda env and the other checkouts).
 set -euo pipefail
@@ -33,7 +33,7 @@ case "$dir" in
     mkdir -p "$HERE/runs"
     lean=(--exclude '*.pt' --exclude '*.npz' --exclude '_store/' --exclude 'scratch/'
           --exclude 'committee/' --exclude 'train/data/' --exclude 'packmol/'
-          --max-size=20m)
+          --max-size=50m)
     if [ "${1:-}" = "--full" ]; then shift; lean=(--exclude '*.state.pt' --exclude 'state.pt'); fi
     rsync "${common[@]}" "${lean[@]}" "$@" "$REMOTE:$REMOTE_DIR/runs/" "$HERE/runs/" ;;
   *) echo "usage: $0 up|down [rsync args]" >&2; exit 2 ;;
