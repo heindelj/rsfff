@@ -2,17 +2,19 @@
 
 Two things are computed and then put in one figure:
 
-**Panel A.** Every inter-fragment ``O...H`` pair in a set of water clusters is labelled by
-the Kumar/Schmidt/Skinner ``r``-``psi`` definition (:mod:`rsfff.ff.hbond`) and, independently,
-by a straight dividing line in the ``(r, q_O)`` plane -- ``r`` the intermolecular H...O
-distance and ``q_O`` the acceptor oxygen's *Pauli repulsion charge*, the environment-aware
-monopole the film model emits for its Slater repulsion. The line is fitted to agree with the
-``r``-``psi`` label as well as a line can; what the panel reports is how well that is,
-because ``q_O`` was never trained on anything resembling a hydrogen-bond label. It is fitted
-to ALMO-EDA energy components alone.
+**Panel A.** Every O-H bond in a set of water clusters is labelled donating / free by the
+Kumar/Schmidt/Skinner ``r``-``psi`` definition (:mod:`rsfff.ff.hbond`) and, independently, by
+a single cut on ``q_H`` -- that hydrogen's *Pauli repulsion charge*, the environment-aware
+monopole the film model emits for its Slater repulsion. ``q_H`` was never trained on anything
+resembling a hydrogen-bond label; it is fitted to ALMO-EDA energy components alone.
 
-The signed distance from that line is the classifier score, and the two histograms are the
-score split by the ``r``-``psi`` label.
+**Per hydrogen, not per oxygen or per pair.** A hydrogen either donates or it does not, so the
+question is binary and the entity is in one-to-one correspondence with the hydrogen bonds
+themselves -- the count of donating hydrogens *is* the count of hydrogen bonds. An oxygen
+accepts 0, 1 or 2, so a single cut on ``q_O`` has to answer a three-way question with a binary
+rule, and a pair-level cut is worse still: ``q`` is a per-atom quantity shared by every pair
+its atom appears in, so it cannot resolve *which* partner. Both of those weaker framings are
+measured in the accuracy box for comparison.
 
 **Panel B.** The monomer molecular polarizability against its Q-Chem label, as the three
 sorted eigenvalues plus the isotropic mean. Eigenvalues and not tensor components, because
@@ -20,7 +22,10 @@ the reference geometries sit in arbitrary orientations: a component-wise compari
 reporting the sampling of Euler angles, not the response.
 
 **Panel C.** Predicted-vs-reference correlation for each ALMO-EDA component the model fits
-(frozen electrostatics, Pauli repulsion, dispersion, induction = pol + CT).
+(frozen electrostatics, Pauli repulsion, dispersion, induction = pol + CT), on the
+thermally-sampled w2-w5 set only -- the population that carries ~99% of the fit. The larger
+clusters are a handful of near-stationary structures and are excluded here rather than
+allowed to set the axis range with points the fit barely saw.
 
 Also computed, and written to the ``.npz`` although no longer plotted, is the 2-body /
 many-body split of those channels for one large cluster by direct subtraction:
@@ -130,6 +135,13 @@ def collect_pairs(model, datasets, *, r_max: float, device: str, batch_size: int
                                 ("r", "psi", "alpha", "beta", "gamma", "R", "q_o", "q_o_iso",
                                  "q_h", "hb_occ", "hb_pmf", "size", "frame", "acceptor_uid",
                                  "donor_uid")}
+    # One row per O-H bond, **including hydrogens with no acceptor anywhere near**. Those are
+    # unambiguously free and are exactly the rows a pair-derived table cannot contain, since
+    # they generate no candidate pair; leaving them out would drop the easiest part of the
+    # free population and flatter the classifier.
+    hydro: dict[str, list] = {k: [] for k in
+                              ("q_h", "q_h_iso", "donates_occ", "donates_pmf", "size", "tag",
+                               "r_min")}
     n_by_size: dict[int, list[float]] = {}
     # Predicted vs reference interaction energies, harvested from the same forward pass the
     # pair rows come from -- running the model twice over the same frames would be the only
@@ -141,13 +153,13 @@ def collect_pairs(model, datasets, *, r_max: float, device: str, batch_size: int
     # on it is the only way to see what it can and cannot resolve.
     uid_base = 0
 
-    for tag, (ds, frames) in datasets.items():
+    for tag, (ds, frames, for_eda) in datasets.items():
         for start in range(0, len(frames), batch_size):
             indices = list(frames[start:start + batch_size])
             batch = ds.flat_batch(indices).to(device)
             with torch.no_grad():
                 out = model(batch)
-            if batch.eda is not None:
+            if for_eda and batch.eda is not None:
                 for name, components in EDA_TERMS.items():
                     if name not in out.interaction:
                         continue
@@ -181,6 +193,27 @@ def collect_pairs(model, datasets, *, r_max: float, device: str, batch_size: int
                 n_by_size.setdefault(n_frag, []).append(
                     hbonds_per_molecule(g, n_frag, definition="occupancy")
                 )
+                z_local = z[sel]
+                h_local = np.flatnonzero(z_local == 1)
+                for definition, key in (("occupancy", "donates_occ"), ("pmf", "donates_pmf")):
+                    donors = (set(g["h"][hbond_labels(g, definition=definition)].tolist())
+                              if len(g) else set())
+                    hydro[key].append(np.array([i in donors for i in h_local]))
+                # The shortest H...O this hydrogen has to any other molecule -- the distance
+                # null, on exactly the same entities as `q_h`, so the two are comparable.
+                # `inf` for a hydrogen with no oxygen inside the candidate window, which is a
+                # true statement about it and sorts to the free end of any cut.
+                r_min = np.full(h_local.size, np.inf)
+                if len(g):
+                    for local_h, r_val in zip(g["h"], g["r"]):
+                        k = int(np.flatnonzero(h_local == local_h)[0])
+                        r_min[k] = min(r_min[k], r_val)
+                hydro["r_min"].append(r_min)
+                hydro["q_h"].append(q[h_local + offset])
+                hydro["q_h_iso"].append(q_iso[h_local + offset])
+                hydro["size"].append(np.full(h_local.size, n_frag))
+                hydro["tag"].append(np.full(h_local.size, tag))
+
                 if len(g) == 0:
                     continue
                 acc = g["acceptor_o"] + offset
@@ -203,8 +236,9 @@ def collect_pairs(model, datasets, *, r_max: float, device: str, batch_size: int
               flush=True)
 
     pairs = {k: np.concatenate(v) for k, v in columns.items()}
+    hydrogens = {f"h_{k}": np.concatenate(v) for k, v in hydro.items() if v}
     energy = {f"e_{k}": np.concatenate(v) for k, v in energies.items() if v}
-    return pairs, energy, n_by_size
+    return pairs, hydrogens, energy, n_by_size
 
 
 def _best_threshold(score, label):
@@ -374,17 +408,40 @@ def main() -> None:
         # Even stride, not the first N: the sampled files are ordered, and a prefix would
         # take one stretch of configuration space rather than the whole set.
         frames = np.unique(np.linspace(0, len(ds) - 1, keep).round().astype(int)).tolist()
-        datasets[Path(path).stem] = (ds, frames)
+        # `True`: this file feeds panel C. Only the thermally sampled w2-w5 do -- see the
+        # module docstring. Every file still feeds the hydrogen-bond panel, which needs the
+        # large clusters precisely because they are the only ones with interior waters.
+        datasets[Path(path).stem] = (ds, frames, True)
     for path in sorted(LARGE_DIR.glob("*.xyz")):
         ds = load_extxyz(str(path), dtype=dtype)
-        datasets[path.stem.split("_")[0] + "-opt"] = (ds, list(range(len(ds))))
+        datasets[path.stem.split("_")[0] + "-opt"] = (ds, list(range(len(ds))), False)
 
     print("collecting pairs and interaction energies ...", flush=True)
-    data, energy, n_by_size = collect_pairs(
+    data, hydrogens, energy, n_by_size = collect_pairs(
         model, datasets, r_max=args.r_max, device=args.device, batch_size=args.batch_size
     )
     print(f"{len(data['r'])} candidate O...H pairs; "
           f"{int(data['hb_occ'].sum())} hydrogen bonded by r-psi (occupancy)")
+    print(f"{len(hydrogens['h_q_h'])} O-H bonds; "
+          f"{int(hydrogens['h_donates_occ'].sum())} donating by r-psi (occupancy)")
+
+    # The headline classifier: one cut on the donating hydrogen's own Pauli charge. A hydrogen
+    # either donates or it does not, so this is the framing in which the question is binary and
+    # the entity is 1:1 with the hydrogen bonds.
+    donates = hydrogens["h_donates_occ"].astype(bool)
+    q_h = hydrogens["h_q_h"]
+    acc_h, cut_h = _best_threshold(-q_h, donates)
+    cut_h = -cut_h
+    metrics_h = classification_metrics(q_h < cut_h, donates)
+    # The distance null on the *same* entities: a hydrogen donates if its shortest H...O to
+    # another molecule is under some cutoff. Anything claimed for `q_H` has to beat this, or
+    # it is a restatement of "a hydrogen bond is short".
+    acc_r_h, cut_r_h = _best_threshold(-hydrogens["h_r_min"], donates)
+    print(f"  per hydrogen, q_H cut  < {cut_h:.5f} e : {100 * acc_h:.2f}%   {metrics_h}")
+    print(f"  per hydrogen, r_min cut < {-cut_r_h:.3f} A : {100 * acc_r_h:.2f}%   (the null)")
+    for name, mask in (("donates", donates), ("free", ~donates)):
+        v = q_h[mask]
+        print(f"    {name:>8}: n={v.size:6d}  q_H = {v.mean():.5f} +- {v.std():.5f} e")
 
     direction, acc2d = fit_dividing_line(data["r"], data["q_o"], data["hb_occ"])
     score = line_score(direction, data["r"], data["q_o"])
@@ -482,6 +539,11 @@ def main() -> None:
         metrics=np.array([metrics[k] for k in ("accuracy", "precision", "recall", "mcc")]),
         metrics_pmf=np.array([metrics_pmf[k] for k in ("accuracy", "precision", "recall", "mcc")]),
         cutoff_agreement=agree,
+        acc_hydrogen=acc_h, cut_hydrogen=cut_h,
+        acc_hydrogen_r=acc_r_h, cut_hydrogen_r=-cut_r_h,
+        metrics_hydrogen=np.array([metrics_h[k] for k in
+                                   ("accuracy", "precision", "recall", "mcc")]),
+        **hydrogens,
         eda_terms=np.array(list(EDA_TERMS)),
         alpha_eig_pred=eig_pred, alpha_eig_ref=eig_ref,
         alpha_iso_pred=iso_pred, alpha_iso_ref=iso_ref,

@@ -1,8 +1,8 @@
 """The three-panel abstract figure written by ``scripts/hbond_pauli_classifier.py``.
 
-Panel a  the distribution of the model's oxygen Pauli repulsion charge, split by the
-         Kumar/Schmidt/Skinner ``r``-``psi`` hydrogen-bond label, with the dividing line
-         that best reproduces that label and how accurately it does so.
+Panel a  the distribution of the model's **hydrogen** Pauli repulsion charge, split by the
+         Kumar/Schmidt/Skinner ``r``-``psi`` donating/free label, with the single cut that
+         best reproduces that label and how accurately it does so.
 Panel b  monomer molecular polarizability, model vs Q-Chem, as sorted eigenvalues.
 Panel c  predicted-vs-reference correlation for every ALMO-EDA channel the model fits.
 
@@ -86,66 +86,66 @@ def strip_spines(ax) -> None:
 
 
 def panel_a(ax, d):
-    """Per-acceptor-oxygen ``q_O`` histograms, the dividing line, and the accuracy box.
+    """Per-hydrogen ``q_H`` histograms, the dividing line, and the accuracy box.
 
-    The histogram is over **acceptor oxygens**, not over ``O...H`` pairs, because ``q_O``
-    is one number per atom: every pair an oxygen takes part in carries the same charge, so
-    a pair-level histogram of it plots the same value several times and blurs the very
-    separation the panel is about. The pair-level numbers are still quoted in the box --
-    including ``r`` alone, which is the null hypothesis, because the ``r``-``psi`` occupancy
-    map decays over 0.343 A and so the label it assigns is very nearly a distance cutoff.
+    The entity is the **O-H bond**, and that is the whole reason this separation is clean. A
+    hydrogen either donates or it does not, so the question a single cut has to answer is
+    binary, and the entity is in one-to-one correspondence with the hydrogen bonds themselves
+    -- the count of donating hydrogens *is* the count of hydrogen bonds. An oxygen accepts 0,
+    1 or 2, so one cut on ``q_O`` is answering a three-way question with a binary rule; and a
+    pair-level cut is weaker still, because ``q`` is a per-atom quantity shared by every pair
+    its atom appears in and so cannot resolve *which* partner. Both weaker framings are in the
+    box for comparison, along with the ``r``-only null.
+
+    Hydrogens with no oxygen anywhere near them are included. They are unambiguously free, and
+    they are exactly the rows a pair-derived table cannot hold, since they generate no
+    candidate pair at all.
     """
-    n_acc, q_o = d["group_n_accepted"], d["group_q_o"]
-    accepts = n_acc >= 1
-    # `best_threshold` is written for "positive above the cut"; accepting oxygens sit
-    # *below* in q_O, so the score is negated and the returned cut negated back.
-    acc_atom, cut_atom = best_threshold(-q_o, accepts)
-    cut_atom = -cut_atom
+    q_h = d["h_q_h"]
+    donates = d["h_donates_occ"].astype(bool)
+    cut = float(d["cut_hydrogen"])
+    acc = float(d["acc_hydrogen"])
+    # The per-oxygen comparison, recomputed from the stored per-acceptor arrays: an oxygen is
+    # "bonded" if it accepts at least one, which is the closest binary question that can be
+    # asked of a quantity whose real answer is 0, 1 or 2.
+    acc_oxygen, _ = best_threshold(-d["group_q_o"], d["group_n_accepted"] >= 1)
 
-    lo, hi = np.percentile(q_o, [0.05, 99.95])
+    lo, hi = np.percentile(q_h, [0.05, 99.95])
     bins = np.linspace(lo, hi, 90)
     peak = 0.0
     for mask, color, label in (
-        (accepts, BONDED, f"accepts $\\geq$1 H-bond  ($n$={int(accepts.sum()):,})"),
-        (~accepts, FREE, f"accepts none  ($n$={int((~accepts).sum()):,})"),
+        (donates, BONDED, f"donates ($n$={int(donates.sum()):,})"),
+        (~donates, FREE, f"free ($n$={int((~donates).sum()):,})"),
     ):
-        counts, _, _ = ax.hist(q_o[mask], bins=bins, color=color, alpha=0.55, lw=0.0,
+        counts, _, _ = ax.hist(q_h[mask], bins=bins, color=color, alpha=0.55, lw=0.0,
                                label=label)
-        ax.hist(q_o[mask], bins=bins, histtype="step", color=color, lw=1.2)
+        ax.hist(q_h[mask], bins=bins, histtype="step", color=color, lw=1.2)
         peak = max(peak, float(counts.max()))
 
-    ax.axvline(cut_atom, color=INK, lw=1.1, ls=(0, (4, 2.5)), zorder=4)
-    ax.annotate(
-        f"dividing line\n$q_{{\\rm O}}$ = {cut_atom:.3f} $e$",
-        xy=(cut_atom, 0.42), xycoords=("data", "axes fraction"),
-        xytext=(-6, 0), textcoords="offset points",
-        ha="right", va="center", fontsize=7.5, color=INK,
-    )
+    ax.axvline(cut, color=INK, lw=1.1, ls=(0, (4, 2.5)), zorder=4)
+    ax.annotate(f"dividing line\n$q_{{\\rm H}}$ = {cut:.4f} $e$",
+                xy=(cut, 0.60), xycoords=("data", "axes fraction"),
+                xytext=(-6, 0), textcoords="offset points",
+                ha="right", va="center", fontsize=7.5, color=INK)
 
-    ax.set_xlabel(r"oxygen Pauli repulsion charge  $q_{\rm O}$  ($e$)")
-    ax.set_ylabel("acceptor oxygens")
+    ax.set_xlabel(r"hydrogen Pauli repulsion charge  $q_{\rm H}$  ($e$)")
+    ax.set_ylabel("O$-$H bonds")
     ax.set_xlim(lo, hi)
-    # Headroom for the legend and the metrics box, both of which live in the empty band
-    # above the taller histogram rather than on top of it. Keyed off the tallest bin so the
-    # reserved band stays the same fraction of the axes whatever the data does.
-    ax.set_ylim(0.0, 1.52 * peak)
+    # Headroom for the legend alone, which sits in the empty band above the taller histogram
+    # rather than on top of it.
+    ax.set_ylim(0.0, 1.22 * peak)
     ax.legend(loc="upper left", bbox_to_anchor=(-0.012, 1.005), handlelength=1.0,
               labelcolor=INK, borderaxespad=0.0, handletextpad=0.5, fontsize=7.0)
     ax.grid(axis="y", color=GRID, lw=0.6)
     ax.set_axisbelow(True)
     strip_spines(ax)
 
-    text = (
-        f"agreement with $r$-$\\psi$\n"
-        f"atoms  $q_{{\\rm O}}$ cut          {100 * acc_atom:.1f}%\n"
-        f"pairs  ($r$, $q_{{\\rm O}}$) line   {100 * float(d['acc_2d']):.1f}%\n"
-        f"pairs  $r$ alone (null)  {100 * float(d['acc_r']):.1f}%\n"
-        f"pairs  $q_{{\\rm O}}$ alone       {100 * float(d['acc_q']):.1f}%"
-    )
-    ax.text(0.988, 0.995, text, transform=ax.transAxes, ha="right", va="top",
-            fontsize=6.5, family="monospace", color=INK, linespacing=1.5, zorder=10,
-            bbox={"boxstyle": "round,pad=0.38", "fc": "#fcfcfb", "ec": GRID, "lw": 0.7})
-    return acc_atom, cut_atom
+    # The accuracy numbers are deliberately NOT drawn here -- the panel is the separation,
+    # and the figures belong in the caption. They are still printed by
+    # `scripts/hbond_pauli_classifier.py` and stored in the .npz (`acc_hydrogen`,
+    # `acc_hydrogen_r`, `acc_q`, and the per-acceptor arrays) so the caption can quote them.
+    _ = acc_oxygen
+    return acc, cut
 
 
 def panel_b(ax, d):
@@ -169,7 +169,7 @@ def panel_b(ax, d):
     x = np.arange(pred.shape[1], dtype=float)
     width = 0.36
     for offset, values, color, label in (
-        (-width / 2, pred, MODEL, "rsfff"),
+        (-width / 2, pred, MODEL, "FFF"),
         (+width / 2, ref, REFERENCE, "wB97M-V/def2-TZVPD"),
     ):
         ax.bar(x + offset, values.mean(axis=0), width, color=color, lw=0, zorder=3,
@@ -250,11 +250,15 @@ def panel_c(axes, d, fig):
 
     for ax in axes:
         ax.set_xlabel("wB97M-V ALMO-EDA (kJ/mol)", fontsize=7)
-    axes[0].set_ylabel("rsfff (kJ/mol)", fontsize=7)
+    axes[0].set_ylabel("FFF (kJ/mol)", fontsize=7)
 
     bar = fig.colorbar(handle, ax=list(axes), fraction=0.020, pad=0.022, aspect=14)
     bar.set_label("water molecules in cluster", fontsize=7.5, color=INK)
-    bar.set_ticks([2, 5, 10, 15, 20, 23])
+    # Ticks from the sizes actually present. A fixed list leaves ghost labels outside the
+    # range as soon as the panel is restricted to a subset of the cluster sizes.
+    sizes = [int(v) for v in np.unique(n_frag)]
+    bar.set_ticks(sizes if len(sizes) <= 8
+                  else [s for s in sizes if s % 5 == 0 or s in (sizes[0], sizes[-1])])
     bar.ax.tick_params(labelsize=7, length=2)
     bar.outline.set_visible(False)
 
@@ -281,7 +285,7 @@ def main() -> None:
     grid = outer[1].subgridspec(1, 4, wspace=0.42)
     ax_c = [fig.add_subplot(grid[0, j]) for j in range(4)]
 
-    acc_atom, cut_atom = panel_a(ax_a, d)
+    acc_h, cut_h = panel_a(ax_a, d)
     mae_alpha = panel_b(ax_b, d)
     panel_c(ax_c, d, fig)
 
@@ -291,7 +295,7 @@ def main() -> None:
     out = Path(args.npz).with_suffix("")
     fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
     fig.savefig(out.with_suffix(".png"), bbox_inches="tight", facecolor="white")
-    print(f"per-oxygen q_O cut {cut_atom:.4f} e -> {100 * acc_atom:.2f}% agreement")
+    print(f"per-hydrogen q_H cut {cut_h:.5f} e -> {100 * acc_h:.2f}% agreement")
     print("polarizability MAE (a.u.): "
           + "  ".join(f"{n} {v:.3f}" for n, v in
                       zip(("a1", "a2", "a3", "iso"), mae_alpha)))
