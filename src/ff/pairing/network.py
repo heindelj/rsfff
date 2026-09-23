@@ -2,9 +2,17 @@
 
 Everything the film network does -- block embedders, shared conditioned trunk, per-family
 FiLM adapters, the two-evaluation ``theta`` / ``theta_0`` convention -- is inherited
-unchanged. The only differences are the family list (``pairing`` in place of ``bonded``) and
-the head that reads that family's latent. ``env_shift`` reports the pairing parameters'
-``|theta - theta_0|`` so the training loop's environment penalty sees them by name.
+unchanged. The differences: the family list (``pairing`` in place of ``bonded``), the head
+that reads that family's latent, and a **topology pass** that precedes all of it.
+
+The topology pass (:meth:`PairingParameterNetwork.topology`) reads the *unprojected*
+features through its own small trunk and its own pairing heads, knowing nothing about
+fragments, charges or states: its couplings feed the electronic-state solve that decides the
+bond orders, the co-membership and the formal charges of the frame. Those then *are* the
+state -- the projector splits the densities by that co-membership, and the conditioned
+trunk is modulated by ``c_i = [q_i, u_i]`` (formal charge, unpaired count) in place of the
+film's fragment key. ``env_shift`` reports the pairing parameters' ``|theta - theta_0|`` so
+the training loop's environment penalty sees them by name.
 """
 
 from __future__ import annotations
@@ -13,6 +21,9 @@ from dataclasses import dataclass
 
 import torch
 
+import torch.nn as nn
+
+from ...mlip.heads import mlp
 from ..film.conditioning import ConditionedTrunk  # noqa: F401  (re-export for builders)
 from ..film.network import ConditionedParameterNetwork, FilmParameters, _log_shift
 from ..film.projector import ProjectedFeatures
@@ -50,7 +61,7 @@ class PairingParameters(FilmParameters):
             "pair_q": _log_shift(self.pairing.q, self.pairing0.q),
             "pair_b": _log_shift(self.pairing.b, self.pairing0.b),
             "kappa": _log_shift(self.pairing.kappa, self.pairing0.kappa),
-            "valence": (self.pairing.valence - self.pairing0.valence).abs(),
+            "valence": _log_shift(self.pairing.valence.clamp(min=1e-6), self.pairing0.valence.clamp(min=1e-6)),
         }
         if self.response.alpha is not None:
             out["alpha"] = (self.response.alpha - self.response0.alpha).flatten(1).norm(dim=-1)
@@ -68,10 +79,29 @@ class PairingParameters(FilmParameters):
 class PairingParameterNetwork(ConditionedParameterNetwork):
     """Block embedders + shared trunk + per-family adapters + the family heads, pairing edition."""
 
-    def __init__(self, *, pairing_heads: PairingHeads, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        pairing_heads: PairingHeads,
+        topology_heads: PairingHeads,
+        topology_hidden: int = 64,
+        topology_depth: int = 2,
+        **kwargs,
+    ) -> None:
         kwargs.setdefault("families", PAIRING_FAMILIES)
         super().__init__(bonded_head=None, **kwargs)
         self.pairing_heads = pairing_heads
+        # state-free: a plain trunk on the unprojected invariants, no FiLM, no environment
+        # embedder -- there is no environment yet when this runs
+        self.topology_heads = topology_heads
+        self.topology_trunk = mlp(kwargs["p_in"], topology_hidden, topology_depth, topology_hidden)
+
+    def topology(self, x_full) -> PairingFamily:
+        """The couplings that decide the bond orders, from the geometry alone."""
+        z = self.topology_trunk(x_full.inv_feats)
+        return self.topology_heads(
+            z, x_full.species_idx, x_full.vec_feats, x_full.equiv_feats
+        )
 
     def forward(  # type: ignore[override]
         self,
@@ -94,12 +124,11 @@ class PairingParameterNetwork(ConditionedParameterNetwork):
             z_joined = z_iso
         gate = self.gate(pf.a_env)
 
-        frag = dict(fragment_idx=state.fragment_idx, fragment_charge=state.fragment_charge)
         pairing = self.pairing_heads(
-            z_joined["pairing"], species_idx, pf.x_in.vec_feats, pf.x_in.equiv_feats, **frag
+            z_joined["pairing"], species_idx, pf.x_in.vec_feats, pf.x_in.equiv_feats
         )
         pairing0 = self.pairing_heads(
-            z_iso["pairing"], species_idx, pf.x_in.vec_feats, pf.x_in.equiv_feats, **frag
+            z_iso["pairing"], species_idx, pf.x_in.vec_feats, pf.x_in.equiv_feats
         )
 
         q_perm, mu_perm, quad_perm = self.permanent_heads(

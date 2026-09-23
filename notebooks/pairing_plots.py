@@ -268,6 +268,7 @@ class ScanResult:
     bond_order: dict[str, np.ndarray]          # pair label -> (n,) (pairing model only)
     comembership: dict[str, np.ndarray]        # pair label -> (n,)
     unpaired: np.ndarray | None = None         # (n, N) per-atom u
+    formal_charge: np.ndarray | None = None    # (n, N) per-atom q^f from the electronic-state solve
 
 
 def _pair_label(z, i, j):
@@ -303,6 +304,7 @@ def evaluate_scan(model, scan: Scan, *, how: str = "single", label: str | None =
     bond_order = {k: np.full(n, np.nan) for k in pair_labels}
     comember = {k: np.full(n, np.nan) for k in pair_labels}
     unpaired = np.full((n, n_at), np.nan)
+    formal_charge = np.full((n, n_at), np.nan)
 
     def pool(x, index, m):
         return x.new_zeros(m).index_add_(0, index, x).numpy()
@@ -340,6 +342,7 @@ def evaluate_scan(model, scan: Scan, *, how: str = "single", label: str | None =
             inv = np.argsort(order[off:off + n_at])          # frame atom -> batch-local atom
             if pairing:
                 unpaired[start + k, order[off:off + n_at]] = out.unpaired[off:off + n_at].numpy()
+                formal_charge[start + k, order[off:off + n_at]] = out.formal_charge[off:off + n_at].numpy()
             for (i, j), name in zip(pairs, pair_labels):
                 a, b = sorted((int(inv[i]) + off, int(inv[j]) + off))
                 hit = np.flatnonzero(keys == a * n_tot + b)
@@ -352,7 +355,8 @@ def evaluate_scan(model, scan: Scan, *, how: str = "single", label: str | None =
                     if sub.size:
                         bond_order[name][start + k] = float(p_bo[int(sub[0])])
     return ScanResult(
-        label, energy, terms, bond_order if pairing else {}, comember, unpaired if pairing else None,
+        label, energy, terms, bond_order if pairing else {}, comember,
+        unpaired if pairing else None, formal_charge if pairing else None,
     )
 
 
@@ -539,6 +543,42 @@ def plot_bond_orders(scans, results, names=None, path=None):
         if drawn:
             ax.legend(fontsize=6)
     axes[0, 0].set_ylabel("bond order / co-membership")
+    fig.tight_layout()
+    if path:
+        savefig(fig, path)
+    return fig
+
+
+def plot_formal_charges(scans, results, names=None, path=None):
+    """Formal charges of the oxygens (and the moving proton on the PT scans) along each scan."""
+    names = [n for n in (names or SCANS) if n in scans]
+    fig, axes = plt.subplots(1, len(names), figsize=(4.2 * len(names), 3.8), squeeze=False)
+    for ax, name in zip(axes.ravel(), names):
+        scan = scans[name]
+        z = scan.frames[0].get_atomic_numbers()
+        watch = [i for i, zi in enumerate(z) if zi == 8]
+        if scan.kind == "pt":
+            watch.append(len(z) - 1)                          # the shared proton is last
+        elif scan.kind == "stretch":
+            watch.append(1)                                   # the stretched hydrogen
+        drawn = False
+        for label, res in results[name].items():
+            if res.formal_charge is None:
+                continue
+            groups = scan.groups() if scan.kind == "pt" else [None]
+            for g in groups:
+                sel = np.ones(scan.n, bool) if g is None else scan.group == g
+                tag = "" if g is None else f" (O-O {g:.2f})"
+                for i, ls in zip(watch, ("-", "--", "-.", ":")):
+                    ax.plot(scan.coord[sel], res.formal_charge[sel, i], ls, lw=1.2,
+                            label=f"{label}: q {'H' if z[i] == 1 else 'O'}{i}{tag}")
+            drawn = True
+        ax.axhline(0, color="#bbbbbb", lw=0.6)
+        ax.set_title(name)
+        ax.set_xlabel(scan.xlabel)
+        if drawn:
+            ax.legend(fontsize=6)
+    axes[0, 0].set_ylabel("formal charge $q^f$")
     fig.tight_layout()
     if path:
         savefig(fig, path)

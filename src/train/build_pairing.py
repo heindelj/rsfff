@@ -18,6 +18,7 @@ from ..ff.fragment_state import FragmentStateEmbedding
 from ..ff.multipole import irrep2_to_spherical
 from ..ff.pairing import PairingHeads, PairingModel, PairingParameterNetwork
 from ..ff.pairing.reference import ChargedAtomicReference
+from ..ff.pairing.electronic_state import capacity_table, chi_eta_table
 from ..ff.pairing.heads import build_pairing_priors
 from ..ff.pauli import DEFAULT_PAULI_DIPOLE_SCALE, DEFAULT_PAULI_QUAD_SCALE, PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_heads import RangeSeparationHeads
@@ -71,7 +72,8 @@ def build_pairing_model(
         hidden=_get(film_cfg, "fragment_state_hidden", 32),
         depth=_get(film_cfg, "fragment_state_depth", 1),
     )
-    d_c = state_embedding.dim + 1
+    # the pairing model conditions on the topology pass's (q_i, u_i), not on a fragment key;
+    # the state embedding is kept for the constructor signature only
 
     hidden = int(_get(film_cfg, "hidden", 128))
     emb_dim = int(_get(film_cfg, "emb_dim", 16))
@@ -121,12 +123,13 @@ def build_pairing_model(
     )
 
     valence, log_qv, log_bv, log_kappa = build_pairing_priors(neighbor_types)
+    capacity = capacity_table(neighbor_types)
+    chi, eta = chi_eta_table(neighbor_types, atomic_states)
     # the valence dipole / quadrupole heads borrow the Pauli output scales: same operator,
     # same role (a learning-rate convenience, not a prior)
     mu_scale_v = torch.tensor([DEFAULT_PAULI_DIPOLE_SCALE.get(int(z), 0.3) for z in neighbor_types])
     quad_scale_v = torch.tensor([DEFAULT_PAULI_QUAD_SCALE.get(int(z), 0.5) for z in neighbor_types])
-    pairing_heads = PairingHeads(
-        hidden, p1, n_species,
+    head_kwargs = dict(
         valence=valence, log_q_prior=log_qv, log_b_prior=log_bv, log_kappa_prior=log_kappa,
         dipole_scale=mu_scale_v, p2=p2, quad_scale=quad_scale_v,
         irrep2_to_spherical=to_spherical,
@@ -136,14 +139,20 @@ def build_pairing_model(
         environment_b=bool(_get(film_cfg, "pairing_environment_b", True)),
         environment_kappa=bool(_get(film_cfg, "pairing_environment_kappa", True)),
         environment_valence=bool(_get(film_cfg, "pairing_environment_valence", True)),
-        heavy=torch.tensor([int(z) > 1 for z in neighbor_types]),
+        capacity=capacity, chi=chi, eta=eta,
     )
+    pairing_heads = PairingHeads(hidden, p1, n_species, **head_kwargs)
+    topology_hidden = int(_get(film_cfg, "topology_hidden", 64))
+    topology_heads = PairingHeads(topology_hidden, p1, n_species, **head_kwargs)
 
     network = PairingParameterNetwork(
         pairing_heads=pairing_heads,
+        topology_heads=topology_heads,
+        topology_hidden=topology_hidden,
+        topology_depth=int(_get(film_cfg, "topology_depth", 2)),
         p_in=featurizer.feature_dims[0],
         p_cross=projector.cross_dims[0],
-        d_c=d_c,
+        d_c=2,                                    # [formal charge, unpaired count]
         permanent_heads=permanent_heads,
         response_heads=response_heads,
         pauli_heads=pauli_heads,
@@ -183,7 +192,7 @@ def build_pairing_model(
         temperature=float(_get(film_cfg, "pairing_temperature", 0.002)),
         range_gate=str(_get(film_cfg, "range_gate", "bond_order")),
         include_13=bool(_get(film_cfg, "include_13", True)),
-        bo_tol=float(_get(film_cfg, "bo_tol", 1.0e-10)),
+        bo_tol=float(_get(film_cfg, "bo_tol", 1.0e-8)),
         bo_maxiter=int(_get(film_cfg, "bo_maxiter", 60)),
     )
 

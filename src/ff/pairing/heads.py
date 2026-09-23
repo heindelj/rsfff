@@ -11,18 +11,12 @@ so the rank-0 model is the initial model exactly.
 plus a zero-initialized readout of the family latent -- the same construction as ``q`` and
 ``b``.
 
-The valence capacity ``v`` is charge dependent. Its prior puts the fragment's formal charge on
-its heavy atoms::
-
-    v_i = v_0(Z_i) + Q_f w_i           w_i = [i heavy] / n_heavy(f)
-
-so the oxygen of H3O+ can form three bonds (3), that of OH- one (1), and the two oxygens of a
-Zundel cation taken as one fragment get 2.5 each -- which is exactly the pairing a shared
-proton needs. A fragment without heavy atoms puts ``-|Q|`` on its hydrogens (a bare proton or
-hydride pairs nothing). On top of the prior a zero-initialized readout of the family latent
-(FiLM-conditioned on the fragment state, so it can tell H3O+ from H2O) scales it as
-``v = v_prior exp(delta)``. That readout is the reactive-phase extension point: when the
-fragment labels go, ``v`` has to come from the local electron count instead (``docs/fff_pairing.md`` §6).
+The valence capacity is not a head at all any more: it is ``v(n)`` of the atom's formal
+electron count ``n``, which the joint solve of :mod:`rsfff.ff.pairing.electronic_state`
+determines from the geometry (capacity polynomial per element, the charged atomic reference
+``chi`` / ``eta`` per element). What the head still owns is a zero-initialized scale on the
+neutral capacity ``v0`` -- the one place the network can bend the octet rule -- and the
+per-element tables it hands to the solve.
 """
 
 from __future__ import annotations
@@ -35,7 +29,7 @@ import torch.nn as nn
 from ...mlip.heads import mlp, zero_init_readout
 from ..pauli import PauliMultipoleHeads
 from .bond_order import valence_table
-from .reference import formal_charge_share
+from .electronic_state import capacity_table
 
 __all__ = ["PairingFamily", "PairingHeads", "DEFAULT_PAIRING_PRIOR", "build_pairing_priors"]
 
@@ -83,7 +77,9 @@ class PairingFamily:
                                 spherical quadrupole ``(N, 5)``), in the Pauli conventions.
     ``b``                     : (N,) pairing exponent, 1/bohr.
     ``kappa``                 : (N,) pairing hardness, Hartree.
-    ``valence``               : (N,) valence capacity.
+    ``tables``                : (N, 5) capacity polynomial ``(n0, v0, a, b, shell)`` per atom,
+                                ``v0`` carrying the learned scale.
+    ``chi``, ``eta``          : (N,) the charged atomic reference's (IP + EA)/2 and IP - EA.
     """
 
     q: torch.Tensor
@@ -91,7 +87,14 @@ class PairingFamily:
     mu: torch.Tensor | None
     quad_s: torch.Tensor | None
     kappa: torch.Tensor
-    valence: torch.Tensor
+    tables: torch.Tensor
+    chi: torch.Tensor
+    eta: torch.Tensor
+
+    @property
+    def valence(self) -> torch.Tensor:
+        """The neutral capacity ``v0`` per atom (what the film-style diagnostics read)."""
+        return self.tables[:, 1]
 
 
 class PairingHeads(nn.Module):
@@ -121,7 +124,9 @@ class PairingHeads(nn.Module):
         environment_kappa: bool = True,
         learn_kappa: bool = True,
         environment_valence: bool = True,
-        heavy: torch.Tensor | None = None,     # (n_species,) bool: Z > 1
+        capacity: torch.Tensor | None = None,  # (n_species, 5) from capacity_table
+        chi: torch.Tensor | None = None,       # (n_species,)
+        eta: torch.Tensor | None = None,       # (n_species,)
     ) -> None:
         super().__init__()
         self.multipoles = PauliMultipoleHeads(
@@ -142,23 +147,14 @@ class PairingHeads(nn.Module):
             zero_init_readout(mlp(latent_dim + emb_dim, hidden, depth, 1))
             if environment_valence else None
         )
-        if heavy is None:
-            heavy = torch.ones(n_species, dtype=torch.bool)
-        self.register_buffer("heavy", heavy.clone())
-
-    def valence_prior(
-        self,
-        species_idx: torch.Tensor,        # (N,)
-        fragment_idx: torch.Tensor,       # (N,)
-        fragment_charge: torch.Tensor,    # (F,)
-    ) -> torch.Tensor:
-        """``(N,)`` the charge-dependent valence prior of the class docstring."""
-        v0 = self.valence_prior_table[species_idx]
-        q_share, has_heavy = formal_charge_share(
-            self.heavy[species_idx], fragment_idx, fragment_charge, dtype=v0.dtype
-        )
-        v = torch.where(has_heavy, v0 + q_share, v0 - q_share.abs())
-        return v.clamp(min=0.0)
+        if capacity is None:
+            capacity = torch.zeros(n_species, 5)
+            capacity[:, 1] = valence
+            capacity[:, 4] = 8.0
+        self.register_buffer("capacity", capacity.clone())
+        zeros = torch.zeros(n_species)
+        self.register_buffer("chi", zeros.clone() if chi is None else chi.clone())
+        self.register_buffer("eta", zeros.clone() if eta is None else eta.clone())
 
     @property
     def max_rank(self) -> int:
@@ -170,9 +166,6 @@ class PairingHeads(nn.Module):
         species_idx: torch.Tensor,                # (N,)
         vec_feats: torch.Tensor | None = None,    # (N, 3, p1)
         equiv_feats: torch.Tensor | None = None,  # (N, 5, p2)
-        *,
-        fragment_idx: torch.Tensor | None = None,     # (N,)
-        fragment_charge: torch.Tensor | None = None,  # (F,)
     ) -> PairingFamily:
         q, b, mu, quad_s = self.multipoles(z, species_idx, vec_feats, equiv_feats)
         emb = self.multipoles.species_emb(species_idx)
@@ -180,14 +173,12 @@ class PairingHeads(nn.Module):
         log_kappa = self.log_kappa_prior[species_idx] + self.d_log_kappa[species_idx]
         if self.kappa_mlp is not None:
             log_kappa = log_kappa + self.kappa_mlp(x).squeeze(-1)
-        if fragment_idx is None or fragment_charge is None:
-            valence = self.valence_prior_table[species_idx]
-        else:
-            valence = self.valence_prior(species_idx, fragment_idx, fragment_charge)
+        tables = self.capacity[species_idx]
         if self.valence_mlp is not None:
-            valence = valence * self.valence_mlp(x).squeeze(-1).exp()
+            scale = self.valence_mlp(x).squeeze(-1).exp()
+            tables = torch.cat((tables[:, :1], tables[:, 1:2] * scale.unsqueeze(-1), tables[:, 2:]), dim=-1)
         return PairingFamily(
             q=q, b=b, mu=mu, quad_s=quad_s,
             kappa=log_kappa.exp(),
-            valence=valence,
+            tables=tables, chi=self.chi[species_idx], eta=self.eta[species_idx],
         )

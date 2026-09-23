@@ -23,13 +23,15 @@ def test_water_is_water():
     p = out.bond_order
     r = out.r[out.sub_index]
     bonded = r < 1.2
-    assert torch.allclose(p[bonded], torch.ones_like(p[bonded]), atol=1e-8)
-    assert float(p[~bonded].max()) < 1e-8
-    assert float(out.unpaired.max()) < 1e-8
-    # the co-membership is one on every assigned intra pair (bonds and the 1-3 pair)
-    assert torch.allclose(out.p_intra[out.is_intra], torch.ones(int(out.is_intra.sum())), atol=1e-8)
-    assert float(out.p_intra[~out.is_intra].max()) < 1e-8
-    assert float(out.interaction["cross"].abs()) < 1e-8
+    assert torch.allclose(p[bonded], torch.ones_like(p[bonded]), atol=1e-6)
+    # a hydrogen-bonded pair keeps a trace of bond order at the priors (the pairing exponent
+    # is soft and the formal charges can move by ~1e-3 to buy it); training sharpens both
+    assert float(p[~bonded].max()) < 5e-3
+    assert float(out.unpaired.max()) < 1e-6
+    assert float(out.formal_charge.abs().max()) < 5e-3
+    assert torch.allclose(out.p_intra[out.is_intra], torch.ones(int(out.is_intra.sum())), atol=1e-6)
+    assert float(out.p_intra[~out.is_intra].max()) < 5e-3
+    assert float(out.interaction["cross"].abs().max()) < 1e-3
     # each O-H bond is worth about the pyCMM well depth at initialization
     e_int = (out.fragment_energy - out.energy_ref)
     assert bool(((e_int < -0.3) & (e_int > -0.5)).all())
@@ -142,61 +144,75 @@ def test_film_fit_runs_with_forces_on_a_pairing_output():
 
 
 def _ion_batch():
-    """H3O+ and OH- as two fragments in one frame, far apart."""
+    """H3O+ and OH-, one frame each (in one frame the total charge would be zero, and the
+    solve cannot separate an ion pair without the environment's electrostatics)."""
     from rsfff.train.data import Batch
 
     h3o = torch.tensor([
         [0.0, 0.0, 0.0754], [0.9408, 0.0, -0.2010],
         [-0.4704, -0.8147, -0.2010], [-0.4704, 0.8147, -0.2010],
     ])
-    oh = torch.tensor([[0.0, 0.0, -0.1072], [0.0, 0.0, 0.8577]]) + torch.tensor([8.0, 0.0, 0.0])
+    oh = torch.tensor([[0.0, 0.0, -0.1072], [0.0, 0.0, 0.8577]])
     positions = torch.cat((h3o, oh))
     return Batch(
         positions=positions.to(torch.get_default_dtype()),
         atomic_numbers=torch.tensor([8, 1, 1, 1, 8, 1]),
-        batch_idx=torch.zeros(6, dtype=torch.long),
-        n_systems=1,
-        energy=torch.zeros(1),
+        batch_idx=torch.tensor([0, 0, 0, 0, 1, 1]),
+        n_systems=2,
+        energy=torch.zeros(2),
         fragment_idx=torch.tensor([0, 0, 0, 0, 1, 1]),
         fragment_charge=torch.tensor([1.0, -1.0]),
         fragment_two_s=torch.zeros(2),
-        fragment_to_batch=torch.zeros(2, dtype=torch.long),
+        fragment_to_batch=torch.tensor([0, 1]),
         n_fragments=2,
     )
 
 
-def test_charge_dependent_valence_lets_hydronium_form_three_bonds():
+def test_formal_charges_come_out_of_the_solve():
+    """H3O+ puts its charge on the oxygen (capacity 3, three bonds); OH- likewise (-1, one)."""
     model = make_model()
     out = model(_ion_batch())
-    v = out.parameters.pairing0.valence
-    assert torch.allclose(v, torch.tensor([3.0, 1.0, 1.0, 1.0, 1.0, 1.0]))
+    q = out.formal_charge
+    assert abs(float(q[0]) - 1.0) < 0.02 and float(q[1:4].abs().max()) < 0.02
+    assert abs(float(q[4]) + 1.0) < 0.05 and abs(float(q[5])) < 0.05
+    v = out.electronic_state.valence
+    assert abs(float(v[0]) - 3.0) < 0.02 and abs(float(v[4]) - 1.0) < 0.05
     p = out.bond_order
     r = out.r[out.sub_index]
     bonded = r < 1.2
-    assert torch.allclose(p[bonded], torch.ones_like(p[bonded]), atol=1e-8)
     assert int(bonded.sum()) == 4
-    assert float(out.unpaired.max()) < 1e-8
-    assert float(out.interaction["cross"].abs()) < 1e-8
+    assert torch.allclose(p[bonded], torch.ones_like(p[bonded]), atol=1e-3)
+    assert float(out.unpaired.max()) < 0.05  # q_O of OH- is -0.987 at priors, so v0 = 1.013
+    assert float(out.interaction["cross"].abs().max()) < 1e-3
+
+
+def test_multiplicity_constraint_unpairs_two_electrons():
+    model = make_model()
+    batch = water_cluster_batch(1, jitter=0.0)
+    batch.fragment_two_s = torch.tensor([2.0])
+    out = model(batch)
+    assert abs(float(out.unpaired.sum()) - 2.0) < 1e-6
+    singlet = model(water_cluster_batch(1, jitter=0.0))
+    assert float(out.energy - singlet.energy) > 0.1     # a broken bond's worth
 
 
 def test_charged_reference_removes_the_ionization_offset():
-    """With E0(Z, q) each O-H bond of H3O+ and OH- is worth about the same as water's."""
-    from rsfff.ff.pairing.reference import ChargedAtomicReference
+    """The atomic E0(q) inside the state energy makes an O-H worth about the same in H2O,
+    H3O+ and OH-: against neutral atoms the ions differ by the ionization / affinity."""
+    from rsfff.ff.pairing.electronic_state import e0_terms
 
-    e0 = torch.tensor([-0.4941110651, -75.0780656005])       # H, O at wB97M-V/def2-TZVPD
-    ip = torch.tensor([0.4941110651, 0.5069852060])
-    ea = torch.tensor([0.0019134340, 0.0546502466])
-    ref = ChargedAtomicReference(e0, chi=0.5 * (ip + ea), eta=ip - ea)
-    s = torch.tensor([0, 1])
-    assert torch.allclose(ref(s, torch.ones(2)), e0 + ip)
-    assert torch.allclose(ref(s, -torch.ones(2)), e0 - ea)
-    assert torch.allclose(ref(s, torch.zeros(2)), e0)
+    chi, eta = torch.tensor(0.2808177263), torch.tensor(0.4523349594)
+    e, _, _ = e0_terms(torch.tensor([1.0, -1.0, 0.0]), chi, eta)
+    ip, ea = chi + 0.5 * eta, chi - 0.5 * eta
+    assert abs(float(e[0]) - float(ip)) < 0.01 and abs(float(e[1]) + float(ea)) < 0.01 and abs(float(e[2])) < 1e-12
 
     model = make_model()
-    model.reference = ref
     out = model(_ion_batch())
-    per_bond = (out.fragment_energy - out.energy_ref) / torch.tensor([3.0, 1.0])
+    e_int = out.fragment_energy - out.energy_ref              # against neutral atoms
+    per_bond = torch.stack((
+        (e_int[0] - out.electronic_state.q.new_tensor(float(ip))) / 3.0,    # minus IP(O)
+        (e_int[1] + out.electronic_state.q.new_tensor(float(ea))) / 1.0,    # plus EA(O)
+    ))
     water = model(water_cluster_batch(1, jitter=0.0))
     per_bond_water = float((water.fragment_energy - water.energy_ref)[0]) / 2.0
-    assert torch.allclose(out.energy_ref, torch.stack((e0[1] + ip[1] + 3 * e0[0], e0[1] - ea[1] + e0[0])))
     assert bool(((per_bond - per_bond_water).abs() < 0.08).all())

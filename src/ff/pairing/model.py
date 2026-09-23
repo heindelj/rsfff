@@ -71,15 +71,11 @@ from ..pairs import intra_fragment_channels, union_channels, union_pairs
 from ..polarization import LevelOutput, coupled_response
 from ..response import ResponseParameters, fragment_polarizability
 from ..units import BOHR_ANG
-from .bond_order import (
-    BondOrderSolution,
-    comembership_from_bond_order,
-    pairing_energy,
-    solve_bond_order,
-)
+from .bond_order import comembership_from_bond_order
+from .electronic_state import ElectronicState, solve_electronic_state, state_energy
 from .heads import PairingFamily
 from .network import PairingParameterNetwork, PairingParameters
-from .reference import ChargedAtomicReference, formal_charge_share
+from .reference import ChargedAtomicReference
 
 __all__ = ["PairingModel", "PairingOutput"]
 
@@ -95,6 +91,8 @@ class PairingOutput(FilmOutput):
     kappa_pair: torch.Tensor | None = None     # (Pb,) at theta_0
     energy_pairing: torch.Tensor | None = None  # (F,) per fragment, theta_0
     bo_solver: dict[str, tuple] | None = None  # name -> (n_iter, converged, residual)
+    formal_charge: torch.Tensor | None = None   # (N,) q_i of the topology pass
+    electronic_state: "ElectronicState | None" = None   # the topology pass's full state
 
 
 def _lookup(keys_sorted: torch.Tensor, i: torch.Tensor, j: torch.Tensor, n_atoms: int):
@@ -141,7 +139,7 @@ class PairingModel(nn.Module):
         temperature: float = 0.002,
         range_gate: str = "bond_order",
         include_13: bool = True,
-        bo_tol: float = 1.0e-10,
+        bo_tol: float = 1.0e-8,
         bo_maxiter: int = 100,
     ) -> None:
         super().__init__()
@@ -215,14 +213,16 @@ class PairingModel(nn.Module):
         kappa = (0.5 * (fam.kappa[i].log() + fam.kappa[j].log())).exp()
         return J, kappa
 
-    def _pairing(self, fam, positions, sub_pairs, dr_au, r_au, r_ang, batch_idx, n_sys):
-        """One bond-order solve and its energy: ``(sol, J, kappa, e_pair (Pb,), e_atom (N,))``."""
+    def _pairing(self, fam, positions, sub_pairs, dr_au, r_au, r_ang, batch_idx, n_sys,
+                 total_charge, two_s):
+        """One electronic-state solve and its energy: ``(state, J, kappa, e_pair (Pb,), e_atom (N,))``."""
         J, kappa = self._coupling(fam, positions, sub_pairs, dr_au, r_au, r_ang)
-        sol = solve_bond_order(
-            J, kappa, fam.valence, self.temperature, sub_pairs, batch_idx, n_sys, **self.bo
+        st = solve_electronic_state(
+            J, kappa, fam.tables, fam.chi, fam.eta, self.temperature, sub_pairs, batch_idx,
+            n_sys, total_charge, two_s, **self.bo,
         )
-        e_pair, e_atom = pairing_energy(J, kappa, self.temperature, sol.p, sol.u, fam.valence)
-        return sol, J, kappa, e_pair, e_atom
+        e_pair, e_atom = state_energy(J, kappa, self.temperature, fam.chi, fam.eta, fam.tables, st)
+        return st, J, kappa, e_pair, e_atom
 
     # -- forward -------------------------------------------------------------------------
 
@@ -248,17 +248,12 @@ class PairingModel(nn.Module):
         f2b = state.fragment_to_batch
         batch_idx = batch.batch_idx
 
-        # --- features, conditioning, parameters ------------------------------------------
-        pf = self.projector(batch, state)
-        c_cond = state.local_conditioning(self.state_embedding)
-        # The SQE channel graph: every pair within the pairing radius (charge may flow
-        # wherever a bond order says the atoms are one fragment) plus the assigned intra
-        # enumeration, frame-grouped.
-        ch_ind, chb_ind, ch_radius = union_channels(
-            positions, batch_idx, frag, self.pairing_cutoff,
-            max_num_neighbors=self.max_num_neighbors,
+        # --- frame totals: the only inputs beyond the geometry --------------------------------
+        total_charge = (
+            batch.total_charge.to(positions.dtype) if getattr(batch, "total_charge", None) is not None
+            else state.fragment_charge.new_zeros(n_sys).index_add_(0, f2b, state.fragment_charge)
         )
-        params: PairingParameters = self.network(pf, c_cond, state, positions, ch_ind)
+        two_s = state.fragment_two_s.new_zeros(n_sys).index_add_(0, f2b, state.fragment_two_s)
 
         # --- one pair list ----------------------------------------------------------------
         pair_index, r, is_intra, pair_frag = union_pairs(
@@ -270,22 +265,42 @@ class PairingModel(nn.Module):
         r_au = r / BOHR_ANG
         pair_batch = batch_idx[i]
         keys = i * n_atoms + j
+        sub_mask = r < self.pairing_cutoff
+        sub_index = torch.nonzero(sub_mask, as_tuple=False).squeeze(-1)
+        sub_pairs = pair_index[:, sub_index]
+        sub_args = (positions, sub_pairs, dr_au[sub_index], r_au[sub_index], r[sub_index],
+                    batch_idx, n_sys, total_charge, two_s)
 
         def pool_batch(x):
             return x.new_zeros(n_sys).index_add_(0, pair_batch, x)
 
-        # --- the bond order at theta_0 ---------------------------------------------------
-        sub_mask = r < self.pairing_cutoff
-        sub_index = torch.nonzero(sub_mask, as_tuple=False).squeeze(-1)
-        sub_pairs = pair_index[:, sub_index]
-        sol0, J0, kappa0, e_pair0, e_atom0 = self._pairing(
-            params.pairing0, positions, sub_pairs, dr_au[sub_index], r_au[sub_index],
-            r[sub_index], batch_idx, n_sys,
-        )
+        # --- the topology pass: geometry -> bond orders, co-membership, formal charges -------
+        primitives = self.projector.primitives(batch)
+        x_full = self.projector.full_features(batch, primitives)
+        topo_fam = self.network.topology(x_full)
+        st_topo, J_topo, _, _, _ = self._pairing(topo_fam, *sub_args)
         c = comembership_from_bond_order(
-            sol0.p, sub_index, pair_index, n_atoms, include_13=self.include_13
+            st_topo.p, sub_index, pair_index, n_atoms, include_13=self.include_13
         )
-        bo_solver = {"pairing0": (sol0.n_iter, sol0.converged, sol0.residual)}
+        bo_solver = {"topology": (st_topo.n_iter, st_topo.converged, st_topo.residual)}
+
+        # --- features projected by that co-membership, conditioned on that state ------------
+        edge_index = primitives[0]
+        e_pos, e_found = _lookup(keys, edge_index[0], edge_index[1], n_atoms)
+        P_e = torch.where(e_found, c[e_pos], torch.zeros_like(c[e_pos]))
+        pf = self.projector.project(batch, P_e, primitives)
+        c_cond = torch.stack((st_topo.q, st_topo.u), dim=-1)
+        # The SQE channel graph: every pair within the pairing radius plus the assigned intra
+        # enumeration, frame-grouped; conductances are weighted by c below.
+        ch_ind, chb_ind, ch_radius = union_channels(
+            positions, batch_idx, frag, self.pairing_cutoff,
+            max_num_neighbors=self.max_num_neighbors,
+        )
+        params: PairingParameters = self.network(pf, c_cond, state, positions, ch_ind)
+
+        # --- the pairing functional at theta_0 -------------------------------------------
+        sol0, J0, kappa0, e_pair0, e_atom0 = self._pairing(params.pairing0, *sub_args)
+        bo_solver["pairing0"] = (sol0.n_iter, sol0.converged, sol0.residual)
 
         gate, r0, r0_pair, alpha, log_r0_prior, log_r0_prior_pair = self._gates(
             r, species_idx, pair_index
@@ -370,12 +385,9 @@ class PairingModel(nn.Module):
             .index_add_(0, sub_frag[sub_intra], e_pair0[sub_intra])
             .index_add_(0, frag, e_atom0)
         )
-        # every atom referenced to its own formal-charge share (docs/fff_pairing.md §2.4)
-        q_share, _ = formal_charge_share(
-            self.network.pairing_heads.heavy[species_idx], frag, state.fragment_charge,
-            dtype=positions.dtype,
-        )
-        e0 = self.reference(species_idx, q_share)
+        # the neutral atomic references; the charged part E0(q) is inside the state energy,
+        # where the formal count was minimized against it
+        e0 = self.reference(species_idx, None)
         energy_ref = e0.new_zeros(n_frag).index_add_(0, frag, e0)
         fragment_energy = energy_ref + energy_pairing + energy_intra
 
@@ -431,10 +443,7 @@ class PairingModel(nn.Module):
             e0_ref = e0_internal + pool_batch(gate_ind * e_elst)
 
             # the pairing functional at theta: the bond's response to its surroundings
-            sol_env, _, _, e_pair_env, e_atom_env = self._pairing(
-                params.pairing, positions, sub_pairs, dr_au[sub_index], r_au[sub_index],
-                r[sub_index], batch_idx, n_sys,
-            )
+            sol_env, _, _, e_pair_env, e_atom_env = self._pairing(params.pairing, *sub_args)
             bo_solver["pairing"] = (sol_env.n_iter, sol_env.converged, sol_env.residual)
             d_pair = (
                 (e_pair_env - e_pair0).new_zeros(n_sys)
@@ -498,9 +507,11 @@ class PairingModel(nn.Module):
             energy_bonded_env=energy_pairing_env,
             solver=solver or None,
             sub_index=sub_index,
-            bond_order=sol0.p,
-            unpaired=sol0.u,
-            coupling=J0,
+            bond_order=st_topo.p,
+            unpaired=st_topo.u,
+            formal_charge=st_topo.q,
+            electronic_state=st_topo,
+            coupling=J_topo,
             kappa_pair=kappa0,
             energy_pairing=energy_pairing,
             bo_solver=bo_solver,

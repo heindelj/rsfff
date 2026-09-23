@@ -56,7 +56,7 @@ film:
   pairing_temperature: 0.002
   range_gate: bond_order
   include_13: true
-  bo_tol: 1.0e-10
+  bo_tol: 1.0e-8
   bo_maxiter: 100
   pairing_environment_b: true
   pairing_environment_kappa: true

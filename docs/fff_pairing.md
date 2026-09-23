@@ -43,11 +43,10 @@ subject to   sum_j p_ij + u_i = v_i    for every atom i.
   unconstrained, `p = J/kappa` and `E = -J^2 / 2 kappa`, the Heitler-London `S^2` scaling at
   long range; saturated, `p = 1` and `E = -J + kappa/2`. The crossover gives the attractive
   branch its Morse-like shape without a Morse.
-- `v_i` is the **valence capacity**: `v_0(Z_i) + Q_f w_i` with the fragment's formal charge
-  shared by its heavy atoms (O in H3O+: 3, in OH-: 1, each O of a one-fragment Zundel: 2.5;
-  a heavy-atom-free fragment puts `-|Q|` on its hydrogens), scaled by a zero-initialized
-  readout of the state-conditioned latent. The fragment label is what carries the charge
-  here; the reactive version has to read it from the local electron count (§6).
+- `v_i` is the **valence capacity**, `v_i(n_i)` of the atom's formal electron count, which
+  is itself a variable of the same minimization (§2.4: O in H3O+ ends at 3, in OH- at 1,
+  each O of a Zundel midpoint near 2.5), with the neutral value scaled by a
+  zero-initialized readout of the latent (`exp` of a `valence` head).
 - `T` is the barrier scale (0.002 Ha). Both entropic terms vanish as `T -> 0`; at finite `T`
   they keep `0 < p < 1` and `u > 0`, and they make the minimizer a smooth function of the
   parameters. On a bond `1 - p ~ exp(-(J - kappa)/T) ~ e^{-200}`: saturated to double
@@ -108,22 +107,56 @@ derivative -- has the exact second derivative too. A force loss needs the second
 against central differences through the whole model. The same trick is used inside the
 scalar per-pair equation.
 
-### 2.4 Energy and the atomic reference
+### 2.4 Energy, formal charges and the atomic reference (`electronic_state.py`)
 
 The reported pairing energy is the minimized functional itself (barriers included), so it
-is stationary in `p`. The per-atom part is referenced to the free atom (`u = v`), so an atom
-without partners contributes exactly zero.
+is stationary in every variable. The per-atom part is referenced to the free neutral atom
+(`u = v0`, `q = 0`), so an atom without partners contributes exactly zero.
 
-Each atom is referenced to **its own charge state** (`reference.py`):
-`E0(Z, q) = E0(Z) + chi_Z q + eta_Z q^2 / 2` with `chi = (IP + EA)/2`, `eta = IP - EA` from
-`data.atomic_reference_states`, evaluated at the atom's formal-charge share (the fragment
-charge split over its heavy atoms -- the same share the valence capacity reads). The
-quadratic runs exactly through `E0 + IP` and `E0 - EA` and is smooth for fractional shares.
-This is what makes a bond transferable across charge states: against `O+ + 3H` hydronium is
-bound by -0.65 Ha, against `O- + H` hydroxide by -0.18, against `O + 2H` water by -0.37 --
-one O-H is ~-0.2 Ha in all three, and at initialization the model already gives that
-(`test_charged_reference_removes_the_ionization_offset`). Without the states file the
-reference is the film's neutral one.
+The capacity is **not** a fixed number per element: it is `v_i(n_i)` with `n_i` the atom's
+*formal* electron count, solved jointly with the bond orders (module docstring of
+`electronic_state.py`):
+
+```
+min_{p,u,n}  F(p, u) + sum_i [ E0_i(q_i) + B_i(n_i) ]           q_i = n0_i - n_i
+s.t.  sum_j p_ij + u_i = v_i(n_i)     (atom)
+      sum_{i in frame} n_i = N        (electron count = sum n0 - total charge)
+      sum_{i in frame} u_i = 2S       (multiplicity, only when 2S > 0)
+```
+
+`v(n) = v0 + a (n - n0) + b (n - n0)^2` is `8 - n` for oxygen (2 at n = 6, 3 at 5, 1 at 7)
+and `n (2 - n)` for hydrogen (peak 1 at n = 1). `E0(q)` is the charged atomic reference,
+**piecewise linear** through `IP` and `-EA` (`chi = (IP + EA)/2`, `eta = IP - EA` from
+`data.atomic_reference_states`), smoothed over `EPS_Q = 0.01 e` at the integer, with a
+quadratic wall beyond one electron either way; `B(n) = T [n ln n + (c - n) ln (c - n)]` is
+the shell barrier that keeps `0 < n < c`. The piecewise-linear form is essential: a
+quadratic `E0` makes every fractional split of a formal charge cheaper than the integer one
+and hydronium's charge smears over its hydrogens (`q_O = 0.49`); with the linear one the
+formal charges stay at the integers unless the bonding pays, which is what `n_i` is for --
+it is the Lewis-structure count, distinct from the SQE partial charge (bond polarity, solved
+downstream and never fed into the capacity, which would put water's oxygen at ~1.6).
+
+What comes out at the priors: water `q = 0`, hydronium `q_O = +1` with three bonds,
+hydroxide `q_O = -0.99`, a Zundel midpoint splits the charge `0.59 / 0.39` at O-O 2.9 A and
+localizes it by 0.25 A off center, a homolytic O-H stretch of water unpairs two electrons
+with no formal charge, and the hydronium O-H stretch goes heterolytically (the leaving
+hydrogen carries `q -> +0.8` and its capacity collapses). The solve is the dual Newton of
+§2.2 on `(lambda_i, mu_frame, nu_frame)` with a bordered `(N + 2)^2` dense system per
+frame; `n_i` is an inner scalar problem (bisection on a monotone residual, then two
+Newton steps). Step acceptance is Armijo on the dual *or* a residual decrease **that does
+not lower the dual** -- `n(mu)` is a staircase, and a residual-only acceptance let the
+count multiplier cycle across an integer step. The loop stops at `tol = 1e-8`; the two
+differentiable Newton steps that follow polish it to roundoff and give exact first and
+second derivatives.
+
+This is what makes a bond transferable across charge states: one O-H is ~-0.2 Ha in water,
+hydronium and hydroxide alike (`test_charged_reference_removes_the_ionization_offset`).
+
+**Limitation.** `E0` alone cannot *create* an ion pair from neutrals: the electrostatic
+stabilization of separated ions lives in the induction solve. Two neutral fragments in one
+frame therefore never autoionize, and the ion tests use one ion per frame. The fix is a
+perturbative environment potential `phi_i q_i` in the count energetics, deliberately not
+coupled into the bonding loop yet.
 
 ## 3. Assembly (`model.py`)
 
@@ -189,30 +222,59 @@ heads keep them separate with the option of tying them later.
   finite-difference gradient of a force loss with respect to a pairing parameter;
 - the total energy is the exact sum of the four buckets; the isolated-fragment vertex;
 - a stretched O-H drops its co-membership below 0.5 and costs energy;
-- `film_fit` (the shared cluster loss) runs on a pairing output with the force term.
+- `film_fit` (the shared cluster loss) runs on a pairing output with the force term;
+- formal charges come out of the solve (hydronium `q_O = +1`, hydroxide `q_O = -1`, three
+  and one bonds), a triplet constraint unpairs exactly two electrons, and the charged
+  reference removes the ionization offset between the O-H bonds of water, H3O+ and OH-.
 
 ## 6. Not yet
 
-- **Charge and multiplicity.** `v_i` reads the *fragment* charge, so a proton cannot move
-  between assigned fragments yet. The plan: per-atom `(q_i, u_i)` conditioning of every
-  head, `v_i` from element and local electron count, and the multiplicity as
-  the constraint `sum_i u_i >= 2S` (a high-spin state then has no pairing between its
-  radical sites and is described by the nonbonded terms alone -- which is also the training
-  signal for `J`, `(E_HS - E_LS)/2` along a stretch).
+- **Environment potential in the count solve.** `phi_i q_i` from the induction state, as a
+  perturbative correction (the autoionization limitation of §2.4); then an SQE baseline
+  from `q^f` so the partial charges of an ion are referenced to its formal charge.
 - **Hybridization.** One exponent per atom; the linear combination of an s-like and a
   p-like exponent is a head change.
-- **Joint solve.** Bond orders are solved at `theta_0` and the gates derived from them
-  before the induction solve (nested, both convex). A joint minimization where the gates
-  depend on `p` and `J` on the induced state is non-convex and is left for later.
+- **Joint solve.** Bond orders and formal counts are solved at `theta_0` and the gates
+  derived from them before the induction solve (nested, both convex). A joint minimization
+  where the gates depend on `p` and `J` on the induced state is non-convex and is left for
+  later.
 - **Kernels.** The pairing coupling goes through `rsfff.ff.backend.slater_pauli_pair_energy`,
   so the torchff Pauli kernel serves it unchanged once the port lands; the solve is torch.
-- **Ions.** `configs/ion_pairing.yaml` trains on the existing H3O+ / OH- data (monomer AIMD +
-  polarizability files, w1/w2 ion clusters with every decomposition), with the charged
-  atomic reference of §2.4 (`data.atomic_reference_states`).
-- **Scans.** `scripts/pairing_scans.py` writes rigid O-H stretches (H2O, H3O+, OH-), an
-  H-O-H bend and shared-proton scans (H5O2+, H3O2- at four O-O distances) into
-  `qchem_roundtrip/force/geoms/` for labeling: the 1-body curves are the kink test and the
-  J-vs-Pauli balance; the proton scans are the valence competition.
-- **Data.** Nothing here needs new labels: on intact water the model reproduces the film's
-  accounting and trains on the same streams. Reactive validation needs the stretched /
-  high-spin scans of the Obsidian plan.
+- **Multiplicity.** A symmetric triplet (two equivalent bonds) splits the unpairing across
+  both; the labels are for the state that unpairs one bond. Conditioning on `u_i` lets the
+  heads break the symmetry, the prior cannot.
+- **Data.** `scripts/pairing_scans.py` writes the rigid O-H stretches (H2O, H3O+, OH-), the
+  H-O-H bend and the shared-proton scans (H5O2+, H3O2- at four O-O distances) as RKS,
+  UKS-singlet and UKS-triplet sets under `qchem_roundtrip/pairing_scans*`;
+  `scripts/aggregate_pairing_data.py` pools them with the monomer / cluster data into
+  `data/pairing/`. RKS labels are unphysical beyond ~1.8 A on the stretches; the triplet
+  minus singlet along a stretch is the training signal for `J`.
+
+## 7. Two-stage architecture: topology, then parameters (`model.py`, `network.py`)
+
+Nothing in the model reads the fragment assignment any more; the only inputs beyond the
+geometry are the frame's total charge and multiplicity.
+
+```
+features on the total density  -> topology heads  -> (J, kappa, v0)   [state-free]
+    -> electronic-state solve  -> p, c, q^f, u
+features projected by c        -> parameter heads, FiLM-conditioned on [q^f, u]
+    -> (J, kappa, v0, multipoles, Pauli, dispersion, SQE ...) -> second solve -> energies
+```
+
+**Stage 1** (`network.topology`): a small trunk on the *unprojected* Lambda features
+(`projector.full_features`) emits a `PairingFamily` -- the couplings and capacities that
+decide the Lewis structure. It is state-free by construction: it cannot know a fragment,
+a charge or a spin, only the density around each atom. Its solve gives the bond orders,
+the co-membership `c` (§3), the formal charges `q^f` and the unpaired counts `u`.
+
+**Stage 2**: `projector.project(batch, c)` splits every feature block by the co-membership
+(internal / environment / cross, the film's blocks with `c` in the role of `P_ij`), and
+the parameter network is FiLM-conditioned on `[q^f_i, u_i]` in place of the film's
+fragment key. Its `PairingFamily` is solved again (`theta_0` and `theta` as in §3) and
+gives every energy. The stage-1 couplings are also what `coupling` reports.
+
+So the answer to "what determines `n_i` without fragments" is: the stage-1 solve, from the
+density alone, against the frame's electron count; and the answer to "why keep SQE
+separate" is that `q^f` is the Lewis charge (integer-like, sets capacities) while the SQE
+charge is bond polarity (continuous, sets electrostatics) -- the same atom carries both.
