@@ -81,7 +81,7 @@ _LOG_KEYS = (
     "bonded", "bond_var", "q_res",
     "r0_elst", "r0_pauli", "r0_disp",
     "env_norm", "env_c6", "env_eta", "env_bond_d", "env_bond_r_eq",
-    "cg_ind", "cg_fail", "bo_iter", "bo_fail",
+    "cg_ind", "cg_fail", "bo_iter", "bo_fail", "bo_frac", "qf_max",
     "lg_elst_mae", "lg_pauli_mae", "lg_disp_mae", "lg_ind_mae", "lg_e_tot_mae",
     "lg_ob_mae", "lg_f_clu", "lg_cg_fail",
     "fs_e_mae", "fs_f_clu", "fs_cg_fail",
@@ -483,11 +483,21 @@ class FilmStreams:
         metrics = {"q_res": float((per_frag - want).abs().max()), **self._metrics}
         for name, value in out.r0.items():
             metrics[f"r0_{name}"] = float(value.detach().mean())
-        b0 = out.parameters.bonded0
-        for name in ("r_eq", "d", "k"):
-            values = getattr(b0, name).detach()
-            if values.numel() > 1:
-                metrics[f"std_{name}"] = float(values.std())
+        b0 = getattr(out.parameters, "bonded0", None)
+        if b0 is not None:
+            for name in ("r_eq", "d", "k"):
+                values = getattr(b0, name).detach()
+                if values.numel() > 1:
+                    metrics[f"std_{name}"] = float(values.std())
+        # the pairing model: how many bonds are fractional and how much formal charge moved
+        # (the solver counts are film_fit's ``bo_iter`` / ``bo_fail``)
+        p = getattr(out, "bond_order", None)
+        if p is not None:
+            p = p.detach()
+            metrics["bo_frac"] = float(((p > 0.05) & (p < 0.95)).to(p.dtype).mean()) if p.numel() else 0.0
+        qf = getattr(out, "formal_charge", None)
+        if qf is not None:
+            metrics["qf_max"] = float(qf.detach().abs().max()) if qf.numel() else 0.0
         return metrics
 
 
