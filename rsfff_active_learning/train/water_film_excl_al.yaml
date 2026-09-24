@@ -13,26 +13,25 @@
 # Not warm-startable from film_committee_100k (that committee is range-separated and its
 # bonded terms were fitted to cancel intramolecular classical pairs): fit it cold.
 #
-# By hand, on the data film_committee_100k was fitted on (the store's legacy frames):
+# By hand, on exactly the data film_committee_100k was fitted on -- the qchem_roundtrip
+# training set in rsfff_data/train/data, which the data section below points at directly (no
+# store, no export needed):
 #
-#   python -m rsfff_al.dataset $RSFFF_STORE train/data --upto -1     # legacy only; drop
-#                                                                     # --upto for AL labels too
 #   python train/train_committee.py --config train/water_film_excl_al.yaml \
 #       --out committees/film_committee_100k_excl
 #
-# As the active-learning template: train.template: train/water_film_excl_al.yaml in the loop
-# config (and committee: the committee above for iteration 0).
+# As the active-learning template (train.template: train/water_film_excl_al.yaml in the loop
+# config, committee: the committee above for iteration 0), the train stage replaces
+# data.path / data.force_path with its export from the cc_workers store; the anchors stay.
 #
 # Paths are relative to THIS file's directory unless absolute.
 device: cuda
 dtype: float64
 data:
   path:
-  - data/eda/*.xyz
-  force_path:
-  - data/force/*.xyz
-  reference_energies: anchors/atomic_references_wb97mv_tzvpd.json
-  monomer_path: anchors/h2o_wb97mv_tzvpd_pol.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/**/*.xyz
+  reference_energies: /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/atomic_references_wb97mv_tzvpd.json
+  monomer_path: /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/monomer/h2o_wb97mv_tzvpd_pol.xyz
   holdout_fraction: 0.1
   force_holdout_fraction: 0.1
   seed: 0
