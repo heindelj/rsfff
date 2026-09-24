@@ -4,6 +4,7 @@
 #   bash scripts/sync.sh up      # code, configs, committees  -> Perlmutter (never runs/)
 #   bash scripts/sync.sh down    # runs/ <- Perlmutter: summaries, logs, configs, selected frames
 #   bash scripts/sync.sh down --full   # ... plus trajectories (*.npz), checkpoints, stores
+#   bash scripts/sync.sh committees [NAME]   # committees/[NAME] <- Perlmutter, checkpoints included
 #   bash scripts/sync.sh up --dry-run
 #
 # `down` is deliberately lean: a production run holds per-frame trajectories, committee
@@ -44,5 +45,13 @@ case "$dir" in
           --max-size=50m)
     if [ "${1:-}" = "--full" ]; then shift; lean=(--exclude '*.state.pt' --exclude 'state.pt'); fi
     rsync "${common[@]}" "${lean[@]}" "$@" "$REMOTE:$REMOTE_DIR/runs/" "$HERE/runs/" ;;
-  *) echo "usage: $0 up|down [rsync args]" >&2; exit 2 ;;
+  committees)
+    # committees/ <- Perlmutter: manifests, resolved configs, logs and the member checkpoints
+    # (~1 MB each for the 100k model, so nothing is left out). One committee by name, or all.
+    name=""
+    if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then name="$1"; shift; fi
+    mkdir -p "$HERE/committees/$name"
+    rsync "${common[@]}" "$@" "$REMOTE:$REMOTE_DIR/committees/${name:+$name/}" \
+      "$HERE/committees/${name:+$name/}" ;;
+  *) echo "usage: $0 up|down|committees [NAME] [rsync args]" >&2; exit 2 ;;
 esac
