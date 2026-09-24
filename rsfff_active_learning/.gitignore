@@ -1,6 +1,7 @@
 # Code and configs are versioned (rsfff branch `nonreactive`); data never is. Everything below
 # travels between the laptop and Perlmutter with scripts/sync.sh, not with git.
 runs/
+train/data/
 _transfer/
 _deps/
 train/anchors/*.xyz

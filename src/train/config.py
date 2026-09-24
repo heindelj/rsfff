@@ -1041,7 +1041,16 @@ class FilmConfig:
     s_init: float = 0.5
     disp_b_prior: str = "per_element"
 
-    # --- range separation ----------------------------------------------------------------
+    # --- nonbonded treatment of intra-fragment pairs -------------------------------------
+    #: "range_separated": every pair carries the classical channels behind a learned
+    #: per-element Fermi switch (r0, alpha) -- the original film model, film_committee_100k.
+    #: "exclusions": the 1-2/1-3 pairs of the covalent graph are dropped from the pair list
+    #: (their energy is the bonded terms alone), no range heads, strictly non-reactive.
+    #: The default stays "range_separated" so configs pickled in older checkpoints load.
+    nonbonded: str = "range_separated"
+    #: With exclusions: 3 -> exclude 1-2 and 1-3; 4 -> also 1-4.
+    exclude_through: int = 3
+    #: Range separation only (ignored under exclusions, as are r0_weight/r0_spread_weight).
     alpha_init: float = 40.0
 
     # --- classical reach -------------------------------------------------------------------

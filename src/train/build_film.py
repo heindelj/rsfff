@@ -164,13 +164,19 @@ def build_film_model(
         gate_a0=float(_get(film_cfg, "gate_a0", 0.5)),
     )
 
-    range_heads = RangeSeparationHeads(
-        0, n_species,
-        log_r0_prior=build_range_priors(neighbor_types),
-        alpha_init=float(_get(film_cfg, "alpha_init", 40.0)),
-        p_env=0, channels=RANGE_CHANNELS,
-        environment_r0=False,
-    )
+    # `film.nonbonded`: "range_separated" (Fermi-switched; the default, so configs pickled
+    # into older checkpoints keep loading) or "exclusions" (hard 1-2/1-3 exclusions, no range
+    # heads, strictly non-reactive). See rsfff.ff.film.model.
+    nonbonded = str(_get(film_cfg, "nonbonded", "range_separated"))
+    range_heads = None
+    if nonbonded == "range_separated":
+        range_heads = RangeSeparationHeads(
+            0, n_species,
+            log_r0_prior=build_range_priors(neighbor_types),
+            alpha_init=float(_get(film_cfg, "alpha_init", 40.0)),
+            p_env=0, channels=RANGE_CHANNELS,
+            environment_r0=False,
+        )
 
     return FilmModel(
         projector,
@@ -178,6 +184,8 @@ def build_film_model(
         network,
         range_heads,
         reference_energies,
+        nonbonded=nonbonded,
+        exclude_through=int(_get(film_cfg, "exclude_through", 3)),
         max_rank=max_rank,
         classical={
             "elst": ClassicalSpec(

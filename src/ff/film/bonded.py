@@ -180,6 +180,49 @@ class BondedTopology:
             angle_weight=angle_weight,
         )
 
+    def exclusions(self, n_atoms: int, through: int = 3) -> torch.Tensor:
+        """``(2, E)`` atom pairs ``i < j`` within ``through - 1`` bonds of each other.
+
+        The classical-force-field exclusion list: ``through=3`` is every 1-2 and 1-3 pair,
+        ``through=4`` adds the 1-4 pairs. Read off the covalent graph (``bond_index``), so
+        like the bonds themselves it comes from the fragment assignment and never from a
+        distance: a stretched bond cannot drop out of its own exclusion.
+
+        Enumerated as walks on the bond graph from every atom, one hop at a time through a
+        padded neighbor table. Walks may backtrack, which only revisits pairs already at a
+        shorter separation; ``unique`` removes the repeats and the self pairs are dropped.
+        """
+        device = self.bond_index.device
+        empty = torch.zeros(2, 0, dtype=torch.long, device=device)
+        hops = int(through) - 1
+        if hops < 1 or self.bond_index.shape[1] == 0:
+            return empty
+        atoms = torch.cat((self.bond_index[0], self.bond_index[1]))
+        others = torch.cat((self.bond_index[1], self.bond_index[0]))
+        order = torch.argsort(atoms, stable=True)
+        atoms_s, others_s = atoms[order], others[order]
+        counts = torch.bincount(atoms_s, minlength=n_atoms)
+        deg_max = int(counts.max())
+        offsets = torch.cumsum(counts, 0) - counts
+        slot = torch.arange(atoms_s.numel(), device=device) - offsets[atoms_s]
+        nbr = torch.full((n_atoms, deg_max), -1, dtype=torch.long, device=device)
+        nbr[atoms_s, slot] = others_s                                  # (n_atoms, deg_max)
+
+        src, dst = atoms_s, others_s                                   # walks of length 1
+        found = [torch.stack((src, dst))]
+        for _ in range(hops - 1):
+            nxt = nbr[dst]                                             # (W, deg_max)
+            keep = nxt >= 0
+            src = src.unsqueeze(1).expand_as(nxt)[keep]
+            dst = nxt[keep]
+            found.append(torch.stack((src, dst)))
+        pairs = torch.cat(found, dim=1)
+        pairs = pairs[:, pairs[0] != pairs[1]]
+        lo = torch.minimum(pairs[0], pairs[1])
+        hi = torch.maximum(pairs[0], pairs[1])
+        keys = torch.unique(lo * n_atoms + hi)
+        return torch.stack((keys // n_atoms, keys % n_atoms))
+
     def geometry(self, positions_ang: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``(r_bohr (Nb,), cos_theta (Na,))`` from Angstrom positions, differentiably."""
         i, j = self.bond_index[0], self.bond_index[1]

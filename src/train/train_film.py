@@ -300,14 +300,15 @@ class FilmStreams:
         self._metrics = {}
 
         # --- range separation (v4 semantics: barrier + log-space spread) ------------------
-        if x.r0_weight > 0.0:
+        # Empty under film.nonbonded = exclusions: there is no r0 to regularize.
+        if x.r0_weight > 0.0 and out.log_r0_prior_pair:
             inter = ~out.is_intra
             if bool(inter.any()):
                 extra["r0"] = x.r0_weight * torch.stack([
                     (out.r0_pair[name][inter] - floor[inter].exp()).clamp(min=0.0).mean()
                     for name, floor in out.log_r0_prior_pair.items()
                 ]).sum()
-        if x.r0_spread_weight > 0.0:
+        if x.r0_spread_weight > 0.0 and out.log_r0_prior:
             extra["r0_spread"] = x.r0_spread_weight * torch.stack([
                 (out.r0[name].log() - prior).pow(2).mean()
                 for name, prior in out.log_r0_prior.items()

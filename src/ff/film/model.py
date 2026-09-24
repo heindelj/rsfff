@@ -30,6 +30,26 @@ No ``eta``-slot or environment path reaches ``fragment_energy``: the bonded ``th
 the isolated latent, the permanent multipoles read the isolated latent by construction, and the
 intra classical pairs read ``theta_0``. The v4 headline invariant survives with fewer moving
 parts -- there is no ``energy_internal`` and no frozen-solve bookkeeping at all.
+
+**Two nonbonded modes** (``film.nonbonded``):
+
+``range_separated`` (the original film model, and what ``film_committee_100k`` was fitted with)
+    every pair -- intra and inter -- carries the classical channels behind a per-element Fermi
+    switch ``fermi(r; r0, alpha)`` learned by :class:`rsfff.ff.range_heads.RangeSeparationHeads`.
+    Intra pairs hand over to the bonded terms as ``r`` shrinks, which is what lets the model
+    in principle be reactive -- and what puts a kink in the one-body stretch scans wherever a
+    switch turns an intra pair's classical energy back on while the bonded terms must cancel it.
+
+``exclusions`` (strictly non-reactive)
+    what a classical force field does: the 1-2 and 1-3 pairs of the covalent graph
+    (``film.exclude_through: 3``; ``4`` adds 1-4) are removed from the pair list outright, so
+    their energy is the bonded Morse + angle and nothing else, and no nonbonded channel can
+    ever switch on for them. Every surviving pair carries its channels at full strength,
+    switched only by the smooth taper at each channel's cutoff; there is no ``r0``/``alpha``
+    and no range head. The exclusion list comes from the fragment topology, never a
+    distance, so the model needs the topology as input and cannot change it -- the reactive
+    model is ``rsfff.ff.pairing`` on the ``pairing`` branch. Induction is unchanged: it was
+    already inter-fragment only (``gate_ind`` carries ``1 - P_ij``).
 """
 
 from __future__ import annotations
@@ -80,6 +100,7 @@ class FilmOutput:
     energy_ref: torch.Tensor                  # (F,) sum_i E0[Z_i]
     energy_bonded: torch.Tensor               # (F,) Morse + angle at theta_0
     energy_intra: torch.Tensor                # (F,) intra classical pairs at theta_0
+                                              # (identically zero for water under exclusions)
     parameters: FilmParameters                # every generated parameter, both evaluations
     topology: BondedTopology
     pair_index: torch.Tensor                  # (2, P)
@@ -88,8 +109,10 @@ class FilmOutput:
     pair_frag: torch.Tensor                   # (P,) fragment id, -1 for inter pairs
     p_intra: torch.Tensor                     # (P,) soft co-membership on the pair list
     e_pair: dict[str, torch.Tensor]           # (P,) gate * classical, per channel
-    gate: dict[str, torch.Tensor]             # (P,) fermi * taper per channel
-    r0: dict[str, torch.Tensor]               # (N,) per-atom, element table
+    gate: dict[str, torch.Tensor]             # (P,) fermi * taper per channel (taper only
+                                              # under exclusions)
+    r0: dict[str, torch.Tensor]               # (N,) per-atom, element table ({} under
+                                              # exclusions, as are r0_pair/alpha/log_r0_prior*)
     r0_pair: dict[str, torch.Tensor]          # (P,)
     alpha: dict[str, torch.Tensor]            # () per channel
     log_r0_prior: dict[str, torch.Tensor]     # (N,)
@@ -183,7 +206,12 @@ class FilmModel(nn.Module):
     network            : :class:`ConditionedParameterNetwork` -- every generated parameter.
     range_heads        : element-only ``r0``/``alpha`` tables (reused verbatim from v4; the
                          v4 lesson stands: ``r0`` must not read the atom's description).
+                         ``None`` with ``nonbonded="exclusions"``.
     reference_energies : (n_species,) isolated-atom energies, frozen buffer.
+    nonbonded          : ``"range_separated"`` (Fermi-switched, default) or ``"exclusions"``
+                         (hard 1-2/1-3 exclusions, non-reactive). See the module docstring.
+    exclude_through    : with exclusions, the largest bond separation removed: 3 -> 1-2 and
+                         1-3, 4 -> also 1-4.
     """
 
     def __init__(
@@ -191,9 +219,11 @@ class FilmModel(nn.Module):
         projector: FragmentProjector,
         state_embedding: FragmentStateEmbedding,
         network: ConditionedParameterNetwork,
-        range_heads: nn.Module,
+        range_heads: nn.Module | None,
         reference_energies: torch.Tensor,
         *,
+        nonbonded: str = "range_separated",
+        exclude_through: int = 3,
         max_rank: int = 2,
         classical: dict[str, ClassicalSpec] | None = None,
         induction: bool = True,
@@ -204,6 +234,24 @@ class FilmModel(nn.Module):
         cg_check_every: int = 1,
     ) -> None:
         super().__init__()
+        if nonbonded not in ("range_separated", "exclusions"):
+            raise ValueError(
+                f"nonbonded must be 'range_separated' or 'exclusions', got {nonbonded!r}"
+            )
+        if nonbonded == "range_separated" and range_heads is None:
+            raise ValueError("nonbonded='range_separated' needs range_heads")
+        if nonbonded == "exclusions":
+            if range_heads is not None:
+                raise ValueError(
+                    "nonbonded='exclusions' has no range separation; pass range_heads=None"
+                )
+            if int(exclude_through) not in (3, 4):
+                raise ValueError(
+                    f"exclude_through must be 3 (1-2, 1-3) or 4 (also 1-4), "
+                    f"got {exclude_through}"
+                )
+        self.nonbonded = str(nonbonded)
+        self.exclude_through = int(exclude_through)
         self.projector = projector
         self.state_embedding = state_embedding
         self.network = network
@@ -220,7 +268,13 @@ class FilmModel(nn.Module):
     # -- helpers -------------------------------------------------------------------------
 
     def _gates(self, r, species_idx, pair_index):
-        """Element-table Fermi switch x compact taper, per channel."""
+        """Element-table Fermi switch x compact taper, per channel (taper only if excluding)."""
+        if self.range_heads is None:
+            gate = {
+                name: pairwise_switch(r, spec.cutoff - spec.taper_width, spec.cutoff)
+                for name, spec in self.classical.items()
+            }
+            return gate, {}, {}, {}, {}, {}
         i, j = pair_index[0], pair_index[1]
         zero_width = r.new_zeros(species_idx.shape[0], 0)
         r0, alpha = self.range_heads(zero_width, species_idx)
@@ -285,6 +339,17 @@ class FilmModel(nn.Module):
             positions, batch.batch_idx, frag, self.cutoff_max,
             max_num_neighbors=self.max_num_neighbors,
         )
+        if self.nonbonded == "exclusions":
+            # Hard 1-2/1-3(/1-4) exclusions: those pairs' energy is the bonded terms alone.
+            # A filter on the one pair list, so every channel -- and the induction coupling,
+            # which reads the same list -- loses exactly the same pairs.
+            n_atoms = positions.shape[0]
+            excl = topo.exclusions(n_atoms, self.exclude_through)
+            keep = ~torch.isin(
+                pair_index[0] * n_atoms + pair_index[1], excl[0] * n_atoms + excl[1]
+            )
+            pair_index, r = pair_index[:, keep], r[keep]
+            is_intra, pair_frag = is_intra[keep], pair_frag[keep]
         i, j = pair_index[0], pair_index[1]
         dr_au = (positions[j] - positions[i]) / BOHR_ANG
         r_au = r / BOHR_ANG
