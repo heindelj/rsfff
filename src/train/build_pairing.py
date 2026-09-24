@@ -195,6 +195,7 @@ def build_pairing_model(
         bo_tol=float(_get(film_cfg, "bo_tol", 1.0e-8)),
         bo_maxiter=int(_get(film_cfg, "bo_maxiter", 60)),
         bo_device=str(_get(film_cfg, "bo_device", "cpu")),
+        state_cache=bool(_get(film_cfg, "state_cache", True)),
     )
 
 

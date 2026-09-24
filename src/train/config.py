@@ -1063,6 +1063,9 @@ class FilmConfig:
     #: "cpu" runs the electronic-state solve on the host even when the model is on a GPU
     #: (it is launch-latency bound there); "same" keeps it on the model's device.
     bo_device: str = "cpu"
+    #: Warm-start the electronic-state solve of a frame from its last solution (per-frame
+    #: host cache keyed by ``Batch.frame_key``); a path choice, not a model choice.
+    state_cache: bool = True
     #: Whether the pairing exponent / hardness read the family latent (else per-species only).
     pairing_environment_b: bool = True
     pairing_environment_kappa: bool = True

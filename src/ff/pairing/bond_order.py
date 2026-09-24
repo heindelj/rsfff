@@ -113,6 +113,12 @@ def _solve_pair_logit(
     The logit is what the caller wants: ``1 - p = sigmoid(-x)`` is then exact where ``p``
     itself rounds to one.
     """
+    from . import fused
+
+    if fused.fused_enabled(a):
+        x = fused.pair_logit(a, kappa, float(temperature), maxiter=maxiter)
+        x = _pair_newton_step(x, a, kappa, temperature)
+        return _pair_newton_step(x, a, kappa, temperature)
     with torch.no_grad():
         x = torch.where(
             a > kappa, (a - kappa) / temperature,

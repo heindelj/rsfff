@@ -142,6 +142,7 @@ class PairingModel(nn.Module):
         bo_tol: float = 1.0e-8,
         bo_maxiter: int = 100,
         bo_device: str = "cpu",
+        state_cache: bool = True,
     ) -> None:
         super().__init__()
         if range_gate not in ("bond_order", "fermi"):
@@ -173,6 +174,17 @@ class PairingModel(nn.Module):
         #: autograd crosses the device boundary through ``.to``), ``"same"`` keeps it with
         #: the model.
         self.bo_device = str(bo_device)
+        #: Warm starts across calls. A batch that carries ``frame_key`` (every training
+        #: batch does) has its topology solution stored per frame, on the host, and the
+        #: next solve of that frame starts from it -- the geometry is fixed and the
+        #: parameters move a little per step, so after the first epoch the cold ~30 Newton
+        #: iterations become a handful. A batch without keys (MD, a driver) reuses the
+        #: previous call's state when it is the same atoms in the same order. Warm starts
+        #: change the path, not the solution (the dual is concave), so nothing downstream
+        #: depends on the cache; it is not part of the state dict.
+        self.state_cache = bool(state_cache)
+        self._cache: dict[tuple[str, int], tuple[torch.Tensor, ...]] = {}
+        self._last: dict[str, tuple[torch.Tensor, ElectronicState]] = {}
         self.register_buffer("temperature", torch.tensor(float(temperature)))
         if not isinstance(reference, ChargedAtomicReference):
             reference = ChargedAtomicReference(reference)     # neutral, film-style
@@ -224,7 +236,7 @@ class PairingModel(nn.Module):
         return J, kappa
 
     def _pairing(self, fam, positions, sub_pairs, dr_au, r_au, r_ang, batch_idx, n_sys,
-                 total_charge, two_s, warm=None):
+                 total_charge, two_s, warm=None, warm_mask=None):
         """One electronic-state solve and its energy: ``(state, J, kappa, e_pair (Pb,), e_atom (N,))``.
         ``warm`` is a previous solve of the same geometry to start from."""
         J, kappa = self._coupling(fam, positions, sub_pairs, dr_au, r_au, r_ang)
@@ -241,7 +253,7 @@ class PairingModel(nn.Module):
             to_solver(J), to_solver(kappa), to_solver(fam.tables), to_solver(fam.chi),
             to_solver(fam.eta), to_solver(self.temperature), to_solver(sub_pairs),
             to_solver(batch_idx), n_sys, to_solver(total_charge), to_solver(two_s),
-            warm=warm_s, **self.bo,
+            warm=warm_s, warm_mask=warm_mask, **self.bo,
         )
         if offload:
             st = ElectronicState(**{
@@ -249,6 +261,81 @@ class PairingModel(nn.Module):
             })
         e_pair, e_atom = state_energy(J, kappa, self.temperature, fam.chi, fam.eta, fam.tables, st)
         return st, J, kappa, e_pair, e_atom
+
+    # -- the state cache -------------------------------------------------------------------
+
+    def clear_state_cache(self) -> None:
+        self._cache.clear()
+        self._last.clear()
+
+    @staticmethod
+    def _signature(batch):
+        """What a keyless batch must share with the previous one to reuse its state."""
+        z = batch.atomic_numbers.detach().cpu()
+        b = batch.batch_idx.detach().cpu()
+        q = getattr(batch, "total_charge", None)
+        fq = getattr(batch, "fragment_charge", None)
+        fs = getattr(batch, "fragment_two_s", None)
+        opt = lambda t: torch.zeros(0) if t is None else t.detach().cpu()  # noqa: E731
+        return (z, b, opt(q), opt(fq), opt(fs))
+
+    def _warm_start(self, batch, batch_idx, n_sys, slot: str):
+        """``(warm, mask)`` for the ``slot`` solve (``"topology"`` / ``"pairing0"``) from the
+        cache, or ``(None, None)``."""
+        if not self.state_cache:
+            return None, None
+        keys = getattr(batch, "frame_key", None)
+        if keys is None:
+            if slot not in self._last:
+                return None, None
+            sig_prev, st = self._last[slot]
+            sig = self._signature(batch)
+            if any(a.shape != b.shape or not bool(torch.equal(a, b)) for a, b in zip(sig, sig_prev)):
+                return None, None
+            return st, None
+        counts = torch.bincount(batch_idx, minlength=n_sys).tolist()
+        keys = keys.tolist()
+        hit = [(slot, k) in self._cache for k in keys]
+        if not any(hit):
+            return None, None
+        dev, dtype = batch.positions.device, batch.positions.dtype
+        lam, n = [], []
+        mu, nu = [], []
+        for k, c, h in zip(keys, counts, hit):
+            if h:
+                lam_k, n_k, mu_k, nu_k = self._cache[(slot, k)]
+                if lam_k.numel() != c:                       # stale key: different atoms
+                    h = False
+            if h:
+                lam.append(lam_k); n.append(n_k); mu.append(mu_k); nu.append(nu_k)
+            else:
+                lam.append(torch.zeros(c, dtype=dtype)); n.append(torch.zeros(c, dtype=dtype))
+                mu.append(torch.zeros((), dtype=dtype)); nu.append(torch.zeros((), dtype=dtype))
+        mask = torch.tensor(hit, device=dev)
+        st = ElectronicState(
+            p=None, u=None, n=torch.cat(n).to(dev), q=None, valence=None,
+            lam=torch.cat(lam).to(dev), mu=torch.stack(mu).to(dev), nu=torch.stack(nu).to(dev),
+            n_iter=0, converged=mask, residual=None,
+        )
+        return st, mask
+
+    def _store_state(self, batch, batch_idx, n_sys, st: ElectronicState, slot: str) -> None:
+        if not self.state_cache:
+            return
+        keys = getattr(batch, "frame_key", None)
+        if keys is None:
+            self._last[slot] = (self._signature(batch), ElectronicState(**{
+                k: (v.detach() if torch.is_tensor(v) else v) for k, v in st.__dict__.items()
+            }))
+            return
+        counts = torch.bincount(batch_idx, minlength=n_sys).tolist()
+        lam = st.lam.detach().cpu().split(counts)
+        n = st.n.detach().cpu().split(counts)
+        mu, nu = st.mu.detach().cpu(), st.nu.detach().cpu()
+        ok = st.converged.cpu().tolist()
+        for f, k in enumerate(keys.tolist()):
+            if ok[f]:
+                self._cache[(slot, k)] = (lam[f].clone(), n[f].clone(), mu[f].clone(), nu[f].clone())
 
     # -- forward -------------------------------------------------------------------------
 
@@ -304,7 +391,9 @@ class PairingModel(nn.Module):
         primitives = self.projector.primitives(batch)
         x_full = self.projector.full_features(batch, primitives)
         topo_fam = self.network.topology(x_full)
-        st_topo, J_topo, _, _, _ = self._pairing(topo_fam, *sub_args)
+        warm, warm_mask = self._warm_start(batch, batch_idx, n_sys, "topology")
+        st_topo, J_topo, _, _, _ = self._pairing(topo_fam, *sub_args, warm=warm, warm_mask=warm_mask)
+        self._store_state(batch, batch_idx, n_sys, st_topo, "topology")
         c = comembership_from_bond_order(
             st_topo.p, sub_index, pair_index, n_atoms, include_13=self.include_13
         )
@@ -325,7 +414,24 @@ class PairingModel(nn.Module):
         params: PairingParameters = self.network(pf, c_cond, state, positions, ch_ind)
 
         # --- the pairing functional at theta_0 -------------------------------------------
-        sol0, J0, kappa0, e_pair0, e_atom0 = self._pairing(params.pairing0, *sub_args, warm=st_topo)
+        # its own cached solution when there is one (the parameter heads drift away from the
+        # topology heads under training), the topology state otherwise
+        warm, warm_mask = self._warm_start(batch, batch_idx, n_sys, "pairing0")
+        if warm is None:
+            warm, warm_mask = st_topo, None
+        elif warm_mask is not None:
+            miss = ~warm_mask[batch_idx]
+            warm = ElectronicState(
+                p=None, u=None, q=None, valence=None, n_iter=0, residual=None,
+                n=torch.where(miss, st_topo.n.detach(), warm.n),
+                lam=torch.where(miss, st_topo.lam.detach(), warm.lam),
+                mu=torch.where(warm_mask, warm.mu, st_topo.mu.detach()),
+                nu=torch.where(warm_mask, warm.nu, st_topo.nu.detach()),
+                converged=warm.converged,
+            )
+            warm_mask = None
+        sol0, J0, kappa0, e_pair0, e_atom0 = self._pairing(params.pairing0, *sub_args, warm=warm, warm_mask=warm_mask)
+        self._store_state(batch, batch_idx, n_sys, sol0, "pairing0")
         bo_solver["pairing0"] = (sol0.n_iter, sol0.converged, sol0.residual)
 
         gate, r0, r0_pair, alpha, log_r0_prior, log_r0_prior_pair = self._gates(

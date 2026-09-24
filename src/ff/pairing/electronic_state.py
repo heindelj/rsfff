@@ -53,6 +53,7 @@ from dataclasses import dataclass
 
 import torch
 
+from . import fused
 from .bond_order import (
     DEFAULT_VALENCE,
     _dp_da,
@@ -251,6 +252,12 @@ def _formal_count(lam, mu_atom, chi, eta, n0, a, b, shell, temperature, *, n_ini
     args = (lam, mu_atom, chi, eta, n0, a, b, shell, temperature)
     eps = float(torch.finfo(lam.dtype).eps)
     tol = 1.0e-12 if eps < 1.0e-10 else 1.0e-5
+    if fused.fused_enabled(lam):
+        n = fused.formal_count(
+            lam, mu_atom, chi, eta, n0, a, b, shell, temperature,
+            n0 if n_init is None else n_init, eps=EPS_Q, wall=WALL_FACTOR, tol=tol, maxiter=maxiter,
+        )
+        return _polish_count(n, args, n0, a, b)
     with torch.no_grad():
         inf = float("inf")
         lo = torch.zeros_like(n0)
@@ -331,6 +338,11 @@ def _formal_count(lam, mu_atom, chi, eta, n0, a, b, shell, temperature, *, n_ini
             done = done | (h.abs() <= tol) | (hi - lo <= 8.0 * eps * shell)
             if bool(done.all()):
                 break
+    return _polish_count(n, args, n0, a, b)
+
+
+def _polish_count(n, args, n0, a, b):
+    """Two differentiable Newton steps from the root, and the sensitivities."""
     for _ in range(2):
         h, dh, _ = _count_residual(n, *args)
         n = n - h / dh
@@ -446,12 +458,14 @@ def solve_electronic_state(
     maxiter: int = 100,
     step_max: float | None = None,
     warm: ElectronicState | None = None,
+    warm_mask: torch.Tensor | None = None,
 ) -> ElectronicState:
     """Minimize the joint functional; differentiable to second order (module docstring).
 
     ``warm`` starts the multipliers and the formal counts from another solve of the same
     geometry (the model's second and third solves differ from the first only in the
     parameters), which typically cuts the Newton iterations from ~30 to a handful.
+    ``warm_mask`` (B,) restricts the warm start to some frames; the others start cold.
     """
     i, j = pair_index[0], pair_index[1]
     dtype, device = J.dtype, J.device
@@ -472,7 +486,12 @@ def solve_electronic_state(
     def merit(pc):
         return torch.maximum(torch.maximum(frame_max(pc["R"]), pc["S"].abs()), pc["M"].abs())
 
-    carried = {"n": None if warm is None else warm.n.detach()}
+    if warm is not None and warm_mask is not None:
+        wm_atom = warm_mask.to(device)[batch_idx]
+        n_warm = torch.where(wm_atom, warm.n.detach(), tables[:, 0])
+    else:
+        n_warm = None if warm is None else warm.n.detach()
+    carried = {"n": n_warm}
 
     def state(x):
         pc = _state(x, J, kappa, temperature, tables, chi, eta, i, j, batch_idx, n_electrons, two_s,
@@ -496,8 +515,14 @@ def solve_electronic_state(
         # averaged over the frame (a crude start; Newton does the rest)
         mu = (chi + lam * tables[:, 2]).new_zeros(int(n_systems)).index_add_(0, batch_idx, chi + lam * tables[:, 2]) / sizes.clamp(min=1).to(dtype)
         nu = torch.zeros(int(n_systems), dtype=dtype, device=device)
-        if warm is not None:
+        if warm is not None and warm_mask is None:
             lam, mu, nu = warm.lam.detach().clone(), warm.mu.detach().clone(), warm.nu.detach().clone()
+        elif warm is not None:
+            wm = warm_mask.to(device)
+            lam = torch.where(wm[batch_idx], warm.lam.detach(), lam)
+            mu = torch.where(wm, warm.mu.detach(), mu)
+            nu = torch.where(wm, warm.nu.detach(), nu)
+        nu = torch.where(two_s > 0.0, nu, torch.zeros_like(nu))   # no constraint, no multiplier
         x = (lam, mu, nu)
         pc = state(x)
         err = merit(pc)

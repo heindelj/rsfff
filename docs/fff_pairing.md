@@ -162,9 +162,31 @@ by more than a decade) when a Newton step fails to shrink the residual: 5-15 res
 evaluations, against 63 for the bisection it replaced. The model's second and third
 solves warm-start from the first (`warm=`), which at close parameters costs nothing beyond
 the polish. Together: a 16-dimer training step went from 9.8 s to 1.3 s on one CPU core
-(the film model: 0.43 s). Per state evaluation the solve is still a few thousand launches
-with a host sync per Newton iteration, so on a GPU it is latency-bound whatever the batch
-size; `bo_device: cpu` (the default) runs it on the host and moves the state back.
+(the film model: 0.43 s).
+
+**Launches.** Even so, a state evaluation in plain torch is a few hundred tiny elementwise
+launches (the per-element control flow of the two inner solves) with a host sync per
+iteration, so on a GPU the solve is latency-bound whatever the batch size. `fused.py` runs
+each inner problem as one Triton kernel -- one program per pair / per atom, the same
+bracketed iteration as scalar code -- so a state evaluation costs two launches for the
+inner solves plus the scatters and one batched dense solve. The kernels return the root
+only; the differentiable polishing steps stay in torch. They are used on CUDA tensors when
+Triton imports (`RSFFF_PAIRING_FUSED=0` disables), the torch loops remain the reference and
+the CPU path, and `tests/pairing/test_pairing_fused.py` checks the two agree to roundoff
+(under the Triton interpreter when there is no GPU). `bo_device: cpu` (the default) is the
+alternative: run the solve on the host, where a tiny op costs ~2 us instead of a launch,
+and move the state back; with the fused kernels available `bo_device: same` should win.
+
+**Warm starts.** Every training batch carries `Batch.frame_key` (unique per frame across
+the process's datasets), and the model keeps a host-side cache of each frame's converged
+`(lambda, mu, nu, n)` for the topology and the `theta_0` solves (`film.state_cache`,
+default on). The geometry is fixed and the parameters move a little per step, so from the
+second epoch the cold ~30 outer iterations become ~3-6 (a 16-dimer batch after a
+parameter step: 0.75 s -> 0.2 s). Frames missing from the cache start cold within the same
+batch (`warm_mask`); a converged frame overwrites its entry. A batch without keys (MD, a
+driver) reuses the previous call's state when the atoms, charges and multiplicities match.
+Warm starts change the solver's path, never its answer -- the dual is concave -- so the
+cache is not part of the model state; `clear_state_cache()` drops it.
 
 This is what makes a bond transferable across charge states: one O-H is ~-0.2 Ha in water,
 hydronium and hydroxide alike (`test_charged_reference_removes_the_ionization_offset`).
