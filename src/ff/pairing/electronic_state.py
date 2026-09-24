@@ -204,18 +204,31 @@ def e0_terms(q, chi, eta, eps=EPS_Q):
     return e, de, d2e
 
 
+def _e0_derivatives(q, chi, eta, eps=EPS_Q):
+    """``E0'``, ``E0''`` only (the residual does not need the energy)."""
+    r = torch.sqrt(q * q + eps * eps)
+    ds = q / r
+    z = (r - eps - 1.0) / eps
+    sig = torch.sigmoid(z)
+    w = eps * torch.nn.functional.softplus(z)
+    dw = sig * ds
+    k = WALL_FACTOR * eta
+    de = chi + 0.5 * eta * ds + k * w * dw
+    d2e = 0.5 * eta * (eps * eps / (r * r * r)) + k * (dw * dw + w * (sig * (1.0 - sig) / eps * ds * ds + sig * (eps * eps / (r * r * r))))
+    return de, d2e
+
+
 def _count_residual(n, lam, mu_atom, chi, eta, n0, a, b, shell, temperature):
     """``h(n) = -E0'(q) + B'(n) - lam v'(n) + mu`` and ``h'(n) > 0``, ``q = n0 - n``, with the
     shell barrier ``B(n) = T [n ln n + (shell - n) ln(shell - n)]`` keeping ``0 < n < shell``."""
-    q = n0 - n
-    _, de0, d2e0 = e0_terms(q, chi, eta)
-    dv = a + 2.0 * b * (n - n0)
+    d = n - n0
+    de0, d2e0 = _e0_derivatives(-d, chi, eta)
     tiny = torch.finfo(n.dtype).tiny
     n_c = n.clamp(min=tiny)
     m_c = (shell - n).clamp(min=tiny)
-    db = temperature * (torch.log(n_c) - torch.log(m_c))
-    d2b = temperature * (1.0 / n_c + 1.0 / m_c)
-    return -de0 + db - lam * dv + mu_atom, d2e0 + d2b - 2.0 * lam * b
+    db = temperature * torch.log(n_c / m_c)
+    d2b = temperature * (n_c + m_c) / (n_c * m_c)
+    return -de0 + db - lam * (a + 2.0 * b * d) + mu_atom, d2e0 + d2b - 2.0 * lam * b, de0
 
 
 def barrier(n, n0, shell, temperature):
@@ -223,39 +236,118 @@ def barrier(n, n0, shell, temperature):
     return temperature * (_xlogx(n) + _xlogx(shell - n) - _xlogx(n0) - _xlogx(shell - n0))
 
 
-def _formal_count(lam, mu_atom, chi, eta, n0, a, b, shell, temperature, *, n_bisect: int = 60):
+def _formal_count(lam, mu_atom, chi, eta, n0, a, b, shell, temperature, *, n_init=None,
+                  maxiter: int = 60):
     """``n`` solving the stationarity condition, plus ``dn/dlam = v'/h'`` and ``dn/dmu = -1/h'``.
 
     ``h`` is increasing in ``n`` and runs from ``-inf`` at ``n = 0`` to ``+inf`` at
-    ``n = shell`` (the barrier), so a root always exists in the shell and bisection finds it
-    without a single data-dependent branch; two differentiable Newton steps from there make
-    the result exact to second order in every parameter.
+    ``n = shell`` (the barrier), so a root always exists in the shell. It is found by a
+    bracketed Newton iteration from ``n_init`` (the previous evaluation's count; the neutral
+    count when there is none): a Newton step that leaves the bracket, or fails to shrink the
+    residual, is replaced by a bisection, so the iteration is never slower than bisection and
+    is usually three to six steps from a warm start. Two differentiable Newton steps from the
+    root make the result exact to second order in every parameter.
     """
     args = (lam, mu_atom, chi, eta, n0, a, b, shell, temperature)
+    eps = float(torch.finfo(lam.dtype).eps)
+    tol = 1.0e-12 if eps < 1.0e-10 else 1.0e-5
     with torch.no_grad():
-        lo = torch.full_like(n0, 0.0)
+        inf = float("inf")
+        lo = torch.zeros_like(n0)
         hi = shell.clone()
-        for _ in range(n_bisect):
-            mid = 0.5 * (lo + hi)
-            h, _ = _count_residual(mid, *args)
-            lo = torch.where(h < 0.0, mid, lo)
-            hi = torch.where(h < 0.0, hi, mid)
-        n = 0.5 * (lo + hi)
+        h_lo = torch.full_like(n0, -inf)
+        h_hi = torch.full_like(n0, inf)
+        side = torch.zeros_like(n0)                  # Illinois: which end was updated last
+        n = n0.clone() if n_init is None else n_init.clamp(min=1.0e-9).minimum(shell - 1.0e-9)
+        h, dh, de0 = _count_residual(n, *args)
+        done = h.abs() <= tol
+
+        def bracket(n_pt, h_pt, lo, hi, h_lo, h_hi, side, active):
+            """Fold the point into the bracket; Illinois halves the stale end's residual when
+            the same end is updated twice running, which keeps regula falsi superlinear
+            across the steps of E0'."""
+            neg = h_pt < 0.0
+            new_side = torch.where(neg, -1.0, 1.0)
+            same = (side == new_side) & active
+            h_hi = torch.where(same & neg, 0.5 * h_hi, h_hi)
+            h_lo = torch.where(same & ~neg, 0.5 * h_lo, h_lo)
+            side = torch.where(active, new_side, side)
+            lo = torch.where(neg & active, n_pt, lo)
+            h_lo = torch.where(neg & active, h_pt, h_lo)
+            hi = torch.where(~neg & active, n_pt, hi)
+            h_hi = torch.where(~neg & active, h_pt, h_hi)
+            return lo, hi, h_lo, h_hi, side
+
+        def fallback(lo, hi, h_lo, h_hi):
+            """The bracket's own step: regula falsi while the two end residuals are within a
+            decade of each other, bisection otherwise (a plateau end against a step end
+            makes regula falsi crawl along the plateau; bisection reaches the tail in a few
+            halvings and Newton finishes)."""
+            bracketed = torch.isfinite(h_lo) & torch.isfinite(h_hi)
+            balanced = bracketed & (h_hi.abs() < 10.0 * h_lo.abs()) & (h_lo.abs() < 10.0 * h_hi.abs())
+            n_rf = (lo * h_hi - hi * h_lo) / torch.where(bracketed, h_hi - h_lo, torch.ones_like(h_lo))
+            n_fb = torch.where(balanced, n_rf, 0.5 * (lo + hi))
+            return n_fb.maximum(lo).minimum(hi)
+
+        for _ in range(maxiter):
+            lo, hi, h_lo, h_hi, side = bracket(n, h, lo, hi, h_lo, h_hi, side, ~done)
+            n_newton = n - h / dh
+            # E0' is flat between its steps (at q = 0 and the walls at q = +-1) and the
+            # barrier slope is ~T there, so a Newton step from a plateau overshoots by
+            # electrons. The step at q = 0 inverts in closed form: with the smooth remainder
+            # g = h + E0' frozen at the current point, eta/2 q / sqrt(q^2 + eps^2) = g - chi
+            # gives q directly. That is the move whenever Newton would cross the step, and
+            # near it wherever the step is much the stiffer part (in its far tail the two
+            # slopes are comparable, the fixed point crawls, and Newton is exact); a Newton
+            # step across a wall stops at the wall.
+            y = (h + de0 - chi) / (0.5 * eta)
+            y_c = y.clamp(-0.999, 0.999)
+            n_inv = n0 - EPS_Q * y_c / torch.sqrt(1.0 - y_c * y_c)
+            q_r = torch.sqrt((n0 - n) ** 2 + EPS_Q * EPS_Q)
+            s_step = 0.5 * eta * EPS_Q * EPS_Q / (q_r * q_r * q_r)
+            crosses = ((n < n0) & (n_newton > n0)) | ((n > n0) & (n_newton < n0))
+            use_inv = (y.abs() < 0.999) & (crosses | (s_step > 50.0 * (dh - s_step).abs()))
+            n_newton = torch.where(use_inv, n_inv, n_newton)
+            for kink in (n0 - 1.0, n0 + 1.0):
+                crossed = ((n < kink) & (n_newton > kink)) | ((n > kink) & (n_newton < kink))
+                n_newton = torch.where(crossed, kink, n_newton)
+            inside = (n_newton > lo) & (n_newton < hi) & torch.isfinite(n_newton)
+            n_try = torch.where(inside, n_newton, fallback(lo, hi, h_lo, h_hi))
+            n_try = torch.where(done, n, n_try)
+            h_try, dh_try, de0_try = _count_residual(n_try, *args)
+            # a Newton step that did not shrink the residual still tightens the bracket; the
+            # point taken is then the bracket's own (regula falsi / bisection)
+            worse = inside & (h_try.abs() > h.abs()) & ~done
+            if bool(worse.any()):
+                lo2, hi2, h_lo2, h_hi2, side2 = bracket(n_try, h_try, lo, hi, h_lo, h_hi, side, worse)
+                n_fb = fallback(lo2, hi2, h_lo2, h_hi2)
+                h_fb, dh_fb, de0_fb = _count_residual(n_fb, *args)
+                lo, hi, h_lo, h_hi, side = lo2, hi2, h_lo2, h_hi2, side2
+                n_try = torch.where(worse, n_fb, n_try)
+                h_try = torch.where(worse, h_fb, h_try)
+                dh_try = torch.where(worse, dh_fb, dh_try)
+                de0_try = torch.where(worse, de0_fb, de0_try)
+            n, h, dh, de0 = n_try, h_try, dh_try, de0_try
+            done = done | (h.abs() <= tol) | (hi - lo <= 8.0 * eps * shell)
+            if bool(done.all()):
+                break
     for _ in range(2):
-        h, dh = _count_residual(n, *args)
+        h, dh, _ = _count_residual(n, *args)
         n = n - h / dh
-    h, dh = _count_residual(n, *args)
+    h, dh, _ = _count_residual(n, *args)
     dv = a + 2.0 * b * (n - n0)
     return n, dv / dh, -1.0 / dh
 
 
-def _state(x, J, kappa, temperature, tables, chi, eta, i, j, batch_idx, n_electrons, two_s):
+def _state(x, J, kappa, temperature, tables, chi, eta, i, j, batch_idx, n_electrons, two_s,
+           n_init=None):
     """Residuals, Jacobian pieces and the dual value at multipliers ``x = (lam, mu, nu)``."""
     lam, mu, nu = x
     n0, v0, a, b, shell = tables.unbind(-1)
     mu_atom = mu[batch_idx]
     nu_atom = nu[batch_idx]
-    n, dn_dlam, dn_dmu = _formal_count(lam, mu_atom, chi, eta, n0, a, b, shell, temperature)
+    n, dn_dlam, dn_dmu = _formal_count(lam, mu_atom, chi, eta, n0, a, b, shell, temperature,
+                                       n_init=n_init)
     v, dv = capacity(n, n0, v0, a, b)
     q = n0 - n
 
@@ -353,8 +445,14 @@ def solve_electronic_state(
     tol: float = 1.0e-8,
     maxiter: int = 100,
     step_max: float | None = None,
+    warm: ElectronicState | None = None,
 ) -> ElectronicState:
-    """Minimize the joint functional; differentiable to second order (module docstring)."""
+    """Minimize the joint functional; differentiable to second order (module docstring).
+
+    ``warm`` starts the multipliers and the formal counts from another solve of the same
+    geometry (the model's second and third solves differ from the first only in the
+    parameters), which typically cuts the Newton iterations from ~30 to a handful.
+    """
     i, j = pair_index[0], pair_index[1]
     dtype, device = J.dtype, J.device
     temperature = torch.as_tensor(temperature, dtype=dtype, device=device)
@@ -374,8 +472,13 @@ def solve_electronic_state(
     def merit(pc):
         return torch.maximum(torch.maximum(frame_max(pc["R"]), pc["S"].abs()), pc["M"].abs())
 
+    carried = {"n": None if warm is None else warm.n.detach()}
+
     def state(x):
-        return _state(x, J, kappa, temperature, tables, chi, eta, i, j, batch_idx, n_electrons, two_s)
+        pc = _state(x, J, kappa, temperature, tables, chi, eta, i, j, batch_idx, n_electrons, two_s,
+                    n_init=carried["n"])
+        carried["n"] = pc["n"].detach()
+        return pc
 
     def scaled(dl, dm, dn):
         move = torch.maximum(torch.maximum(frame_max(dl), dm.abs()), dn.abs())
@@ -393,6 +496,8 @@ def solve_electronic_state(
         # averaged over the frame (a crude start; Newton does the rest)
         mu = (chi + lam * tables[:, 2]).new_zeros(int(n_systems)).index_add_(0, batch_idx, chi + lam * tables[:, 2]) / sizes.clamp(min=1).to(dtype)
         nu = torch.zeros(int(n_systems), dtype=dtype, device=device)
+        if warm is not None:
+            lam, mu, nu = warm.lam.detach().clone(), warm.mu.detach().clone(), warm.nu.detach().clone()
         x = (lam, mu, nu)
         pc = state(x)
         err = merit(pc)

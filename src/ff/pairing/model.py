@@ -141,6 +141,7 @@ class PairingModel(nn.Module):
         include_13: bool = True,
         bo_tol: float = 1.0e-8,
         bo_maxiter: int = 100,
+        bo_device: str = "cpu",
     ) -> None:
         super().__init__()
         if range_gate not in ("bond_order", "fermi"):
@@ -163,6 +164,15 @@ class PairingModel(nn.Module):
         self.range_gate = str(range_gate)
         self.include_13 = bool(include_13)
         self.bo = dict(tol=float(bo_tol), maxiter=int(bo_maxiter))
+        if bo_device not in ("cpu", "same"):
+            raise ValueError(f"bo_device must be 'cpu' or 'same', got {bo_device!r}")
+        #: The electronic-state solve is a few thousand tiny elementwise ops per state
+        #: evaluation with a host sync per Newton iteration: on a GPU it is launch-latency
+        #: bound whatever the batch size. ``"cpu"`` runs it on the host (the arrays are a
+        #: handful of numbers per atom; the differentiable polishing steps run there too, so
+        #: autograd crosses the device boundary through ``.to``), ``"same"`` keeps it with
+        #: the model.
+        self.bo_device = str(bo_device)
         self.register_buffer("temperature", torch.tensor(float(temperature)))
         if not isinstance(reference, ChargedAtomicReference):
             reference = ChargedAtomicReference(reference)     # neutral, film-style
@@ -214,13 +224,29 @@ class PairingModel(nn.Module):
         return J, kappa
 
     def _pairing(self, fam, positions, sub_pairs, dr_au, r_au, r_ang, batch_idx, n_sys,
-                 total_charge, two_s):
-        """One electronic-state solve and its energy: ``(state, J, kappa, e_pair (Pb,), e_atom (N,))``."""
+                 total_charge, two_s, warm=None):
+        """One electronic-state solve and its energy: ``(state, J, kappa, e_pair (Pb,), e_atom (N,))``.
+        ``warm`` is a previous solve of the same geometry to start from."""
         J, kappa = self._coupling(fam, positions, sub_pairs, dr_au, r_au, r_ang)
+        dev = J.device
+        host = torch.device("cpu")
+        offload = self.bo_device == "cpu" and dev.type != "cpu"
+        to_solver = (lambda t: t.to(host)) if offload else (lambda t: t)
+        warm_s = warm
+        if offload and warm is not None:
+            warm_s = ElectronicState(**{
+                k: (v.to(host) if torch.is_tensor(v) else v) for k, v in warm.__dict__.items()
+            })
         st = solve_electronic_state(
-            J, kappa, fam.tables, fam.chi, fam.eta, self.temperature, sub_pairs, batch_idx,
-            n_sys, total_charge, two_s, **self.bo,
+            to_solver(J), to_solver(kappa), to_solver(fam.tables), to_solver(fam.chi),
+            to_solver(fam.eta), to_solver(self.temperature), to_solver(sub_pairs),
+            to_solver(batch_idx), n_sys, to_solver(total_charge), to_solver(two_s),
+            warm=warm_s, **self.bo,
         )
+        if offload:
+            st = ElectronicState(**{
+                k: (v.to(dev) if torch.is_tensor(v) else v) for k, v in st.__dict__.items()
+            })
         e_pair, e_atom = state_energy(J, kappa, self.temperature, fam.chi, fam.eta, fam.tables, st)
         return st, J, kappa, e_pair, e_atom
 
@@ -299,7 +325,7 @@ class PairingModel(nn.Module):
         params: PairingParameters = self.network(pf, c_cond, state, positions, ch_ind)
 
         # --- the pairing functional at theta_0 -------------------------------------------
-        sol0, J0, kappa0, e_pair0, e_atom0 = self._pairing(params.pairing0, *sub_args)
+        sol0, J0, kappa0, e_pair0, e_atom0 = self._pairing(params.pairing0, *sub_args, warm=st_topo)
         bo_solver["pairing0"] = (sol0.n_iter, sol0.converged, sol0.residual)
 
         gate, r0, r0_pair, alpha, log_r0_prior, log_r0_prior_pair = self._gates(
@@ -443,7 +469,7 @@ class PairingModel(nn.Module):
             e0_ref = e0_internal + pool_batch(gate_ind * e_elst)
 
             # the pairing functional at theta: the bond's response to its surroundings
-            sol_env, _, _, e_pair_env, e_atom_env = self._pairing(params.pairing, *sub_args)
+            sol_env, _, _, e_pair_env, e_atom_env = self._pairing(params.pairing, *sub_args, warm=sol0)
             bo_solver["pairing"] = (sol_env.n_iter, sol_env.converged, sol_env.residual)
             d_pair = (
                 (e_pair_env - e_pair0).new_zeros(n_sys)

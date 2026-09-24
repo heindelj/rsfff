@@ -1058,8 +1058,11 @@ class FilmConfig:
     #: (keep the film model's element-table switches as an ablation).
     range_gate: str = "bond_order"
     include_13: bool = True
-    bo_tol: float = 1.0e-10
+    bo_tol: float = 1.0e-8
     bo_maxiter: int = 100
+    #: "cpu" runs the electronic-state solve on the host even when the model is on a GPU
+    #: (it is launch-latency bound there); "same" keeps it on the model's device.
+    bo_device: str = "cpu"
     #: Whether the pairing exponent / hardness read the family latent (else per-species only).
     pairing_environment_b: bool = True
     pairing_environment_kappa: bool = True

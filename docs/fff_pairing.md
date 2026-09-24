@@ -142,12 +142,29 @@ localizes it by 0.25 A off center, a homolytic O-H stretch of water unpairs two 
 with no formal charge, and the hydronium O-H stretch goes heterolytically (the leaving
 hydrogen carries `q -> +0.8` and its capacity collapses). The solve is the dual Newton of
 §2.2 on `(lambda_i, mu_frame, nu_frame)` with a bordered `(N + 2)^2` dense system per
-frame; `n_i` is an inner scalar problem (bisection on a monotone residual, then two
-Newton steps). Step acceptance is Armijo on the dual *or* a residual decrease **that does
-not lower the dual** -- `n(mu)` is a staircase, and a residual-only acceptance let the
-count multiplier cycle across an integer step. The loop stops at `tol = 1e-8`; the two
-differentiable Newton steps that follow polish it to roundoff and give exact first and
-second derivatives.
+frame; `n_i` is an inner scalar problem. Step acceptance is Armijo on the dual *or* a
+residual decrease **that does not lower the dual** -- `n(mu)` is a staircase, and a
+residual-only acceptance let the count multiplier cycle across an integer step. The loop
+stops at `tol = 1e-8`; the two differentiable Newton steps that follow polish it to
+roundoff and give exact first and second derivatives.
+
+**Cost.** The inner problem is where the time goes: it is evaluated once per atom per
+dual-state evaluation, and each of its iterations is a dozen tiny elementwise ops. Its
+residual `h(n)` is a staircase too -- flat at slope ~`T` between the steps of `E0'` (at
+`q = 0` and the walls at `q = +-1`), steep at them -- so plain Newton overshoots by whole
+electrons from a plateau and crawls along the algebraic tail of the smoothed `|q|`, and
+bisection needs forty halvings. The solve is a bracketed Newton iteration warm-started from
+the previous evaluation's `n`, with the step at `q = 0` inverted in closed form (freeze the
+smooth remainder `g = h + E0'` at the current point; `eta/2 q / sqrt(q^2 + eps^2) = g - chi`
+gives `q`) whenever Newton would cross it or it is much the stiffer part, walls as hard
+stops, and the bracket's own step (regula falsi, or bisection when the end residuals differ
+by more than a decade) when a Newton step fails to shrink the residual: 5-15 residual
+evaluations, against 63 for the bisection it replaced. The model's second and third
+solves warm-start from the first (`warm=`), which at close parameters costs nothing beyond
+the polish. Together: a 16-dimer training step went from 9.8 s to 1.3 s on one CPU core
+(the film model: 0.43 s). Per state evaluation the solve is still a few thousand launches
+with a host sync per Newton iteration, so on a GPU it is latency-bound whatever the batch
+size; `bo_device: cpu` (the default) runs it on the host and moves the state back.
 
 This is what makes a bond transferable across charge states: one O-H is ~-0.2 Ha in water,
 hydronium and hydroxide alike (`test_charged_reference_removes_the_ionization_offset`).
