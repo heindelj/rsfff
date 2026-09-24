@@ -1,0 +1,7 @@
+{
+  "member": 1,
+  "checkpoint": "/global/cfs/cdirs/m3196/heindelj/rsfff_active_learning/committees/film_committee_100k_excl/member_01/member_01_full/best.pt",
+  "elapsed_seconds": 2149.2,
+  "train_seed": 1,
+  "val_loss": 97.295
+}
