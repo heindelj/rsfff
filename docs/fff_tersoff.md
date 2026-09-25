@@ -35,76 +35,108 @@ valence polytensor, `PairingHeads`), `kappa_ij = sqrt(kappa_i kappa_j)`, `v_i` t
 
 ### 2.1 Raw bond order
 
-The unconstrained stationary point of the pairing functional, `kappa p + T logit(p) = J`,
-has no closed form; its sigmoid surrogate with the same slope at `p = 1/2` is
+The unconstrained stationary point of the barrier-free pairing functional, ``kappa p = J``,
+clipped to the unit interval:
 
 ```
-b_ij = sigmoid( (J_ij - kappa_ij / 2) / T_b ),      T_b = T + kappa_ij / 4
+b_ij = clip( J_ij / kappa_ij, 0, 1 )      smoothed over w = T / kappa (softplus corners)
 ```
 
-`b -> 1` where `J >> kappa/2` (a bond), `b -> 0` where `J << kappa/2`, and the crossover at
-`J = kappa/2` is where the pairing model's attractive branch turns over. Because `J` is the
-Slater-overlap operator, the radial shape, the exponential decay and the anisotropy (dipole
-and quadrupole ranks: bond angles, and later sigma vs pi) are inherited unchanged; nothing is
-switched by distance. A plain sigmoid in `r` with emitted `(r0, w)` is kept as the ablation
-`raw: radial` for the "how simple can it be" question, but it is not the default: it throws
-away the directional information the polytensor already carries.
+`b = 1/2` at `J = kappa/2`, where the pairing model's attractive branch turns over, and `b = 1`
+for `J >= kappa`. Because `J` is the Slater-overlap operator, the radial shape, the exponential
+decay and the anisotropy (dipole and quadrupole ranks: bond angles, and later sigma vs pi) are
+inherited unchanged; nothing is switched by distance. The pairing model's `T` is the smoothing
+width, so `1 - p ~ exp(-(J - kappa)/T)` on a bond as there. (The first draft had a sigmoid
+surrogate here; the clipped line *is* the stationary point, and it is what the water filling
+below needs.)
 
-### 2.2 Saturation: the three explicit forms
+### 2.2 Saturation: the explicit forms
 
 The raw bond order does not know about capacity. At the pairing priors a hydrogen-bonded
-`O...H` pair at 1.9 A has `J ~ 0.07 Ha` against `kappa/2 = 0.1`, so `b ~ 0.35`: **the
-unconstrained pairing model gives the same** (`p = J/kappa`), and it is the valence constraint
-alone that squeezes it below 1e-2 (`test_valence_competition`). The saturation rule is
-therefore the whole model, and the water *dimer* -- not the reaction -- is the first test:
-the covalent `O-H` must keep `p = 1` and the hydrogen bond must get `~0`, or the film
-accounting (elst/disp weighted by `1 - c`) breaks on intact water.
+`O...H` pair at 1.9 A has `J ~ 0.14 Ha` against `kappa/2 = 0.1`, so `b ~ 0.7`, and the 1-3
+`H-H` pair of a water has `J ~ 0.13`, `b ~ 0.6`: **the unconstrained pairing model gives the
+same** (`p = J/kappa`), and it is the valence constraint alone that squeezes them below 1e-2
+(`test_valence_competition`). The saturation rule is therefore the whole model, and intact
+water -- not a reaction -- is the first test: the covalent `O-H` must keep `p = 1` while the
+1-3 pair and the hydrogen bond get `~0`, or the film accounting (elst/disp weighted by
+`1 - c`) breaks.
 
-Three rules, selected by `tersoff.saturation`, in increasing fidelity to the constraint:
+Two rules, `tersoff_saturation`:
 
 **`rebo` -- multiplicative (Tersoff / REBO).** Each atom scales all its bonds by one factor:
 
 ```
-N_i = sum_j b_ij,        s_i = ( 1 + (N_i / v_i)^m )^(-1/m),        p_ij = b_ij s_i s_j
+N_i = sum_j b_ij,        s_i = v_i / smoothmax(v_i, N_i),        p_ij = b_ij s_i s_j
 ```
 
-`s_i -> 1` below capacity, `v_i / N_i` above it, so `sum_j p_ij <= s_i N_i <= v_i` by
-construction (`m ~ 6-8`, smooth). This is what the question asked for and the cheapest
-form. Its known weakness is *how* it shares: linearly. The water-dimer hydrogen with
-`b = 1` on its bond and `0.35` on the acceptor gets `s_H = 0.78`, the covalent bond drops
-to `0.78` and the hydrogen bond keeps `0.27`. Expect it to fail the dimer test at the
-priors; whether the topology network can rescue it by lowering `J` on the acceptor pair is
-exactly the "wider scope of simple forms" hypothesis, and the dimer test measures it.
+`s_i = 1` below capacity, `v_i / N_i` above it, so `sum_j p_ij <= v_i` by construction. This
+is the form the question asked for, and the ablation. Tersoff's own `(1 + zeta^n)^(-1/2n)`
+has the same limits but is `2^(-1/2n)` *at* capacity, which is exactly where every bond of an
+intact molecule sits; since `p = 1` has a meaning here (it is the co-membership), the factor
+is one up to the capacity and bends only above it, over `tersoff_saturation_width` electrons.
+Its weakness is *how* it shares: linearly. **Result at the priors:** it fails intact water
+outright, not just the dimer -- with the 1-3 and hydrogen-bond raw orders above one half,
+the water dimer's covalent bonds come out at `p = 0.3-0.46` and every non-bonded pair within
+2 A carries `0.1-0.2` (`test_dimer_discriminator` records it). Whether the topology network
+can rescue it by pushing `J` on those pairs below `kappa/2` is the "wider scope of simple
+forms" question; at the priors the answer is that the raw order with the pairing priors is
+far too soft for a linear sharing rule, and the pairing solve's competition was doing all
+the work.
 
 **`waterfill` -- per-atom energetic sharing (default).** The pairing functional restricted
 to one atom, `min sum_j [-J_ij p_j + kappa p_j^2 / 2]` subject to `sum_j p_j <= v_i`,
 `0 <= p_j <= 1`, has the water-filling solution
 
 ```
-p_i(j) = clip( (J_ij - lambda_i) / kappa_ij, 0, 1 ),     sum_j p_i(j) = min(v_i, sum_j b_ij)
+p_i(j) = clip( (J_ij - lambda_i) / kappa_ij, 0, 1 ),      lambda_i >= 0 fills the capacity
 ```
 
-with `lambda_i >= 0` the one scalar per atom that fills the capacity (a monotone 1-D root,
-taken as `K = 3` Newton steps from `lambda = 0` -- fixed cost, unrolled, no convergence
-test; the clip is the pairing model's smooth `T`-barrier so `p` is C2). Competition is
-energetic: a partner with `J` below `lambda_i` gets exactly (smoothly) zero, so the dimer's
-hydrogen bond is squeezed out the moment the covalent bond saturates, and two equal partners
-split `v_i` evenly with a transition width set by `kappa`, not `T`, which is what gives the
-Zundel midpoint its smooth `0.5 / 0.5`. The two ends are reconciled with a soft minimum,
+`lambda_i = 0` when the raw orders fit. Competition is energetic: a partner whose `J` falls
+below `lambda_i` gets (smoothly) zero, so the dimer's hydrogen bond and the 1-3 pairs are
+squeezed out the moment the covalent bonds saturate, and two equal partners split `v_i`
+evenly with a transition width set by `kappa`, not `T`, which is what gives the Zundel
+midpoint its `0.5 / 0.5`. The two ends are reconciled by the smaller grant,
 
 ```
-p_ij = softmin_T( p_i(j), p_j(i) )
+p_ij = smoothmin( p_i(j), p_j(i) )
 ```
 
-so both capacities hold: `sum_j p_ij <= sum_j p_i(j) <= v_i`. This is the explicit model's
-analogue of the dual solve with the coupling `lambda_i + lambda_j` dropped; it is exact for an
-isolated atom and for any pair whose two ends agree.
+which is the dual solution whenever one end is the binding one and the even split of a shared
+proton when both are. The smooth minimum `(x+y)/2 - sqrt(((x-y)/2)^2 + eps^2) + eps` is exact
+on `x = y` (every bond of an intact molecule) and at most `eps = tersoff_reconcile_width`
+(2e-3) above the true minimum elsewhere, so `sum_j p_ij <= v_i + g_i + deg_i eps` with `g_i`
+the filling residual. No multiplicative factor is applied on top: any smooth `min(1, v/N)`
+bends *at* capacity.
 
-**`dual_k` -- K unrolled dual steps (ablation toward pairing).** `p_ij = sigmoid((J_ij -
-lambda_i - lambda_j - kappa p_ij) / T)` with `lambda` updated by `K` diagonal-Jacobian Newton
-steps of the marginal residual, then the `rebo` normalization as a final guarantee. Not
-implemented first; it is the rung between `waterfill` and the solve if `waterfill` falls
-short at transition states.
+*The root.* `S_i(lambda) = sum_j clip((J_ij - lambda)/kappa_ij)` is monotone and, unsmoothed,
+piecewise linear, so its root is found in a fixed number of steps without a convergence test:
+Newton on the unsmoothed filling, exact on a linear piece, with a jump to the nearest
+breakpoint on a flat one (the saturated partner that unsaturates first going up, the empty one
+that fills first going down), a bracket as the safeguard, and the *bottom* of a flat root
+interval when the capacity is met by saturated partners alone (`tersoff_fill_steps = 8`, no
+graph). Then `tersoff_polish_steps = 4` differentiable Newton steps on the smoothed filling in
+the pairing solve's log form (`ln fill - ln room`, `room` cancellation-free as
+`(v - n_sat) + sum_sat (1 - p)`), each tried against its two bisections toward the current
+point and the plain step, keeping the candidate with the smallest residual: the hard root
+leaves a squeezed partner exactly on its breakpoint, where the smooth root is a balance of
+exponential tails on which the plain step moves one `T` per iteration and the log form is
+exact. At a root the Newton map has zero derivative in `lambda`, so these steps carry the
+implicit first and second derivatives (`gradcheck` / `gradgradcheck` in
+`tests/tersoff/test_tersoff_bond_order.py`). Water clusters and the ions converge to
+`< 1e-4`; the tolerance for `converged` is `10 T`.
+
+*What it does not do.* Each atom fills as if its partners were unconstrained. When both ends
+of a pair are binding and disagree, the smaller grant wins and the other atom is left
+*under* capacity: on the Zundel scan at the priors the shared proton's two orders sum to
+0.86-0.95 between the midpoint and 0.15 A off it, where the pairing solve keeps them at 1.
+That under-filling, together with the closed-form charge hand-over below, puts a hump of
+~0.07 Ha on the explicit model's proton-transfer curve at the priors against ~0.03 Ha for the
+pairing model (both untrained). `tersoff_dual_sweeps` (Jacobi sweeps of the coupled dual,
+each atom refilling against `J - lambda_partner`) was written to close that gap and is left
+in as **experimental**: one or two sweeps do shrink the under-filling, but the damped Jacobi
+iteration is not monotone and can leave an atom on the wrong side of a breakpoint; `0` is
+the default and the only tested setting. The proper rung above `waterfill` is the pairing
+solve itself, which is the point of the ablation.
 
 ### 2.3 Energy
 
@@ -131,26 +163,34 @@ penalty on the unsaturated bond order helps the network learn to keep `J` honest
 
 The pairing model solves the formal electron count `n_i` jointly with the bond orders; that is
 where hydronium's oxygen gets capacity 3 and hydroxide's gets 1. The explicit model needs the
-same information without the solve. Rule (`formal_charge.py`):
+same information without the solve (`formal_charge.py`):
 
 ```
-q~_i   = zero-initialized readout of the topology latent (per species)
-q_i    = q~_i + w_i (Q_frame - sum_k q~_k) / sum_k w_k,     w_i = 1 on heavy atoms, 0 on H
+q~_i   = zero-initialized readout of the family latent (per species; TersoffHeads.q_mlp)
+q_i    = q~_i + w_i (Q_frame - sum_k q~_k) / sum_k w_k
 v_i    = capacity(n0_i - q_i)          (the pairing branch's capacity polynomial, unchanged)
 ```
 
-At initialization the frame charge sits on the heavy atoms: H3O+ gives `v_O = 3`, OH- gives
-`v_O = 1`, a Zundel frame gives each oxygen `2.5` -- the same starting point the pairing
-model's solve reaches at its priors -- and the readout lets the network move charge onto or
-off a hydrogen (a leaving proton) as the data demand. `u_i = v_i - sum_j p_ij` is the
-unpaired count. `(q_i, u_i)` condition the stage-2 network exactly as in the pairing model,
-and `ChargedAtomicReference(q)` gives `E0_i(q_i)` so an O-H bond costs the same ~-0.2 Ha in
-water, H3O+ and OH-. The multiplicity constraint has no explicit analogue; a high-spin frame
-enters through `u` conditioning only (as it does on `pairing` today).
+with the projection weights `w` by `tersoff_formal_charge`: `heavy_atoms` (one on heavy atoms,
+zero on H), `uniform`, or the default **`overload`** -- the charge follows the bonding, once:
+a first pass with the heavy-atom weights gives bond orders `p0`, and the weights of the second
+pass are the atoms' over- (`Q > 0`) or under-coordination (`Q < 0`) in that state past half an
+electron, `w_i = softplus((+-(sum_j p0_ij - v0_i) - 1/2) / width)`. That is ReaxFF's
+over-coordination `Delta_i` used as a charge prior. At initialization (`q~ = 0`): H3O+ gives
+`q_O = 0.996`, `v_O = 3`; OH- `q_O = -0.999`, `v_O = 1`; a Zundel frame splits `0.49 / 0.49`
+at the midpoint and hands `0.92` of the charge -- and the third capacity -- to the oxygen the
+proton sits on 0.1 A off it (the heavy-atom prior alone leaves `2.5 / 2.5` wherever the
+proton is: `test_zundel_hands_the_charge_over`). The readout lets the network move charge
+onto or off a hydrogen (a leaving proton) as the data demand. `u_i = v_i - sum_j p_ij`;
+`(q_i, u_i)` condition the stage-2 network exactly as in the pairing model, and
+`ChargedAtomicReference(q)` gives `E0_i(q_i)` so an O-H bond costs the same ~-0.2 Ha in
+water, H3O+ and OH- (`test_charged_reference_removes_the_ionization_offset`). The
+multiplicity constraint has no explicit analogue; a high-spin frame enters through the `u`
+conditioning only.
 
 This is the one place the explicit model is *less* principled than ReaxFF-with-EEM would be,
-and the diagnostic is direct: plot `q_O` and `v_O` along the Zundel and Eigen scans and along
-the hydronium O-H stretch (heterolytic: the proton must carry `q -> +1` and `v_H -> 0`).
+and the diagnostic is direct: `q_O` and `v_O` along the Zundel and Eigen scans and along the
+hydronium O-H stretch (heterolytic: the proton must carry `q -> +1` and `v_H -> 0`).
 
 ### 2.5 Co-membership and assembly
 
@@ -161,87 +201,41 @@ ungated on bonds as the repulsive wall, `range_gate: bond_order`, four exact ene
 `film.nonbonded: exclusions` is the *fixed-topology* limit of this accounting (`c` one-hot on
 the covalent graph), which is the right first regression test.
 
-## 3. Implementation
+## 3. Implementation (on the branch, 2026-09-25)
 
-### 3.0 Bring in the pairing scaffold
-
-`tersoff` is branched from `nonreactive` (hard exclusions, latest committees). The pairing
-package it needs lives on `pairing`, which already merged `nonreactive` up to `c5a3170`; the
-only `nonreactive` commits it lacks are the exclusions commit and notebook/benchmark work.
-**Step 0 is `git merge pairing` into `tersoff`** (expected conflicts: `src/train/config.py`
-and `src/train/train_film.py`, both touched by the exclusions commit and by the pairing
-dispatch; trivial to resolve). Everything below then builds on `src/ff/pairing` by subclassing,
-so the two models stay in lock-step and share tests.
-
-### 3.1 New package `src/ff/tersoff/`
+`pairing` is merged into `tersoff` (clean; the branch carries both the exclusions film and the
+pairing package), and everything below subclasses `rsfff.ff.pairing`, so the two models stay
+in lock-step and share tests.
 
 | file | contents |
 |---|---|
-| `bond_order.py` | `raw_bond_order(J, kappa, T)` (sigmoid surrogate; `radial` ablation); `saturate_rebo(b, v, pairs, m)`; `saturate_waterfill(J, kappa, v, pairs, K, T)`; `softmin`; `explicit_state(J, kappa, v, sub_pairs, n_atoms, ...) -> ExplicitState(p, u, valence, lam)`; `overbinding_penalty(b, v)`. Pure torch, batched over frames by `index_add_`; no dense matrices. |
-| `formal_charge.py` | `project_formal_charge(q_raw, species, batch_idx, total_charge)` (heavy-atom projection), `capacity_from_charge(tables, q)` reusing `pairing.electronic_state.capacity`. |
-| `heads.py` | `TersoffHeads(PairingHeads)`: adds the zero-initialized `formal_charge` readout on the topology latent; everything else inherited (`q_v, b, mu_v, quad_v, kappa, v0`). |
-| `model.py` | `TersoffModel(PairingModel)`: overrides `_pairing` to return `(ExplicitState, J, kappa, e_pair, e_atom)` from the closed form, drops the state cache / `bo_device` / warm-start plumbing (`_warm_start`, `_store_state` become no-ops), reports `bo_solver=None`. `forward` inherited: topology pass -> `c` -> projected features -> stage-2 heads -> `theta_0` and `theta` evaluations -> the same four buckets. |
-| `__init__.py` | exports. |
+| `src/ff/tersoff/bond_order.py` | `raw_bond_order`, `saturate_rebo`, `saturate_waterfill` (root finder, sweeps, polish), `overbinding_penalty`, `explicit_state(...) -> ElectronicState` (the pairing container, so `PairingOutput`, `train_film` diagnostics and `pairing_plots.py` read it unchanged; `lam` = the filling multiplier, `mu`/`nu` zeros, `residual` the per-frame max filling residual), `tersoff_state_energy` (`-J p + kappa p^2/2`, `E0(q)`; no entropic terms). |
+| `src/ff/tersoff/formal_charge.py` | `project_formal_charge` (heavy_atoms / uniform / weights), `overload_weights`. |
+| `src/ff/tersoff/heads.py` | `TersoffHeads(PairingHeads)` + the zero-initialized `q_mlp`; `TersoffFamily(PairingFamily)` + `q_raw`. |
+| `src/ff/tersoff/model.py` | `TersoffModel(PairingModel)`: overrides `_pairing` (coupling -> formal charge -> explicit state -> energy, with the optional overbinding penalty), stubs the warm-start cache; `forward` stashes the batch's atomic numbers for the projection and is otherwise inherited. |
+| `src/train/build_tersoff.py` | `build_tersoff_model`: the pairing builder (now taking `model_cls` / `heads_cls` / their kwargs) with the `tersoff_*` config fields. |
+| `src/train/build_pairing.py` | `MODEL_BUILDERS = {film, pairing, tersoff}`; `build_model` dispatches on it (the single point `train_film.py` and `md/film_driver.py` use). |
+| `src/train/config.py` | `film.model: tersoff`; `tersoff_saturation`, `tersoff_saturation_width`, `tersoff_fill_steps`, `tersoff_formal_charge`, `tersoff_formal_charge_width`, `tersoff_reconcile_width`, `tersoff_dual_sweeps`, `tersoff_formal_charge_readout`, `tersoff_overbinding_penalty`. |
+| `configs/water_tersoff.yaml`, `configs/ion_tersoff.yaml` | the pairing configs with the model swapped (same streams, labels, splits). |
+| `tests/tersoff/` | `tersoff_helpers.py` (model builders, a hydrogen-bonded dimer, the ions, a Zundel frame with a movable proton), `test_tersoff_bond_order.py` (8: raw order, exact one-atom filling, the squeeze, the even split, the rebo bound, the capacity bound on a random graph, gradcheck/gradgradcheck for both rules), `test_tersoff_model.py` (15: intact water = film accounting, the dimer discriminator, capacity everywhere, vertex, exact bucket sum, FD forces for both rules, FD force-loss gradient, stretched bond, formal charges under both projections, the Zundel hand-over, the ionization offset, agreement with the pairing model on intact water, `film_fit` smoke, config round-trip). |
 
-`ElectronicState` is reused as the state container (`p, u, q, valence` filled; `n, lam, mu,
-nu, n_iter, residual` carry the closed-form `lambda` or `None`) so `PairingOutput`,
-`train_film.py` diagnostics (`bo_frac`, `qf_max`) and `notebooks/pairing_plots.py` read it
-without change.
-
-### 3.2 Training and dispatch
-
-- `src/train/build_tersoff.py`: copy of `build_pairing.py` with the `tersoff:` config block
-  (`raw: coupling|radial`, `saturation: rebo|waterfill`, `m`, `K`, `T`,
-  `overbinding_penalty`, `formal_charge: heavy_atoms|readout`).
-- `src/train/config.py`: `film.model: tersoff` (+ the `tersoff_*` fields next to the
-  `pairing_*` ones). The dispatch already lives in one place, `build_pairing.build_model`
-  (imported by `train_film.py` and `md/film_driver.py`); turn it into a
-  `{film, pairing, tersoff}` registry there so nothing else changes.
-- `configs/water_tersoff.yaml`, `configs/ion_tersoff.yaml`, `configs/tersoff_all.yaml`:
-  the three pairing configs with the model swapped (same streams, labels, splits).
-
-### 3.3 Tests (`tests/tersoff/`)
-
-Copy `tests/pairing/pairing_helpers.py` and run the pairing model's invariants against the
-explicit state, plus the ones that only make sense here:
-
-1. **Intact water = film accounting**: `c = 1` on bonds and 1-3 pairs, `< 1e-6` elsewhere;
-   `E_cross = 0`; isolated-fragment vertex (zero induction, zero inter channels).
-2. **Water dimer (the discriminator)**: `p(O-H covalent) > 0.999`, `p(O...H) < 1e-2` at the
-   priors under `waterfill`; recorded (not asserted) under `rebo`.
-3. **Capacity**: `sum_j p_ij <= v_i + 1e-9` for every atom on every test frame, both rules.
-4. **Formal charges**: H3O+ `q_O = +1`, `v_O = 3`, three bonds; OH- `q_O = -1`, one bond;
-   Zundel midpoint `2.5 / 2.5` and a symmetric `p` split.
-5. **Smoothness**: `gradcheck` / `gradgradcheck` of `explicit_state` (both rules) in `J`,
-   `kappa`, `v`; central-difference forces through the whole model; finite-difference
-   gradient of a force loss with respect to a pairing parameter.
-6. **Stretched bond**: `c` drops below 0.5 and the energy rises; hydronium O-H stretch is
-   heterolytic (`q_H -> +1`), water O-H homolytic (`u -> 2`, `q = 0`).
-7. `film_fit` smoke on a `TersoffModel` output with the force term.
-
-### 3.4 Diagnostics
-
-`notebooks/tersoff_plots.py` (module; the notebook only calls it) extends
-`notebooks/pairing_plots.py` with a model argument so every figure in
-`notebooks/figures/pairing_*` is produced for `film`, `pairing` and `tersoff (rebo)`,
-`tersoff (waterfill)` on the same axes: O-H stretches (H2O, H3O+, OH-), HOH bend, the
-H5O2+ / H3O2- proton-transfer scans with `p_ij`, `sum_j p_Hj`, `q_O`, `v_O` along the
-coordinate, and the dimer `p(O...H)` against O-O distance. Those plots, at the priors and
-after training, are the deliverable of the viability test.
+Cost: on an 8-water cluster on one CPU core, energy + forces take the same 0.17 s as the
+warm-started pairing model; the explicit state is a few dozen scatters. The comparison that
+matters is a training step on Perlmutter (M3).
 
 ## 4. Milestones
 
-- **M0 -- scaffold** (step 0 merge; package skeleton; `TersoffModel` running on
-  `water_tersoff.yaml` with `rebo`; tests 1, 3, 5 pass). Expect intact water to reproduce
-  the film accounting immediately, since `J >> kappa/2` on a bond gives `b = 1` to double
-  precision.
-- **M1 -- the dimer** (`waterfill`; tests 2, 5; dimer figure). Decides the default rule.
-  If `rebo` leaks bond order into the hydrogen bond at the priors, train a short
-  `water_tersoff.yaml` with each rule and check whether the topology network learns to close
-  the leak; that is the direct measurement of how much scope the network buys a simple form.
-- **M2 -- ions at the priors** (`formal_charge.py`; tests 4, 6; stretch and proton-transfer
-  figures against the pairing figures). Success = same qualitative curves as `pairing`
-  (smooth stretches, heterolytic vs homolytic asymptotes, Zundel hand-over) with no solve.
+- **M0 -- scaffold: done** (merge, package, dispatch, configs, 23 tests).
+- **M1 -- the dimer: decided at the priors.** `waterfill` reproduces the film accounting on
+  intact water and the dimer exactly (`p(O-H) = 1`, `p(O...H) < 1e-4`); `rebo` fails intact
+  water (§2.2). Still to do: a short `water_tersoff.yaml` fit with each rule to see whether
+  the topology network closes `rebo`'s leak -- the direct measurement of how much scope the
+  network buys a simple form.
+- **M2 -- ions at the priors: done in tests, figures pending.** H3O+ / OH- capacities and
+  bond orders match the pairing solve; the Zundel proton splits evenly at the midpoint and
+  hands its charge over off it, with the under-filling hump of §2.2 as the known difference
+  from `pairing`. Next: `notebooks/tersoff_plots.py` and the stretch / bend / PT figures
+  against `notebooks/figures/pairing_*`.
 - **M3 -- training**: `water_tersoff` -> `ion_tersoff` -> `tersoff_all` on the pairing data
   (`data/pairing`, `ion_pairing`; the RKS / UKS singlet / UKS triplet scans; nothing new to
   label for single bonds). Compare energy / force / EDA errors and the scan figures to
@@ -269,12 +263,14 @@ after training, are the deliverable of the viability test.
 
 - Same coupling, heads, co-membership, assembly and tests as `pairing`; the solve becomes a
   formula. The branch is an ablation, and it is built as one (subclass, shared tests).
-- Raw bond order is a sigmoid of the *coupling*, not of the distance, so radial shape and
-  anisotropy come from the polytensor overlap.
+- Raw bond order is the clipped `J / kappa` -- a function of the *coupling*, not of the
+  distance -- so radial shape and anisotropy come from the polytensor overlap.
 - Saturation is the model: `rebo` (asked for; linear sharing) and `waterfill` (energetic
-  sharing, exact per atom) both implemented; the water dimer decides.
+  sharing, exact per atom) both implemented; at the priors intact water decides for
+  `waterfill`, and `rebo` stays as the ablation.
 - Capacity bound built into `p`; the overbinding penalty is an ablation, not a crutch.
-- Formal charges in closed form with a heavy-atom prior; the Zundel / Eigen / stretch scans
+- Formal charges in closed form: the charge follows the first pass's over-coordination
+  (ReaxFF's `Delta_i` as a prior) plus a learned readout; the Zundel / Eigen / stretch scans
   are the honesty check.
 - Single bonds on the existing pairing data first; pi bonds are a follow-up card on the
   polytensor's rank-2 coupling, with the ethylene torsion as the discriminating test.

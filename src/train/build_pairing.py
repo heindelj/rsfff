@@ -26,7 +26,7 @@ from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
 from ..ff.response import build_elec_priors
 from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS
 
-__all__ = ["build_pairing_model", "build_model"]
+__all__ = ["MODEL_BUILDERS", "build_pairing_model", "build_model"]
 
 
 def _get(cfg, name, default):
@@ -39,9 +39,18 @@ def build_pairing_model(
     neighbor_types,
     reference_energies: torch.Tensor,
     atomic_states=None,
+    *,
+    model_cls=PairingModel,
+    heads_cls=PairingHeads,
+    heads_kwargs: dict | None = None,
+    model_kwargs: dict | None = None,
 ) -> PairingModel:
     """``atomic_states`` (an ``AtomicStateReference``) turns on the charge-dependent atomic
-    reference ``E0(Z, q)``; without it every atom is referenced neutrally, as in the film."""
+    reference ``E0(Z, q)``; without it every atom is referenced neutrally, as in the film.
+
+    ``model_cls`` / ``heads_cls`` (+ their extra kwargs) let a model that shares the pairing
+    assembly -- :mod:`rsfff.train.build_tersoff` -- reuse this builder whole.
+    """
     neighbor_types = sorted(int(z) for z in neighbor_types)
     n_species = len(neighbor_types)
 
@@ -141,9 +150,10 @@ def build_pairing_model(
         environment_valence=bool(_get(film_cfg, "pairing_environment_valence", True)),
         capacity=capacity, chi=chi, eta=eta,
     )
-    pairing_heads = PairingHeads(hidden, p1, n_species, **head_kwargs)
+    head_kwargs.update(heads_kwargs or {})
+    pairing_heads = heads_cls(hidden, p1, n_species, **head_kwargs)
     topology_hidden = int(_get(film_cfg, "topology_hidden", 64))
-    topology_heads = PairingHeads(topology_hidden, p1, n_species, **head_kwargs)
+    topology_heads = heads_cls(topology_hidden, p1, n_species, **head_kwargs)
 
     network = PairingParameterNetwork(
         pairing_heads=pairing_heads,
@@ -174,7 +184,7 @@ def build_pairing_model(
     )
     taper = float(_get(film_cfg, "taper_width", 1.0))
     reference = ChargedAtomicReference.from_states(reference_energies, atomic_states)
-    return PairingModel(
+    return model_cls(
         projector, state_embedding, network, range_heads, reference,
         max_rank=max_rank,
         classical={
@@ -196,21 +206,40 @@ def build_pairing_model(
         bo_maxiter=int(_get(film_cfg, "bo_maxiter", 60)),
         bo_device=str(_get(film_cfg, "bo_device", "cpu")),
         state_cache=bool(_get(film_cfg, "state_cache", True)),
+        **(model_kwargs or {}),
     )
 
 
+def _build_film(features_cfg, film_cfg, neighbor_types, reference_energies, atomic_states=None):
+    from .build_film import build_film_model
+
+    return build_film_model(features_cfg, film_cfg, neighbor_types, reference_energies)
+
+
+def _build_tersoff(features_cfg, film_cfg, neighbor_types, reference_energies, atomic_states=None):
+    from .build_tersoff import build_tersoff_model
+
+    return build_tersoff_model(
+        features_cfg, film_cfg, neighbor_types, reference_energies, atomic_states
+    )
+
+
+#: ``film.model`` -> builder ``(features_cfg, film_cfg, neighbor_types, reference_energies,
+#: atomic_states)``. The film references neutrally and ignores ``atomic_states``.
+MODEL_BUILDERS = {
+    "film": _build_film,
+    "pairing": build_pairing_model,
+    "tersoff": _build_tersoff,
+}
+
+
 def build_model(features_cfg, film_cfg, neighbor_types, reference_energies, atomic_states=None):
-    """``film.model`` dispatch: the film model or the pairing model from the same blocks.
-
-    ``atomic_states`` only reaches the pairing model (the film references neutrally).
-    """
+    """``film.model`` dispatch (:data:`MODEL_BUILDERS`) from the same config blocks."""
     kind = str(_get(film_cfg, "model", "film"))
-    if kind == "film":
-        from .build_film import build_film_model
-
-        return build_film_model(features_cfg, film_cfg, neighbor_types, reference_energies)
-    if kind == "pairing":
-        return build_pairing_model(
-            features_cfg, film_cfg, neighbor_types, reference_energies, atomic_states
-        )
-    raise ValueError(f"film.model must be 'film' or 'pairing', got {kind!r}")
+    try:
+        builder = MODEL_BUILDERS[kind]
+    except KeyError:
+        raise ValueError(
+            f"film.model must be one of {tuple(MODEL_BUILDERS)}, got {kind!r}"
+        ) from None
+    return builder(features_cfg, film_cfg, neighbor_types, reference_energies, atomic_states)

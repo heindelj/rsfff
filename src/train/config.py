@@ -1054,9 +1054,11 @@ class FilmConfig:
     alpha_init: float = 40.0
 
     # --- the pairing model (``model: pairing``) ---------------------------------------------
-    #: "film" (Morse + angle on the assigned topology) or "pairing" (the variational bond
-    #: order of ``docs/fff_pairing.md``; :mod:`rsfff.ff.pairing`). Selects the builder, the
-    #: streams and losses are shared.
+    #: "film" (Morse + angle on the assigned topology), "pairing" (the variational bond
+    #: order of ``docs/fff_pairing.md``; :mod:`rsfff.ff.pairing`) or "tersoff" (the same
+    #: model with an explicit bond order, ``docs/fff_tersoff.md``; :mod:`rsfff.ff.tersoff`).
+    #: Selects the builder (``rsfff.train.build_pairing.MODEL_BUILDERS``); the streams and
+    #: losses are shared.
     model: str = "film"
     #: Angstrom: candidate radius for bond orders and SQE channels, and the taper below it.
     pairing_cutoff: float = 4.0
@@ -1080,6 +1082,31 @@ class FilmConfig:
     pairing_environment_kappa: bool = True
     #: Whether the valence capacity reads the family latent on top of its charge prior.
     pairing_environment_valence: bool = True
+
+    # --- the tersoff model (``model: tersoff``; the pairing knobs above apply too) ----------
+    #: "waterfill" (per-atom energetic sharing of the capacity, the default) or "rebo"
+    #: (multiplicative Tersoff / REBO saturation).
+    tersoff_saturation: str = "waterfill"
+    #: rebo only: electrons over which the factor ``v / smoothmax(v, N)`` bends at capacity.
+    tersoff_saturation_width: float = 0.02
+    #: Safeguarded Newton steps of the water filling (unrolled; fixed cost).
+    tersoff_fill_steps: int = 8
+    #: How the frame charge is distributed before the readout moves it: "overload" (two
+    #: passes; the charge follows the over-/under-coordination of the first pass),
+    #: "heavy_atoms" or "uniform".
+    tersoff_formal_charge: str = "overload"
+    #: Electrons over which the overload weights turn on.
+    tersoff_formal_charge_width: float = 0.1
+    #: Smooth-minimum width (bond-order units) reconciling a pair's two ends under waterfill.
+    tersoff_reconcile_width: float = 2.0e-3
+    #: Jacobi sweeps of the coupled dual on top of the per-atom water filling (0 = pure
+    #: per-atom rule, the only tested setting; the sweeps are experimental and not
+    #: monotone -- see rsfff.ff.tersoff.bond_order.saturate_waterfill).
+    tersoff_dual_sweeps: int = 0
+    #: Whether the family heads carry the zero-initialized formal-charge readout.
+    tersoff_formal_charge_readout: bool = True
+    #: Weight of the ReaxFF-style overbinding penalty on the raw coordination (0 = off).
+    tersoff_overbinding_penalty: float = 0.0
 
     # --- classical reach -------------------------------------------------------------------
     elst_cutoff: float = 12.0
