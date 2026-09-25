@@ -114,8 +114,10 @@ class ConditionedParameterNetwork(nn.Module):
         film_hidden: int = 32,
         film_depth: int = 1,
         gate_a0: float = 0.5,
+        families: tuple[str, ...] = FAMILIES,
     ) -> None:
         super().__init__()
+        self.families = tuple(families)
         self.embed_in = nn.Linear(int(p_in), int(block_dim))
         self.embed_env = nn.Linear(int(p_in), int(block_dim), bias=False)
         self.embed_cross = nn.Linear(int(p_cross), int(block_dim), bias=False)
@@ -131,11 +133,11 @@ class ConditionedParameterNetwork(nn.Module):
             film_hidden=film_hidden, film_depth=film_depth,
         )
         self.adapters = nn.ModuleDict(
-            {name: FiLMLayer(hidden, hidden) for name in FAMILIES}
+            {name: FiLMLayer(hidden, hidden) for name in self.families}
         )
         self.family_generators = (
             nn.ModuleDict(
-                {name: FiLMGenerator(d_c, film_hidden, film_depth, hidden) for name in FAMILIES}
+                {name: FiLMGenerator(d_c, film_hidden, film_depth, hidden) for name in self.families}
             )
             if conditioning_mode == "film"
             else None
@@ -162,7 +164,7 @@ class ConditionedParameterNetwork(nn.Module):
     ) -> dict[str, torch.Tensor]:
         z = self.trunk(x, c)
         out = {}
-        for name in FAMILIES:
+        for name in self.families:
             modulation = None
             if self.family_generators is not None:
                 modulation = self.family_generators[name](c)

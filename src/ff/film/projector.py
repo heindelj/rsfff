@@ -121,15 +121,37 @@ class FragmentProjector(nn.Module):
         return self.featurizer._species_lut[atomic_numbers]
 
     @torch.compiler.disable
-    def forward(self, batch, state: StateDescriptor) -> ProjectedFeatures:
-        feat = self.featurizer
+    def primitives(self, batch):
+        """The fragmentation-independent half: neighbor search and the edge expansion.
+
+        Returns ``(edge_index, RY, species_idx)``. Everything a state does to the features
+        happens in :meth:`project`; the pairing model calls this once and projects with the
+        co-membership its own bond-order solve produced.
+        """
         positions = batch.positions
         species_idx = self.species_index(batch.atomic_numbers)
-        n_atoms = int(positions.shape[0])
+        edge_index = self.featurizer._build_edges(positions, batch.batch_idx)
+        RY = self.featurizer.density.edge_expansion(positions, edge_index)
+        return edge_index, RY, species_idx
 
-        edge_index = feat._build_edges(positions, batch.batch_idx)
-        RY = feat.density.edge_expansion(positions, edge_index)
-        P_e = state.edge_comembership(edge_index)
+    def full_features(self, batch, primitives=None) -> LambdaFeatures:
+        """The unprojected features: every neighbor in one density, no state anywhere.
+
+        What the pairing model's topology pass reads -- the bond orders have to come from
+        the geometry alone, because the projection below is built from them.
+        """
+        edge_index, RY, species_idx = primitives or self.primitives(batch)
+        feat = self.featurizer
+        n_atoms = int(batch.positions.shape[0])
+        A = feat._compress(feat.density.scatter_species(RY, edge_index, species_idx, n_atoms))
+        return feat._features_from_density(A, species_idx, batch.batch_idx, edge_index)
+
+    def project(self, batch, P_e: torch.Tensor, primitives=None) -> ProjectedFeatures:
+        """The three blocks from an edge co-membership ``P_e`` on the primitives' edges."""
+        edge_index, RY, species_idx = primitives or self.primitives(batch)
+        feat = self.featurizer
+        positions = batch.positions
+        n_atoms = int(positions.shape[0])
 
         A_in = feat._compress(
             feat.density.scatter_species(
@@ -173,3 +195,8 @@ class FragmentProjector(nn.Module):
             edge_index=edge_index,
             P_edge=P_e,
         )
+
+    def forward(self, batch, state: StateDescriptor) -> ProjectedFeatures:
+        primitives = self.primitives(batch)
+        P_e = state.edge_comembership(primitives[0])
+        return self.project(batch, P_e, primitives)

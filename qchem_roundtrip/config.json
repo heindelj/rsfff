@@ -42,6 +42,27 @@
       "molecule": {
         "mode": "plain"
       }
+    },
+    "pairing_scans": {
+      "priority": 30,
+      "template": "templates/force.in",
+      "molecule": {
+        "mode": "plain"
+      }
+    },
+    "pairing_scans_uks_singlet": {
+      "priority": 30,
+      "template": "templates/force_uks.in",
+      "molecule": {
+        "mode": "plain"
+      }
+    },
+    "pairing_scans_uks_triplet": {
+      "priority": 30,
+      "template": "templates/force_uks.in",
+      "molecule": {
+        "mode": "plain"
+      }
     }
   }
 }

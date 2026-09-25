@@ -119,6 +119,10 @@ class Batch:
     #: (:func:`split_indices_grouped`) and the applicability term softmaxes within one.
     #: ``None`` for data where every frame is its own geometry.
     group_id: torch.Tensor | None = None
+    #: (B,) a key unique to each frame across every dataset of the process (the dataset's
+    #: offset plus the frame index): what a model keys a per-frame cache on (the pairing
+    #: model warm-starts its electronic-state solve from the frame's last solution).
+    frame_key: torch.Tensor | None = None
 
     def to(self, device) -> "Batch":
         opt = lambda t: t.to(device) if t is not None else None  # noqa: E731
@@ -149,7 +153,18 @@ class Batch:
             bond_index=opt(self.bond_index),
             bond_batch=opt(self.bond_batch),
             group_id=opt(self.group_id),
+            frame_key=opt(self.frame_key),
         )
+
+
+_FRAME_KEY_OFFSET = [0]
+
+
+def _claim_frame_keys(n: int) -> int:
+    """Reserve ``n`` frame keys; datasets built in one process never share one."""
+    start = _FRAME_KEY_OFFSET[0]
+    _FRAME_KEY_OFFSET[0] += int(n)
+    return start
 
 
 class MoleculeDataset:
@@ -189,6 +204,7 @@ class MoleculeDataset:
         self._forces = forces
         self._energy = energy
         self._counts = counts.long()
+        self._frame_key_offset = _claim_frame_keys(int(self._counts.numel()))
         self._offsets = torch.cat(
             (torch.zeros(1, dtype=torch.long), torch.cumsum(self._counts, 0))
         )
@@ -336,6 +352,7 @@ class MoleculeDataset:
                 {k: v[idx] for k, v in self._eda.items()} if self._eda is not None else None
             ),
             group_id=self._group_id[idx] if self._group_id is not None else None,
+            frame_key=idx + self._frame_key_offset,
             **fragments,
             **channels,
         )

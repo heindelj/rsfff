@@ -86,6 +86,7 @@ packages = [
     "rsfff.features",
     "rsfff.ff",
     "rsfff.ff.film",
+    "rsfff.ff.pairing",
     "rsfff.ff.v1",
     "rsfff.md",
     "rsfff.mlip",

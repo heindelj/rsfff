@@ -1053,6 +1053,34 @@ class FilmConfig:
     #: Range separation only (ignored under exclusions, as are r0_weight/r0_spread_weight).
     alpha_init: float = 40.0
 
+    # --- the pairing model (``model: pairing``) ---------------------------------------------
+    #: "film" (Morse + angle on the assigned topology) or "pairing" (the variational bond
+    #: order of ``docs/fff_pairing.md``; :mod:`rsfff.ff.pairing`). Selects the builder, the
+    #: streams and losses are shared.
+    model: str = "film"
+    #: Angstrom: candidate radius for bond orders and SQE channels, and the taper below it.
+    pairing_cutoff: float = 4.0
+    pairing_taper: float = 1.0
+    #: Hartree: the entropic barrier scale of the bond-order functional.
+    pairing_temperature: float = 0.002
+    #: "bond_order" (cutoff tapers only; the bond order is the range separation) or "fermi"
+    #: (keep the film model's element-table switches as an ablation).
+    range_gate: str = "bond_order"
+    include_13: bool = True
+    bo_tol: float = 1.0e-8
+    bo_maxiter: int = 100
+    #: "cpu" runs the electronic-state solve on the host even when the model is on a GPU
+    #: (it is launch-latency bound there); "same" keeps it on the model's device.
+    bo_device: str = "cpu"
+    #: Warm-start the electronic-state solve of a frame from its last solution (per-frame
+    #: host cache keyed by ``Batch.frame_key``); a path choice, not a model choice.
+    state_cache: bool = True
+    #: Whether the pairing exponent / hardness read the family latent (else per-species only).
+    pairing_environment_b: bool = True
+    pairing_environment_kappa: bool = True
+    #: Whether the valence capacity reads the family latent on top of its charge prior.
+    pairing_environment_valence: bool = True
+
     # --- classical reach -------------------------------------------------------------------
     elst_cutoff: float = 12.0
     pauli_cutoff: float = 7.0

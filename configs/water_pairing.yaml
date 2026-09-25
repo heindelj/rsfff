@@ -1,0 +1,166 @@
+# The pairing model of docs/fff_pairing.md on nonreactive water: the film model with the
+# assigned Morse + angle topology replaced by a variational bond order (spin-pairing energy).
+#
+#   python -m rsfff.train.train_film configs/water_pairing.yaml
+#
+# Same streams, labels and losses as configs/water_film.yaml; `film.model: pairing` selects
+# the builder. What is different in the model, in one place:
+#
+#   * no bonded topology. Every pair within `pairing_cutoff` carries a bare pairing energy
+#     J_ij (the Pauli operator on a valence polytensor) and a bond order p_ij is solved for
+#     under the valence marginals; the covalent energy is -J p + kappa p^2 / 2. The priors put
+#     the water O-H at the pyCMM r_eq / D against the pyCMM Pauli repulsion.
+#   * the bond order is the co-membership: it replaces the assigned p_intra in the intra/inter
+#     split, the induction gate and the SQE conductances, and with `range_gate: bond_order`
+#     the element-table Fermi switches are gone (`fermi` keeps them as the ablation).
+#   * the Pauli repulsion is at full strength on a bond (its repulsive wall); electrostatics
+#     and dispersion act between two atoms with weight (1 - c_ij).
+#
+# What to watch, beyond the film metrics:
+#
+#   bo_iter     Newton iterations of the bond-order solve; ~10-15 on water. Climbing = trouble.
+#   bo_fail     frames whose bond-order solve did not converge. Must stay 0.
+#   env_pair_*  |theta - theta_0| of the pairing family: how much of the bond's environment
+#               response the induction channel is putting into J / kappa / the exponent.
+#   bond_var    is not reported: there is no per-type table to be geometry-independent from.
+
+run_name: water_pairing
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+    - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]
+  backend: e3nn
+  density_channels: 8
+
+film:
+  model: pairing
+  # --- the pairing model --------------------------------------------------------------------
+  pairing_cutoff: 4.0
+  pairing_taper: 1.0
+  pairing_temperature: 0.002
+  range_gate: bond_order
+  include_13: true
+  bo_tol: 1.0e-8
+  bo_maxiter: 100
+  pairing_environment_b: true
+  pairing_environment_kappa: true
+  pairing_environment_valence: true
+
+  # --- conditioning. "film" is the design; "none"/"concatenate" are the §10 ablations. ------
+  conditioning_mode: film
+  cross_lambdas: [0]
+  block_dim: 64
+  hidden: 128
+  depth: 2
+  film_hidden: 32
+  film_depth: 1
+  gate_a0: 0.5
+  max_rank: 2
+
+  # Identically zero for a neutral singlet, so inert on this data -- present so the state key
+  # is an addition rather than a retrofit when charged fragments arrive (fff_film.md §8.3).
+  fragment_state_dim: 4
+
+  # --- family heads --------------------------------------------------------------------------
+  emb_dim: 16
+  head_hidden: 64
+  head_depth: 2
+  equiv_channels: 32
+  eta_init: 0.5
+  eta_floor: 0.05
+  s_init: 0.5
+  disp_b_prior: per_element
+
+  # --- classical reach and range separation ---------------------------------------------------
+  alpha_init: 40.0
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+
+  induction: true
+  cg_rtol: 1.0e-9
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+
+  # --- loss ------------------------------------------------------------------------------------
+  energy_scale: 3.8093e-4
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  induction_weight: 30.0
+  total_energy_weight: 0.0
+  force_weight: 1.0
+  force_scale: 1.0e-3
+  force_every: 2
+
+  fragment_weight: 10.0
+  fragment_batch_size: 64
+  anchor_weight: 10.0
+  anchor_batch_size: 32
+  anchor_force_every: 5
+
+  # 0 for the first fit: measure the unopposed environment dependence before dialing it.
+  env_penalty_weight: 0.0
+  # No bonded tables in this model; the regularizer is a no-op and stays at its default.
+  r0_weight: 0.05
+  r0_spread_weight: 1.0
+
+# Reused blocks: multipole/polarizability label weights and the monomer anchor's force term.
+elec:
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
+
+onebody:
+  energy_scale: 3.8093e-4
+  force_weight: 1.0
+  force_scale: 1.0e-3
+
+train:
+  epochs: 80
+  init_from: ""
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 128
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 5
+
+# Stage A (isolated water) then the full fit -- fff_film.md §8.2. Dimers/clusters arrive with
+# the full stage; holding out complete cluster sizes is a data.path override away.
+stages:
+  - name: isolated
+    train:
+      epochs: 15
+      lr_schedule: none
+    film:
+      induction: false
+      force_weight: 0.0
+      fragment_weight: 30.0
+
+  - name: full
+    train:
+      epochs: 80
+    film:
+      induction: true

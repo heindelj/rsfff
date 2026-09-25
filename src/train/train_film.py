@@ -51,7 +51,8 @@ import torch
 
 from ..ff.units import KJMOL_PER_HARTREE
 from ..mlip.heads import env_parameters
-from .build_film import build_film_model
+from ..mlip.reference_states import AtomicStateReference
+from .build_pairing import build_model
 from ..ff.film.model import maybe_compile
 from .config import Config, load_config, stage_config
 from .data import (
@@ -80,7 +81,7 @@ _LOG_KEYS = (
     "bonded", "bond_var", "q_res",
     "r0_elst", "r0_pauli", "r0_disp",
     "env_norm", "env_c6", "env_eta", "env_bond_d", "env_bond_r_eq",
-    "cg_ind", "cg_fail",
+    "cg_ind", "cg_fail", "bo_iter", "bo_fail", "bo_frac", "qf_max",
     "lg_elst_mae", "lg_pauli_mae", "lg_disp_mae", "lg_ind_mae", "lg_e_tot_mae",
     "lg_ob_mae", "lg_f_clu", "lg_cg_fail",
     "fs_e_mae", "fs_f_clu", "fs_cg_fail",
@@ -151,6 +152,11 @@ def film_fit(out, batch, cfg: Config, *, training: bool = True, with_forces: boo
         n_iter, converged, pd_fail = out.solver["ind"]
         metrics["cg_ind"] = float(n_iter)
         metrics["cg_fail"] = float((~converged).sum() + pd_fail.sum())
+    bo = getattr(out, "bo_solver", None)
+    if bo:
+        metrics["bo_iter"] = float(max(v[0] for v in bo.values()))
+        metrics["bo_fail"] = float(sum(int((~v[1]).sum()) for v in bo.values()))
+        metrics["bo_pmin"] = float(out.bond_order.detach().max()) if out.bond_order.numel() else 0.0
     return loss, metrics, batch.fragment_energy
 
 
@@ -199,7 +205,8 @@ def strided_fit_term(model, force_every: int = 1):
 
 def _bonded_variance(out) -> torch.Tensor:
     """Mean squared feature-dependent deviation of the bonded parameters (theta_0 branch)."""
-    d = out.parameters.bonded0.delta_iso
+    bonded0 = getattr(out.parameters, "bonded0", None)
+    d = None if bonded0 is None else bonded0.delta_iso
     return d.pow(2).mean() if d is not None and d.numel() else out.energy.new_zeros(())
 
 
@@ -477,11 +484,21 @@ class FilmStreams:
         metrics = {"q_res": float((per_frag - want).abs().max()), **self._metrics}
         for name, value in out.r0.items():
             metrics[f"r0_{name}"] = float(value.detach().mean())
-        b0 = out.parameters.bonded0
-        for name in ("r_eq", "d", "k"):
-            values = getattr(b0, name).detach()
-            if values.numel() > 1:
-                metrics[f"std_{name}"] = float(values.std())
+        b0 = getattr(out.parameters, "bonded0", None)
+        if b0 is not None:
+            for name in ("r_eq", "d", "k"):
+                values = getattr(b0, name).detach()
+                if values.numel() > 1:
+                    metrics[f"std_{name}"] = float(values.std())
+        # the pairing model: how many bonds are fractional and how much formal charge moved
+        # (the solver counts are film_fit's ``bo_iter`` / ``bo_fail``)
+        p = getattr(out, "bond_order", None)
+        if p is not None:
+            p = p.detach()
+            metrics["bo_frac"] = float(((p > 0.05) & (p < 0.95)).to(p.dtype).mean()) if p.numel() else 0.0
+        qf = getattr(out, "formal_charge", None)
+        if qf is not None:
+            metrics["qf_max"] = float(qf.detach().abs().max()) if qf.numel() else 0.0
         return metrics
 
 
@@ -545,9 +562,16 @@ def _train_once(config: Config):
         config.data.reference_energies, neighbor_types
     ).to(dtype)
 
+    atomic_states = (
+        AtomicStateReference.from_json(
+            config.data.atomic_reference_states, neighbor_types, dtype=dtype
+        )
+        if config.data.atomic_reference_states else None
+    )
+
     torch.manual_seed(config.train.seed)
-    model = build_film_model(
-        config.features, config.film, neighbor_types, reference_energies
+    model = build_model(
+        config.features, config.film, neighbor_types, reference_energies, atomic_states
     ).to(device=device, dtype=dtype)
     maybe_compile(model, training=True)       # RSFFF_COMPILE=cg: compiled PCG iteration
 
