@@ -54,7 +54,7 @@ from rsfff.train.data import Batch, load_extxyz  # noqa: E402
 
 __all__ = [
     "SCANS", "Scan", "ScanResult", "load_scan", "load_scans", "load_model",
-    "build_prior_pairing_model", "evaluate_scan", "evaluate_all", "plot_stretches",
+    "build_prior_model", "build_prior_pairing_model", "model_kind", "evaluate_scan", "evaluate_all", "plot_stretches",
     "plot_bend", "plot_proton_transfer", "plot_bond_orders", "monomer_parity",
     "plot_monomer_parity", "savefig",
 ]
@@ -71,7 +71,9 @@ SCANS = {
 SCAN_ROOT = ROOT / "qchem_roundtrip" / "pairing_scans"
 
 MODEL_COLORS = {"qm": "#3c4450", "film": "#276ef1", "film:A": "#276ef1", "film:B": "#7a4cc2",
-                "pairing": "#d64545", "pairing (priors)": "#e07a3f"}
+                "pairing": "#d64545", "pairing (priors)": "#e07a3f",
+                "tersoff": "#2a9d8f", "tersoff (priors)": "#2a9d8f",
+                "tersoff:rebo": "#8a6d3b", "tersoff:rebo (priors)": "#8a6d3b"}
 TERM_COLORS = {"pairing": "#d64545", "pauli": "#e07a3f", "elst": "#276ef1", "disp": "#2a9d8f",
                "bonded": "#276ef1", "intra": "#e07a3f", "cross": "#999999"}
 
@@ -148,16 +150,18 @@ def load_model(path, *, device: str = "cpu"):
     return model, cfg
 
 
-def build_prior_pairing_model(config_path=ROOT / "configs" / "water_pairing.yaml",
-                              neighbor_types=(1, 8), *, atomic_states: bool = True):
-    """The pairing model at its priors: no fit, only the calibrated functional.
+def build_prior_model(config_path, neighbor_types=(1, 8), *, atomic_states: bool = True,
+                      **film_over):
+    """A model at its priors from a config (``film.model`` dispatch: pairing or tersoff):
+    no fit, only the calibrated functional. ``film_over`` overrides fields of the config's
+    film block (``tersoff_saturation="rebo"``, say).
 
     ``atomic_states`` turns on the charged atomic reference (``data.atomic_reference_states``
     of the config; defaults to the wB97M-V/def2-TZVPD file when the config does not set it),
     which is what makes the ion scans comparable to the neutral one.
     """
     from rsfff.mlip.reference_states import AtomicStateReference
-    from rsfff.train.build_pairing import build_pairing_model
+    from rsfff.train.build_pairing import build_model
     from rsfff.train.config import load_config
     from rsfff.train.data import load_reference_energies
 
@@ -173,13 +177,28 @@ def build_prior_pairing_model(config_path=ROOT / "configs" / "water_pairing.yaml
         states = AtomicStateReference.from_json(
             str(ROOT / states_path), types, dtype=torch.get_default_dtype()
         )
+    for key, value in film_over.items():
+        setattr(cfg.film, key, value)
     torch.manual_seed(0)
-    model = build_pairing_model(cfg.features, cfg.film, types, ref, states)
+    model = build_model(cfg.features, cfg.film, types, ref, states)
     return model.eval(), cfg
 
 
+def build_prior_pairing_model(config_path=ROOT / "configs" / "water_pairing.yaml",
+                              neighbor_types=(1, 8), *, atomic_states: bool = True):
+    """The pairing model at its priors (see :func:`build_prior_model`)."""
+    return build_prior_model(config_path, neighbor_types, atomic_states=atomic_states)
+
+
 def is_pairing(model) -> bool:
+    """A model with a bond-order state (the pairing model or its explicit Tersoff ablation)."""
     return hasattr(model, "network") and hasattr(model.network, "pairing_heads")
+
+
+def model_kind(model) -> str:
+    if not is_pairing(model):
+        return "film"
+    return "tersoff" if type(model).__name__ == "TersoffModel" else "pairing"
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +288,8 @@ class ScanResult:
     comembership: dict[str, np.ndarray]        # pair label -> (n,)
     unpaired: np.ndarray | None = None         # (n, N) per-atom u
     formal_charge: np.ndarray | None = None    # (n, N) per-atom q^f from the electronic-state solve
+    valence: np.ndarray | None = None          # (n, N) per-atom capacity v
+    coordination: np.ndarray | None = None     # (n, N) per-atom sum_j p_ij
 
 
 def _pair_label(z, i, j):
@@ -292,7 +313,7 @@ def evaluate_scan(model, scan: Scan, *, how: str = "single", label: str | None =
                   chunk: int = 64) -> ScanResult:
     """Run one model over every frame of a scan (in chunks of ``chunk`` frames per batch).
     Missing Q-Chem labels do not matter here."""
-    label = label or ("pairing" if is_pairing(model) else "film")
+    label = label or model_kind(model)
     n = scan.n
     pairing = is_pairing(model)
     z = scan.frames[0].get_atomic_numbers()
@@ -305,6 +326,8 @@ def evaluate_scan(model, scan: Scan, *, how: str = "single", label: str | None =
     comember = {k: np.full(n, np.nan) for k in pair_labels}
     unpaired = np.full((n, n_at), np.nan)
     formal_charge = np.full((n, n_at), np.nan)
+    valence = np.full((n, n_at), np.nan)
+    coordination = np.full((n, n_at), np.nan)
 
     def pool(x, index, m):
         return x.new_zeros(m).index_add_(0, index, x).numpy()
@@ -337,12 +360,17 @@ def evaluate_scan(model, scan: Scan, *, how: str = "single", label: str | None =
         sub_index = out.sub_index.numpy() if pairing else None
         p_intra = out.p_intra.numpy()
         p_bo = out.bond_order.numpy() if pairing else None
+        if pairing:
+            sp = out.pair_index[:, out.sub_index]
+            coord_all = torch.zeros(n_tot).index_add_(0, sp[0], out.bond_order).index_add_(0, sp[1], out.bond_order)
         for k in range(m):
             off = offsets[k]
             inv = np.argsort(order[off:off + n_at])          # frame atom -> batch-local atom
             if pairing:
                 unpaired[start + k, order[off:off + n_at]] = out.unpaired[off:off + n_at].numpy()
                 formal_charge[start + k, order[off:off + n_at]] = out.formal_charge[off:off + n_at].numpy()
+                valence[start + k, order[off:off + n_at]] = out.electronic_state.valence[off:off + n_at].numpy()
+                coordination[start + k, order[off:off + n_at]] = coord_all[off:off + n_at].numpy()
             for (i, j), name in zip(pairs, pair_labels):
                 a, b = sorted((int(inv[i]) + off, int(inv[j]) + off))
                 hit = np.flatnonzero(keys == a * n_tot + b)
@@ -357,6 +385,7 @@ def evaluate_scan(model, scan: Scan, *, how: str = "single", label: str | None =
     return ScanResult(
         label, energy, terms, bond_order if pairing else {}, comember,
         unpaired if pairing else None, formal_charge if pairing else None,
+        valence if pairing else None, coordination if pairing else None,
     )
 
 
@@ -396,8 +425,14 @@ def _ref_index(scan: Scan):
     return 0
 
 
-def savefig(fig, name, figdir=ROOT / "notebooks" / "figures", prefix="pairing"):
+#: File prefix of every saved figure; ``tersoff_plots`` sets it to ``"tersoff"`` so the two
+#: notebooks do not overwrite each other's figures.
+FIG_PREFIX = "pairing"
+
+
+def savefig(fig, name, figdir=ROOT / "notebooks" / "figures", prefix=None):
     figdir.mkdir(parents=True, exist_ok=True)
+    prefix = prefix or FIG_PREFIX
     for ext in ("png", "pdf"):
         fig.savefig(figdir / f"{prefix}_{name}.{ext}", dpi=160, bbox_inches="tight")
 
@@ -439,7 +474,7 @@ def plot_stretches(scans, results, names=("h2o_stretch", "h3o+_stretch", "oh-_st
             keys = [k for k in ("pairing", "bonded", "intra classical", "induction") if k in res.terms]
             for key in keys:
                 y = res.terms[key] - res.terms[key][k0]
-                ls = "-" if label.startswith("pairing") else "--"
+                ls = "--" if label.startswith("film") else "-"
                 ax.plot(x[sel], (y * KJMOL_PER_HARTREE)[sel], ls, color=TERM_COLORS.get(key, None),
                         label=f"{label}: {key}")
         ax.axhline(0, color="#bbbbbb", lw=0.8)
@@ -470,7 +505,7 @@ def plot_bend(scans, results, name="h2o_bend", path=None):
         for key in ("pairing", "bonded", "intra classical"):
             if key in res.terms:
                 y = (res.terms[key] - res.terms[key][k0]) * KJMOL_PER_HARTREE
-                ax.plot(x, y, "-" if label.startswith("pairing") else "--",
+                ax.plot(x, y, "--" if label.startswith("film") else "-",
                         color=TERM_COLORS.get(key), label=f"{label}: {key}")
     ax.set_xlabel(scan.xlabel)
     ax.set_ylabel("one-body pieces, relative (kJ/mol)")
@@ -528,7 +563,7 @@ def plot_bond_orders(scans, results, names=None, path=None):
                 for g in scan.groups():
                     sel = scan.group == g
                     for (pair, p), ls in zip(res.bond_order.items(), ("-", "--")):
-                        ax.plot(scan.coord[sel], p[sel], ls, lw=1.2, label=f"{pair} (O-O {g:.2f})")
+                        ax.plot(scan.coord[sel], p[sel], ls, lw=1.2, label=f"{label}: {pair} (O-O {g:.2f})")
             else:
                 for pair, p in res.bond_order.items():
                     ax.plot(scan.coord, p, "-", label=f"{label}: p {pair}")
