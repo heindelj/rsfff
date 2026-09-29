@@ -53,6 +53,7 @@ from dataclasses import dataclass
 import torch
 
 from .coupled_solve import (
+    DEFAULT_CG_CHECK_EVERY,
     CoupledSystem,
     coupled_energy,
     coupled_solve,
@@ -161,7 +162,7 @@ def coupled_response(
     rtol: float = 1.0e-9,
     atol: float = 1.0e-12,
     maxiter: int = 100,
-    check_every: int = 1,
+    check_every: int = DEFAULT_CG_CHECK_EVERY,
 ) -> LevelOutput:
     """Minimize the coupled functional and report what it converged to.
 

@@ -863,7 +863,8 @@ class ExpertConfig:
     cg_maxiter: int = 100
     #: Test CG convergence every k iterations (one host sync each) rather than every one;
     #: converged frames take exact zero steps meanwhile, so the answer is unchanged.
-    cg_check_every: int = 1
+    #: Mirrors ``rsfff.ff.coupled_solve.DEFAULT_CG_CHECK_EVERY``.
+    cg_check_every: int = 4
 
     # --- loss ---------------------------------------------------------------------------
     #: One kJ/mol in Hartree. Every error is divided by this before squaring, so every weight
@@ -1066,7 +1067,8 @@ class FilmConfig:
     cg_maxiter: int = 100
     #: Test CG convergence every k iterations (one host sync each) rather than every one;
     #: converged frames take exact zero steps meanwhile, so the answer is unchanged.
-    cg_check_every: int = 1
+    #: Mirrors ``rsfff.ff.coupled_solve.DEFAULT_CG_CHECK_EVERY``.
+    cg_check_every: int = 4
 
     # --- loss ----------------------------------------------------------------------------------
     #: One kJ/mol in Hartree; every error is divided by this before squaring.

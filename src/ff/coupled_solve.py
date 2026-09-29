@@ -606,6 +606,12 @@ def _cg_iteration(sys, d_map, g0, pre, x, r, p, rz, converged, pd_fail, target):
     return x, r, p, rz_new, converged, pd_fail
 
 
+#: Default number of CG iterations between convergence tests. Each test is a device->host
+#: sync (``bool(converged.all())``); converged frames take exact zero steps in between, so
+#: the answer does not depend on it -- a larger value trades up to k-1 wasted iterations for
+#: k times fewer syncs.
+DEFAULT_CG_CHECK_EVERY = 4
+
 _COMPILED_ITERATION = None
 _COMPILE = os.environ.get("RSFFF_COMPILE", "").strip().lower()
 
@@ -641,7 +647,7 @@ def pcg(
     rtol: float = 1.0e-10,
     atol: float = 1.0e-12,
     maxiter: int = 200,
-    check_every: int = 1,
+    check_every: int = DEFAULT_CG_CHECK_EVERY,
     d_map=None,
 ) -> tuple[State, CoupledInfo]:
     """Solve ``A x = rhs`` (default ``rhs = -b``, i.e. minimize the functional).
@@ -762,7 +768,9 @@ class _CoupledSolve(torch.autograd.Function):
         ctx.has_rhs = rhs is not None
         ctx.save_for_backward(*x, *(rhs if rhs is not None else ()), *params)
         ctx.info = info
-        n_iter = torch.tensor([info.n_iter], dtype=torch.int64, device=x[0].device)
+        # on the host: it is a Python int already, and `.item()` on a device copy would be
+        # one more full stream sync per solve
+        n_iter = torch.tensor([info.n_iter], dtype=torch.int64)
         ctx.mark_non_differentiable(n_iter)
         return x[0], x[1], x[2], n_iter
 
@@ -876,7 +884,7 @@ def coupled_solve(
     rtol: float = 1.0e-10,
     atol: float = 1.0e-12,
     maxiter: int = 200,
-    check_every: int = 1,
+    check_every: int = DEFAULT_CG_CHECK_EVERY,
     info_out: list | None = None,
 ) -> tuple[State, int]:
     """Minimize the coupled functional. Differentiable through the adjoint, to second order.
@@ -927,6 +935,7 @@ def coupled_solve_dense(sys: CoupledSystem) -> State:
 
 
 __all__ = [
+    "DEFAULT_CG_CHECK_EVERY",
     "CoupledInfo",
     "CoupledSystem",
     "State",

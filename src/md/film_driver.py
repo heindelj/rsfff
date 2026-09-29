@@ -33,6 +33,7 @@ import numpy as np
 import torch
 from scipy.optimize import minimize
 
+from ..ff.coupled_solve import DEFAULT_CG_CHECK_EVERY
 from ..ff.film.model import maybe_compile
 from ..train.build_film import build_film_model
 from ..train.data import Batch, load_reference_energies
@@ -50,7 +51,7 @@ __all__ = [
 ]
 
 
-def load_film_model(path, *, device: str = "cpu"):
+def load_film_model(path, *, device: str = "cpu", cg_check_every: int | None = DEFAULT_CG_CHECK_EVERY):
     """Rebuild a trained film model from a checkpoint and load it strictly.
 
     Sets the global default dtype from the checkpoint's config, because every tensor built
@@ -68,6 +69,10 @@ def load_film_model(path, *, device: str = "cpu"):
     The JSON is still the fallback for a checkpoint written before the buffer existed, and
     :func:`rsfff.train.data.resolve_data_path` finds it without assuming the current
     directory.
+
+    ``cg_check_every`` overrides the induction CG's convergence-test interval stored in the
+    checkpoint (checkpoints trained with the old default carry ``1``, a host sync every
+    iteration). It does not change the answer; pass ``None`` to keep the checkpoint's value.
     """
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     config = ckpt["config"]
@@ -84,6 +89,8 @@ def load_film_model(path, *, device: str = "cpu"):
     maybe_compile(model)                      # RSFFF_COMPILE: inference use, all parts allowed
     model.load_state_dict(state)
     model.eval().to(device)
+    if cg_check_every is not None and isinstance(getattr(model, "cg", None), dict):
+        model.cg["check_every"] = max(int(cg_check_every), 1)
     return model, config
 
 

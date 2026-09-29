@@ -64,6 +64,7 @@ from ...mlip.sqe import sqe_solve
 from ..damping import fermi_switch
 from .. import backend as ff_backend
 from ..backend import slater_elec_pair_energy, slater_pauli_pair_energy
+from ..coupled_solve import DEFAULT_CG_CHECK_EVERY
 from ..expert_model import ClassicalSpec
 from ..fragment_state import FragmentStateEmbedding
 from ..multipole import build_polytensor, spherical_to_cartesian_quadrupole
@@ -231,7 +232,7 @@ class FilmModel(nn.Module):
         cg_rtol: float = 1.0e-9,
         cg_atol: float = 1.0e-12,
         cg_maxiter: int = 100,
-        cg_check_every: int = 1,
+        cg_check_every: int = DEFAULT_CG_CHECK_EVERY,
     ) -> None:
         super().__init__()
         if nonbonded not in ("range_separated", "exclusions"):

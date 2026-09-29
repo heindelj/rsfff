@@ -15,6 +15,7 @@ import torch
 
 from ..features.features import FlatLambdaSOAPFeaturizer
 from ..ff.dispersion import DispersionParameterHeads, build_log_priors
+from ..ff.coupled_solve import DEFAULT_CG_CHECK_EVERY
 from ..ff.expert_model import ClassicalSpec
 from ..ff.film import (
     BondedParameterHead,
@@ -206,5 +207,5 @@ def build_film_model(
         cg_rtol=float(_get(film_cfg, "cg_rtol", 1.0e-9)),
         cg_atol=float(_get(film_cfg, "cg_atol", 1.0e-12)),
         cg_maxiter=int(_get(film_cfg, "cg_maxiter", 100)),
-        cg_check_every=int(_get(film_cfg, "cg_check_every", 1)),
+        cg_check_every=int(_get(film_cfg, "cg_check_every", DEFAULT_CG_CHECK_EVERY)),
     )
