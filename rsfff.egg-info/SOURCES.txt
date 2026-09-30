@@ -13,6 +13,7 @@ src/features/features.py
 src/features/weighted_bispectrum.py
 src/ff/__init__.py
 src/ff/atomic_energy.py
+src/ff/backend.py
 src/ff/bond_energy.py
 src/ff/coupled_solve.py
 src/ff/damping.py
@@ -23,6 +24,7 @@ src/ff/environment.py
 src/ff/expert.py
 src/ff/expert_model.py
 src/ff/fragment_state.py
+src/ff/hbond.py
 src/ff/many_body.py
 src/ff/mediator.py
 src/ff/mixture_model.py
@@ -96,6 +98,7 @@ src/qcgen/wigner.py
 src/train/__init__.py
 src/train/build_expert.py
 src/train/build_film.py
+src/train/committee.py
 src/train/config.py
 src/train/data.py
 src/train/loss.py
@@ -116,6 +119,7 @@ src/train/train_unified.py
 tests/test_active_learning.py
 tests/test_applicability_loss.py
 tests/test_bond_energy.py
+tests/test_committee.py
 tests/test_data.py
 tests/test_data_eda.py
 tests/test_eem.py
@@ -135,6 +139,7 @@ tests/test_ff_prior_matches_eda.py
 tests/test_ff_unified.py
 tests/test_free_atom.py
 tests/test_grouped_data.py
+tests/test_hbond.py
 tests/test_heads.py
 tests/test_invariance.py
 tests/test_many_body.py

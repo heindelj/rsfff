@@ -50,11 +50,15 @@ neighbors = [
 # not listed as a dependency: a relative path is not a valid requirement specifier, and the
 # CPU/GPU install commands differ.
 
+# cuequivariance: the frontends are pure Python and work everywhere (CPU off CUDA). The fused
+# CUDA ops ship per CUDA major version (Linux only), so pick the extra matching
+# `python -c "import torch; print(torch.version.cuda)"` -- scripts/make_env.sh does this.
 cue = [
     "cuequivariance>=0.10",
     "cuequivariance-torch>=0.10",
-    "cuequivariance-ops-torch-cu12",
 ]
+cue-cu12 = ["rsfff[cue]", "cuequivariance-ops-torch-cu12"]
+cue-cu13 = ["rsfff[cue]", "cuequivariance-ops-torch-cu13"]
 # Local (CPU) quantum-chemistry backend for rsfff.qcgen. On Colab the GPU stack
 # (gpu4pyscf-cuda12x etc.) is installed from the notebook instead. Note: VV10
 # (needed by wB97M-V) is built into pyscf; pyscf-dispersion is intentionally not

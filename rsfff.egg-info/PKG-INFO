@@ -14,7 +14,12 @@ Requires-Dist: torch-cluster; extra == "neighbors"
 Provides-Extra: cue
 Requires-Dist: cuequivariance>=0.10; extra == "cue"
 Requires-Dist: cuequivariance-torch>=0.10; extra == "cue"
-Requires-Dist: cuequivariance-ops-torch-cu12; extra == "cue"
+Provides-Extra: cue-cu12
+Requires-Dist: rsfff[cue]; extra == "cue-cu12"
+Requires-Dist: cuequivariance-ops-torch-cu12; extra == "cue-cu12"
+Provides-Extra: cue-cu13
+Requires-Dist: rsfff[cue]; extra == "cue-cu13"
+Requires-Dist: cuequivariance-ops-torch-cu13; extra == "cue-cu13"
 Provides-Extra: qc
 Requires-Dist: pyscf>=2.14; extra == "qc"
 Requires-Dist: geometric; extra == "qc"
