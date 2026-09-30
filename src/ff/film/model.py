@@ -304,6 +304,41 @@ class FilmModel(nn.Module):
         w = p_intra.reshape(-1, *([1] * (theta0.dim() - 1)))
         return w * theta0 + (1.0 - w) * theta
 
+    # -- the induction level (the nonvariational model overrides these two) ---------------
+
+    def _response_parameters(self, params: FilmParameters) -> ResponseParameters:
+        """The coupled level's parameters: the env-dressed response family around the
+        permanent multipoles. ``chi = -eta q_perm`` with ``q0 = q_perm`` makes the charge
+        drive vanish in isolation; ``mu0``/``quad0`` is the direct parameterization."""
+        resp = params.response
+        return ResponseParameters(
+            chi=-resp.eta * params.q_perm,
+            eta=resp.eta,
+            q0=params.q_perm,
+            compliance=resp.compliance,
+            chivec=None,
+            alpha=resp.alpha,
+            chiquad=None,
+            cquad=None,
+            z=resp.z,
+            b=resp.b,
+            mu0=params.mu_perm,
+            quad0=params.quad_perm,
+        )
+
+    def _induction_level(
+        self, rp: ResponseParameters, params: FilmParameters, *, positions, batch, state,
+        bond_index, bond_batch, pair_index, gate, solver: dict,
+    ) -> LevelOutput:
+        """One converged coupled solve; records ``solver["ind"]`` for the training metrics."""
+        level = coupled_response(
+            rp, positions=positions, batch_idx=batch.batch_idx, n_systems=int(batch.n_systems),
+            bond_index=bond_index, bond_batch=bond_batch, pair_index=pair_index,
+            gate=gate, max_rank=self.max_rank, **self.cg,
+        )
+        solver["ind"] = (level.n_iter, level.converged, level.pd_fail)
+        return level
+
     # -- forward -------------------------------------------------------------------------
 
     def forward(
@@ -462,28 +497,13 @@ class FilmModel(nn.Module):
         energy_bonded_env = None
         solver: dict[str, tuple] = {}
         if induction:
-            resp = params.response
-            rp = ResponseParameters(
-                chi=-resp.eta * params.q_perm,
-                eta=resp.eta,
-                q0=params.q_perm,
-                compliance=resp.compliance,
-                chivec=None,
-                alpha=resp.alpha,
-                chiquad=None,
-                cquad=None,
-                z=resp.z,
-                b=resp.b,
-                mu0=params.mu_perm,
-                quad0=params.quad_perm,
-            )
+            rp = self._response_parameters(params)
             gate_ind = gate["elst"] * (1.0 - p_intra)
-            level_ind = coupled_response(
-                rp, positions=positions, batch_idx=batch.batch_idx, n_systems=n_sys,
+            level_ind = self._induction_level(
+                rp, params, positions=positions, batch=batch, state=state,
                 bond_index=ch_ind, bond_batch=chb_ind, pair_index=pair_index,
-                gate=gate_ind, max_rank=self.max_rank, **self.cg,
+                gate=gate_ind, solver=solver,
             )
-            solver["ind"] = (level_ind.n_iter, level_ind.converged, level_ind.pd_fail)
 
             # The same functional at zero response. The internal part collapses to
             # `chi q0 + 1/2 eta q0^2 = -1/2 eta q_perm^2` by the chi-trick; the pair part is

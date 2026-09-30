@@ -27,6 +27,7 @@ from ..ff.film import (
 )
 from ..ff.fragment_state import FragmentStateEmbedding
 from ..ff.multipole import irrep2_to_spherical
+from ..ff.nonvariational import NonvariationalModel
 from ..ff.pauli import PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_heads import RangeSeparationHeads
 from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
@@ -104,6 +105,13 @@ def build_film_model(
         emb_dim=int(_get(film_cfg, "bonded_emb_dim", 8)),
     )
 
+    # `film.model`: "film" (converged coupled solve) or "nonvariational" (fixed-K unrolled
+    # solve with learned mutual damping, docs/fff_nonvariational.md).
+    model_kind = str(_get(film_cfg, "model", "film"))
+    if model_kind not in ("film", "nonvariational"):
+        raise ValueError(f"film.model must be 'film' or 'nonvariational', got {model_kind!r}")
+    nonvariational = model_kind == "nonvariational"
+
     log_z, log_b_elec, q0_prior = build_elec_priors(neighbor_types)
     permanent_heads = PermanentMultipoleHeads(
         hidden, p1, p2, n_species,
@@ -125,6 +133,14 @@ def build_film_model(
         psd_floor=float(_get(film_cfg, "psd_floor", 1e-4)),
         compliance_cutoff=featurizer.cutoff,
         s_init=float(_get(film_cfg, "s_init", 0.5)),
+        # the nonvariational model's heads; absent (no parameters) under `model: film`, so
+        # film checkpoints keep loading whatever the config defaults say
+        induced_width=nonvariational and bool(_get(film_cfg, "induced_width", True)),
+        induced_width_mode=str(_get(film_cfg, "induced_width_mode", "broaden")),
+        induced_width_bias_init=float(_get(film_cfg, "induced_width_bias_init", -3.0)),
+        induced_quadrupoles=nonvariational and bool(_get(film_cfg, "induced_quadrupoles", True)),
+        cquad_init=float(_get(film_cfg, "cquad_init", 1.0)),
+        cquad_floor=float(_get(film_cfg, "cquad_floor", 1.0e-4)),
     )
 
     log_q, log_b_pauli, mu_scale, quad_scale = build_pauli_priors(neighbor_types)
@@ -179,12 +195,21 @@ def build_film_model(
             environment_r0=False,
         )
 
-    return FilmModel(
+    cls, extra = FilmModel, {}
+    if nonvariational:
+        cls, extra = NonvariationalModel, dict(
+            n_iter=int(_get(film_cfg, "n_iter", 3)),
+            iterate_weights=bool(_get(film_cfg, "iterate_weights", True)),
+            with_residual=bool(_get(film_cfg, "solve_residual", False)),
+        )
+
+    return cls(
         projector,
         state_embedding,
         network,
         range_heads,
         reference_energies,
+        **extra,
         nonbonded=nonbonded,
         exclude_through=int(_get(film_cfg, "exclude_through", 3)),
         max_rank=max_rank,

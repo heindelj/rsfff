@@ -43,6 +43,13 @@ class ResponseFamily:
     compliance: torch.Tensor
     z: torch.Tensor
     b: torch.Tensor
+    #: ``nonvariational`` model only (``docs/fff_nonvariational.md`` §4-§5): the induced-density
+    #: Slater exponent ``b_ind = b exp(-s)`` used in the mutual-induction operator, the log
+    #: shift ``s`` itself (an ``env_*`` metric), and the isotropic quadrupole polarizability.
+    #: ``None`` under the film model: nothing else reads them.
+    b_ind: torch.Tensor | None = None
+    s_ind: torch.Tensor | None = None
+    cquad: torch.Tensor | None = None
 
 
 class FilmResponseHeads(nn.Module):
@@ -79,6 +86,12 @@ class FilmResponseHeads(nn.Module):
         compliance_radial: int = 8,
         compliance_cutoff: float = 5.0,
         s_init: float = 0.5,
+        induced_width: bool = False,
+        induced_width_mode: str = "broaden",
+        induced_width_bias_init: float = -3.0,
+        induced_quadrupoles: bool = False,
+        cquad_init: float = 1.0,
+        cquad_floor: float = 1.0e-4,
     ) -> None:
         super().__init__()
         self.eta_floor = float(eta_floor)
@@ -112,6 +125,34 @@ class FilmResponseHeads(nn.Module):
             n_radial=compliance_radial, cutoff=compliance_cutoff, s_init=s_init,
         )
 
+        # --- the nonvariational model's two extra heads (docs/fff_nonvariational.md) -------
+        # Induced-density width: `b_ind = b exp(-s)`, `s = gate * softplus(raw + beta_Z)`
+        # ("broaden": s >= 0, the induced shell can only get more diffuse and the mutual
+        # coupling only weaker) or `s = gate * raw` ("free"). The gate is the film's
+        # environment gate, exactly zero for an isolated fragment, so `b_ind == b` there
+        # without a convention. The zero-init readout plus a negative bias keeps a fresh
+        # model at `b_ind ~ b` with a live gradient (softplus(-3) ~ 0.05).
+        if induced_width_mode not in ("broaden", "free"):
+            raise ValueError(
+                f"induced_width_mode must be 'broaden' or 'free', got {induced_width_mode!r}"
+            )
+        self.induced_width_mode = str(induced_width_mode)
+        self.width_mlp = None
+        if induced_width:
+            self.width_mlp = zero_init_readout(mlp(latent_dim + emb_dim, hidden, depth, 1))
+            self.width_bias = nn.Parameter(
+                torch.full((n_species,), float(induced_width_bias_init))
+            )
+        # Isotropic quadrupole polarizability `C = c I5`, the same construction as
+        # `ElectrostaticParameterHeads` (per-species prior + zero-init residual, softplus,
+        # floor). `cquad = None` keeps the permanent quadrupole rigid, as the film has it.
+        self.cquad_mlp = None
+        if induced_quadrupoles:
+            self.cquad_floor = float(cquad_floor)
+            c0 = torch.full((n_species,), max(float(cquad_init) - self.cquad_floor, 1e-6))
+            self.cquad0_raw = nn.Parameter(torch.log(torch.expm1(c0)))
+            self.cquad_mlp = zero_init_readout(mlp(latent_dim + emb_dim, hidden, depth, 1))
+
     def forward(
         self,
         z: torch.Tensor,              # (N, latent) the response-family latent
@@ -119,6 +160,7 @@ class FilmResponseHeads(nn.Module):
         species_idx: torch.Tensor,
         positions: torch.Tensor,
         bond_index: torch.Tensor,     # (2, Nb) the SQE channel graph
+        gate: torch.Tensor | None = None,   # (N,) environment gate; None = isolated evaluation
     ) -> ResponseFamily:
         emb = self.species_emb(species_idx)
         x = torch.cat((z, emb), dim=-1)
@@ -136,7 +178,29 @@ class FilmResponseHeads(nn.Module):
         compliance = self.compliance_head(z, positions, bond_index)
         log_z = self.log_z_prior[species_idx] + self.d_log_z[species_idx]
         log_b = self.log_b_prior[species_idx] + self.d_log_b[species_idx]
+        b = log_b.exp()
+
+        b_ind = s_ind = None
+        if self.width_mlp is not None:
+            raw = self.width_mlp(x).squeeze(-1)
+            if self.induced_width_mode == "broaden":
+                s_ind = torch.nn.functional.softplus(raw + self.width_bias[species_idx])
+            else:
+                s_ind = raw
+            if gate is None:
+                s_ind = torch.zeros_like(s_ind)
+            else:
+                s_ind = gate * s_ind
+            b_ind = b * torch.exp(-s_ind)
+        cquad = None
+        if self.cquad_mlp is not None:
+            cquad = (
+                torch.nn.functional.softplus(
+                    self.cquad0_raw[species_idx] + self.cquad_mlp(x).squeeze(-1)
+                )
+                + self.cquad_floor
+            )
         return ResponseFamily(
             eta=eta, alpha=alpha, compliance=compliance,
-            z=log_z.exp(), b=log_b.exp(),
+            z=log_z.exp(), b=b, b_ind=b_ind, s_ind=s_ind, cquad=cquad,
         )

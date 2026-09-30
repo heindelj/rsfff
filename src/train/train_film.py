@@ -80,7 +80,8 @@ _LOG_KEYS = (
     "bonded", "bond_var", "q_res",
     "r0_elst", "r0_pauli", "r0_disp",
     "env_norm", "env_c6", "env_eta", "env_bond_d", "env_bond_r_eq",
-    "cg_ind", "cg_fail",
+    "env_alpha", "env_b_ind", "env_cquad",
+    "cg_ind", "cg_fail", "ind_res",
     "lg_elst_mae", "lg_pauli_mae", "lg_disp_mae", "lg_ind_mae", "lg_e_tot_mae",
     "lg_ob_mae", "lg_f_clu", "lg_cg_fail",
     "fs_e_mae", "fs_f_clu", "fs_cg_fail",
@@ -151,6 +152,8 @@ def film_fit(out, batch, cfg: Config, *, training: bool = True, with_forces: boo
         n_iter, converged, pd_fail = out.solver["ind"]
         metrics["cg_ind"] = float(n_iter)
         metrics["cg_fail"] = float((~converged).sum() + pd_fail.sum())
+        if "ind_residual" in out.solver:      # nonvariational model, film.solve_residual
+            metrics["ind_res"] = float(out.solver["ind_residual"].max())
     return loss, metrics, batch.fragment_energy
 
 

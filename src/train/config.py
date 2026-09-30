@@ -1060,6 +1060,26 @@ class FilmConfig:
     disp_cutoff: float = 10.0
     taper_width: float = 1.0
 
+    # --- which model ----------------------------------------------------------------------
+    #: "film": the converged coupled solve (PCG + adjoint). "nonvariational": the fixed-K
+    #: unrolled solve with learned mutual damping of ``docs/fff_nonvariational.md``; the
+    #: ``cg_*`` settings are then unused except by ``rsfff.ff.nonvariational.diagnose``.
+    model: str = "film"
+    #: nonvariational: K mutual-induction iterations after the exact fragment solve.
+    n_iter: int = 3
+    #: nonvariational: learn the global OPT-style weights c_2..c_K on the corrections.
+    iterate_weights: bool = True
+    #: nonvariational: the induced-density width head b_ind = b exp(-s) ("broaden": s >= 0).
+    induced_width: bool = True
+    induced_width_mode: str = "broaden"
+    induced_width_bias_init: float = -3.0
+    #: nonvariational: isotropic quadrupole polarizability (induced quadrupoles).
+    induced_quadrupoles: bool = True
+    cquad_init: float = 1.0
+    cquad_floor: float = 1.0e-4
+    #: nonvariational: log the physical residual at x_K (one extra matvec per step).
+    solve_residual: bool = False
+
     # --- induction ---------------------------------------------------------------------------
     induction: bool = True
     cg_rtol: float = 1.0e-9

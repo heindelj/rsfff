@@ -86,6 +86,10 @@ class FilmParameters:
         }
         if self.response.alpha is not None:
             out["alpha"] = (self.response.alpha - self.response0.alpha).flatten(1).norm(dim=-1)
+        if self.response.s_ind is not None:
+            out["b_ind"] = self.response.s_ind.abs()          # |log b_ind - log b|
+        if self.response.cquad is not None:
+            out["cquad"] = _log_shift(self.response.cquad, self.response0.cquad)
         if self.pauli[2] is not None:
             out["pauli_mu"] = (self.pauli[2] - self.pauli0[2]).norm(dim=-1)
         if self.pauli[3] is not None:
@@ -207,7 +211,7 @@ class ConditionedParameterNetwork(nn.Module):
         )
 
         response = self.response_heads(
-            z_joined["response"], pf.x_in, species_idx, positions, bond_index
+            z_joined["response"], pf.x_in, species_idx, positions, bond_index, gate=gate
         )
         response0 = self.response_heads(
             z_iso["response"], pf.x_in, species_idx, positions, bond_index

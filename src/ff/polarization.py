@@ -83,6 +83,9 @@ class LevelOutput:
     n_iter: int
     converged: torch.Tensor            # (M,) bool
     pd_fail: torch.Tensor              # (M,) bool
+    #: Unrolled solve only: per-frame ``max |A x + b|`` of the physical operator at the
+    #: reported state, when asked for (:func:`unrolled_response` ``with_residual``).
+    residual: torch.Tensor | None = None
 
 
 def build_coupled_system(
@@ -224,4 +227,77 @@ def coupled_response(
     )
 
 
-__all__ = ["LevelOutput", "build_coupled_system", "coupled_response"]
+def unrolled_response(
+    rp: ResponseParameters,
+    *,
+    positions: torch.Tensor,
+    batch_idx: torch.Tensor,
+    n_systems: int,
+    bond_index: torch.Tensor,
+    bond_batch: torch.Tensor,
+    pair_index: torch.Tensor,
+    gate: torch.Tensor,
+    max_rank: int = 1,
+    n_iter: int = 3,
+    iterate_weights: torch.Tensor | None = None,
+    b_ind: torch.Tensor | None = None,
+    fragment_idx: torch.Tensor | None = None,
+    n_fragments: int | None = None,
+    differentiable: bool = False,
+    with_residual: bool = False,
+) -> LevelOutput:
+    """The non-variational level: ``n_iter`` unrolled iterations, then the physical functional.
+
+    Same functional, same pair kernel and same reporting as :func:`coupled_response`; the only
+    difference is where the state comes from -- :func:`rsfff.ff.unrolled_solve.unrolled_solve`
+    with the induced widths ``b_ind`` in the mutual operator (``None``: the physical ``b``, the
+    plain truncated series) -- and that nothing here is stationary: the energy reads the state
+    through the full graph, so autograd through the loop *is* the force. ``converged`` is all
+    true and ``pd_fail`` all false by construction; ``n_iter`` reports ``K`` so the training
+    metrics keep their meaning. See ``docs/fff_nonvariational.md``.
+    """
+    from .unrolled_solve import build_mutual_operator, unrolled_solve
+
+    sys, tensors = build_coupled_system(
+        rp, positions=positions, batch_idx=batch_idx, n_systems=n_systems,
+        bond_index=bond_index, bond_batch=bond_batch, pair_index=pair_index,
+        gate=gate, max_rank=max_rank,
+    )
+    mutual = build_mutual_operator(sys, b_ind=b_ind, positions=positions, gate=gate)
+    group, n_groups = (fragment_idx, n_fragments) if fragment_idx is not None else (None, None)
+    state, info = unrolled_solve(
+        sys, mutual, n_iter=n_iter, iterate_weights=iterate_weights,
+        group=group, n_groups=n_groups, differentiable=differentiable,
+        with_residual=with_residual,
+    )
+
+    q, mu, theta = multipoles_from_state(sys, state)
+    mu = mu if mu.numel() else None
+    theta = theta if theta.numel() else None
+    energy_internal = coupled_energy(sys, state)
+
+    quad_c = None if theta is None else spherical_to_cartesian_quadrupole(theta)
+    m_real = build_polytensor(q, mu, quad_c, max_rank=max_rank)
+    m_nuc = build_polytensor(rp.z, None, None, max_rank=max_rank)
+    e_pair = backend_slater_elec_pair_energy(
+        positions, pair_index, rp.b, gate, m_real, m_nuc, tensors=tensors
+    )
+    pair_batch = batch_idx[pair_index[0]]
+    energy = energy_internal + e_pair.new_zeros(n_systems).index_add(0, pair_batch, e_pair)
+
+    ok = torch.ones(n_systems, dtype=torch.bool, device=positions.device)
+    return LevelOutput(
+        charges=q,
+        mu=mu,
+        quad_s=theta,
+        energy_internal=energy_internal,
+        e_pair=e_pair,
+        energy=energy,
+        n_iter=int(n_iter),
+        converged=ok,
+        pd_fail=~ok,
+        residual=info.residual,
+    )
+
+
+__all__ = ["LevelOutput", "build_coupled_system", "coupled_response", "unrolled_response"]
