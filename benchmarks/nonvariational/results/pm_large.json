@@ -1,0 +1,102 @@
+{
+ "args": {
+  "film_checkpoint": "/global/cfs/cdirs/m3196/heindelj/software/rsfff/rsfff_active_learning/committees/film_committee_100k_excl/member_00/member_00_full/best.pt",
+  "nv_checkpoint": "/global/cfs/cdirs/m3196/heindelj/software/rsfff/checkpoints/water_nonvariational_full/best.pt",
+  "waters": [
+   512,
+   1000
+  ],
+  "structures": null,
+  "n_iter": [
+   3
+  ],
+  "backends": [
+   "torchff"
+  ],
+  "device": "cuda",
+  "frames": 1,
+  "repeats": 3,
+  "accuracy": false,
+  "skip_train_step": false,
+  "cg_rtol": 1e-09,
+  "cg_atol": 1e-12,
+  "cg_maxiter": 100,
+  "cg_check_every": 4,
+  "out": "/global/cfs/cdirs/m3196/heindelj/software/rsfff/benchmarks/nonvariational/results",
+  "tag": "pm_large",
+  "no_plot": false
+ },
+ "trained_k": 3,
+ "host": "nid003565",
+ "torch": "2.14.0+cu130",
+ "rows": [
+  {
+   "label": "film (PCG)",
+   "backend": "torchff",
+   "n_waters": 512,
+   "n_atoms": 1536,
+   "frames": 1,
+   "energy_ms": 88.30183604732156,
+   "forces_ms": 145.93022607732564,
+   "train_ms": 256.82075100485235,
+   "train_peak_mb": 4028.04248046875,
+   "cg_iter": 20.0,
+   "residual": NaN,
+   "gap_kj": NaN,
+   "gap_rel": NaN,
+   "force_rms_diff": NaN,
+   "extra": {}
+  },
+  {
+   "label": "nonvariational K=3",
+   "backend": "torchff",
+   "n_waters": 512,
+   "n_atoms": 1536,
+   "frames": 1,
+   "energy_ms": 46.006151009351015,
+   "forces_ms": 117.31668398715556,
+   "train_ms": 431.5198900876567,
+   "train_peak_mb": 4058.841796875,
+   "cg_iter": 3.0,
+   "residual": 0.05768952550737489,
+   "gap_kj": NaN,
+   "gap_rel": NaN,
+   "force_rms_diff": NaN,
+   "extra": {}
+  },
+  {
+   "label": "film (PCG)",
+   "backend": "torchff",
+   "n_waters": 1000,
+   "n_atoms": 3000,
+   "frames": 1,
+   "energy_ms": 153.60582200810313,
+   "forces_ms": 261.6324790287763,
+   "train_ms": 422.9699829593301,
+   "train_peak_mb": 16244.240234375,
+   "cg_iter": 28.0,
+   "residual": NaN,
+   "gap_kj": NaN,
+   "gap_rel": NaN,
+   "force_rms_diff": NaN,
+   "extra": {}
+  },
+  {
+   "label": "nonvariational K=3",
+   "backend": "torchff",
+   "n_waters": 1000,
+   "n_atoms": 3000,
+   "frames": 1,
+   "energy_ms": 75.81144792493433,
+   "forces_ms": 194.519322947599,
+   "train_ms": 791.7713799979538,
+   "train_peak_mb": 16278.73291015625,
+   "cg_iter": 3.0,
+   "residual": 0.22593039166835563,
+   "gap_kj": NaN,
+   "gap_rel": NaN,
+   "force_rms_diff": NaN,
+   "extra": {}
+  }
+ ]
+}
