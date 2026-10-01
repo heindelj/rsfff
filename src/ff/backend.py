@@ -137,7 +137,7 @@ def slater_elec_field(
     m: torch.Tensor,               # (N, K) polytensor, a.u.
     m_nuc: torch.Tensor,           # (N, K) nuclear point charges
     *,
-    reference: bool = False,       # pure-torch reference formulas (differentiable to any order)
+    reference: bool = False,       # the call will be differentiated twice (see below)
 ) -> torch.Tensor:
     """``d/dm`` of the gated point + penetration energy: ``(N, K)``, the coupled-solve matvec.
 
@@ -147,17 +147,24 @@ def slater_elec_field(
     nothing of size ``P x K x K`` is ever materialised; its backward is the exact VJP with
     respect to positions, ``b``, ``gate``, ``m`` and ``m_nuc`` (first order), which is all the
     adjoint of :class:`rsfff.ff.coupled_solve._CoupledSolve` asks of it *inside the CG loop*.
-    The adjoint's one recorded residual VJP under a force loss needs a second derivative, which
-    the kernel does not have yet; ``reference=True`` returns torchff's pure-torch reference
-    field for that call (same formulas, ordinary autograd, ``(P, K, K)`` tensors materialised).
+    The adjoint's one recorded residual VJP under a force loss -- and every iteration of the
+    non-variational model's unrolled loop in training -- needs a second derivative.
+    ``reference=True`` says so: with a torchff build that has ``slater_elec_field_hvp`` the
+    kernel path provides it (``torchff.slaterelec.FIELD_DOUBLE_BACKWARD``); otherwise the
+    call evaluates torchff's pure-torch reference field (same formulas, ordinary autograd,
+    ``(P, K, K)`` tensors materialised).
     """
     if not HAVE_TORCHFF:
         raise RuntimeError("slater_elec_field needs torchff")
     from torchff import slaterelec
 
+    # `reference` asks for a second derivative. A torchff build with `slater_elec_field_hvp`
+    # gives it on the kernel path (`FIELD_DOUBLE_BACKWARD`); an older build falls back to the
+    # pure-torch field for that call only.
+    needs_ref = reference and not getattr(slaterelec, "FIELD_DOUBLE_BACKWARD", False)
     return slaterelec.slater_elec_field(
         positions_ang / BOHR_ANG, pair_index.t(), b, gate, m, m_nuc,
-        use_customized_ops=False if reference else None,
+        use_customized_ops=False if needs_ref else None,
     )
 
 
