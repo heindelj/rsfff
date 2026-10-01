@@ -72,7 +72,7 @@ from ..pairs import intra_fragment_channels, union_channels, union_pairs
 from ..polarization import LevelOutput, coupled_response
 from ..response import ResponseParameters, fragment_polarizability
 from ..units import BOHR_ANG
-from .bonded import BondedTopology
+from .bonded import BondedTopology, improper_energy
 from .network import ConditionedParameterNetwork, FilmParameters
 from .projector import FragmentProjector
 from .state import StateDescriptor
@@ -479,6 +479,10 @@ class FilmModel(nn.Module):
             .index_add_(0, topo.bond_frag, e_bond0)
             .index_add_(0, topo.angle_frag, e_angle0)
         )
+        # Out-of-plane impropers (degree-3 centers; only with `film.impropers: true`).
+        e_imp0 = improper_energy(positions, topo, params.bonded0)
+        if e_imp0 is not None:
+            energy_bonded = energy_bonded.index_add(0, topo.improper_frag, e_imp0)
 
         # --- fragment energies ------------------------------------------------------------
         # Intra classical pairs at theta_0. `pair_frag` is only valid where `is_intra`; a
@@ -524,6 +528,11 @@ class FilmModel(nn.Module):
                 .index_add_(0, topo.bond_frag, e_bond_env)
                 .index_add_(0, topo.angle_frag, e_angle_env)
             )
+            e_imp_env = improper_energy(positions, topo, params.bonded)
+            if e_imp_env is not None:
+                energy_bonded_env = energy_bonded_env.index_add(
+                    0, topo.improper_frag, e_imp_env
+                )
             d_bond = energy_bonded_env - energy_bonded
             interaction["induction"] = (
                 (level_ind.energy - e0_ref)

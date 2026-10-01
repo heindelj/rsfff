@@ -78,6 +78,13 @@ from .units import BOHR_ANG
 DEFAULT_PAULI_PRIOR: dict[int, tuple[float, float]] = {
     8: (6.50923, 2.1975),      # O
     1: (0.527804, 1.96474),    # H
+    # Na+/Cl-: CMM ion model (pyCMM/scripts/ion_water_refit.xml).
+    11: (5.50609, 2.79055),    # Na+
+    17: (6.05800, 1.45325),    # Cl-
+    # N/F: no CMM values. q scaled from O by valence-electron count, b by the molecular-IP
+    # decay exponent (as for DEFAULT_ELEC_PRIOR). Starting points, learnable.
+    7: (5.42, 1.97),           # N
+    9: (7.59, 2.48),           # F
 }
 
 #: Per-element Pauli dipole magnitude scale in e*bohr, used only to set the output scale of

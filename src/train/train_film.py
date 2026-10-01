@@ -80,7 +80,7 @@ _LOG_KEYS = (
     "bonded", "bond_var", "q_res",
     "r0_elst", "r0_pauli", "r0_disp",
     "env_norm", "env_c6", "env_eta", "env_bond_d", "env_bond_r_eq",
-    "env_alpha", "env_b_ind", "env_cquad",
+    "env_alpha", "env_b_ind", "env_cquad", "env_improper_c", "env_improper_k",
     "cg_ind", "cg_fail", "ind_res",
     "lg_elst_mae", "lg_pauli_mae", "lg_disp_mae", "lg_ind_mae", "lg_e_tot_mae",
     "lg_ob_mae", "lg_f_clu", "lg_cg_fail",

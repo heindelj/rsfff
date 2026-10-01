@@ -1,0 +1,165 @@
+# The film model (variational: converged coupled solve) on sodium chloride clusters.
+#
+#   python -m rsfff.train.train_film configs/nacl_film.yaml
+#
+# Every ion is its own monatomic fragment (Na+: charge +1, Cl-: charge -1, both singlets), so
+# there are no bonded terms and no exclusions: the whole energy is elst / Pauli / dispersion /
+# induction between ions, with the permanent charges pinned to the formal +-1 by the exact
+# charge projection and the ions' polarizabilities and Pauli/dispersion parameters generated
+# by the network. Priors are the CMM ion model's (pyCMM/scripts/ion_water_refit.xml).
+#
+# Two things differ from the molecular systems:
+#
+#   reference energies   a lone ion's fragment energy is E0[Z] and nothing else -- there is no
+#                        bonded term to absorb an offset -- so the "atomic" references here are
+#                        the isolated *ion* energies, taken from the EDA's own fragment
+#                        energies:
+#                          python scripts/ion_references.py data/nacl_wb97mv_tzvpd/*.xyz \
+#                              --out data/nacl_wb97mv_tzvpd/ion_references_wb97mv_tzvpd.json
+#                        (a pyscf atom would leave a permanent per-ion error that the
+#                        total-energy loss pushes into the interaction channels).
+#   elst_cutoff: 50      the charge-charge tail is 1/r: at 12 A a +-1 pair still carries
+#                        ~28 kcal/mol, so the water taper would truncate real energy. 50 A
+#                        leaves gas-phase clusters untruncated; periodic NaCl needs Ewald/PME.
+#
+# The isolated stage has nothing to fit on the fragment stream (a lone ion's label equals its
+# reference); it still trains the ion polarizabilities on the monomer anchors and the
+# non-induction channels, so it is kept short.
+#
+# Everything else is film_committee_100k_excl's recipe (rsfff_active_learning/train/
+# water_film_excl_al.yaml): ~100k parameters, hard 1-2/1-3 exclusions, same loss weights and
+# isolated -> full stages. Element priors for the new species live in the code tables
+# (rsfff.ff.response / pauli / dispersion / film.bonded) with their provenance; all are
+# learnable starting points.
+#
+# Data layout (the water conventions -- ALMO-EDA extxyz with fragment_idx, eda_cls_elec /
+# eda_mod_pauli / eda_disp / eda_pol / eda_ct, fragment_energies / _dipoles /
+# _second_moments, fragment_charges / _multiplicities, forces; the monomer file adds
+# polarizability). The paths below are placeholders for files that do not exist yet; for
+# rsfff_active_learning/train/train_committee.py, data.path may instead be a glob.
+#
+# Monomer anchors: one isolated-ion frame each (energy, polarizability; dipole/quadrupole
+# zero by symmetry).
+
+run_name: nacl_film
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/nacl_wb97mv_tzvpd/nacl_1_wb97mv_tzvpd.xyz
+    - data/nacl_wb97mv_tzvpd/nacl_2_wb97mv_tzvpd.xyz
+    - data/nacl_wb97mv_tzvpd/nacl_3_wb97mv_tzvpd.xyz
+    - data/nacl_wb97mv_tzvpd/nacl_4_wb97mv_tzvpd.xyz
+  reference_energies: data/nacl_wb97mv_tzvpd/ion_references_wb97mv_tzvpd.json
+  monomer_path:
+    - data/nacl_wb97mv_tzvpd/na+_wb97mv_tzvpd_pol.xyz
+    - data/nacl_wb97mv_tzvpd/cl-_wb97mv_tzvpd_pol.xyz
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]
+  backend: e3nn
+  density_channels: 8
+
+film:
+  # --- the strictly non-reactive film: hard exclusions, no range heads --------------------
+  nonbonded: exclusions
+  exclude_through: 3
+
+  # --- film_committee_100k_excl's architecture (~100k parameters) -------------------------
+  conditioning_mode: film
+  cross_lambdas: [0]
+  block_dim: 32
+  hidden: 48
+  depth: 2
+  film_hidden: 16
+  film_depth: 1
+  gate_a0: 0.5
+  max_rank: 2
+  fragment_state_dim: 4
+  emb_dim: 16
+  head_hidden: 24
+  head_depth: 1
+  equiv_channels: 16
+  bonded_hidden: 24
+  bonded_depth: 1
+  eta_init: 0.5
+  eta_floor: 0.05
+  s_init: 0.5
+  disp_b_prior: per_element
+
+  # --- classical reach -----------------------------------------------------------------------
+  elst_cutoff: 50.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+
+  induction: true
+  cg_rtol: 1.0e-9
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+
+  # --- loss: as film_committee_100k_excl -----------------------------------------------------
+  energy_scale: 3.8093e-4
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  induction_weight: 30.0
+  total_energy_weight: 5.0
+  force_weight: 1.0
+  force_scale: 1.0e-3
+  force_every: 2
+  fragment_weight: 10.0
+  fragment_batch_size: 128
+  anchor_weight: 10.0
+  anchor_batch_size: 32
+  anchor_force_every: 5
+  env_penalty_weight: 0.0
+  bonded_variance_weight: 1.0e-2
+
+elec:
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
+
+onebody:
+  energy_scale: 3.8093e-4
+  force_weight: 1.0
+  force_scale: 1.0e-3
+
+train:
+  epochs: 80
+  init_from: ""
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 128
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 5
+  seed: 0
+
+stages:
+  - name: isolated
+    train:
+      epochs: 5
+      lr_schedule: none
+    film:
+      induction: false
+      force_weight: 0.0
+      fragment_weight: 30.0
+
+  - name: full
+    train:
+      epochs: 80
+    film:
+      induction: true

@@ -1034,6 +1034,10 @@ class FilmConfig:
     bonded_hidden: int = 64
     bonded_depth: int = 1
     bonded_emb_dim: int = 8
+    #: Out-of-plane (Wilson-angle) impropers on every atom of bond-degree 3 -- the umbrella
+    #: mode of NH3 / H3O+ (:mod:`rsfff.ff.film.bonded`). Off by default so existing
+    #: checkpoints keep their exact parameter set; inert for water (no degree-3 centers).
+    impropers: bool = False
     #: Reserved hook (decision: strict physical form). Setting it raises in the builder.
     bonded_nn_residual: bool = False
     eta_init: float = 0.5

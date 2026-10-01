@@ -103,6 +103,7 @@ def build_film_model(
         hidden=int(_get(film_cfg, "bonded_hidden", 64)),
         depth=int(_get(film_cfg, "bonded_depth", 1)),
         emb_dim=int(_get(film_cfg, "bonded_emb_dim", 8)),
+        impropers=bool(_get(film_cfg, "impropers", False)),
     )
 
     # `film.model`: "film" (converged coupled solve) or "nonvariational" (fixed-K unrolled

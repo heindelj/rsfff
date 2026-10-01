@@ -61,6 +61,15 @@ from .units import BOHR_ANG
 DEFAULT_C6_PRIOR: dict[int, tuple[float, float]] = {
     8: (40.0, 1.84302),   # O
     1: (1.0, 1.30993),    # H
+    # Na+/Cl-: CMM ion model (pyCMM/scripts/ion_water_refit.xml).
+    11: (5.49726, 1.98292),   # Na+
+    17: (661.778, 1.07027),   # Cl-
+    # N/F: the same convention as O/H. With H fixed at 1, the O/H priors give a water
+    # molecular C6 (sum sqrt C6_i)^2 of 69 au against the experimental 45 (x1.53); N and F
+    # are set so NH3 (89 au) and HF (19 au) carry the same x1.53. b scaled from O by the
+    # molecular-IP decay exponent. Starting points, learnable.
+    7: (75.3, 1.65),      # N
+    9: (19.3, 2.08),      # F
 }
 
 #: Damping-exponent prior in bohr^-1, applied uniformly across elements.

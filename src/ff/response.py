@@ -61,6 +61,15 @@ from .units import BOHR_ANG
 DEFAULT_ELEC_PRIOR: dict[int, tuple[float, float]] = {
     8: (3.61565, 2.13358),   # O
     1: (0.93619, 2.33322),   # H
+    # Na+/Cl-: the CMM ion model (pyCMM/scripts/ion_water_refit.xml, na+/cl-). Cl-'s fitted
+    # Z_cp sits at the full nuclear charge (17); kept as fitted.
+    11: (2.14133, 2.16955),  # Na+
+    17: (17.0, 1.93144),     # Cl-
+    # N (NH3) and F (HF) have no fitted CMM values. Z_cp is scaled from O by valence-electron
+    # count (O: 3.616 for 6 -> ~0.6 per electron), b from O by the molecular-IP decay
+    # exponent 2 sqrt(2 IP) (H2O 12.6, NH3 10.1, HF 16.0 eV). Starting points, learnable.
+    7: (3.0, 1.91),          # N
+    9: (4.2, 2.41),          # F
 }
 
 #: Per-element **baseline** charges ``q0``, from the same water model's permanent monopoles.
@@ -78,7 +87,15 @@ DEFAULT_ELEC_PRIOR: dict[int, tuple[float, float]] = {
 #: Starting from a physical baseline puts the optimizer on the right side of that saddle.
 #: This is what SQE's ``q0`` is *for* -- it is the diabatic baseline, and ``MonomerModel``
 #: uses ``ReferenceEmbedding.baseline_charge`` the same way.
-DEFAULT_Q0_PRIOR: dict[int, float] = {8: -0.390896, 1: 0.195448}
+DEFAULT_Q0_PRIOR: dict[int, float] = {
+    8: -0.390896, 1: 0.195448,
+    11: 1.0, 17: -1.0,
+    # The point-charge dipole charges of NH3 (1.47 D) and HF (1.82 D) scaled by the same
+    # 0.59 that maps water's point-charge q_H (0.33) onto CMM's (0.195) -- the rest of the
+    # dipole lives in the atomic dipoles. Only the sign really matters (see above); the exact
+    # charge projection restores fragment neutrality whatever H's table value is.
+    7: -0.474, 9: -0.244,
+}
 
 
 def build_elec_priors(

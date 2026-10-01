@@ -84,6 +84,9 @@ class FilmParameters:
             "c6": _log_shift(self.disp[0], self.disp0[0]),
             "b_disp": _log_shift(self.disp[1], self.disp0[1]),
         }
+        if self.bonded.c_chi is not None and self.bonded.c_chi.numel():
+            out["improper_c"] = (self.bonded.c_chi - self.bonded0.c_chi).abs()
+            out["improper_k"] = _log_shift(self.bonded.k_chi, self.bonded0.k_chi)
         if self.response.alpha is not None:
             out["alpha"] = (self.response.alpha - self.response0.alpha).flatten(1).norm(dim=-1)
         if self.response.s_ind is not None:
@@ -94,7 +97,9 @@ class FilmParameters:
             out["pauli_mu"] = (self.pauli[2] - self.pauli0[2]).norm(dim=-1)
         if self.pauli[3] is not None:
             out["pauli_quad"] = (self.pauli[3] - self.pauli0[3]).norm(dim=-1)
-        return out
+        # A batch with no bonds / angles (monatomic ions, HF) has empty bonded shifts, whose
+        # mean is NaN -- in the metrics and, with a nonzero env penalty, in the loss.
+        return {name: shift for name, shift in out.items() if shift.numel()}
 
 
 class ConditionedParameterNetwork(nn.Module):
