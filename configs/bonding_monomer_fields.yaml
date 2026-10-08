@@ -1,0 +1,118 @@
+# The monomer-bonded study (branch `bonding`, docs/fff_bonding.md): one model on the paper's
+# flexible set + ethene + HF/H2O/NH3/CH4 + OH-, OH., H3O+, NH4+, HPO4.- -- molecules whose
+# every atom pair is 1-2, 1-3 or 1-4.
+#
+#   python -m rsfff.train.train_bonding configs/bonding_monomer.yaml
+#
+# The four variants differ only in two flags (one config each, generated from this one):
+#
+#   bonding_monomer.yaml                 couplings: false  field_features: false   (A)
+#   bonding_monomer_coupled.yaml         couplings: true   field_features: false
+#   bonding_monomer_fields.yaml          couplings: false  field_features: true    (C)
+#   bonding_monomer_coupled_fields.yaml  couplings: true   field_features: true
+#
+# Everything else is held fixed so the comparison is the flags alone:
+#
+#   exclude_through: 4   1-2, 1-3 and 1-4 all excluded -> the monomer energy is E0 + bonded
+#   atom_typing: degree  (Z, covalent degree) prior tables: C=O vs C-O, sp2 vs sp3 C, ...
+#   torsions: true       Fourier torsions on every a-b-c-d (needed by every rotor)
+#   impropers: true      Wilson out-of-plane terms on degree-3 centers (NH3, H3O+, sp2 C)
+#
+# Data (placeholders until the ChemLab campaign has run): every frame carries `bonds`
+# (flat 0-based pairs), `fragment_idx` (all zeros), `fragment_charges` /
+# `fragment_multiplicities`, energy, forces, and where computed `dipole` (e*a0),
+# `fragment_second_moments`, `polarizability` (a0^3). Probe frames add `ext_charges`
+# (flat x, y, z [Ang], q [e]); uniform-field frames `ext_field` (a.u.).
+# Moments are compared as energy derivatives (FilmModel.response_properties).
+
+run_name: bonding_monomer_fields
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/monomer_bonded/vacuum_wb97mv_tzvpd.xyz
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  holdout_fraction: 0.1
+  seed: 0
+
+bonding:
+  probe_path:
+    - data/monomer_bonded/probe_wb97mv_tzvpd.xyz
+  probe_weight: 1.0
+  probe_batch_size: 32
+  energy_weight: 1.0
+  force_weight: 1.0
+  dipole_weight: 1.0
+  quadrupole_weight: 1.0
+  polarizability_weight: 1.0
+  energy_scale: 3.8093e-4      # Ha per atom (1 kJ/mol)
+  force_scale: 1.0e-3          # Ha/Ang
+  dipole_scale: 0.05           # e*bohr
+  quadrupole_scale: 0.2        # e*bohr^2
+  polarizability_scale: 0.5    # bohr^3
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]
+  backend: e3nn
+  density_channels: 8
+
+film:
+  nonbonded: exclusions
+  exclude_through: 4
+  impropers: true
+  atom_typing: degree
+  torsions: true
+  couplings: false
+  torsion_nmax: 4
+  field_features: true
+  field_ranks: [0, 1, 2]
+
+  conditioning_mode: film
+  cross_lambdas: [0]
+  block_dim: 32
+  hidden: 48
+  depth: 2
+  film_hidden: 16
+  film_depth: 1
+  gate_a0: 0.5
+  max_rank: 2
+  fragment_state_dim: 4
+  emb_dim: 16
+  head_hidden: 24
+  head_depth: 1
+  equiv_channels: 16
+  bonded_hidden: 24
+  bonded_depth: 1
+  term_hidden: 24
+  term_depth: 1
+  eta_init: 0.5
+  eta_floor: 0.05
+  s_init: 0.5
+  disp_b_prior: per_element
+
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+
+  induction: true
+  cg_rtol: 1.0e-9
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+
+train:
+  epochs: 200
+  init_from: ""
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 64
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 5
+  seed: 0

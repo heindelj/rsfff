@@ -119,6 +119,12 @@ class Batch:
     #: (:func:`split_indices_grouped`) and the applicability term softmaxes within one.
     #: ``None`` for data where every frame is its own geometry.
     group_id: torch.Tensor | None = None
+    #: (2, Nc) long, the **covalent** graph in global atom indices (``bonds`` in the extxyz):
+    #: what the bonded terms are enumerated from. ``None`` = the legacy rule (every
+    #: intra-fragment non-H-H pair), valid only for single-heavy-atom fragments.
+    covalent_bonds: torch.Tensor | None = None
+    #: :class:`rsfff.ff.external.ExternalSources` (probe charges / uniform fields), or None.
+    external: object | None = None
 
     def to(self, device) -> "Batch":
         opt = lambda t: t.to(device) if t is not None else None  # noqa: E731
@@ -149,6 +155,8 @@ class Batch:
             bond_index=opt(self.bond_index),
             bond_batch=opt(self.bond_batch),
             group_id=opt(self.group_id),
+            covalent_bonds=opt(self.covalent_bonds),
+            external=None if self.external is None else self.external.to(device),
         )
 
 
@@ -183,6 +191,11 @@ class MoleculeDataset:
         bond_index: torch.Tensor | None = None,          # (2, Nbond_all) frame-local
         bond_counts: torch.Tensor | None = None,         # (n_frames,) channels per frame
         group_id: torch.Tensor | None = None,            # (n_frames,) geometry id
+        covalent_bonds: torch.Tensor | None = None,      # (2, Nc_all) frame-local
+        covalent_counts: torch.Tensor | None = None,     # (n_frames,) bonds per frame
+        ext_charges: torch.Tensor | None = None,         # (M_all, 4) x, y, z [Ang], q [e]
+        ext_counts: torch.Tensor | None = None,          # (n_frames,) probes per frame
+        ext_field: torch.Tensor | None = None,           # (n_frames, 3) a.u.
     ) -> None:
         self._pos = positions
         self._num = atomic_numbers.long()
@@ -212,6 +225,21 @@ class MoleculeDataset:
         self._bond_index = bond_index
         self._bond_counts = bond_counts.long() if bond_counts is not None else None
         self._group_id = group_id.long() if group_id is not None else None
+        # Covalent graph and external sources: frame-local, re-offset in flat_batch like the
+        # channel graph. All-or-nothing per dataset, like every other optional field.
+        self._covalent_bonds = covalent_bonds
+        self._covalent_counts = covalent_counts.long() if covalent_counts is not None else None
+        if self._covalent_counts is not None:
+            self._covalent_offsets = torch.cat(
+                (torch.zeros(1, dtype=torch.long), torch.cumsum(self._covalent_counts, 0))
+            )
+        self._ext_charges = ext_charges
+        self._ext_counts = ext_counts.long() if ext_counts is not None else None
+        if self._ext_counts is not None:
+            self._ext_offsets = torch.cat(
+                (torch.zeros(1, dtype=torch.long), torch.cumsum(self._ext_counts, 0))
+            )
+        self._ext_field = ext_field
         if self._fragment_counts is not None:
             self._frag_offsets = torch.cat(
                 (torch.zeros(1, dtype=torch.long), torch.cumsum(self._fragment_counts, 0))
@@ -315,7 +343,36 @@ class MoleculeDataset:
                 bond_batch=torch.repeat_interleave(torch.arange(idx.shape[0]), bond_counts),
             )
 
+        extra: dict = {}
+        if self._covalent_counts is not None:
+            c_counts = self._covalent_counts[idx]
+            c_rows = torch.cat(
+                [torch.arange(self._covalent_offsets[i], self._covalent_offsets[i + 1])
+                 for i in idx.tolist()]
+            ) if idx.numel() else torch.empty(0, dtype=torch.long)
+            extra["covalent_bonds"] = (
+                self._covalent_bonds[:, c_rows] + torch.repeat_interleave(atom_offsets, c_counts)
+            )
+        if self._ext_counts is not None or self._ext_field is not None:
+            from ..ff.external import ExternalSources
+
+            ext = ExternalSources()
+            if self._ext_counts is not None:
+                e_counts = self._ext_counts[idx]
+                e_rows = torch.cat(
+                    [torch.arange(self._ext_offsets[i], self._ext_offsets[i + 1])
+                     for i in idx.tolist()]
+                ) if idx.numel() else torch.empty(0, dtype=torch.long)
+                q = self._ext_charges[e_rows]
+                ext.charge_positions = q[:, :3].clone()
+                ext.charges = q[:, 3].clone()
+                ext.charge_batch = torch.repeat_interleave(torch.arange(idx.shape[0]), e_counts)
+            if self._ext_field is not None:
+                ext.field = self._ext_field[idx].clone()
+            extra["external"] = ext
+
         return Batch(
+            **extra,
             positions=self._pos[rows].clone(),
             atomic_numbers=self._num[rows],
             batch_idx=batch_idx,
@@ -417,6 +474,27 @@ def fragment_view(dataset: MoleculeDataset, indices=None) -> MoleculeDataset:
 
     n_frag = int(frag_keep.shape[0])
     pick = lambda x: None if x is None else x[frag_keep].clone()  # noqa: E731
+    covalent: dict = {}
+    if dataset._covalent_counts is not None:
+        # frame-local bonds -> global atom rows -> rows of the exploded dataset -> local to
+        # the fragment-frame of their first atom (bonds never cross fragments)
+        frame_of_bond = torch.repeat_interleave(torch.arange(len(dataset)), dataset._covalent_counts)
+        gb = dataset._covalent_bonds + dataset._offsets[frame_of_bond]
+        new_pos = torch.full((dataset._pos.shape[0],), -1, dtype=torch.long)
+        new_pos[order] = torch.arange(order.shape[0])
+        nb = new_pos[gb]
+        ok = (nb >= 0).all(0)
+        nb = nb[:, ok]
+        new_offsets = torch.cumsum(counts, 0) - counts
+        new_frame = torch.bucketize(nb[0], new_offsets, right=True) - 1
+        same = (torch.bucketize(nb[1], new_offsets, right=True) - 1) == new_frame
+        nb, new_frame = nb[:, same], new_frame[same]
+        sort = torch.argsort(new_frame, stable=True)
+        nb, new_frame = nb[:, sort], new_frame[sort]
+        covalent = dict(
+            covalent_bonds=nb - new_offsets[new_frame],
+            covalent_counts=torch.bincount(new_frame, minlength=n_frag),
+        )
     energy = dataset._fragment_energy[frag_keep].clone()
     return MoleculeDataset(
         positions=dataset._pos[order].clone(),
@@ -437,6 +515,7 @@ def fragment_view(dataset: MoleculeDataset, indices=None) -> MoleculeDataset:
         fragment_dipole=pick(dataset._fragment_dipole),
         fragment_second_moment=pick(dataset._fragment_second_moment),
         fragment_counts=torch.ones(n_frag, dtype=torch.long),
+        **covalent,
     )
 
 
@@ -632,8 +711,15 @@ def load_extxyz(
     frag_idx_list, frag_q_list, frag_s_list, frag_counts = [], [], [], []
     frag_e_list, frag_dip_list, frag_m2_list = [], [], []
     bond_list, bond_counts = [], []
+    cov_list, cov_counts, ext_list, ext_counts, ext_field_list = [], [], [], [], []
     for atoms in iread(str(path), index=":"):
+        # track the reorder of _select_fragmentation / _sort_by_fragment so that the
+        # covalent graph (given in the file's atom order) can follow the atoms
+        atoms.arrays["_orig_index"] = np.arange(len(atoms))
         _select_fragmentation(atoms, fragmentation, path)
+        orig = np.asarray(atoms.arrays.pop("_orig_index"))
+        new_of_orig = np.empty_like(orig)
+        new_of_orig[orig] = np.arange(orig.shape[0])
         n = len(atoms)
         pos_list.append(np.asarray(atoms.get_positions(), dtype=np.float64))
         num_list.append(np.asarray(atoms.numbers, dtype=np.int64))
@@ -645,6 +731,16 @@ def load_extxyz(
         counts.append(n)
 
         info = atoms.info
+        if "bonds" in info:   # flat 0-based atom pairs, the file's original atom order
+            pairs = np.asarray(info["bonds"], dtype=np.int64).reshape(-1, 2)
+            cov_list.append(new_of_orig[pairs].T)
+            cov_counts.append(pairs.shape[0])
+        if "ext_charges" in info:   # flat (x, y, z [Ang], q [e]) per probe charge
+            probes = np.asarray(info["ext_charges"], dtype=np.float64).reshape(-1, 4)
+            ext_list.append(probes)
+            ext_counts.append(probes.shape[0])
+        if "ext_field" in info:     # uniform field, a.u.
+            ext_field_list.append(np.asarray(info["ext_field"], dtype=np.float64).reshape(3))
         charge_list.append(float(info.get("charge", 0.0)))
         for key, value in info.items():
             if key.startswith("eda_"):
@@ -722,6 +818,22 @@ def load_extxyz(
             )
 
     n_frames = len(counts)
+    for name, lst in (("bonds", cov_counts), ("ext_charges", ext_counts),
+                      ("ext_field", ext_field_list)):
+        if len(lst) not in (0, n_frames):
+            raise ValueError(f"{path}: `{name}` present on {len(lst)} of {n_frames} frames; "
+                             f"it must be all-or-nothing")
+    if not cov_counts and frag_idx_list:
+        # the legacy topology rule bonds every intra-fragment non-H-H pair; refuse a fragment
+        # where that is wrong rather than silently bond ethane's H's to the far carbon
+        for fi, z in zip(frag_idx_list, num_list):
+            heavy = np.bincount(fi[z > 1], minlength=int(fi.max()) + 1 if fi.size else 0)
+            if heavy.size and heavy.max() > 1:
+                raise ValueError(
+                    f"{path}: a fragment has {int(heavy.max())} heavy atoms but the file has no "
+                    f"`bonds` header; multi-heavy-atom fragments need the explicit covalent graph"
+                )
+
     if len(dip_list) not in (0, n_frames) or len(pol_list) not in (0, n_frames) or len(
         dmu_list
     ) not in (0, n_frames):
@@ -776,6 +888,19 @@ def load_extxyz(
             bond_index=torch.tensor(np.concatenate(bond_list, axis=1), dtype=torch.long),
             bond_counts=torch.tensor(bond_counts, dtype=torch.long),
         )
+
+    if cov_counts:
+        partition.update(
+            covalent_bonds=torch.tensor(np.concatenate(cov_list, axis=1), dtype=torch.long),
+            covalent_counts=torch.tensor(cov_counts, dtype=torch.long),
+        )
+    if ext_counts:
+        partition.update(
+            ext_charges=torch.tensor(np.concatenate(ext_list), dtype=dtype),
+            ext_counts=torch.tensor(ext_counts, dtype=torch.long),
+        )
+    if ext_field_list:
+        partition["ext_field"] = torch.tensor(np.stack(ext_field_list), dtype=dtype)
 
     return MoleculeDataset(
         positions, atomic_numbers, forces, energy, counts_t,
@@ -851,6 +976,11 @@ def concatenate_datasets(datasets: "list[MoleculeDataset]") -> MoleculeDataset:
         bond_index=_cat_optional("_bond_index", dim=1),
         bond_counts=_cat_optional("_bond_counts"),
         group_id=_cat_optional("_group_id"),
+        covalent_bonds=_cat_optional("_covalent_bonds", dim=1),
+        covalent_counts=_cat_optional("_covalent_counts"),
+        ext_charges=_cat_optional("_ext_charges"),
+        ext_counts=_cat_optional("_ext_counts"),
+        ext_field=_cat_optional("_ext_field"),
     )
 
 

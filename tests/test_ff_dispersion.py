@@ -403,7 +403,7 @@ def test_parameters_start_at_the_prior(w2_dataset):
 
 def test_unknown_element_raises():
     with pytest.raises(KeyError, match="no C6 prior"):
-        build_log_priors([1, 8, 6])
+        build_log_priors([1, 8, 14])   # Si: no prior (C has one since the bonding branch)
 
 
 def test_c6_prior_override():

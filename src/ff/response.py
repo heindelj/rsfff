@@ -70,6 +70,11 @@ DEFAULT_ELEC_PRIOR: dict[int, tuple[float, float]] = {
     # exponent 2 sqrt(2 IP) (H2O 12.6, NH3 10.1, HF 16.0 eV). Starting points, learnable.
     7: (3.0, 1.91),          # N
     9: (4.2, 2.41),          # F
+    # C, P, S (the monomer-bonded set): the same two scalings -- Z_cp ~0.6 per valence
+    # electron, b ~ sqrt of the hydride's IP (CH4 12.6, PH3 9.9, H2S 10.5 eV). Starting points.
+    6: (2.4, 2.13),          # C
+    15: (3.0, 1.89),         # P
+    16: (3.6, 1.95),         # S
 }
 
 #: Per-element **baseline** charges ``q0``, from the same water model's permanent monopoles.
@@ -95,6 +100,10 @@ DEFAULT_Q0_PRIOR: dict[int, float] = {
     # dipole lives in the atomic dipoles. Only the sign really matters (see above); the exact
     # charge projection restores fragment neutrality whatever H's table value is.
     7: -0.474, 9: -0.244,
+    # C: slightly negative in its hydrides (the sign flips in carbonyls; the head learns it);
+    # P: strongly positive in every phosphate; S: thiol-like. Cl keeps the ion's -1 above --
+    # covalent Cl relies on the head and the exact fragment projection (a typed q0 is TODO).
+    6: -0.10, 15: 0.50, 16: -0.10,
 }
 
 

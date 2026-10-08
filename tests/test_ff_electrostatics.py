@@ -599,7 +599,7 @@ def test_environment_features_require_an_explicit_override():
 
 def test_unknown_element_raises_rather_than_guessing():
     with pytest.raises(KeyError, match="Refusing to guess"):
-        build_elec_priors([1, 6, 8])
+        build_elec_priors([1, 8, 14])   # Si: no prior
 
 
 def test_kjmol_scale_is_sane(w2_dataset):

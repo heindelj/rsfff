@@ -49,7 +49,7 @@ from pathlib import Path
 
 import torch
 
-from ..ff.units import KJMOL_PER_HARTREE
+from ..ff.units import BOHR_ANG, KJMOL_PER_HARTREE
 from ..mlip.heads import env_parameters
 from .build_film import build_film_model
 from ..ff.film.model import maybe_compile
@@ -202,8 +202,12 @@ def strided_fit_term(model, force_every: int = 1):
 
 def _bonded_variance(out) -> torch.Tensor:
     """Mean squared feature-dependent deviation of the bonded parameters (theta_0 branch)."""
-    d = out.parameters.bonded0.delta_iso
-    return d.pow(2).mean() if d is not None and d.numel() else out.energy.new_zeros(())
+    parts = [out.parameters.bonded0.delta_iso]
+    terms0 = getattr(out.parameters, "terms0", None)
+    if terms0 is not None:
+        parts.append(terms0.delta_iso)   # torsion / coupling deviations from their tables
+    parts = [p for p in parts if p is not None and p.numel()]
+    return torch.cat(parts).pow(2).mean() if parts else out.energy.new_zeros(())
 
 
 class FilmStreams:
@@ -378,6 +382,19 @@ class FilmStreams:
                     with_polarizability=cfg.elec.polarizability_weight > 0.0,
                     with_induction=False,
                 )
+
+            if (
+                cfg.elec.polarizability_weight > 0.0
+                and getattr(self.model.network, "field_features", None) is not None
+            ):
+                # With field-dependent bonded parameters the closed-form alpha (charge flow +
+                # on-site) is no longer the whole response: the molecular polarizability is
+                # -d2E/dF2, which adds the bonded term exactly (rsfff.ff.film.fields). Same
+                # units as the closed form (e^2 Angstrom^2 / Hartree), so the loss is unchanged.
+                _, _, _, alpha = self.model.response_properties(
+                    anchor_batch, quadrupole=False, create_graph=training
+                )
+                anchor_out.polarizability = alpha * BOHR_ANG ** 2
 
             onebody_cfg = cfg.onebody
             if training and self._step % self.anchor_force_every != 0:

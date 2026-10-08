@@ -136,6 +136,68 @@ IMPROPER_ANGLE_PRIOR: dict[int, tuple[float, float]] = {
 }
 
 
+# ---------------------------------------------------------------------------------------
+# (Z, degree)-typed priors -- used only by heads built with ``atom_typing="degree"``.
+#
+# An atom's type is its element plus its covalent degree (``BondedTopology.degree``): read off
+# the graph, so it is resonance-safe (both carboxylate O's are (8, 1)) while separating C=O
+# (O deg 1) from C-O (O deg 2), carbonyl/ethene C (6, 3) from methyl C (6, 4), and so on.
+# Lookup order: typed key -> element key (the tables above) -> generic. These are starting
+# points from typical bond lengths, bond energies and stretch/bend force constants (the
+# constant-parameter fit replaces them); D is the bond-dissociation scale the well-referenced
+# Morse carries. Units: bohr, hartree.
+# ---------------------------------------------------------------------------------------
+
+_ANG = 1.0 / 0.529177210903     # bohr per Angstrom
+_KCAL = 1.0 / 627.509474        # hartree per kcal/mol
+_MDYN = 0.0642231               # (hartree/bohr^2) per (mdyn/Angstrom)
+
+
+def _bp(r_ang: float, d_kcal: float, k_mdyn: float) -> tuple[float, float, float]:
+    return (r_ang * _ANG, d_kcal * _KCAL, k_mdyn * _MDYN)
+
+
+#: element-pair bond priors for the organic set (added to DEFAULT_BOND_PRIOR's water/NH3/HF)
+ORGANIC_BOND_PRIOR: dict[tuple[int, int], tuple[float, float, float]] = {
+    (1, 6): _bp(1.090, 105.0, 4.9),
+    (6, 6): _bp(1.530, 88.0, 4.5),
+    (6, 7): _bp(1.470, 83.0, 4.8),
+    (6, 8): _bp(1.420, 92.0, 5.0),
+    (6, 9): _bp(1.380, 110.0, 5.8),
+    (6, 16): _bp(1.820, 73.0, 3.0),
+    (6, 17): _bp(1.780, 84.0, 3.4),
+    (1, 16): _bp(1.340, 87.0, 4.0),
+    (7, 9): _bp(1.400, 67.0, 4.3),
+    (8, 15): _bp(1.600, 90.0, 6.0),
+}
+
+#: typed overrides, keyed by the sorted pair of (Z, degree) types
+TYPED_BOND_PRIOR: dict[tuple[tuple[int, int], tuple[int, int]], tuple[float, float, float]] = {
+    ((6, 3), (6, 3)): _bp(1.330, 174.0, 9.6),     # C=C
+    ((6, 3), (8, 1)): _bp(1.215, 178.0, 12.0),    # C=O (and carboxylate C-O, bond order 1.5)
+    ((8, 1), (15, 4)): _bp(1.500, 130.0, 9.0),    # P=O / P-O(-)
+    ((6, 3), (7, 3)): _bp(1.360, 100.0, 6.5),     # amide C-N
+}
+
+#: angle priors by apex type: (theta_eq [rad], k_theta [Ha], cosine form)
+TYPED_ANGLE_PRIOR: dict[tuple[int, int], tuple[float, float]] = {
+    (6, 4): (1.9106, 0.142),       # sp3 C, 109.47 deg
+    (6, 3): (2.0944, 0.184),       # sp2 C, 120 deg
+    (7, 4): (1.9106, 0.142),       # ammonium N
+    (8, 3): (1.9400, 0.150),       # hydronium O, ~111 deg
+    (15, 4): (1.9106, 0.142),      # phosphate P
+    (16, 2): (1.6755, 0.120),      # thiol S, ~96 deg
+}
+
+#: out-of-plane priors by center type: (c_chi, k_chi [Ha]); c < 0 restores planarity
+TYPED_IMPROPER_PRIOR: dict[tuple[int, int], tuple[float, float]] = {
+    (6, 3): (-0.5, 0.08),          # sp2 C: planar
+    (8, 3): (-0.5, 0.005),         # hydronium: shallow pyramid
+}
+
+MAX_DEGREE = 4
+
+
 def morse_energy(
     r: torch.Tensor, r_eq: torch.Tensor, d: torch.Tensor, k: torch.Tensor
 ) -> torch.Tensor:
@@ -259,43 +321,120 @@ class BondedTopology:
     improper_index: torch.Tensor | None = None
     improper_frag: torch.Tensor | None = None
     improper_weight: torch.Tensor | None = None
+    # --- the explicit-graph extensions (``rsfff.ff.film.topology``); always enumerated, they
+    # only carry energy when the term heads that read them exist ---------------------------
+    #: (N,) covalent degree of each atom: the second half of the (Z, degree) atom type.
+    degree: torch.Tensor | None = None
+    #: (2, Na) bond columns of each angle's two legs, ``[(i, apex), (apex, k)]``.
+    angle_bonds: torch.Tensor | None = None
+    #: (4, Nt) ``[a, b, c, d]``; (Nt,) owning fragment of ``b``; (Nt,) co-membership product.
+    torsion_index: torch.Tensor | None = None
+    torsion_frag: torch.Tensor | None = None
+    torsion_weight: torch.Tensor | None = None
+    #: (3, Nt) bond columns ``[ab, bc, cd]``; (2, Nt) angle columns ``[abc, bcd]``.
+    torsion_bonds: torch.Tensor | None = None
+    torsion_angles: torch.Tensor | None = None
+    #: (4, Naa) ``[apex, s, x, y]``; (2, Naa) angle columns of ``(s, apex, x)``/``(s, apex, y)``.
+    angle_pair_index: torch.Tensor | None = None
+    angle_pair_angles: torch.Tensor | None = None
+    angle_pair_frag: torch.Tensor | None = None
+    angle_pair_weight: torch.Tensor | None = None
 
     @property
     def n_impropers(self) -> int:
         return 0 if self.improper_index is None else int(self.improper_index.shape[1])
 
+    @property
+    def n_torsions(self) -> int:
+        return 0 if self.torsion_index is None else int(self.torsion_index.shape[1])
+
+    @property
+    def n_angle_pairs(self) -> int:
+        return 0 if self.angle_pair_index is None else int(self.angle_pair_index.shape[1])
+
     @classmethod
     def from_state(
-        cls, state: StateDescriptor, atomic_numbers: torch.Tensor
+        cls,
+        state: StateDescriptor,
+        atomic_numbers: torch.Tensor,
+        bonds: torch.Tensor | None = None,
     ) -> "BondedTopology":
-        """Enumerate bonds and angles from the assignment -- no distance anywhere.
+        """Enumerate the bonded terms from the covalent graph -- no distance anywhere.
 
-        Bonds are every intra-fragment pair that is not H-H; angles come from bonds sharing
-        an atom. For a water that is exactly 2 x (O, H) and 1 x (H, O, H).
+        ``bonds`` (2, Nc), global atom indices: the **explicit** covalent graph the data
+        carries (``Batch.covalent_bonds``). It is the only correct source once a fragment has
+        more than one heavy atom -- the legacy rule below would bond ethane's methyl H's to
+        the far carbon. ``None`` falls back to that rule: every intra-fragment pair that is
+        not H-H, which is exact for water, HF, NH3, H3O+, OH- and their clusters (the loader
+        refuses a multi-heavy-atom fragment without bonds).
+
+        Angles come from bonds sharing an atom; torsions, angle pairs and impropers likewise
+        (``rsfff.ff.film.topology``). For a water that is exactly 2 x (O, H) and 1 x (H, O, H)
+        and nothing else, as before.
         """
+        from .topology import (
+            angle_pairs_from_angles, atom_degrees, canonical_bonds, lookup_angles,
+            lookup_bonds, torsions_from_bonds,
+        )
+
         n_atoms = int(atomic_numbers.shape[0])
-        pairs, pair_frag = intra_fragment_channels(state.fragment_idx)
-        is_h = atomic_numbers == 1
-        keep = ~(is_h[pairs[0]] & is_h[pairs[1]])
-        bond_index = pairs[:, keep]
-        bond_frag = pair_frag[keep]
+        if bonds is None:
+            pairs, _ = intra_fragment_channels(state.fragment_idx)
+            is_h = atomic_numbers == 1
+            keep = ~(is_h[pairs[0]] & is_h[pairs[1]])
+            bond_index = pairs[:, keep]
+        else:
+            bond_index = canonical_bonds(bonds.to(state.fragment_idx.device))
+        bond_frag = state.fragment_idx[bond_index[0]]
         bond_weight = state.edge_comembership(bond_index)
+
+        def comem(a, b):
+            return (state.C[a] * state.C[b]).sum(-1)
 
         angle_index = _angles_from_bonds(bond_index, n_atoms)
         angle_frag = state.fragment_idx[angle_index[1]]
         i, apex, k = angle_index[0], angle_index[1], angle_index[2]
-        angle_weight = (state.C[i] * state.C[apex]).sum(-1) * (
-            state.C[apex] * state.C[k]
-        ).sum(-1)
+        angle_weight = comem(i, apex) * comem(apex, k)
 
         improper_index = _impropers_from_bonds(bond_index, n_atoms)
         c = improper_index[0]
         improper_frag = state.fragment_idx[c]
         improper_weight = torch.ones_like(improper_frag, dtype=state.C.dtype)
         for row in (1, 2, 3):
-            improper_weight = improper_weight * (
-                state.C[c] * state.C[improper_index[row]]
-            ).sum(-1)
+            improper_weight = improper_weight * comem(c, improper_index[row])
+
+        angle_bonds = torch.stack((
+            lookup_bonds(bond_index, n_atoms, i, apex),
+            lookup_bonds(bond_index, n_atoms, apex, k),
+        )) if angle_index.shape[1] else angle_index.new_zeros(2, 0)
+
+        torsion_index = torsions_from_bonds(bond_index, n_atoms)
+        ta, tb, tc, td = (torsion_index[r] for r in range(4))
+        torsion_frag = state.fragment_idx[tb]
+        torsion_weight = comem(ta, tb) * comem(tb, tc) * comem(tc, td)
+        if torsion_index.shape[1]:
+            torsion_bonds = torch.stack((
+                lookup_bonds(bond_index, n_atoms, ta, tb),
+                lookup_bonds(bond_index, n_atoms, tb, tc),
+                lookup_bonds(bond_index, n_atoms, tc, td),
+            ))
+            torsion_angles = torch.stack((
+                lookup_angles(angle_index, n_atoms, ta, tb, tc),
+                lookup_angles(angle_index, n_atoms, tb, tc, td),
+            ))
+        else:
+            torsion_bonds = torsion_index.new_zeros(3, 0)
+            torsion_angles = torsion_index.new_zeros(2, 0)
+
+        angle_pair_index = angle_pairs_from_angles(bond_index, n_atoms)
+        pa, ps, px, py = (angle_pair_index[r] for r in range(4))
+        angle_pair_frag = state.fragment_idx[pa]
+        angle_pair_weight = comem(pa, ps) * comem(pa, px) * comem(pa, py)
+        angle_pair_angles = torch.stack((
+            lookup_angles(angle_index, n_atoms, ps, pa, px),
+            lookup_angles(angle_index, n_atoms, ps, pa, py),
+        )) if angle_pair_index.shape[1] else angle_pair_index.new_zeros(2, 0)
+
         return cls(
             bond_index=bond_index,
             bond_frag=bond_frag,
@@ -306,7 +445,24 @@ class BondedTopology:
             improper_index=improper_index,
             improper_frag=improper_frag,
             improper_weight=improper_weight,
+            degree=atom_degrees(bond_index, n_atoms),
+            angle_bonds=angle_bonds,
+            torsion_index=torsion_index,
+            torsion_frag=torsion_frag,
+            torsion_weight=torsion_weight,
+            torsion_bonds=torsion_bonds,
+            torsion_angles=torsion_angles,
+            angle_pair_index=angle_pair_index,
+            angle_pair_angles=angle_pair_angles,
+            angle_pair_frag=angle_pair_frag,
+            angle_pair_weight=angle_pair_weight,
         )
+
+    def separation(self, pair_index: torch.Tensor, n_atoms: int, max_sep: int = 3) -> torch.Tensor:
+        """``(P,)`` graph separation of each pair (1 = 1-2, 2 = 1-3, 3 = 1-4, ``max_sep+1`` beyond)."""
+        from .topology import graph_separation
+
+        return graph_separation(self.bond_index, n_atoms, pair_index, max_sep)
 
     def exclusions(self, n_atoms: int, through: int = 3) -> torch.Tensor:
         """``(2, E)`` atom pairs ``i < j`` within ``through - 1`` bonds of each other.
@@ -360,6 +516,23 @@ class BondedTopology:
         v2 = positions_ang[c] - positions_ang[apex]
         cos_theta = (v1 * v2).sum(-1) / (v1.norm(dim=-1) * v2.norm(dim=-1))
         return r, cos_theta
+
+    def torsion_cos(self, positions_ang: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        """``(Nt,)`` ``cos phi`` of every torsion, differentiably and without ``acos``.
+
+        ``cos phi = n1.n2 / (|n1||n2|)`` with ``n1 = b1 x b2``, ``n2 = b2 x b3``. Every
+        torsion energy here is a polynomial in ``cos phi`` (``cos n phi = T_n(cos phi)``), so
+        nothing is singular at ``phi = 0, pi``; the only undefined point is a collinear
+        triple, guarded by ``eps``.
+        """
+        a, b, c, d = (self.torsion_index[n] for n in range(4))
+        b1 = positions_ang[b] - positions_ang[a]
+        b2 = positions_ang[c] - positions_ang[b]
+        b3 = positions_ang[d] - positions_ang[c]
+        n1 = torch.cross(b1, b2, dim=-1)
+        n2 = torch.cross(b2, b3, dim=-1)
+        norm = torch.sqrt((n1 * n1).sum(-1).clamp_min(eps) * (n2 * n2).sum(-1).clamp_min(eps))
+        return (n1 * n2).sum(-1) / norm
 
     def improper_sin2(self, positions_ang: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
         """``(Ni,)`` ``sin^2 chi`` of every improper leg, differentiably (dimensionless).
@@ -466,13 +639,39 @@ class BondedParameterHead(nn.Module):
         angle_prior: dict[int, tuple[float, float]] | None = None,
         impropers: bool = False,
         improper_prior: dict[int, tuple[float, float]] | None = None,
+        atom_typing: str = "element",
     ) -> None:
         super().__init__()
         self.species = [int(z) for z in species]
-        n_species = len(self.species)
+        if atom_typing not in ("element", "degree"):
+            raise ValueError(f"atom_typing must be 'element' or 'degree', got {atom_typing!r}")
+        self.atom_typing = atom_typing
+        # The table axis: one row per species ("element", every existing checkpoint) or one
+        # per (species, degree 0..MAX_DEGREE) ("degree"). `_type_index` maps atoms onto it.
+        if atom_typing == "degree":
+            types = [(z, d) for z in self.species for d in range(MAX_DEGREE + 1)]
+        else:
+            types = [(z, None) for z in self.species]
+        self.types = types
+        n_species = len(types)
+
+        def bond_lookup(ta, tb):
+            (za, da), (zb, db) = sorted((ta, tb), key=lambda t: (t[0], -1 if t[1] is None else t[1]))
+            if da is not None:
+                key = tuple(sorted(((za, da), (zb, db))))
+                if key in TYPED_BOND_PRIOR:
+                    return TYPED_BOND_PRIOR[key]
+            ekey = (min(za, zb), max(za, zb))
+            return bond_prior.get(ekey, GENERIC_BOND_PRIOR)
+
+        def apex_lookup(t, typed_table, element_table, generic):
+            z, d = t
+            if d is not None and (z, d) in typed_table:
+                return typed_table[(z, d)]
+            return element_table.get(z, generic)
 
         # {**a, **b} rather than dict(a, **b): the keys are ints / int tuples, not strings
-        bond_prior = {**DEFAULT_BOND_PRIOR, **(bond_prior or {})}
+        bond_prior = {**ORGANIC_BOND_PRIOR, **DEFAULT_BOND_PRIOR, **(bond_prior or {})}
         angle_prior = {
             **DEFAULT_ANGLE_PRIOR,
             **(IMPROPER_ANGLE_PRIOR if impropers else {}),
@@ -483,17 +682,18 @@ class BondedParameterHead(nn.Module):
         # for both orderings). Learnable: the table is the geometry-independent part of every
         # parameter, i.e. the analytic minimum of the variance penalty.
         table = torch.empty(n_species, n_species, 3)
-        for ia, za in enumerate(self.species):
-            for ib, zb in enumerate(self.species):
-                key = (min(za, zb), max(za, zb))
-                r_eq, d, k = bond_prior.get(key, GENERIC_BOND_PRIOR)
+        for ia, ta in enumerate(types):
+            for ib, tb in enumerate(types):
+                r_eq, d, k = bond_lookup(ta, tb)
                 table[ia, ib] = torch.tensor([r_eq, d, k]).log()
         self.bond_table = nn.Parameter(table)
 
         # (n_species, 2): [atanh(cos theta_eq), log k_theta] per apex species.
         atable = torch.empty(n_species, 2)
-        for ia, za in enumerate(self.species):
-            theta_eq, k_theta = angle_prior.get(za, GENERIC_ANGLE_PRIOR)
+        for ia, ta in enumerate(types):
+            theta_eq, k_theta = apex_lookup(
+                ta, TYPED_ANGLE_PRIOR, angle_prior, GENERIC_ANGLE_PRIOR,
+            )
             atable[ia, 0] = torch.atanh(torch.tensor(theta_eq).cos())
             atable[ia, 1] = torch.tensor(k_theta).log()
         self.angle_table = nn.Parameter(atable)
@@ -513,8 +713,10 @@ class BondedParameterHead(nn.Module):
         if self.impropers:
             improper_prior = {**DEFAULT_IMPROPER_PRIOR, **(improper_prior or {})}
             itable = torch.empty(n_species, 2)
-            for ia, za in enumerate(self.species):
-                c_chi, k_chi = improper_prior.get(za, GENERIC_IMPROPER_PRIOR)
+            for ia, ta in enumerate(types):
+                c_chi, k_chi = apex_lookup(
+                    ta, TYPED_IMPROPER_PRIOR, improper_prior, GENERIC_IMPROPER_PRIOR
+                )
                 c_chi = min(max(float(c_chi), -0.999), 0.999)
                 itable[ia, 0] = torch.atanh(torch.tensor(c_chi))
                 itable[ia, 1] = torch.tensor(max(float(k_chi), 1e-8)).log()
@@ -522,6 +724,14 @@ class BondedParameterHead(nn.Module):
             improper_in = 4 * latent_dim + 4 * emb_dim
             self.improper_base = zero_init_readout(mlp(improper_in, hidden, depth, 2))
             self.improper_delta = zero_init_readout(mlp(improper_in, hidden, depth, 2))
+
+    def type_index(self, species_idx: torch.Tensor, topo: BondedTopology) -> torch.Tensor:
+        """``(N,)`` row of the prior tables: the species, or (species, degree) when typed."""
+        if self.atom_typing == "element":
+            return species_idx
+        if topo.degree is None:
+            raise ValueError("atom_typing='degree' needs BondedTopology.degree")
+        return species_idx * (MAX_DEGREE + 1) + topo.degree.clamp(max=MAX_DEGREE)
 
     def _bond_input(self, z: torch.Tensor, species_idx: torch.Tensor, topo) -> torch.Tensor:
         i, j = topo.bond_index[0], topo.bond_index[1]
@@ -563,12 +773,18 @@ class BondedParameterHead(nn.Module):
         gate: torch.Tensor | None,    # (N,) environment gate g(a_env), g(0) = 0
         species_idx: torch.Tensor,    # (N,)
         topo: BondedTopology,
+        z_shift: torch.Tensor | None = None,  # (N, latent) field shift, dressed eval only
     ) -> BondedParameters:
         """Parameters at one evaluation. ``z_joined=None`` gives ``theta_0`` exactly.
 
         Note ``theta_0`` needs no separate machinery: the delta branch is *multiplied by the
         gate*, so on an isolated fragment ``theta == theta_0`` bitwise regardless of weights.
         """
+        species_idx = self.type_index(species_idx, topo)
+        if z_shift is not None and z_joined is not None:
+            # the field-dressed evaluation: the isolated branch reads the shifted latent
+            # (rsfff.ff.film.fields; the shift is O(F^2) by construction and None in vacuum)
+            z_iso = z_iso + z_shift
         bond_x_iso = self._bond_input(z_iso, species_idx, topo)
         angle_x_iso = self._angle_input(z_iso, species_idx, topo)
         d_bond = self.bond_base(bond_x_iso)                        # (Nb, 3)
@@ -603,6 +819,12 @@ class BondedParameterHead(nn.Module):
 
         si = species_idx[topo.bond_index[0]]
         sj = species_idx[topo.bond_index[1]]
+        if self.atom_typing == "degree":
+            # canonical orientation, so the (learnable, separately-updated) [a, b] and [b, a]
+            # entries can never make the energy depend on which atom is stored first. The
+            # element-typed path keeps its legacy lookup: existing checkpoints trained only
+            # the storage-order entry (O before H in every water file).
+            si, sj = torch.minimum(si, sj), torch.maximum(si, sj)
         log_bond = self.bond_table[si, sj] + d_bond                # (Nb, 3)
         r_eq, d, k = log_bond.exp().unbind(-1)
 

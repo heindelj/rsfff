@@ -173,6 +173,11 @@ class CoupledSystem:
     positions: torch.Tensor | None = None   # (N, 3) Angstrom
     b: torch.Tensor | None = None           # (N,) 1/bohr
     gate: torch.Tensor | None = None        # (P,)
+    #: (N, K) external electrostatic sources as the polytensor conjugate ``dE_ext/dM``
+    #: (probe charges, uniform fields; :mod:`rsfff.ff.external`). ``E_ext`` is *linear* in the
+    #: multipoles, so it only adds this constant to the coupling gradient: it moves the
+    #: right-hand side and never the operator. ``None`` = no external sources.
+    ext_m: torch.Tensor | None = None
 
     @property
     def on_the_fly(self) -> bool:
@@ -376,9 +381,10 @@ def _coupling_grad(sys: CoupledSystem, m: torch.Tensor, *, differentiable: bool 
     if sys.on_the_fly:
         from .backend import slater_elec_field
 
-        return slater_elec_field(
+        g = slater_elec_field(
             sys.positions, sys.pair_index, sys.b, sys.gate, m, sys.m_nuc, reference=differentiable
         )
+        return g if sys.ext_m is None else g + sys.ext_m
 
     i, j = sys.pair_index[0], sys.pair_index[1]
     m_i, m_j = m[i], m[j]
@@ -397,7 +403,7 @@ def _coupling_grad(sys: CoupledSystem, m: torch.Tensor, *, differentiable: bool 
         + torch.einsum("pab,pb->pa", sys.t_ss, s_i)
         + torch.einsum("pab,pb->pa", sys.t_1c_j, n_i)
     )
-    out = torch.zeros_like(m)
+    out = torch.zeros_like(m) if sys.ext_m is None else sys.ext_m.expand_as(m).clone()
     return out.index_add(0, i, g_i).index_add(0, j, g_j)
 
 
@@ -715,7 +721,7 @@ def pcg(
 _PARAM_FIELDS = (
     "chi", "eta", "q0", "compliance", "chivec", "alpha", "chiquad", "cquad",
     "t_point", "t_ss", "t_1c_i", "t_1c_j", "m_nuc", "mu0", "quad0",
-    "positions", "b", "gate",
+    "positions", "b", "gate", "ext_m",
 )
 
 

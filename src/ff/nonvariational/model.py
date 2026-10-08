@@ -65,8 +65,13 @@ class NonvariationalModel(FilmModel):
 
     def _induction_level(
         self, rp: ResponseParameters, params: FilmParameters, *, positions, batch, state,
-        bond_index, bond_batch, pair_index, gate, solver: dict,
+        bond_index, bond_batch, pair_index, gate, solver: dict, ext_m=None,
     ) -> LevelOutput:
+        if ext_m is not None:
+            raise NotImplementedError(
+                "external sources are wired into the variational film solve only; the fixed-K "
+                "unrolled solve needs ext_m in its block solve and mutual iterations first"
+            )
         level = unrolled_response(
             rp, positions=positions, batch_idx=batch.batch_idx, n_systems=int(batch.n_systems),
             bond_index=bond_index, bond_batch=bond_batch, pair_index=pair_index,

@@ -25,6 +25,8 @@ from ..ff.film import (
     FragmentProjector,
     PermanentMultipoleHeads,
 )
+from ..ff.film.fields import FieldFeatureShift
+from ..ff.film.terms import TermParameterHead
 from ..ff.fragment_state import FragmentStateEmbedding
 from ..ff.multipole import irrep2_to_spherical
 from ..ff.nonvariational import NonvariationalModel
@@ -104,7 +106,37 @@ def build_film_model(
         depth=int(_get(film_cfg, "bonded_depth", 1)),
         emb_dim=int(_get(film_cfg, "bonded_emb_dim", 8)),
         impropers=bool(_get(film_cfg, "impropers", False)),
+        atom_typing=str(_get(film_cfg, "atom_typing", "element")),
     )
+
+    # Torsions / couplings (rsfff.ff.film.terms) and the O(F^2) field features
+    # (rsfff.ff.film.fields): built only when switched on, so every existing config and
+    # checkpoint keeps its exact parameter set.
+    term_head = None
+    if _get(film_cfg, "torsions", False) or _get(film_cfg, "couplings", False):
+        if _get(film_cfg, "couplings", False) and not _get(film_cfg, "torsions", False):
+            raise ValueError("film.couplings needs film.torsions (the torsion couplings ride "
+                             "on the torsion head); set torsions: true")
+        term_head = TermParameterHead(
+            hidden, len(bonded_head.types),
+            torsions=bool(_get(film_cfg, "torsions", False)),
+            couplings=bool(_get(film_cfg, "couplings", False)),
+            n_max=int(_get(film_cfg, "torsion_nmax", 4)),
+            hidden=int(_get(film_cfg, "term_hidden", 32)),
+            depth=int(_get(film_cfg, "term_depth", 1)),
+            emb_dim=int(_get(film_cfg, "bonded_emb_dim", 8)),
+            torsion_scale=float(_get(film_cfg, "torsion_scale", 1.0e-3)),
+        )
+    field_features = None
+    if _get(film_cfg, "field_features", False):
+        field_features = FieldFeatureShift(
+            hidden, p1, p2, to_spherical,
+            ranks=tuple(_get(film_cfg, "field_ranks", (0, 1, 2))),
+            channels=int(_get(film_cfg, "field_channels", 8)),
+            n_products=int(_get(film_cfg, "field_products", 16)),
+            hidden=int(_get(film_cfg, "field_hidden", 32)),
+            scales=tuple(_get(film_cfg, "field_scales", (0.05, 0.02, 0.01))),
+        )
 
     # `film.model`: "film" (converged coupled solve) or "nonvariational" (fixed-K unrolled
     # solve with learned mutual damping, docs/fff_nonvariational.md).
@@ -180,6 +212,8 @@ def build_film_model(
         film_hidden=int(_get(film_cfg, "film_hidden", 32)),
         film_depth=int(_get(film_cfg, "film_depth", 1)),
         gate_a0=float(_get(film_cfg, "gate_a0", 0.5)),
+        term_head=term_head,
+        field_features=field_features,
     )
 
     # `film.nonbonded`: "range_separated" (Fermi-switched; the default, so configs pickled

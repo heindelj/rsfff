@@ -70,6 +70,11 @@ DEFAULT_C6_PRIOR: dict[int, tuple[float, float]] = {
     # molecular-IP decay exponent. Starting points, learnable.
     7: (75.3, 1.65),      # N
     9: (19.3, 2.08),      # F
+    # C, P, S: the same x1.53 molecular-C6 convention on CH4 (129.6 au), PH3 (~186), H2S
+    # (134); b from O by the hydride IP. Starting points.
+    6: (101.0, 1.84),     # C
+    15: (193.0, 1.63),    # P
+    16: (152.0, 1.68),    # S
 }
 
 #: Damping-exponent prior in bohr^-1, applied uniformly across elements.

@@ -65,6 +65,12 @@ class FilmParameters:
     disp: tuple       # (c6, b)
     disp0: tuple
     gate: torch.Tensor            # (N,) the environment gate g(a_env)
+    #: torsion / coupling parameters (``rsfff.ff.film.terms``), ``None`` without a term head
+    terms: object | None = None
+    terms0: object | None = None
+    #: (N, latent) the O(F^2) field shift of the bonded latent (``rsfff.ff.film.fields``),
+    #: ``None`` without field features or without external sources
+    field_shift: torch.Tensor | None = None
 
     def env_shift(self) -> dict[str, torch.Tensor]:
         """Per-quantity ``|theta - theta_0|`` (log-space for positives): the L_env inputs."""
@@ -123,8 +129,16 @@ class ConditionedParameterNetwork(nn.Module):
         film_hidden: int = 32,
         film_depth: int = 1,
         gate_a0: float = 0.5,
+        term_head: nn.Module | None = None,
+        field_features: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        # Registered only when present, so models built without them keep their exact
+        # parameter set (and every existing checkpoint its state_dict keys).
+        if term_head is not None:
+            self.term_head = term_head
+        if field_features is not None:
+            self.field_features = field_features
         self.embed_in = nn.Linear(int(p_in), int(block_dim))
         self.embed_env = nn.Linear(int(p_in), int(block_dim), bias=False)
         self.embed_cross = nn.Linear(int(p_cross), int(block_dim), bias=False)
@@ -186,6 +200,7 @@ class ConditionedParameterNetwork(nn.Module):
         topo: BondedTopology,
         positions: torch.Tensor,
         bond_index: torch.Tensor,
+        fields: tuple | None = None,
     ) -> FilmParameters:
         species_idx = pf.x_in.species_idx
         x_iso = self.embed_in(pf.x_in.inv_feats)
@@ -206,10 +221,23 @@ class ConditionedParameterNetwork(nn.Module):
             z_joined = z_iso
         gate = self.gate(pf.a_env)
 
+        shift = None
+        if fields is not None and getattr(self, "field_features", None) is not None:
+            shift = self.field_features(
+                fields, state.fragment_idx, state.n_fragments, pf.x_in
+            )
         bonded = self.bonded_head(
-            z_iso["bonded"], z_joined["bonded"], gate, species_idx, topo
+            z_iso["bonded"], z_joined["bonded"], gate, species_idx, topo, z_shift=shift
         )
         bonded0 = self.bonded_head(z_iso["bonded"], None, None, species_idx, topo)
+        terms = terms0 = None
+        term_head = getattr(self, "term_head", None)
+        if term_head is not None and term_head.active:
+            type_idx = self.bonded_head.type_index(species_idx, topo)
+            terms = term_head(
+                z_iso["bonded"], z_joined["bonded"], gate, type_idx, topo, z_shift=shift
+            )
+            terms0 = term_head(z_iso["bonded"], None, None, type_idx, topo)
 
         q_perm, mu_perm, quad_perm = self.permanent_heads(
             z_iso["permanent"], pf.x_in, state
@@ -238,4 +266,6 @@ class ConditionedParameterNetwork(nn.Module):
             pauli=pauli, pauli0=pauli0,
             disp=disp, disp0=disp0,
             gate=gate,
+            terms=terms, terms0=terms0,
+            field_shift=shift,
         )
