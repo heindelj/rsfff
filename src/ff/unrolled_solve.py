@@ -62,6 +62,7 @@ from .coupled_solve import (
     state_max_abs,
 )
 from .electrostatics import slater_elec_tensors
+from ..linalg_guard import finite_or_identity, poison
 from .units import BOHR_ANG
 
 __all__ = [
@@ -206,7 +207,8 @@ class fragment_block_solve:
         s_p[self.bond_group, bond_local] = sys.compliance
         L = torch.einsum("gie,gif->gef", B, eta_p.unsqueeze(-1) * B)
         eye = torch.eye(nb_max, dtype=dtype, device=device)
-        self.inv = torch.linalg.inv(eye + L * s_p.unsqueeze(-2))      # (I + L S)^-1
+        mat, ok = finite_or_identity(eye + L * s_p.unsqueeze(-2))      # non-finite groups: NaN, not a GPU fault
+        self.inv = poison(torch.linalg.inv(mat), ok)                     # (I + L S)^-1
 
     def __call__(self, rhs: torch.Tensor) -> torch.Tensor:
         if self.nb == 0:

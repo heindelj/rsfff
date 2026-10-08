@@ -43,6 +43,7 @@ src/ff/slots.py
 src/ff/state_invariants.py
 src/ff/unified.py
 src/ff/units.py
+src/ff/unrolled_solve.py
 src/ff/film/__init__.py
 src/ff/film/bonded.py
 src/ff/film/conditioning.py

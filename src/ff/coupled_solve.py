@@ -89,6 +89,7 @@ from dataclasses import dataclass
 
 import torch
 
+from ..linalg_guard import finite_or_identity
 from ..mlip.sqe import _local_index
 from .multipole import build_polytensor, spherical_to_cartesian_quadrupole
 
@@ -540,20 +541,24 @@ class _Preconditioner:
                 + s_p.unsqueeze(-1) * eye
                 + floor * eye
             )
+            # A frame with non-finite eta / compliance factorizes the identity instead: the
+            # batched GPU LU can fault on NaN input and take the process down; CG on the same
+            # inputs still leaves that frame NaN, so nothing is hidden.
+            mat, _ = finite_or_identity(mat)
             self.lu = torch.linalg.lu_factor(mat)
             self.bond_local, self.nb_max = bond_local, nb_max
 
         self.alpha_inv = None
         if sys.has_dipole:
             eye3 = torch.eye(3, dtype=dtype, device=device)
-            self.alpha_inv = torch.linalg.inv(sys.alpha + floor * eye3)
+            self.alpha_inv = torch.linalg.inv(finite_or_identity(sys.alpha + floor * eye3)[0])
         self.cquad_inv = None
         if sys.has_quad:
             if sys.cquad.dim() == 1:
                 self.cquad_inv = 1.0 / (sys.cquad + floor)
             else:
                 eye5 = torch.eye(5, dtype=dtype, device=device)
-                self.cquad_inv = torch.linalg.inv(sys.cquad + floor * eye5)
+                self.cquad_inv = torch.linalg.inv(finite_or_identity(sys.cquad + floor * eye5)[0])
 
     def __call__(self, r: State) -> State:
         sys = self.sys

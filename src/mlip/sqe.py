@@ -65,6 +65,7 @@ import torch
 import torch.nn as nn
 
 from ..features import BesselBasis
+from ..linalg_guard import finite_or_identity, poison
 from .heads import two_slot_mlp, zero_init_readout
 
 
@@ -190,7 +191,8 @@ def sqe_solve(
     # One factorization for the transfers and (optionally) the three polarizability columns.
     G = torch.einsum("mie,mia->mea", B, pos_p) if with_polarizability else None  # (M, Nb, 3)
     rhs = -b.unsqueeze(-1) if G is None else torch.cat((-b.unsqueeze(-1), G), dim=-1)
-    sol = torch.linalg.solve(A, rhs)                                      # (M, Nb, 1 [+3])
+    A, ok = finite_or_identity(A)                                         # non-finite molecules: NaN, not a GPU fault
+    sol = poison(torch.linalg.solve(A, rhs), ok)                          # (M, Nb, 1 [+3])
 
     v = sol[..., 0]                                                       # (M, Nb)
     p_p = s_p * v                                                         # (M, Nb)
