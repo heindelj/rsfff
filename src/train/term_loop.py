@@ -217,6 +217,11 @@ def warm_start(model, path: str | None) -> None:
             dropped.append(f"{k} {tuple(v.shape)} vs {tuple(want.shape)}")
     revived_keys = {r.split(" ", 1)[0] for r in revived}
     missing = [k for k in current if k not in take and k not in revived_keys]
+    # Hand the model its own value for whatever the checkpoint lacks, so "left at
+    # initialization" is literal: a module that supplies a default for a key missing from an
+    # *old* checkpoint (FilmResponseHeads.alpha_scale -> ones, to reproduce it) must not have
+    # that default replace this model's fresh value in a warm start.
+    take.update({k: current[k] for k in missing})
     model.load_state_dict(take, strict=False)
     parts = [f"warm start from {path}: loaded {len(take)}/{len(current)} tensors"]
     if padded:

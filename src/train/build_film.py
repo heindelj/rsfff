@@ -31,7 +31,7 @@ from ..ff.nonvariational import NonvariationalModel
 from ..ff.pauli import PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_heads import RangeSeparationHeads
 from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
-from ..ff.response import build_elec_priors
+from ..ff.response import alpha_scale_prior, build_elec_priors
 from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS
 
 __all__ = ["build_film_model"]
@@ -142,6 +142,9 @@ def build_film_model(
         induced_quadrupoles=nonvariational and bool(_get(film_cfg, "induced_quadrupoles", True)),
         cquad_init=float(_get(film_cfg, "cquad_init", 1.0)),
         cquad_floor=float(_get(film_cfg, "cquad_floor", 1.0e-4)),
+        alpha_scale=(
+            alpha_scale_prior(neighbor_types) if bool(_get(film_cfg, "alpha_prior", True)) else None
+        ),
     )
 
     log_q, log_b_pauli, mu_scale, quad_scale = build_pauli_priors(neighbor_types)

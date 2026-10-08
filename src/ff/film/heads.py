@@ -92,9 +92,17 @@ class FilmResponseHeads(nn.Module):
         induced_quadrupoles: bool = False,
         cquad_init: float = 1.0,
         cquad_floor: float = 1.0e-4,
+        alpha_scale: torch.Tensor | None = None,   # (n_species,) see alpha_scale_prior
     ) -> None:
         super().__init__()
         self.eta_floor = float(eta_floor)
+        # Per-species multiplier on the atomic alpha: the prior magnitude for monatomic ions
+        # (rsfff.ff.response.alpha_scale_prior), 1 elsewhere. A fixed buffer, saved with the
+        # model; see _load_from_state_dict for checkpoints written before it existed.
+        self.register_buffer(
+            "alpha_scale",
+            torch.ones(n_species) if alpha_scale is None else alpha_scale.detach().clone(),
+        )
         self.species_emb = nn.Embedding(n_species, emb_dim)
         self.register_buffer("log_z_prior", log_z_prior.clone())
         self.register_buffer("log_b_prior", log_b_prior.clone())
@@ -153,6 +161,19 @@ class FilmResponseHeads(nn.Module):
             self.cquad0_raw = nn.Parameter(torch.log(torch.expm1(c0)))
             self.cquad_mlp = zero_init_readout(mlp(latent_dim + emb_dim, hidden, depth, 1))
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, *args, **kwargs):
+        """Loading a checkpoint written before ``alpha_scale`` existed gives ones: that is the
+        alpha the checkpoint was trained with, so it reproduces exactly (``strict`` is no help in
+        telling loads apart -- ``nn.Module.load_state_dict`` passes True to every submodule).
+        A warm start is different: ``rsfff.train.term_loop.warm_start`` hands over this model's
+        own value for every key the checkpoint lacks, so the prior survives, which is how an old
+        NaCl committee warm-started on this code picks the ion priors up -- its heads sit near
+        ``softplus(0)``, so the multiplied alpha starts close to the prior."""
+        key = prefix + "alpha_scale"
+        if key not in state_dict:
+            state_dict[key] = torch.ones_like(self.alpha_scale)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, *args, **kwargs)
+
     def forward(
         self,
         z: torch.Tensor,              # (N, latent) the response-family latent
@@ -174,7 +195,7 @@ class FilmResponseHeads(nn.Module):
         if self.alpha_head is not None:
             alpha = voigt_vector_to_symmetric_matrix(
                 self.alpha_head(z, emb, x_in.equiv_feats)
-            )
+            ) * self.alpha_scale.to(z.dtype)[species_idx].view(-1, 1, 1)
         compliance = self.compliance_head(z, positions, bond_index)
         log_z = self.log_z_prior[species_idx] + self.d_log_z[species_idx]
         log_b = self.log_b_prior[species_idx] + self.d_log_b[species_idx]
