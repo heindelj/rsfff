@@ -433,7 +433,7 @@ def test_dipoles_without_lambda1_features_raise():
 
 def test_unknown_element_raises_rather_than_guessing():
     with pytest.raises(KeyError, match="Refusing to guess"):
-        build_pauli_priors([1, 6, 8])
+        build_pauli_priors([1, 8, 14])   # Si: no prior
 
 
 def test_inter_only_without_fragments_raises(w2_dataset):

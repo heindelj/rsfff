@@ -166,6 +166,8 @@ def coupled_response(
     atol: float = 1.0e-12,
     maxiter: int = 100,
     check_every: int = DEFAULT_CG_CHECK_EVERY,
+    ext_m: torch.Tensor | None = None,
+    stationary: bool = True,
 ) -> LevelOutput:
     """Minimize the coupled functional and report what it converged to.
 
@@ -180,6 +182,11 @@ def coupled_response(
         bond_index=bond_index, bond_batch=bond_batch, pair_index=pair_index,
         gate=gate, max_rank=max_rank,
     )
+    if ext_m is not None:
+        # external sources (rsfff.ff.external): a constant shift of the coupling gradient
+        from dataclasses import replace as _replace
+
+        sys = _replace(sys, ext_m=ext_m)
     info_out: list = []
     state, n_iter = coupled_solve(
         sys, rtol=rtol, atol=atol, maxiter=maxiter, check_every=check_every, info_out=info_out
@@ -194,7 +201,11 @@ def coupled_response(
     mu = mu if mu.numel() else None
     theta = theta if theta.numel() else None
 
-    state_s = stationary_view(state)
+    # `stationary=False` keeps the full adjoint on the energy too: needed when a derivative
+    # of a derivative must see dx*/dtheta under create_graph (response properties trained on
+    # alpha = -d2E/dF2), which the stationary shortcut drops by design. Costs adjoint solves
+    # whose right-hand side is the CG residual -- they exit at once.
+    state_s = stationary_view(state) if stationary else state
     energy_internal = coupled_energy(sys, state_s)
     q_s, mu_s, theta_s = multipoles_from_state(sys, state_s)
     mu_s = mu_s if mu_s.numel() else None
@@ -213,6 +224,11 @@ def coupled_response(
     i = pair_index[0]
     pair_batch = batch_idx[i]
     energy = energy_internal + e_pair.new_zeros(n_systems).index_add(0, pair_batch, e_pair)
+    if ext_m is not None:
+        # E_ext = ext_m . M at the converged multipoles (it is linear in M, so this is the
+        # whole of it apart from the M-independent constant the caller books separately)
+        e_ext = (ext_m * m_real).sum(-1)
+        energy = energy + e_ext.new_zeros(n_systems).index_add(0, batch_idx, e_ext)
 
     return LevelOutput(
         charges=q,

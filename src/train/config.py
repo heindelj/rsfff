@@ -1038,6 +1038,27 @@ class FilmConfig:
     #: mode of NH3 / H3O+ (:mod:`rsfff.ff.film.bonded`). Off by default so existing
     #: checkpoints keep their exact parameter set; inert for water (no degree-3 centers).
     impropers: bool = False
+    # --- the monomer-bonded study (docs/monomer_bonded.md) -------------------------------
+    #: Prior-table typing of the bonded terms: "element" (every existing checkpoint) or
+    #: "degree" -- (Z, covalent degree), which separates C=O from C-O, sp2 from sp3 C, ...
+    atom_typing: str = "element"
+    #: Fourier torsions sum_n K_n (1 + cos n phi) on every a-b-c-d of the covalent graph.
+    torsions: bool = False
+    #: The coupling family: bond-bond, bond-angle, angle-angle, torsion-bond, torsion-angle,
+    #: torsion-angle-angle (rsfff.ff.film.terms). The "with/without couplings" switch.
+    couplings: bool = False
+    torsion_nmax: int = 4
+    torsion_scale: float = 1.0e-3
+    term_hidden: int = 32
+    term_depth: int = 1
+    #: O(F^2) electrostatic-environment features into the bonded parameters
+    #: (rsfff.ff.film.fields). The "with/without field dependence" switch.
+    field_features: bool = False
+    field_ranks: list = field(default_factory=lambda: [0, 1, 2])
+    field_channels: int = 8
+    field_products: int = 16
+    field_hidden: int = 32
+    field_scales: list = field(default_factory=lambda: [0.05, 0.02, 0.01])
     #: Reserved hook (decision: strict physical form). Setting it raises in the builder.
     bonded_nn_residual: bool = False
     eta_init: float = 0.5

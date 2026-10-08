@@ -85,6 +85,10 @@ DEFAULT_PAULI_PRIOR: dict[int, tuple[float, float]] = {
     # decay exponent (as for DEFAULT_ELEC_PRIOR). Starting points, learnable.
     7: (5.42, 1.97),           # N
     9: (7.59, 2.48),           # F
+    # C, P, S: same scalings (valence-electron count, hydride IP). Starting points.
+    6: (4.34, 2.20),           # C
+    15: (5.42, 1.95),          # P
+    16: (6.51, 2.01),          # S
 }
 
 #: Per-element Pauli dipole magnitude scale in e*bohr, used only to set the output scale of

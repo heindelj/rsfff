@@ -72,7 +72,9 @@ from ..pairs import intra_fragment_channels, union_channels, union_pairs
 from ..polarization import LevelOutput, coupled_response
 from ..response import ResponseParameters, fragment_polarizability
 from ..units import BOHR_ANG
+from ..external import ExternalSources, external_potential, point_fields, with_uniform
 from .bonded import BondedTopology, improper_energy
+from .terms import term_energies
 from .network import ConditionedParameterNetwork, FilmParameters
 from .projector import FragmentProjector
 from .state import StateDescriptor
@@ -328,13 +330,14 @@ class FilmModel(nn.Module):
 
     def _induction_level(
         self, rp: ResponseParameters, params: FilmParameters, *, positions, batch, state,
-        bond_index, bond_batch, pair_index, gate, solver: dict,
+        bond_index, bond_batch, pair_index, gate, solver: dict, ext_m=None,
     ) -> LevelOutput:
         """One converged coupled solve; records ``solver["ind"]`` for the training metrics."""
         level = coupled_response(
             rp, positions=positions, batch_idx=batch.batch_idx, n_systems=int(batch.n_systems),
             bond_index=bond_index, bond_batch=bond_batch, pair_index=pair_index,
-            gate=gate, max_rank=self.max_rank, **self.cg,
+            gate=gate, max_rank=self.max_rank, ext_m=ext_m,
+            stationary=getattr(self, "_stationary_energy", True), **self.cg,
         )
         solver["ind"] = (level.n_iter, level.converged, level.pd_fail)
         return level
@@ -364,11 +367,19 @@ class FilmModel(nn.Module):
         # --- features, conditioning, topology, parameters --------------------------------
         pf = self.projector(batch, state)
         c = state.local_conditioning(self.state_embedding)
-        topo = BondedTopology.from_state(state, batch.atomic_numbers)
+        topo = BondedTopology.from_state(
+            state, batch.atomic_numbers, getattr(batch, "covalent_bonds", None)
+        )
         # The SQE channel graph: complete intra-fragment enumeration, frame-grouped (charge
         # flows within fragments only; the coupled solve groups by frame).
         ch_ind, chb_ind, _ = union_channels(positions, batch.batch_idx, frag, 0.0)
-        params = self.network(pf, c, state, topo, positions, ch_ind)
+        # External sources (probe charges, uniform fields): the undamped point fields feed
+        # the O(F^2) bonded field features, when the network has them.
+        ext: ExternalSources | None = getattr(batch, "external", None)
+        fields = None
+        if ext is not None and getattr(self.network, "field_features", None) is not None:
+            fields = point_fields(ext, positions, batch.batch_idx)
+        params = self.network(pf, c, state, topo, positions, ch_ind, fields=fields)
 
         # --- one pair list ----------------------------------------------------------------
         pair_index, r, is_intra, pair_frag = union_pairs(
@@ -464,6 +475,19 @@ class FilmModel(nn.Module):
             name: pool_batch((1.0 - p_intra) * value) for name, value in e_pair.items()
         }
 
+        # --- external sources: first-order electrostatics of the permanent multipoles ------
+        # E_ext = ext_m . M + c, linear in the multipoles; the same ext_m drives the solve
+        # below, so the induction channel is the pure relaxation (rsfff.ff.external).
+        ext_m = None
+        e_ext_perm = None
+        if ext is not None:
+            ext_m, ext_c = external_potential(
+                ext, positions, batch.batch_idx, n_sys, b0, z0, self.max_rank
+            )
+            e_ext_atom = (ext_m * m_real).sum(-1)
+            e_ext_perm = e_ext_atom.new_zeros(n_sys).index_add(0, batch.batch_idx, e_ext_atom)
+            interaction["external"] = e_ext_perm + ext_c
+
         # --- bonded -----------------------------------------------------------------------
         # The leaf evaluations go through `rsfff.ff.backend` (torch, or torchff kernels);
         # the torch path reuses one geometry evaluation for both bonded parameter sets.
@@ -483,6 +507,12 @@ class FilmModel(nn.Module):
         e_imp0 = improper_energy(positions, topo, params.bonded0)
         if e_imp0 is not None:
             energy_bonded = energy_bonded.index_add(0, topo.improper_frag, e_imp0)
+        # Torsions and couplings (rsfff.ff.film.terms), at the same theta_0.
+        if params.terms0 is not None:
+            for e_term, frag_term in term_energies(
+                positions, topo, params.bonded0, params.terms0, geometry=geom
+            ):
+                energy_bonded = energy_bonded.index_add(0, frag_term, e_term)
 
         # --- fragment energies ------------------------------------------------------------
         # Intra classical pairs at theta_0. `pair_frag` is only valid where `is_intra`; a
@@ -506,7 +536,7 @@ class FilmModel(nn.Module):
             level_ind = self._induction_level(
                 rp, params, positions=positions, batch=batch, state=state,
                 bond_index=ch_ind, bond_batch=chb_ind, pair_index=pair_index,
-                gate=gate_ind, solver=solver,
+                gate=gate_ind, solver=solver, ext_m=ext_m,
             )
 
             # The same functional at zero response. The internal part collapses to
@@ -519,6 +549,8 @@ class FilmModel(nn.Module):
                 0, batch.batch_idx, e0_atom
             )
             e0_ref = e0_internal + pool_batch(gate_ind * e_elst)
+            if e_ext_perm is not None:
+                e0_ref = e0_ref + e_ext_perm
 
             e_bond_env, e_angle_env = ff_backend.bonded_energy(
                 positions, topo, params.bonded, geometry=geom
@@ -533,6 +565,11 @@ class FilmModel(nn.Module):
                 energy_bonded_env = energy_bonded_env.index_add(
                     0, topo.improper_frag, e_imp_env
                 )
+            if params.terms is not None:
+                for e_term, frag_term in term_energies(
+                    positions, topo, params.bonded, params.terms, geometry=geom
+                ):
+                    energy_bonded_env = energy_bonded_env.index_add(0, frag_term, e_term)
             d_bond = energy_bonded_env - energy_bonded
             interaction["induction"] = (
                 (level_ind.energy - e0_ref)
@@ -589,3 +626,87 @@ class FilmModel(nn.Module):
             energy_bonded_env=energy_bonded_env,
             solver=solver or None,
         )
+    # -- response properties as energy derivatives ---------------------------------------
+
+    def response_properties(
+        self,
+        batch,
+        state: StateDescriptor | None = None,
+        *,
+        polarizability: bool = True,
+        quadrupole: bool = True,
+        create_graph: bool | None = None,
+        origin: torch.Tensor | None = None,
+    ):
+        """``(out, mu (B, 3), theta (B, 3, 3) | None, alpha (B, 3, 3) | None)``, atomic units.
+
+        Every molecular response property is a derivative of the one energy, exactly as the
+        QM labels are (SCF moments are Hellmann-Feynman derivatives, CPSCF alpha a second
+        derivative). A uniform field ``F`` and field gradient ``G`` are added to the batch's
+        external sources at zero and differentiated:
+
+            mu    = -dE/dF                 about the uniform field's origin (default: the
+                                           coordinate origin, as ``molecular_multipoles``)
+            Theta = -3 dE/dG               traceless (Buckingham)
+            alpha = -d^2E/dF dF = d mu/dF  alpha[b, i, j] = d mu_i / dF_j
+
+        With the film's variational solve, ``mu`` equals the summed permanent + induced moments
+        (Hellmann-Feynman). With the O(F^2) field features (:mod:`rsfff.ff.film.fields`) the
+        zero-field ``mu`` is unchanged and ``alpha`` gains the bonded term ``-d^2E_b/dF^2``
+        automatically -- nothing has to be added by hand. Under a fixed-K (non-variational)
+        solve this is the *relaxed* (derivative) moment, the one consistent with the energy.
+
+        ``create_graph`` defaults to grad mode, so a training step can put losses on all three.
+        """
+        from dataclasses import replace as _replace
+
+        n_sys = int(batch.n_systems)
+        pos = batch.positions
+        f_unif = torch.zeros(n_sys, 3, dtype=pos.dtype, device=pos.device, requires_grad=True)
+        g_unif = (
+            torch.zeros(n_sys, 3, 3, dtype=pos.dtype, device=pos.device, requires_grad=True)
+            if quadrupole else None
+        )
+        ext = getattr(batch, "external", None)
+        if origin is not None:
+            # moments about `origin` (B, 3) Angstrom. Only legitimate when the batch carries
+            # no uniform field of its own: re-originating one changes the potential itself.
+            if ext is not None and (ext.field is not None or ext.field_gradient is not None):
+                raise ValueError("origin= with a uniform external field already in the batch")
+            ext = _replace(ext, origin=origin) if ext is not None else ExternalSources(origin=origin)
+        ext = with_uniform(ext, f_unif, g_unif)
+        create = torch.is_grad_enabled() if create_graph is None else bool(create_graph)
+        keep = getattr(self, "_stationary_energy", True)
+        self._stationary_energy = False       # exact second derivatives (see coupled_response)
+        try:
+            with torch.enable_grad():
+                out = self.forward(_replace(batch, external=ext), state, with_induction=True)
+        finally:
+            self._stationary_energy = keep
+        with torch.enable_grad():
+            inputs = [f_unif] + ([g_unif] if quadrupole else [])
+            grads = torch.autograd.grad(
+                out.energy.sum(), inputs, create_graph=create or polarizability
+            )
+            mu = -grads[0]
+            theta = None
+            if quadrupole:
+                gg = grads[1]
+                gg = 0.5 * (gg + gg.transpose(-1, -2))
+                eye = torch.eye(3, dtype=gg.dtype, device=gg.device)
+                gg = gg - gg.diagonal(dim1=-2, dim2=-1).sum(-1)[:, None, None] / 3.0 * eye
+                theta = -3.0 * gg
+            alpha = None
+            if polarizability:
+                rows = [
+                    torch.autograd.grad(
+                        mu[:, c].sum(), f_unif, create_graph=create, retain_graph=True
+                    )[0]
+                    for c in range(3)
+                ]
+                alpha = torch.stack(rows, dim=1)
+        if not create:
+            mu = mu.detach()
+            theta = None if theta is None else theta.detach()
+            alpha = None if alpha is None else alpha.detach()
+        return out, mu, theta, alpha
