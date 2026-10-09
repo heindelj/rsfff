@@ -9,4 +9,4 @@ qchem_roundtrip/train/runs/
 benchmarks/profile/results/*_trace.json.gz
 benchmarks/profile/results/*_forward.json
 benchmarks/profile/results/slurm-*.out
-
+theory
