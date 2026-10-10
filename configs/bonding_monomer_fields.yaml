@@ -18,7 +18,9 @@
 #   torsions: true       Fourier torsions on every a-b-c-d (needed by every rotor)
 #   impropers: true      Wilson out-of-plane terms on degree-3 centers (NH3, H3O+, sp2 C)
 #
-# Data (placeholders until the ChemLab campaign has run): every frame carries `bonds`
+# Data: the ChemLab project fff_bonding/cl exports a set (python/scripts/export_dataset.py) as
+# vacuum.xyz (main), vacuum_pol.xyz, probe.xyz, field.xyz -- copy data/sets/<workflow>/ to
+# data/monomer_bonded/<workflow>/. Every frame carries `bonds`
 # (flat 0-based pairs), `fragment_idx` (all zeros), `fragment_charges` /
 # `fragment_multiplicities`, energy, forces, and where computed `dipole` (e*a0),
 # `fragment_second_moments`, `polarizability` (a0^3). Probe frames add `ext_charges`
@@ -32,16 +34,16 @@ checkpoint_root: checkpoints
 
 data:
   path:
-    - data/monomer_bonded/vacuum_wb97mv_tzvpd.xyz
+    - data/monomer_bonded/monomer-pilot/vacuum.xyz
   reference_energies: data/atomic_references_wb97mv_tzvpd.json
   holdout_fraction: 0.1
   seed: 0
 
 bonding:
-  probe_path:
-    - data/monomer_bonded/probe_wb97mv_tzvpd.xyz
-  probe_weight: 1.0
-  probe_batch_size: 32
+  streams:                     # fff_bonding/cl python/scripts/export_dataset.py lays a set out so
+    - {name: pol, path: data/monomer_bonded/monomer-pilot/vacuum_pol.xyz, weight: 1.0, batch_size: 16}
+    - {name: probe, path: data/monomer_bonded/monomer-pilot/probe.xyz, weight: 1.0, batch_size: 32}
+    - {name: field, path: data/monomer_bonded/monomer-pilot/field.xyz, weight: 1.0, batch_size: 16}
   energy_weight: 1.0
   force_weight: 1.0
   dipole_weight: 1.0

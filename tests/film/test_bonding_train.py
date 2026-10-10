@@ -2,7 +2,9 @@
 
 Vacuum frames (energy, forces, dipole, second moments, polarizability) and probe frames
 (``ext_charges``) for methanol and acetaldehyde, with explicit ``bonds``; the four model
-variants (couplings x field features) each train two epochs and must stay finite.
+variants (couplings x field features) each train two epochs and must stay finite. A second
+test uses ``bonding.streams`` the way the fff_bonding export lays a set out: a main file
+without polarizabilities, and ``pol`` / ``probe`` / ``field`` streams.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import torch
 from test_bonding import acetaldehyde, methanol
 
 
-def _frames(mol, n, rng, *, probes=False):
+def _frames(mol, n, rng, *, probes=False, pol=True, field=False):
     from ase import Atoms
     from ase.calculators.singlepoint import SinglePointCalculator
 
@@ -33,8 +35,11 @@ def _frames(mol, n, rng, *, probes=False):
             "fragment_charges": np.zeros(1), "fragment_multiplicities": np.ones(1),
             "fragment_dipoles": 0.5 * rng.standard_normal(3),
             "fragment_second_moments": m2[np.triu_indices(3)][[0, 1, 3, 2, 4, 5]],
-            "polarizability": (20.0 * np.eye(3) + rng.standard_normal((3, 3))).reshape(-1),
         })
+        if pol:
+            a.info["polarizability"] = (20.0 * np.eye(3) + rng.standard_normal((3, 3))).reshape(-1)
+        if field:
+            a.info["ext_field"] = np.eye(3)[rng.integers(3)] * rng.choice([-0.002, 0.002])
         if probes:
             p = rng.standard_normal((3, 3))
             p = 4.0 * p / np.linalg.norm(p, axis=1, keepdims=True)
@@ -95,3 +100,60 @@ train: {{epochs: 2, batch_size: 4, learning_rate: 1.0e-3, eval_every: 1}}
     (tmp_path / "cfg.yaml").write_text(cfg)
     train(tmp_path / "cfg.yaml")
     assert (tmp_path / "ckpt" / "smoke" / "best.pt").exists()
+
+
+def test_train_bonding_streams(tmp_path, capsys):
+    from ase.io import write
+    from rsfff.train.train_bonding import train
+
+    rng = np.random.default_rng(1)
+    files = {
+        "vacuum": _frames(methanol(), 6, rng, pol=False) + _frames(acetaldehyde(), 6, rng, pol=False),
+        "vacuum_pol": _frames(methanol(), 4, rng) + _frames(acetaldehyde(), 4, rng),
+        "probe": _frames(methanol(), 4, rng, probes=True, pol=False),
+        "field": _frames(acetaldehyde(), 4, rng, pol=False, field=True),
+    }
+    for name, frames in files.items():
+        write(str(tmp_path / f"{name}.xyz"), frames, format="extxyz")
+    (tmp_path / "ref.json").write_text(json.dumps({"energies": {"H": -0.5, "C": -37.8, "O": -75.0}}))
+    cfg = f"""
+run_name: streams
+device: cpu
+dtype: float64
+checkpoint_root: {tmp_path}/ckpt
+data:
+  path: [{tmp_path}/vacuum.xyz]
+  reference_energies: {tmp_path}/ref.json
+  holdout_fraction: 0.25
+  seed: 0
+features: {{cutoff: 5.0, n_max: 3, l_max: 2, selected_lambdas: [0, 1, 2], backend: e3nn, density_channels: 4}}
+film:
+  nonbonded: exclusions
+  exclude_through: 4
+  impropers: true
+  atom_typing: degree
+  torsions: true
+  couplings: true
+  field_features: true
+  hidden: 24
+  block_dim: 16
+  head_hidden: 16
+  head_depth: 1
+  equiv_channels: 4
+  bonded_hidden: 16
+  term_hidden: 8
+  induction: true
+bonding:
+  streams:
+    - {{name: pol, path: {tmp_path}/vacuum_pol.xyz, weight: 1.0, batch_size: 4}}
+    - {{name: probe, path: [{tmp_path}/probe.xyz], weight: 0.5, batch_size: 2}}
+    - {{name: field, path: [{tmp_path}/field.xyz], batch_size: 2}}
+train: {{epochs: 2, batch_size: 4, learning_rate: 1.0e-3, eval_every: 1}}
+"""
+    (tmp_path / "cfg.yaml").write_text(cfg)
+    best = train(tmp_path / "cfg.yaml")
+    log = capsys.readouterr().out
+    assert np.isfinite(best)
+    assert "pol 8 (6/2)" in log and "probe 4" in log and "field 4" in log
+    val = [line for line in log.splitlines() if line.strip().startswith("val:")]
+    assert val and all(k in val[-1] for k in ("pol_alpha_mae", "probe_e_mae", "field_mu_mae"))

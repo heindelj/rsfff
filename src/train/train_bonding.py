@@ -7,14 +7,27 @@ every frame is one molecule, every bonded term is enumerated from the explicit c
 (``bonds`` in the extxyz), and every response label is compared against an **energy
 derivative** of the model (:meth:`rsfff.ff.film.FilmModel.response_properties`):
 
-=================  ==========================================================================
-stream             supervises
-=================  ==========================================================================
-``data.path``      vacuum frames: energy per atom, forces, dipole, traceless quadrupole and
-                   polarizability -- each where the file carries the label
-``bonding.probe``  frames with ``ext_charges`` (and/or ``ext_field``): the same labels, in the
-                   field. Its own minibatch every step, weighted by ``bonding.probe_weight``
-=================  ==========================================================================
+====================  =======================================================================
+stream                supervises
+====================  =======================================================================
+``data.path``         the main frames (train/val split, epochs, checkpoints): energy per atom,
+                      forces, dipole, traceless quadrupole, polarizability -- each where the
+                      file carries the label
+``bonding.streams``   further files, each its own minibatch every step with its own weight:
+                      frames whose label set differs from the main file's (rsfff's loader
+                      wants a label on every frame of a file or on none), e.g. the vacuum
+                      frames with a polarizability, the probe-charge frames (``ext_charges``)
+                      and the uniform-field frames (``ext_field``). Each is split with the
+                      same holdout fraction; its held-out part enters the validation loss,
+                      so the best checkpoint is chosen on every stream
+====================  =======================================================================
+
+A stream is ``{name, path, weight, batch_size}``. The older ``bonding.probe_path`` (with
+``probe_weight`` / ``probe_batch_size``) is read as one stream named ``probe``.
+
+The ChemLab project ``fff_bonding/cl`` exports a set as four files
+(``python/scripts/export_dataset.py``): ``vacuum.xyz`` (the main file), ``vacuum_pol.xyz``,
+``probe.xyz`` and ``field.xyz`` (the streams ``pol``, ``probe``, ``field``).
 
 Moments are compared about each molecule's **center of nuclear charge** (Q-Chem's origin):
 the model's by placing the uniform-field origin there, the labels by shifting the stored
@@ -48,10 +61,10 @@ from .loss import compute_forces
 from .term_loop import fit
 from .train_eem import resolve_device
 
-__all__ = ["BondingWeights", "monomer_loss", "train"]
+__all__ = ["BondingWeights", "Stream", "Streams", "monomer_loss", "train"]
 
-_LOG_KEYS = ["e_mae", "f_mae", "mu_mae", "theta_mae", "alpha_mae",
-             "pr_e_mae", "pr_f_mae", "pr_mu_mae", "cg_fail"]
+_METRICS = ["e_mae", "f_mae", "mu_mae", "theta_mae", "alpha_mae"]
+_LOG_KEYS = ["loss", *_METRICS, "cg_fail"]
 
 
 @dataclass
@@ -69,6 +82,7 @@ class BondingWeights:
     probe_weight: float = 1.0
     probe_batch_size: int = 32
     probe_path: list | None = None
+    streams: list | None = None
 
     @classmethod
     def from_yaml(cls, path) -> "BondingWeights":
@@ -77,6 +91,25 @@ class BondingWeights:
         if isinstance(kw.get("probe_path"), str):
             kw["probe_path"] = [kw["probe_path"]]
         return cls(**kw)
+
+    def stream_specs(self) -> list[dict]:
+        """``[{name, path: [..], weight, batch_size}]``: ``streams`` plus the legacy probe path."""
+        specs = []
+        for i, st in enumerate(self.streams or []):
+            if not st.get("path"):
+                raise ValueError(f"bonding.streams[{i}] has no path")
+            path = st["path"] if isinstance(st["path"], list) else [st["path"]]
+            specs.append({"name": str(st.get("name", f"s{i}")), "path": path,
+                          "weight": float(st.get("weight", 1.0)),
+                          "batch_size": int(st.get("batch_size", 32))})
+        if self.probe_path:
+            specs.append({"name": "probe", "path": list(self.probe_path),
+                          "weight": float(self.probe_weight),
+                          "batch_size": int(self.probe_batch_size)})
+        names = [sp["name"] for sp in specs]
+        if len(set(names)) != len(names):
+            raise ValueError(f"bonding.streams: duplicate names {names}")
+        return specs
 
 
 def _labels_about_center(batch):
@@ -150,25 +183,78 @@ def monomer_loss(model, out, batch, w: BondingWeights, *, training: bool, prefix
     return loss, metrics
 
 
-class ProbeStream:
-    """The probe-charge frames as their own minibatch each training step."""
+class Stream:
+    """One extra file as its own minibatch each step.
 
-    def __init__(self, model, dataset, train_idx, w: BondingWeights, device, seed: int = 0):
-        self.model, self.dataset, self.idx, self.w, self.device = model, dataset, train_idx, w, device
+    Training: a random minibatch of the stream's training frames, its loss times ``weight``.
+    Evaluation: the next ``batch_size`` of its held-out frames (in order, wrapping), so a
+    validation pass over the main file also sweeps the stream's held-out part.
+    """
+
+    def __init__(self, name, model, dataset, train_idx, val_idx, w: BondingWeights, weight,
+                 batch_size, device, seed: int = 0):
+        self.name, self.model, self.dataset, self.w = name, model, dataset, w
+        self.train_idx, self.val_idx = train_idx, val_idx
+        self.weight, self.batch_size, self.device = float(weight), int(batch_size), device
         self.g = torch.Generator().manual_seed(int(seed) + 17)
+        self._next = 0
+        self.last: dict = {}
 
-    def __call__(self, out, batch, cfg):
+    def _pick(self, training: bool):
+        if training:
+            idx = self.train_idx
+            return idx[torch.randperm(idx.numel(), generator=self.g)[: self.batch_size]]
+        idx = self.val_idx
+        if idx.numel() == 0:
+            return None
+        rows = (torch.arange(self.batch_size) + self._next) % idx.numel()
+        self._next = int((self._next + self.batch_size) % idx.numel())
+        return idx[rows[: min(self.batch_size, idx.numel())]]
+
+    def __call__(self):
         self.last = {}
-        if self.dataset is None or not self.model.training or self.w.probe_weight <= 0.0:
-            return {}
-        pick = self.idx[torch.randperm(self.idx.numel(), generator=self.g)[: self.w.probe_batch_size]]
+        training = self.model.training
+        if self.weight <= 0.0:
+            return None
+        pick = self._pick(training)
+        if pick is None or pick.numel() == 0:
+            return None
         pb = self.dataset.flat_batch(pick.tolist()).to(self.device)
         pb.positions.requires_grad_(True)
         with torch.enable_grad():
             pout = self.model(pb, with_induction=True)
-            loss, metrics = monomer_loss(self.model, pout, pb, self.w, training=True, prefix="pr_")
+            loss, metrics = monomer_loss(self.model, pout, pb, self.w, training=training,
+                                         prefix=f"{self.name}_")
+        metrics.pop("cg_fail", None)
         self.last = metrics
-        return {"probe": self.w.probe_weight * loss}
+        return self.weight * (loss if training else loss.detach())
+
+
+class Streams:
+    """The ``penalties`` / ``diagnostics`` hooks of :func:`rsfff.train.term_loop.fit`."""
+
+    def __init__(self, streams):
+        self.streams = streams
+
+    def __call__(self, out, batch, cfg):
+        extra = {}
+        for st in self.streams:
+            value = st()
+            if value is not None:
+                extra[st.name] = value
+        return extra
+
+    def diagnostics(self, out, batch, target):
+        merged = {}
+        for st in self.streams:
+            merged.update(st.last)
+        return merged
+
+    def log_keys(self):
+        keys = []
+        for st in self.streams:
+            keys += [st.name] + [f"{st.name}_{k}" for k in _METRICS]
+        return keys
 
 
 def train(config_path):
@@ -178,37 +264,38 @@ def train(config_path):
     dtype = torch.float64 if str(config.dtype) == "float64" else torch.float32
     torch.set_default_dtype(dtype)
 
-    vacuum = load_datasets(config.data.path, dtype=dtype)
-    probes = load_datasets(w.probe_path, dtype=dtype) if w.probe_path else None
-    types = sorted(set(vacuum.unique_atomic_numbers) | set(
-        probes.unique_atomic_numbers if probes is not None else []))
-    train_idx, val_idx = split_indices(len(vacuum), config.data.holdout_fraction, config.data.seed)
-    probe_train = (
-        split_indices(len(probes), config.data.holdout_fraction, config.data.seed)[0]
-        if probes is not None else None
-    )
+    main_set = load_datasets(config.data.path, dtype=dtype)
+    specs = w.stream_specs()
+    extra_sets = [load_datasets(sp["path"], dtype=dtype) for sp in specs]
+    types = sorted(set(main_set.unique_atomic_numbers).union(
+        *[set(d.unique_atomic_numbers) for d in extra_sets]))
+    train_idx, val_idx = split_indices(len(main_set), config.data.holdout_fraction, config.data.seed)
     ref = load_reference_energies(config.data.reference_energies, types).to(dtype)
     torch.manual_seed(config.train.seed)
     model = build_film_model(config.features, config.film, types, ref).to(device=device, dtype=dtype)
+
+    streams = []
+    for sp, ds in zip(specs, extra_sets):
+        tr, va = split_indices(len(ds), config.data.holdout_fraction, config.data.seed)
+        streams.append(Stream(sp["name"], model, ds, tr, va, w, sp["weight"], sp["batch_size"],
+                              device, config.data.seed))
+    hooks = Streams(streams)
+    desc = "; ".join(f"{st.name} {len(st.dataset)} ({len(st.train_idx)}/{len(st.val_idx)})"
+                     for st in streams) or "no streams"
     print(
-        f"{len(vacuum)} vacuum frames ({len(train_idx)}/{len(val_idx)} train/val); "
-        f"{0 if probes is None else len(probes)} probe frames; species {types}; "
-        f"{sum(p.numel() for p in model.parameters())} parameters; "
+        f"{len(main_set)} main frames ({len(train_idx)}/{len(val_idx)} train/val); {desc}; "
+        f"species {types}; {sum(p.numel() for p in model.parameters())} parameters; "
         f"couplings={config.film.couplings} field_features={config.film.field_features}",
         flush=True,
     )
-    stream = ProbeStream(model, probes, probe_train, w, device, config.data.seed)
 
     def fit_term(out, batch, cfg):
         return (*monomer_loss(model, out, batch, w, training=model.training), batch.energy)
 
-    def diagnostics(out, batch, target):
-        return dict(getattr(stream, "last", {}))
-
     return fit(
-        model, vacuum, config, config, device, train_idx, val_idx,
-        log_keys=_LOG_KEYS, fit_term=fit_term, penalties=stream, diagnostics=diagnostics,
-        grad_positions=w.force_weight > 0.0,
+        model, main_set, config, config, device, train_idx, val_idx,
+        log_keys=_LOG_KEYS + hooks.log_keys(), fit_term=fit_term, penalties=hooks,
+        diagnostics=hooks.diagnostics, grad_positions=w.force_weight > 0.0,
     )
 
 

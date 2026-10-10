@@ -68,9 +68,18 @@ gains `-d2E_b/dF2` (tests pin both). Its energy is booked in induction as
 `E_b(theta) - E_b(theta_0)`. Sources: external only for now; other fragments' permanent
 multipoles are the next source.
 
+**Training streams** (`bonding.streams` in `src/train/train_bonding.py`): rsfff's loader wants a
+label on every frame of a file or on none, so a set comes as several files: the main file
+(`data.path`; epochs, checkpoints) plus streams `{name, path, weight, batch_size}`, each its own
+minibatch every step and split with the same holdout fraction; their held-out parts enter the
+validation loss. The ChemLab project `~/research/fff_bonding/cl` exports a set
+(`python/scripts/export_dataset.py`) as `vacuum.xyz` (main), `vacuum_pol.xyz` (`pol`),
+`probe.xyz` and `field.xyz`. `bonding.probe_path` still works (a stream named `probe`).
+
 ## Next
 
-- Data (ChemLab campaign): vacuum + probe + uniform-field frames, Hessians, scans.
+- Data (ChemLab `fff_bonding/cl`): `monomer-pilot` -- Wigner/rotor, scans, probe and field
+  frames for the seven pilot molecules; Hessians at distorted geometries later.
 - Train the four variants (B0 constant-parameter baseline first: heads off, tables only).
 - Hessian-vector-product loss; per-family `bond_var` weights; relative-energy target.
 - Typed nonbonded priors (q0 for covalent Cl); inter-fragment permanent sources for the field
