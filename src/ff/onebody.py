@@ -65,7 +65,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ..features.features import LambdaFeatures
+from bb.features import LambdaFeatures
 from ..mlip.pair_heads import PairEnergyHead
 from .pairs import intra_fragment_pairs
 from .response import FragmentResponse, FragmentResponseOutput  # noqa: F401

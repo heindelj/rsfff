@@ -17,9 +17,10 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 
-from ..features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
+from bb.graph import config_max_num_neighbors as _max_neighbors
+
 from .heads import AtomicEnergyHead
-from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 
 class EnergyModel(nn.Module):

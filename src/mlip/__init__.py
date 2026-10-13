@@ -1,5 +1,7 @@
 """Machine-learned interatomic potential (MLIP) models and heads."""
 
+from bb.nn import mlp
+
 from .eem import (
     atomic_dipoles,
     charge_flow_polarizability,
@@ -16,7 +18,7 @@ from .diabats import (
     finest_common_refinement,
 )
 from .eem_model import EEMOutput, EEMParameterHeads, MLIPEEMModel, build_eem_model
-from .heads import AtomicEnergyHead, mlp
+from .heads import AtomicEnergyHead
 from .model import EnergyModel, build_model
 from .monomer import (
     MonomerModel,

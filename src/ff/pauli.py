@@ -53,8 +53,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ..features.features import LambdaFeatures
-from ..mlip.heads import two_slot_mlp, zero_init_readout
+from bb.features import LambdaFeatures
+from bb.nn import two_slot_mlp, zero_init_readout
 from ..mlip.pair_heads import PairEnergyHead
 from ..mlip.response_heads import AtomicQuadrupoleHead, AtomicVectorHead
 from ..mlip.switch import pairwise_switch

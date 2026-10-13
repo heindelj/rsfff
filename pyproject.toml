@@ -10,12 +10,17 @@ requires-python = ">=3.10"
 # torch-cluster is optional, and not listed here for two reasons. It ships only an sdist whose
 # setup.py imports torch, and pip builds it in an isolated environment that has no torch, so
 # listing it makes `pip install .` fail outright with "ModuleNotFoundError: No module named
-# 'torch'" before anything else is installed. And rsfff.neighbors no longer needs it:
+# 'torch'" before anything else is installed. And bb.graph (rsfff.neighbors) does not need it:
 # radius_graph_torch produces the same graph in plain torch, at the same speed for molecular
 # clusters (the neighbor list is a rounding error next to one model evaluation) and more slowly
 # for a large periodic box, where the compiled cell list wins. Install it for that case -- see
 # [neighbors] below.
 dependencies = [
+    # bb ("Black Box", ~/dev/bb): the features, neighbor lists, readouts and NN building blocks.
+    # Not on PyPI -- install it first: `pip install -e ~/dev/bb` (or pin a tag on a cluster,
+    # `pip install "bb-black-box @ git+...@<tag>"`). The distribution is named `bb-black-box`
+    # because PyPI's `bb` is an unrelated project; the import name is `bb`.
+    "bb-black-box",
     "numpy",
     "pyyaml",
     "torch",
@@ -53,12 +58,10 @@ neighbors = [
 # cuequivariance: the frontends are pure Python and work everywhere (CPU off CUDA). The fused
 # CUDA ops ship per CUDA major version (Linux only), so pick the extra matching
 # `python -c "import torch; print(torch.version.cuda)"` -- scripts/make_env.sh does this.
-cue = [
-    "cuequivariance>=0.10",
-    "cuequivariance-torch>=0.10",
-]
-cue-cu12 = ["rsfff[cue]", "cuequivariance-ops-torch-cu12"]
-cue-cu13 = ["rsfff[cue]", "cuequivariance-ops-torch-cu13"]
+# The backend lives in bb, so these defer to bb's extras.
+cue = ["bb-black-box[cue]"]
+cue-cu12 = ["bb-black-box[cue-cu12]"]
+cue-cu13 = ["bb-black-box[cue-cu13]"]
 # Local (CPU) quantum-chemistry backend for rsfff.qcgen. On Colab the GPU stack
 # (gpu4pyscf-cuda12x etc.) is installed from the notebook instead. Note: VV10
 # (needed by wB97M-V) is built into pyscf; pyscf-dispersion is intentionally not

@@ -26,7 +26,7 @@ which is a convention that has to be enforced by hand, in several places, consis
 not.
 
 Here ``eta`` is identically zero for an isolated fragment because the sum that builds it is
-empty (:meth:`rsfff.features.features.FlatLambdaSOAPFeaturizer.forward`, ``also_cross=True``).
+empty (:meth:`bb.features.SOAPFeaturizer.forward`, ``also_cross=True``).
 There is nothing to enforce and nothing to get wrong.
 
 The narrow-input convention
@@ -45,11 +45,11 @@ when a batch happens to contain no cross-fragment edges at all.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 
-from ..features.features import LambdaFeatures
+from bb.features import LambdaFeatures
 
 __all__ = ["SlotDims", "SlotFeatures", "select_atoms"]
 
@@ -66,8 +66,7 @@ def select_atoms(feats: LambdaFeatures | None, atom_index) -> LambdaFeatures | N
     """
     if feats is None or atom_index is None:
         return feats
-    return replace(
-        feats,
+    return feats.replace(
         inv_feats=feats.inv_feats[atom_index],
         equiv_feats=(
             None if feats.equiv_feats is None else feats.equiv_feats[atom_index]
@@ -169,8 +168,7 @@ class SlotFeatures:
         if self.env is None:
             return self.frag
         if self._joined is None:
-            self._joined = replace(
-                self.frag,
+            self._joined = self.frag.replace(
                 inv_feats=_cat(self.frag.inv_feats, self.env.inv_feats),
                 vec_feats=_cat(self.frag.vec_feats, self.env.vec_feats),
                 equiv_feats=_cat(self.frag.equiv_feats, self.env.equiv_feats),

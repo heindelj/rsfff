@@ -31,15 +31,17 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 
-from ..features import FlatLambdaSOAPFeaturizer, LambdaFeatures
+from bb.features import FlatLambdaSOAPFeaturizer, LambdaFeatures
+from bb.graph import config_max_num_neighbors as _max_neighbors
+from bb.nn import mlp, zero_init_readout
+
 from .eem import atomic_dipoles, charge_flow_polarizability, eem_charges, eem_energy
-from .heads import AtomicEnergyHead, mlp, zero_init_readout
+from .heads import AtomicEnergyHead
 from .response_heads import (
     AtomicAlphaHead,
     AtomicVectorHead,
     voigt_vector_to_symmetric_matrix,
 )
-from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 
 class EEMParameterHeads(nn.Module):

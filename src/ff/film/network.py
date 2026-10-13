@@ -27,9 +27,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ...mlip.heads import mark_env_slot
+from bb.nn import ConditionedTrunk, FiLMGenerator, FiLMLayer, mark_env_slot
 from .bonded import BondedParameterHead, BondedParameters, BondedTopology
-from .conditioning import ConditionedTrunk, FiLMGenerator, FiLMLayer
 from .heads import FilmResponseHeads, ResponseFamily
 from .permanent import PermanentMultipoleHeads
 from .projector import ProjectedFeatures

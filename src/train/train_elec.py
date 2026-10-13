@@ -77,7 +77,9 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import torch  # noqa: E402
 
-from ..features.features import FlatLambdaSOAPFeaturizer  # noqa: E402
+from bb.features import FlatLambdaSOAPFeaturizer  # noqa: E402
+from bb.graph import config_max_num_neighbors as _max_neighbors  # noqa: E402
+
 from ..ff.electrostatics import (  # noqa: E402
     DEFAULT_ELEC_PRIOR,
     ElectrostaticParameterHeads,
@@ -96,7 +98,6 @@ from .data import load_datasets, load_monomer_batch, split_indices  # noqa: E402
 from .loss import fragment_multipole_loss  # noqa: E402
 from .term_loop import fit  # noqa: E402
 from .train_eem import resolve_device  # noqa: E402
-from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 _LOG_KEYS = ("loss", "mae", "rmse", "ff_mae", "corr_share", "r0", "q_res", "qO",
              "dchi", "mu", "quad", "dip_mae", "quad_mae")

@@ -49,8 +49,9 @@ from pathlib import Path
 
 import torch
 
+from bb.nn import env_parameters
+
 from ..ff.units import KJMOL_PER_HARTREE
-from ..mlip.heads import env_parameters
 from .build_film import build_film_model
 from ..ff.film.model import maybe_compile
 from .config import Config, load_config, stage_config

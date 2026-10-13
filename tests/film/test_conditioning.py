@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from rsfff.ff.film.conditioning import CONDITIONING_MODES, ConditionedTrunk, FiLMGenerator
+from bb.nn.conditioning import CONDITIONING_MODES, ConditionedTrunk, FiLMGenerator
 
 
 def test_film_is_identity_at_init():

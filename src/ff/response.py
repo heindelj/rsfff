@@ -34,9 +34,10 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ..features.features import LambdaFeatures
+from bb.features import LambdaFeatures
+from bb.nn import two_slot_mlp, zero_init_readout
+
 from ..mlip.eem import atomic_dipoles, atomic_quadrupoles
-from ..mlip.heads import two_slot_mlp, zero_init_readout
 from ..mlip.response_heads import (
     AtomicAlphaHead,
     AtomicQuadrupoleHead,

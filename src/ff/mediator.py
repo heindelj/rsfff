@@ -58,7 +58,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ..mlip.heads import mlp
+from bb.nn import mlp
 from ..mlip.switch import validity_bump
 
 __all__ = [

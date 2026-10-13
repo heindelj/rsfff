@@ -12,9 +12,8 @@ import warnings
 import pytest
 import torch
 
-from rsfff.features.features import FlatLambdaSOAPFeaturizer, FlatStateSOAPFeaturizer
-from rsfff.ff import pairs as pairs_mod
-from rsfff.neighbors import (
+from bb.features import FlatLambdaSOAPFeaturizer, FlatStateSOAPFeaturizer
+from bb.graph import (
     BACKEND,
     CAP_EVENTS,
     DEFAULT_MAX_NUM_NEIGHBORS,
@@ -25,6 +24,8 @@ from rsfff.neighbors import (
     set_strict,
 )
 
+from rsfff.ff import pairs as pairs_mod
+
 try:  # only the tests that compare the two implementations need the compiled one
     from torch_cluster import radius_graph
 except ImportError:  # pragma: no cover
@@ -33,6 +34,12 @@ except ImportError:  # pragma: no cover
 needs_compiled = pytest.mark.skipif(
     radius_graph is None, reason="compiled torch_cluster is not installed"
 )
+
+
+
+def _cap_warnings(caught):
+    """The neighbor-cap warnings among ``caught`` (bb also notes, once, a missing torch_cluster)."""
+    return [c for c in caught if "max_num_neighbors" in str(c.message)]
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +77,7 @@ def test_truncation_warns_and_is_counted():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         build_radius_graph(pos, 5.0, batch, context="unit", max_num_neighbors=16)
+    caught = _cap_warnings(caught)
     assert len(caught) == 1
     assert "max_num_neighbors=16" in str(caught[0].message)
     assert CAP_EVENTS["unit"] == 1
@@ -81,7 +89,7 @@ def test_untruncated_list_is_silent():
         warnings.simplefilter("always")
         edge = build_radius_graph(pos, 5.0, batch, context="unit")
     assert edge.shape[1] == 40 * 39            # complete graph, nothing dropped
-    assert not caught
+    assert not _cap_warnings(caught)
     assert CAP_EVENTS == {}
 
 
@@ -99,7 +107,7 @@ def test_warning_fires_once_per_context():
         warnings.simplefilter("always")
         for _ in range(5):
             build_radius_graph(pos, 5.0, batch, context="unit", max_num_neighbors=16)
-    assert len(caught) == 1
+    assert len(_cap_warnings(caught)) == 1
     assert CAP_EVENTS["unit"] == 5             # the count still sees every hit
 
 
@@ -109,12 +117,15 @@ def test_no_caller_inherits_the_library_default():
         pairs_mod.inter_fragment_pairs,
         pairs_mod.union_pairs,
         pairs_mod.union_channels,
-        FlatLambdaSOAPFeaturizer.__init__,
-        FlatStateSOAPFeaturizer.__init__,
     ]
     for fn in builders:
         default = inspect.signature(fn).parameters["max_num_neighbors"].default
         assert default >= DEFAULT_MAX_NUM_NEIGHBORS, fn
+    # bb's featurizers resolve an unset cap (``None``) to bb's default at construction.
+    feat = FlatLambdaSOAPFeaturizer(cutoff=4.0, n_max=2, l_max=1, neighbor_types=(1, 8))
+    assert feat.max_num_neighbors >= DEFAULT_MAX_NUM_NEIGHBORS
+    default = inspect.signature(FlatStateSOAPFeaturizer.__init__).parameters["max_num_neighbors"].default
+    assert default is None or default >= DEFAULT_MAX_NUM_NEIGHBORS
 
 
 def test_featurizer_passes_its_cap_through():
@@ -125,8 +136,8 @@ def test_featurizer_passes_its_cap_through():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         feat._build_edges(pos, batch)
-    assert len(caught) == 1
-    assert CAP_EVENTS["FlatLambdaSOAPFeaturizer"] == 1
+    assert len(_cap_warnings(caught)) == 1
+    assert CAP_EVENTS[type(feat).__name__] == 1
 
 
 def test_pair_builder_reports_its_own_context():
@@ -137,7 +148,7 @@ def test_pair_builder_reports_its_own_context():
         pairs_mod.inter_fragment_pairs(
             pos, batch, 5.0, fragment_idx=frag, max_num_neighbors=16,
         )
-    assert len(caught) == 1
+    assert len(_cap_warnings(caught)) == 1
     assert CAP_EVENTS["inter_fragment_pairs"] == 1
 
 
@@ -294,7 +305,7 @@ def test_backend_says_which_one_is_in_use():
 def test_padded_and_chunked_fallbacks_agree(monkeypatch, seed, cap):
     """The padded (F, n_max, n_max) path and the chunked path are the same graph, edge for
     edge and in the same order, including truncation to the cap."""
-    from rsfff import neighbors as nb
+    from bb.graph import neighbors as nb
 
     g = torch.Generator().manual_seed(seed)
     sizes = [int(k) for k in torch.randint(1, 12, (7,), generator=g)]

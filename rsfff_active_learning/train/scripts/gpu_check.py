@@ -56,7 +56,7 @@ def report(status: str, name: str, detail: str = "") -> None:
 
 def build(config, device):
     """Everything ``rsfff.train.train_film._train_once`` builds, on ``device``."""
-    from rsfff.mlip.heads import env_parameters  # noqa: F401  (import check)
+    from bb.nn import env_parameters  # noqa: F401  (import check)
     from rsfff.train.build_film import build_film_model
     from rsfff.train.data import (fragment_view, load_cluster_datasets,
                                   load_reference_energies, split_indices_grouped)
@@ -128,7 +128,7 @@ def main() -> int:
 
     # --- 1. environment ----------------------------------------------------------------------
     import rsfff
-    import rsfff.neighbors as nb
+    import bb.graph.neighbors as nb
     print(f"torch {torch.__version__} (CUDA build {torch.version.cuda}), python "
           f"{sys.version.split()[0]}, rsfff at {Path(rsfff.__file__).parent}")
     try:

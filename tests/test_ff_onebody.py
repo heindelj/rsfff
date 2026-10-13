@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-from rsfff.features.features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
 from rsfff.ff.multipole import irrep2_to_spherical
 from rsfff.ff.onebody import OneBodyEnergy, OneBodyEnvironment, OneBodyModel
 from rsfff.ff.pairs import inter_fragment_pairs, intra_fragment_pairs

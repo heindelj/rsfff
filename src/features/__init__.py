@@ -1,53 +1,21 @@
-"""GPU-native SOAP / ACE-style equivariant atomic features.
+"""Moved to bb: features live in :mod:`bb.features`, backends in :mod:`bb.o3`.
 
-Two interchangeable equivariant backends are provided:
-
-  * ``"e3nn"`` -- the default, pure-``e3nn`` path (CPU/CUDA/MPS).
-  * ``"cue"``  -- a ``cuequivariance`` path for the fused nu=3 bispectrum on CUDA
-                  (install the optional ``cue`` extra: ``pip install rsfff[cue]``).
-
-The two are a faithful numerical swap for the density and nu=2 power spectrum;
-only the learnable bispectrum weights differ. See ``equivariant_backend`` for
-details.
+This alias keeps ``import rsfff.features`` working for scripts and notebooks for one
+release; new code imports from bb directly.
 """
 
-from .equivariant_backend import (
-    CueBackend,
-    E3nnBackend,
-    E3nnWeightedBispectrum,
-    EquivariantBackend,
-    get_backend,
-)
-from .features import (
+from bb.features import (  # noqa: F401
     BesselBasis,
     DensityExpansion,
+    E3nnWeightedBispectrum,
     FlatLambdaSOAPFeaturizer,
     FlatStateSOAPFeaturizer,
     LambdaFeatures,
-    SoapAceFeatures,
+    SOAPFeaturizer,
+    StateSOAPFeaturizer,
     bispectrum,
     cosine_cutoff,
     equivariant_power_spectrum,
     power_spectrum,
 )
-
-__all__ = [
-    # backends
-    "EquivariantBackend",
-    "E3nnBackend",
-    "CueBackend",
-    "E3nnWeightedBispectrum",
-    "get_backend",
-    # featurizers
-    "BesselBasis",
-    "DensityExpansion",
-    "SoapAceFeatures",
-    "FlatLambdaSOAPFeaturizer",
-    "FlatStateSOAPFeaturizer",
-    "LambdaFeatures",
-    # functional
-    "power_spectrum",
-    "bispectrum",
-    "equivariant_power_spectrum",
-    "cosine_cutoff",
-]
+from bb.o3 import CueBackend, E3nnBackend, EquivariantBackend, get_backend  # noqa: F401

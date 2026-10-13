@@ -14,7 +14,7 @@ from typing import Sequence
 
 import yaml
 
-from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS
+from bb.graph import DEFAULT_MAX_NUM_NEIGHBORS
 
 
 @dataclass
@@ -1001,7 +1001,7 @@ class FilmConfig:
     * permanent multipoles are direct heads on the internal features -- there is no frozen
       SQE solve, hence no ``internal``/``bond`` split to configure or watch;
     * conditioning is FiLM over ``c_i = [k_i, u_i]`` with per-family modulators
-      (:mod:`rsfff.ff.film.conditioning`); ``conditioning_mode`` is the ablation dial.
+      (:mod:`bb.nn.conditioning`); ``conditioning_mode`` is the ablation dial.
     """
 
     # --- architecture -------------------------------------------------------------------

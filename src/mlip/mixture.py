@@ -50,13 +50,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from bb.features import LambdaFeatures
+
 from .adiabatic import AdiabaticCorrection, AdiabaticDelta
 from .diabats import FragmentAssignment, finest_common_refinement
 from .eem import atomic_dipoles
 from .monomer import MonomerModel
 from .sqe import atomic_dipole_energy, sqe_solve
 from .switch import pairwise_switch, validity_bump
-from ..features import LambdaFeatures
 from ..train.data import Batch
 
 # Coulomb constant in Hartree*Angstrom: E = Q_a Q_b * BOHR / r[Ang] (since r[Bohr] = r[Ang]/BOHR).

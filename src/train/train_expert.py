@@ -72,8 +72,9 @@ from pathlib import Path
 
 import torch
 
+from bb.nn import core_parameters, env_parameters
+
 from ..ff.units import KJMOL_PER_HARTREE
-from ..mlip.heads import core_parameters, env_parameters
 from ..mlip.reference_states import AtomicStateReference
 from .build_expert import build_expert_model
 from .config import Config, load_config, stage_config

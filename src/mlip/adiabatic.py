@@ -35,7 +35,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from .heads import mlp
+from bb.nn import mlp
 
 
 @dataclass

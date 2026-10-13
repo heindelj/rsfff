@@ -50,7 +50,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..mlip.heads import (
+from bb.nn import (
     env_reduce_parameter,
     exempt_from_weight_decay,
     slot_reduce,

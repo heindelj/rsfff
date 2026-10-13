@@ -16,7 +16,7 @@ import pytest
 import torch
 from ase.io import read
 
-from rsfff.features.features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
 from rsfff.ff.multipole import irrep2_to_spherical, spherical_to_cartesian_quadrupole
 from rsfff.ff.pauli import (
     DEFAULT_PAULI_PRIOR,

@@ -22,16 +22,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from rsfff.features.features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
+from bb.nn import TwoSlotLinear, core_parameters, env_parameters, mlp, two_slot_mlp
+
 from rsfff.ff.multipole import irrep2_to_spherical
 from rsfff.ff.slots import SlotFeatures
-from rsfff.mlip.heads import (
-    TwoSlotLinear,
-    core_parameters,
-    env_parameters,
-    mlp,
-    two_slot_mlp,
-)
 from rsfff.train.data import load_extxyz
 from rsfff.train.term_loop import parameter_groups
 
@@ -218,7 +213,7 @@ def _heads():
     from rsfff.ff.pauli import PauliMultipoleHeads
     from rsfff.ff.range_heads import RangeSeparationHeads
     from rsfff.ff.response import ElectrostaticParameterHeads
-    from rsfff.features.equivariant_backend import get_backend
+    from bb.o3 import get_backend
 
     backend = get_backend("e3nn")
     voigt = backend.irrep6_to_voigt().double()
@@ -272,7 +267,7 @@ def _call(head, inv, vec, equiv, species):
     """Call one head, whatever calling convention it happens to have, and flatten the result."""
     import inspect
 
-    from rsfff.features.features import LambdaFeatures
+    from bb.features import LambdaFeatures
 
     params = inspect.signature(head.forward).parameters
     if "feats" in params:                       # ElectrostaticParameterHeads

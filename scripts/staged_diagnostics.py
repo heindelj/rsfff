@@ -30,6 +30,7 @@ Usage:
 
 import argparse
 import os
+import re
 import sys
 
 import numpy as np
@@ -169,7 +170,7 @@ def block_norms(model):
     named = dict(model.named_parameters())
     out = {}
     for name, p in named.items():
-        if name.endswith("equiv_reduce"):
+        if name.endswith("equiv_reduce") or re.search(r"\.reduce\.\d+[eo]$", name):
             out[name] = float(p.norm())
     for prefix in sorted({k.rsplit(".", 2)[0] for k in named if k.endswith(".weight")}):
         layers = [

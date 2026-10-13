@@ -139,14 +139,14 @@ adjoint from a constant operator to the Hessian at ``M*``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Sequence
 
 import torch
 import torch.nn as nn
 
-from ..features.features import LambdaFeatures
-from ..mlip.heads import mlp, zero_init_readout
+from bb.features import LambdaFeatures
+from bb.nn import mlp, zero_init_readout
 from ..mlip.switch import pairwise_switch
 from ..mlip.unified_head import ChannelSpec, UnifiedPairHead
 from .atomic_energy import AtomicStateEnergy
@@ -248,7 +248,7 @@ class EnvironmentResidual(nn.Module):
       actually wants, rather than something that has to be inferred from a fit quality
       difference;
     * both descriptors come from one neighbor search and one set of spherical harmonics
-      (:meth:`rsfff.features.features.FlatLambdaSOAPFeaturizer.forward` with
+      (:meth:`bb.features.SOAPFeaturizer.forward` with
       ``also_ungrouped=True``), so the difference is attributable to the environment and not
       to two independently-built geometries.
 
@@ -312,7 +312,7 @@ class EnvironmentResidual(nn.Module):
 
         Exact in exact arithmetic; ~1e-16 in float64, because the two descriptors come from
         two scatters that sum the same edges in different orders
-        (:meth:`rsfff.features.features.FlatLambdaSOAPFeaturizer.forward`).
+        (:meth:`bb.features.SOAPFeaturizer.forward`).
 
         Without it an isolated fragment still picks up ``g(h_frag)``, some arbitrary constant
         the rest of the model would have to learn to cancel, and the charge-transfer energy of
@@ -336,7 +336,7 @@ class EnvironmentResidual(nn.Module):
                 + self.equiv_gate(x_full).unsqueeze(1) * full.equiv_feats
                 - self.equiv_gate(x_frag).unsqueeze(1) * frag.equiv_feats
             )
-        return replace(frag, inv_feats=inv, vec_feats=vec, equiv_feats=equiv)
+        return frag.replace(inv_feats=inv, vec_feats=vec, equiv_feats=equiv)
 
     def magnitude(self, frag: LambdaFeatures, env: LambdaFeatures) -> torch.Tensor:
         """``||h_env - h_frag||`` per atom: how much environment the model is using."""
@@ -574,7 +574,7 @@ class UnifiedPairModel(nn.Module):
         )
         if state is None:
             return feats
-        return replace(feats, inv_feats=torch.cat((feats.inv_feats, state), dim=-1))
+        return feats.replace(inv_feats=torch.cat((feats.inv_feats, state), dim=-1))
 
     @property
     def pair_corrections(self) -> bool:

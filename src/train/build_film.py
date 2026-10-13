@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import torch
 
-from ..features.features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
+from bb.graph import DEFAULT_MAX_NUM_NEIGHBORS
+
 from ..ff.dispersion import DispersionParameterHeads, build_log_priors
 from ..ff.coupled_solve import DEFAULT_CG_CHECK_EVERY
 from ..ff.expert_model import ClassicalSpec
@@ -32,7 +34,6 @@ from ..ff.pauli import PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_heads import RangeSeparationHeads
 from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
 from ..ff.response import build_elec_priors
-from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS
 
 __all__ = ["build_film_model"]
 

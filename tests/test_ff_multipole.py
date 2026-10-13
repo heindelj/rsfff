@@ -12,7 +12,7 @@ import math
 import pytest
 import torch
 
-from rsfff.features.features import _resolve_backend
+from bb.o3 import resolve_backend as _resolve_backend
 from rsfff.ff.multipole import (
     build_polytensor,
     cartesian_to_spherical_quadrupole,

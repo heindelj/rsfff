@@ -1,6 +1,7 @@
 #!/bin/bash
 # Create the rsfff conda environment (Python 3.12) from environment.yml, on the Mac or on
 # Perlmutter, then do the steps environment.yml can't express:
+#   0. bb, the shared feature / NN library (editable, from a checkout next to this repo)
 #   1. rsfff itself (editable)
 #   2. the cuequivariance CUDA ops matching torch's CUDA major version (Linux + CUDA torch)
 #   3. torchff-lib: CUDA kernels on Perlmutter (via build_torchff_perlmutter.sh), the
@@ -20,12 +21,14 @@
 # Environment overrides:
 #   CUDA_MODULE=cudatoolkit/X.Y   Perlmutter: toolkit for the torchff build (default: torch's CUDA)
 #   TORCHFF_CUDA=1                off Perlmutter: compile torchff's CUDA kernels anyway
+#   BB_DIR=/path/to/bb            the bb checkout to install (default: ../bb next to this repo)
 #
 # On Perlmutter run this on a login node (compute nodes have no network). The torchff build
 # compiles every extension and takes a while; --no-torchff and running the build later is fine.
 set -eo pipefail   # no -u: conda's activate scripts reference unset variables
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BB_DIR="${BB_DIR:-$REPO/../bb}"
 PERLMUTTER_PREFIX=/global/cfs/cdirs/m3196/heindelj/rsfff
 
 FLAG='' TARGET='' FORCE=0 DO_CUE=1 DO_TORCHFF=1
@@ -35,7 +38,7 @@ while [[ $# -gt 0 ]]; do
         --force)      FORCE=1; shift ;;
         --no-cue)     DO_CUE=0; shift ;;
         --no-torchff) DO_TORCHFF=0; shift ;;
-        -h|--help)    sed -n '2,25p' "$0"; exit 0 ;;
+        -h|--help)    sed -n '2,27p' "$0"; exit 0 ;;
         *)            echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -78,7 +81,15 @@ conda env create $FLAG "$TARGET" -f "$REPO/environment.yml"
 conda activate "$TARGET"
 cd "$REPO"
 
-# --- rsfff ---------------------------------------------------------------------------------
+# --- bb, then rsfff ------------------------------------------------------------------------
+# rsfff depends on `bb-black-box`, which is not on PyPI: install the checkout first so the
+# rsfff install finds it already satisfied instead of looking for it on the index.
+if [[ ! -f "$BB_DIR/pyproject.toml" ]]; then
+    echo "bb checkout not found at $BB_DIR (clone it there, or set BB_DIR=/path/to/bb)" >&2
+    exit 1
+fi
+echo ">> pip install -e $BB_DIR (bb)"
+python -m pip install -e "$BB_DIR"
 echo ">> pip install -e . (rsfff)"
 python -m pip install -e .
 

@@ -15,7 +15,7 @@ import pytest
 import torch
 from ase.io import read
 
-from rsfff.features.features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
 from rsfff.ff.electrostatics import (
     FragmentResponse,
     DEFAULT_ELEC_PRIOR,

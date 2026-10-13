@@ -64,9 +64,10 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ..features import BesselBasis
+from bb.features import BesselBasis
+from bb.nn import two_slot_mlp, zero_init_readout
+
 from ..linalg_guard import finite_or_identity, poison
-from .heads import two_slot_mlp, zero_init_readout
 
 
 def _local_index(group_idx: torch.Tensor, n_groups: int) -> tuple[torch.Tensor, torch.Tensor]:

@@ -42,9 +42,11 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 
-from ..features import FlatStateSOAPFeaturizer, LambdaFeatures
+from bb.features import FlatStateSOAPFeaturizer, LambdaFeatures
+from bb.graph import config_max_num_neighbors as _max_neighbors
+from bb.nn import mlp, zero_init_readout
+
 from .eem import atomic_dipoles
-from .heads import mlp, zero_init_readout
 from .reference_states import AtomicStateReference, AtomWeightNet, ReferenceEmbedding
 from .response_heads import (
     AtomicAlphaHead,
@@ -52,7 +54,6 @@ from .response_heads import (
     voigt_vector_to_symmetric_matrix,
 )
 from .sqe import PairComplianceHead, atomic_dipole_energy, sqe_solve
-from ..neighbors import config_max_num_neighbors as _max_neighbors
 
 
 class MonomerParameterHeads(nn.Module):

@@ -12,6 +12,8 @@ import pytest
 import torch
 from ase.io import read
 
+from bb.features import FlatLambdaSOAPFeaturizer
+
 from rsfff.ff.dispersion import (
     DEFAULT_C6_PRIOR,
     DispersionParameterHeads,
@@ -21,7 +23,6 @@ from rsfff.ff.dispersion import (
 )
 from rsfff.ff.pairs import inter_fragment_pairs
 from rsfff.ff.units import BOHR_ANG
-from rsfff.features.features import FlatLambdaSOAPFeaturizer
 from rsfff.mlip.pair_heads import PairEnergyHead
 from rsfff.train.data import load_extxyz
 

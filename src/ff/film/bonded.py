@@ -70,7 +70,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ...mlip.heads import mlp, zero_init_readout
+from bb.nn import mlp, zero_init_readout
 from ..pairs import intra_fragment_channels
 from ..units import BOHR_ANG
 from .state import StateDescriptor

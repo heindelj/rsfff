@@ -20,8 +20,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ...features.features import LambdaFeatures
-from ...mlip.heads import mlp, zero_init_readout
+from bb.features import LambdaFeatures
+from bb.nn import mlp, zero_init_readout
 from ...mlip.response_heads import AtomicAlphaHead, voigt_vector_to_symmetric_matrix
 from ...mlip.sqe import PairComplianceHead
 
