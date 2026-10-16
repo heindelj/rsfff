@@ -69,3 +69,95 @@ def test_synthetic_recovery():
     assert max(v["phi_rms"] / v["phi_ref_rms"] for v in met.values()) < 3e-3
     p = mod.params()
     assert torch.allclose(p.Z, true.Z, rtol=1e-2) and torch.allclose(p.b, true.b, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# constraints: multi-shell sites, fixed Z, exponent floor, taper
+# ---------------------------------------------------------------------------
+def _quad_pair(qa, Za, ba, wa, qb, Zb, bb, wb, R):
+    """Two spherical sites, nucleus + positive mixture of 1s shells: energy by radial quadrature (independent
+    of the closed forms): E = Za Zb/R + Za phi_b^el(R) + Zb phi_a^el(R) + int rho_a phi_b^el."""
+    from numpy.polynomial.legendre import leggauss
+    from scipy.integrate import quad
+
+    def phi_el(q, Z, bs, ws, s):    # potential of the shell charge (q - Z) at distance s
+        rho = lambda x: (q - Z) * sum(w * b ** 3 / (8 * np.pi) * np.exp(-b * x) for b, w in zip(bs, ws))
+        inner = quad(lambda x: rho(x) * 4 * np.pi * x * x, 0, s)[0] / s
+        return inner + quad(lambda x: rho(x) * 4 * np.pi * x, s, np.inf)[0]
+
+    x, wq = leggauss(160)
+    rmax = 40.0 / min(ba)
+    r, wr = (x + 1) / 2 * rmax, wq * rmax / 2
+    c, wc = leggauss(64)
+    ee = 0.0
+    for ri, wri in zip(r, wr):
+        rho_a = (qa - Za) * sum(w * b ** 3 / (8 * np.pi) * np.exp(-b * ri) for b, w in zip(ba, wa))
+        s = np.sqrt(ri ** 2 + R ** 2 - 2 * ri * R * c)
+        ee += wri * 2 * np.pi * ri ** 2 * rho_a * sum(wc[k] * phi_el(qb, Zb, bb, wb, s[k]) for k in range(len(c)))
+    return Za * Zb / R + Za * phi_el(qb, Zb, bb, wb, R) + Zb * phi_el(qa, Za, ba, wa, R) + ee
+
+
+def _shell_site(q, Z, bs, ws):
+    t = lambda v: torch.tensor([v], dtype=D)
+    return F.SiteParams(t(q), torch.zeros(1, 3, dtype=D), torch.zeros(1, 3, 3, dtype=D), t(Z),
+                        torch.tensor([bs], dtype=D), None, torch.tensor([ws], dtype=D))
+
+
+def test_multishell_pair_energy_matches_quadrature():
+    A = (-1.0, 7.0, (1.1, 2.6), (0.4, 0.6))
+    B = (1.0, 9.0, (2.4, 4.0), (0.7, 0.3))
+    for R in (2.5, 4.5):
+        e = F.pair_energy(O, _shell_site(*A), torch.tensor([[0, 0, R]], dtype=D), _shell_site(*B), max_rank=0)
+        assert abs(float(e) - _quad_pair(*A, *B, R)) < 2e-6, R
+
+
+def test_multishell_potential_is_weighted_single_shells():
+    two = _shell_site(-1.0, 7.0, (1.2, 2.5), (0.25, 0.75))
+    one = lambda b: _shell_site(-1.0, 7.0, (b,), (1.0,))
+    ref = 0.25 * F.potential(O, one(1.2), P, 0) + 0.75 * F.potential(O, one(2.5), P, 0)
+    assert torch.allclose(F.potential(O, two, P, 0), ref, atol=1e-13)
+
+
+def test_taper_switches_penetration_off():
+    sp = _sp(q=-1.0, Z=7.0, b=1.0)
+    R = torch.tensor([[0, 0, 4.0], [0, 0, 6.0], [0, 0, 6.5], [0, 0, 9.0]], dtype=D) / F.BOHR
+    tap = F.potential(O, sp, R, 0, taper_ang=(5.0, 6.0))
+    full, pt = F.potential(O, sp, R, 0), F.potential(O, sp, R, 0, penetration=False)
+    assert torch.allclose(tap[:1], full[:1]) and torch.allclose(tap[1:], pt[1:], atol=1e-15)
+    # C2 at both ends of the switch
+    x = torch.tensor([5.0, 6.0], dtype=D).requires_grad_(True)
+    s = F.taper(x, 5.0, 6.0)
+    (d1,) = torch.autograd.grad(s.sum(), x, create_graph=True)
+    (d2,) = torch.autograd.grad(d1.sum(), x)
+    assert torch.allclose(d1, torch.zeros(2, dtype=D)) and torch.allclose(d2, torch.zeros(2, dtype=D), atol=1e-12)
+
+
+def test_config_constraints_hold():
+    cfg = F.FitConfig(max_rank=0, n_shells={17: 2}, z={17: 11.0}, b_min=1.4, taper=(5.0, 6.0))
+    mod = F.MonomerFit([17, 1], -1.0, config=cfg)
+    with torch.no_grad():
+        for p in mod.parameters():
+            p.add_(torch.randn_like(p) * 3)
+    sp = mod.params()
+    assert float(sp.Z[0]) == 11.0 and float(sp.Z[1]) != 11.0          # Cl fixed, H free
+    assert (sp.b >= 1.4).all() and (sp.b[:, 1] > sp.b[:, 0]).all()   # floor and ordering
+    assert torch.allclose(sp.sw.sum(1), torch.ones(2, dtype=D)) and float(sp.sw[1, 1]) == 0.0   # H one shell
+    assert abs(float(sp.q.sum()) + 1.0) < 1e-12
+    assert F.FitConfig.fromdict(cfg.asdict()) == cfg
+
+
+def test_multishell_synthetic_recovery():
+    """An anion with two shells and fixed Z is recovered (potential) from an inner+outer grid."""
+    true = _shell_site(-1.0, 7.0, (1.3, 3.0), (0.55, 0.45))
+    rng = np.random.default_rng(3)
+    u = rng.normal(size=(400, 3))
+    pts = torch.tensor(u / np.linalg.norm(u, axis=1)[:, None] * rng.uniform(0.4, 9.0, (400, 1)), dtype=D)
+    phi, E = F.potential_field(O, true, pts, 0, create_graph=False)
+    scale = np.round(np.linspace(0.2, 3.0, 400), 1)
+    grid = {"coords": np.zeros((1, 3)), "points": pts.numpy(), "phi": phi.detach().numpy(),
+            "field": E.detach().numpy(), "scale": scale}
+    cfg = F.FitConfig(max_rank=0, n_shells=2, z={17: 7.0}, b_min=1.0)
+    mod, _ = F.fit_monomer(grid, [17], -1.0, config=cfg, weights="relative", outer=12)
+    sp = mod.params()
+    assert torch.allclose(F.potential(O, sp, pts, 0), phi, atol=1e-7)
+    assert torch.allclose(sp.b[0], torch.tensor([1.3, 3.0], dtype=D), atol=1e-3)

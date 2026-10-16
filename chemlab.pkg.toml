@@ -1,0 +1,20 @@
+# rsfff as a ChemLab package (ChemLab docs/packages.md, "Worker packages"): its workers, with the code they run.
+# A project uses it from this checkout (`package use ~/dev/rsfff`, or the Packages section of the Work
+# workspace) or as an installed copy; ChemLab stages chemlab/workers/* and src/ (as `import rsfff`) at
+# home and pushes them to the project's sites, where chemlab-manager runs the stages with PYTHONPATH set
+# to them and to bb's. Third-party dependencies (torch, e3nn, ase, ...) are the site environment's
+# (the allocation template's conda env). A project adds its own job types and contexts to these
+# workers in its workers/<worker>/ (an extension: no worker.toml there).
+[package]
+name = "rsfff"
+version = "0.1.0"
+description = "Reactive/short-range fluctuation force field toolkit: committee sampling and training for active learning."
+
+[provides]
+workers = ["chemlab/workers"]
+
+[python]
+import = { rsfff = "src" }   # src/ is the package `rsfff` (pyproject: package-dir = { rsfff = "src" })
+
+[requires]
+packages = ["bb"]

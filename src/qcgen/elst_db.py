@@ -16,6 +16,7 @@ Layout of a database directory::
     db/monomers/<name>.npz      elst_ref.Monomer (AO density + Coulomb fit), one per geometry
     db/index.json               name -> formula, charge, spin, xc, basis, energy, dipole, n_atoms
     db/grids/<name>.npz         points (Bohr), phi, field (au), scale of each point
+    db/grids_inner/<name>.npz   the same from 0.2 x vdW (elst_fit.INNER_SCALES)
     db/pairs_<tag>.extxyz       pair records (positions in Angstrom; energies Hartree; phi, field au)
 
 Units: atomic units for every label; extxyz positions in Angstrom (ase convention).
@@ -151,10 +152,12 @@ def surface_points(coords, radii, scales=(0.6, 0.8, 1.0, 1.2, 1.4, 1.7, 2.0, 2.5
 
 
 def monomer_grid(db: MonomerDB, name, scales=(0.6, 0.8, 1.0, 1.2, 1.4, 1.7, 2.0, 2.5, 3.0), density=2.0,
-                 rng=None, overwrite=False, gradients=False):
+                 rng=None, overwrite=False, gradients=False, cache="grids"):
     """Potential and field (and, with ``gradients``, the field gradient dE_a/dr_b) of one monomer on scaled
-    vdW surfaces; cached in ``db/grids/<name>.npz`` (a cached grid gains ``field_grad`` on request)."""
-    out = db.root / "grids" / f"{name}.npz"
+    vdW surfaces; cached in ``db/<cache>/<name>.npz`` (a cached grid gains ``field_grad`` on request).
+    Use a separate ``cache`` per set of ``scales`` (e.g. ``elst_fit.INNER_SCALES`` in ``"grids_inner"``):
+    a cached grid is returned as is."""
+    out = db.root / cache / f"{name}.npz"
     if out.exists() and not overwrite:
         rec = dict(np.load(out))
         if gradients and "field_grad" not in rec:
