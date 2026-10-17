@@ -161,6 +161,190 @@ def slater_one_center_damp(u: torch.Tensor, max_rank: int = 1) -> torch.Tensor:
     )
 
 
+#: Unequal-exponent two-center factors (HIPPO, Rackers et al., JCTC 17, 7056 (2021), Appendix A;
+#: Coulson integrals). For exponents b_i != b_j, with A = b_j^2/(b_j^2 - b_i^2), B = 1 - A,
+#:
+#:     f_n = [A^2 a_n(u_i) + 2 A^2 B c_n(u_i)] e^{-u_i} + [B^2 a_n(u_j) + 2 B^2 A c_n(u_j)] e^{-u_j},
+#:
+#: u = b r. ``a_n`` are the one-center polynomials, ``c_n`` the cross polynomials below. Checked
+#: symbolically (sympy) against the recursion that defines the higher orders from f1,
+#: f_{n+2} = f_n - r f_n'/n, and against the equal-exponent polynomials of
+#: :func:`slater_two_center_damp` in the limit b_i -> b_j; f1 against quadrature of the Coulomb
+#: integral of two normalized exp(-b r) densities (tests/test_ff_multipole_unequal.py).
+_UNEQ_A = {
+    1: (1.0, 1 / 2),
+    3: (1.0, 1.0, 1 / 2),
+    5: (1.0, 1.0, 1 / 2, 1 / 6),
+    7: (1.0, 1.0, 1 / 2, 1 / 6, 1 / 30),
+    9: (1.0, 1.0, 1 / 2, 1 / 6, 4 / 105, 1 / 210),
+}
+_UNEQ_C = {
+    1: (1.0,),
+    3: (1.0, 1.0),
+    5: (1.0, 1.0, 1 / 3),
+    7: (1.0, 1.0, 2 / 5, 1 / 15),
+    9: (1.0, 1.0, 3 / 7, 2 / 21, 1 / 105),
+}
+
+#: Near-equal exponents: the closed form cancels catastrophically as b_i -> b_j (A, B ~ 1/eps), so
+#: with b_i = z(1 + eps), b_j = z(1 - eps), u = z r it is replaced by its symmetric series
+#: f_n = f_n^eq(u) - [eps^2 s2(u) + eps^4 s4(u) + eps^6 s6(u)] e^{-u}  (sympy, exact rationals).
+_UNEQ_SERIES = {
+    1: ((0, -3/8, -3/8, -5/32, -1/32, -1/480),
+        (0, 1/16, 1/16, 0, -1/48, -19/1920, -1/640, -1/13440),
+        (0, 0, 0, 1/96, 1/96, 1/320, -1/2880, -23/80640, -1/26880, -1/725760)),
+    3: ((0, 0, 0, -1/16, -1/16, -11/480, -1/480),
+        (0, 0, 0, 1/16, 1/16, 3/160, -1/480, -1/896, -1/13440),
+        (0, 0, 0, -1/48, -1/48, -1/480, 7/1440, 11/8064, -1/40320, -19/725760, -1/725760)),
+    5: ((0, 0, 0, 0, 0, -1/180, -1/180, -1/1440),
+        (0, 0, 0, 0, 0, 1/120, 1/120, 1/1260, -1/4032, -1/40320),
+        (0, 0, 0, 0, 0, -1/180, -1/180, -1/5040, 1/2016, 1/22680, -1/181440, -1/2177280)),
+    7: ((0, 0, 0, 0, 0, 0, 0, -1/1200, -1/7200),
+        (0, 0, 0, 0, 0, 0, 0, 17/12600, 31/100800, -1/33600, -1/201600),
+        (0, 0, 0, 0, 0, 0, 0, -13/12600, -17/50400, 29/453600, 13/907200, -1/1814400, -1/10886400)),
+    9: ((0, 0, 0, 0, 0, 0, 0, 0, -1/10080, -1/50400),
+        (0, 0, 0, 0, 0, 0, 0, 0, 1/6720, 37/705600, -1/470400, -1/1411200),
+        (0, 0, 0, 0, 0, 0, 0, 0, -1/10080, -211/3175200, 19/6350400, 1/423360, -1/76204800, -1/76204800)),
+}
+
+#: |eps| below which the series is used: where the series truncation (eps^8) and the closed form's
+#: cancellation (~ machine eps / eps^2) cross. Max abs error of f_n over u in [0, 36]: ~1e-12 (float64,
+#: 0.02), ~1e-6 (float32, 0.2).
+UNEQUAL_SWITCH = {torch.float64: 0.02, torch.float32: 0.2}
+
+
+def _poly(coeffs, u):
+    out = torch.full_like(u, float(coeffs[-1]))
+    for c in coeffs[-2::-1]:
+        out = out * u + float(c)
+    return out
+
+
+def slater_two_center_damp_unequal(
+    b_i: torch.Tensor, b_j: torch.Tensor, r: torch.Tensor, max_rank: int = 1, switch: float | None = None,
+) -> torch.Tensor:
+    """Two-center Slater damping factors for **unequal** exponents, stacked like
+    :func:`slater_two_center_damp`: ``(2*max_rank + 1, P)`` overlap complements ``f_n``.
+
+    The interaction of two normalized Slater 1s densities ``b^3/(8 pi) exp(-b r)`` with their own
+    exponents, rather than the equal-exponent form evaluated at a combined exponent. Reduces to
+    :func:`slater_two_center_damp` at ``b_i == b_j``. Smooth (and with finite gradients) through
+    ``b_i == b_j``: near-equal pairs use the even series in ``eps = (b_i - b_j)/(b_i + b_j)``.
+    """
+    max_rank = _check_rank(max_rank)
+    orders = (1, 3, 5, 7, 9)[: 2 * max_rank + 1]
+    if switch is None:
+        switch = UNEQUAL_SWITCH.get(r.dtype, 0.2)
+    z = 0.5 * (b_i + b_j)
+    eps = (b_i - b_j) / (b_i + b_j)
+    u = z * r
+    near = eps.abs() < switch
+    # series branch (accurate for small |eps|; evaluated everywhere, selected where near)
+    eq = slater_two_center_damp(u, max_rank)
+    exp_u = torch.exp(-u)
+    e2 = eps * eps
+    ser = []
+    for k, n in enumerate(orders):
+        s2, s4, s6 = _UNEQ_SERIES[n]
+        ser.append(eq[k] - exp_u * e2 * (_poly(s2, u) + e2 * (_poly(s4, u) + e2 * _poly(s6, u))))
+    # closed form at a guarded eps (never closer to equal than the switch, so it stays finite)
+    eps_s = torch.where(near, torch.full_like(eps, switch), eps)
+    bi, bj = z * (1.0 + eps_s), z * (1.0 - eps_s)
+    A = bj * bj / (bj * bj - bi * bi)
+    B = 1.0 - A
+    ui, uj = bi * r, bj * r
+    ei, ej = torch.exp(-ui), torch.exp(-uj)
+    out = []
+    for k, n in enumerate(orders):
+        a, c = _UNEQ_A[n], _UNEQ_C[n]
+        ex = (A * A * (_poly(a, ui) + 2.0 * B * _poly(c, ui)) * ei
+              + B * B * (_poly(a, uj) + 2.0 * A * _poly(c, uj)) * ej)
+        out.append(torch.where(near, ser[k], ex))
+    return _stack(out, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# Shaped Slater densities: rho(r) = sum_k w_k N_k r^k e^{-b r}, k = 0..3, w_k >= 0, sum_k w_k = 1
+# ---------------------------------------------------------------------------
+#: Positive by construction (every basis density is positive); k = 0 is the 1s density of everything
+#: above, so w = (1, 0, ...) reproduces :func:`slater_one_center_damp` / the unequal two-center form.
+#: Dipole and quadrupole densities are gradients of the same spherical density, as for the 1s model.
+#: Derivation (sympy): scripts/derive/slater_shapes/ -- one-center factors from the potential of each
+#: normalized r^k e^{-b r} density, two-center factors from exponent derivatives of the 1s-1s Coulomb
+#: integral, J_kl = N_k N_l (-d/da)^k (-d/db)^l I(a, b, R), carried out in a polynomial ring (1/a, 1/b,
+#: 1/R and 1/(a^2 - b^2) as symbols), and the recursion f_{n+2} = f_n - R f_n'/n for the higher orders.
+#: One-center overlap complements f_n = e^{-u} P_nk(u), u = b r:
+SHAPE_ONE_CENTER = {
+    0: {1: (1, 1/2), 3: (1, 1, 1/2), 5: (1, 1, 1/2, 1/6), 7: (1, 1, 1/2, 1/6, 1/30),
+        9: (1, 1, 1/2, 1/6, 4/105, 1/210)},
+    1: {1: (1, 2/3, 1/6), 3: (1, 1, 1/2, 1/6), 5: (1, 1, 1/2, 1/6, 1/18), 7: (1, 1, 1/2, 1/6, 2/45, 1/90),
+        9: (1, 1, 1/2, 1/6, 3/70, 1/105, 1/630)},
+    2: {1: (1, 3/4, 1/4, 1/24), 3: (1, 1, 1/2, 1/6, 1/24), 5: (1, 1, 1/2, 1/6, 1/24, 1/72),
+        7: (1, 1, 1/2, 1/6, 1/24, 1/120, 1/360), 9: (1, 1, 1/2, 1/6, 1/24, 1/120, 1/630, 1/2520)},
+    3: {1: (1, 4/5, 3/10, 1/15, 1/120), 3: (1, 1, 1/2, 1/6, 1/24, 1/120), 5: (1, 1, 1/2, 1/6, 1/24, 1/120, 1/360),
+        7: (1, 1, 1/2, 1/6, 1/24, 1/120, 1/900, 1/1800),
+        9: (1, 1, 1/2, 1/6, 1/24, 1/120, 17/12600, 1/6300, 1/12600)},
+}
+#: (The k = 0 row is exactly :func:`slater_one_center_damp`: its p7 and p9 -- "p9 builds on p5" -- are what
+#: the recursion gives, not a transcription quirk.)
+
+#: |eps| below which the two-center shaped factors use the series (eps = (b_i - b_j)/(b_i + b_j)). Evaluated
+#: in float64 internally: closed form and series (to eps^13) cross near 0.13 with ~1e-10 max error.
+SHAPE_SWITCH = 0.13
+
+
+def shaped_one_center_damp(u: torch.Tensor, w: torch.Tensor, max_rank: int = 1) -> torch.Tensor:
+    """One-center overlap complements for a shaped density: ``(2*max_rank+1, P)``; ``w`` is ``(P, K+1)``."""
+    max_rank = _check_rank(max_rank)
+    e = torch.exp(-u)
+    out = []
+    for n in (1, 3, 5, 7, 9)[: 2 * max_rank + 1]:
+        out.append(e * sum(w[:, k] * _poly(SHAPE_ONE_CENTER[k][n], u) for k in range(w.shape[1])))
+    return _stack(out, dim=0)
+
+
+def shaped_two_center_damp(
+    b_i: torch.Tensor, b_j: torch.Tensor, w_i: torch.Tensor, w_j: torch.Tensor, r: torch.Tensor,
+    max_rank: int = 1, switch: float = SHAPE_SWITCH,
+) -> torch.Tensor:
+    """Two-center overlap complements between shaped densities (exponents b_i, b_j; weights w_i, w_j
+    ``(P, K+1)``, K <= 3): ``(2*max_rank+1, P)``. Reduces to :func:`slater_two_center_damp_unequal` for
+    pure 1s weights. Computed in float64 and returned in the input dtype (the closed forms cancel
+    strongly near b_i = b_j; float32 cannot carry them)."""
+    from ._slater_shape_tables import CLOSED, SERIES
+    max_rank = _check_rank(max_rank)
+    nord = 2 * max_rank + 1
+    dt = r.dtype
+    bi, bj, rr = b_i.double(), b_j.double(), r.double()
+    wi, wj = w_i.double(), w_j.double()
+    z = 0.5 * (bi + bj)
+    eps = (bi - bj) / (bi + bj)
+    u = z * rr
+    near = eps.abs() < switch
+    sgn = torch.where(eps >= 0, torch.ones_like(eps), -torch.ones_like(eps))
+    eps_s = torch.where(near, switch * sgn, eps)
+    ai, aj = z * (1 + eps_s), z * (1 - eps_s)
+    Ei, Ej = torch.exp(-ai * rr), torch.exp(-aj * rr)
+    eu = torch.exp(-u)
+    out = [torch.zeros_like(rr) for _ in range(nord)]
+    K = wi.shape[1] - 1
+    for k in range(K + 1):
+        for l in range(K + 1):
+            wk = wi[:, k] * wj[:, l]
+            if k <= l:
+                cl = CLOSED[(k, l)](ai, aj, rr, Ei, Ej)
+                se, ee = SERIES[(k, l)], eps
+            else:
+                cl = CLOSED[(l, k)](aj, ai, rr, Ej, Ei)
+                se, ee = SERIES[(l, k)], -eps
+            for n in range(nord):
+                ser = torch.zeros_like(u)
+                for p in range(len(se[n]) - 1, -1, -1):
+                    ser = ser * ee + _poly(se[n][p], u)
+                out[n] = out[n] + wk * torch.where(near, eu * ser, cl[n])
+    return _stack(out, dim=0).to(dt)
+
+
 def damped_interaction_tensor(
     dr_vec: torch.Tensor,                  # (P, 3) bohr, = pos[j] - pos[i]
     damp: torch.Tensor | None,             # (2*max_rank+1, P) or None for the bare tensor

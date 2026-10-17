@@ -1043,6 +1043,10 @@ class FilmConfig:
     eta_init: float = 0.5
     eta_floor: float = 0.05
     psd_floor: float = 1e-4
+    #: Multiply the atomic alpha by the per-element prior of the monatomic ions
+    #: (rsfff.ff.response.DEFAULT_ALPHA_PRIOR: Na+, Cl-); every other element is unaffected.
+    #: Off reproduces the head without a prior, which cannot reach Cl-'s 31 a0^3.
+    alpha_prior: bool = True
     s_init: float = 0.5
     disp_b_prior: str = "per_element"
 

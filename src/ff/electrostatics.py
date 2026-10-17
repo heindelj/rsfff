@@ -84,6 +84,7 @@ from .multipole import (
     multipole_pair_energy,
     slater_one_center_damp,
     slater_two_center_damp,
+    slater_two_center_damp_unequal,
     spherical_to_cartesian_quadrupole,
 )
 from .pairs import inter_fragment_pairs
@@ -108,6 +109,7 @@ def slater_elec_tensors(
     b: torch.Tensor,            # (N,) per-atom Slater penetration exponent, 1/bohr
     pair_index: torch.Tensor,   # (2, P)
     max_rank: int = 1,
+    two_center: str = "combined",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The four interaction tensors this component is built from: each ``(P, K, K)``.
 
@@ -127,15 +129,27 @@ def slater_elec_tensors(
 
     The leading minus on each damped tensor is pyCMM's sign convention:
     :mod:`rsfff.ff.multipole` returns the overlap *complement*.
+
+    ``two_center`` selects the shell-shell factor: ``"combined"`` (pyCMM's equal-exponent form at
+    ``sqrt(b_i b_j)``; the default, and what the torchff kernels implement) or ``"unequal"`` (HIPPO's
+    exact form for two Slater 1s densities with their own exponents,
+    :func:`rsfff.ff.multipole.slater_two_center_damp_unequal`). Against frozen-density reference
+    electrostatics (``rsfff.qcgen.elst_db``, per-geometry fits) the unequal form cuts the ion-water
+    pair error at 2.0-2.5 A contact from 7.5 to 1.0 kcal/mol; the combined form errs most when the
+    exponents differ and the shells are large (halides). The torch path only, for now.
     """
     i, j = pair_index[0], pair_index[1]
     r_inv = 1.0 / r_au
-    b_ij = (0.5 * (b[i].log() + b[j].log())).exp()
+    if two_center == "unequal":
+        f_ss = slater_two_center_damp_unequal(b[i], b[j], r_au, max_rank)
+    elif two_center == "combined":
+        b_ij = (0.5 * (b[i].log() + b[j].log())).exp()
+        f_ss = slater_two_center_damp(b_ij * r_au, max_rank)
+    else:
+        raise ValueError(f"two_center must be 'combined' or 'unequal', got {two_center!r}")
     return (
         damped_interaction_tensor(dr_au, None, r_inv, max_rank=max_rank),
-        damped_interaction_tensor(
-            dr_au, -slater_two_center_damp(b_ij * r_au, max_rank), r_inv, max_rank=max_rank,
-        ),
+        damped_interaction_tensor(dr_au, -f_ss, r_inv, max_rank=max_rank),
         damped_interaction_tensor(
             dr_au, -slater_one_center_damp(b[i] * r_au, max_rank), r_inv, max_rank=max_rank,
         ),
@@ -155,6 +169,7 @@ def slater_elec_pair_energy(
     pair_index: torch.Tensor,   # (2, P)
     max_rank: int = 1,
     tensors: tuple | None = None,   # precomputed slater_elec_tensors, to avoid rebuilding
+    two_center: str = "combined",   # shell-shell factor, see slater_elec_tensors
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``(e_point (P,), e_pen (P,))`` in Hartree: the undamped tail and its penetration.
 
@@ -173,7 +188,7 @@ def slater_elec_pair_energy(
     """
     i, j = pair_index[0], pair_index[1]
     t_point, t_ss, t_1c_i, t_1c_j = (
-        slater_elec_tensors(dr_au, r_au, b, pair_index, max_rank=max_rank)
+        slater_elec_tensors(dr_au, r_au, b, pair_index, max_rank=max_rank, two_center=two_center)
         if tensors is None else tensors
     )
     # Point multipoles: the exact long-range interaction, undamped.
