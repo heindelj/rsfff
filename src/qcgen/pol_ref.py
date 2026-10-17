@@ -61,9 +61,14 @@ class Environment:
     charge_coords: np.ndarray | None = None      # (K, 3) Bohr
     charges: np.ndarray | None = None            # (K,) e
     partners: list = dfield(default_factory=list)   # elst_ref.Placed (nuclei + AO density)
+    gradient: np.ndarray | None = None           # (3, 3) uniform field gradient G = dE_a/dr_b (symmetric, traceless)
+    gradient_origin: np.ndarray | None = None    # (3,) Bohr: phi = -1/2 (r - o)^T G (r - o) (default 0)
 
     def is_empty(self):
-        return self.field is None and self.charges is None and not self.partners
+        return self.field is None and self.charges is None and not self.partners and self.gradient is None
+
+    def _o(self):
+        return np.zeros(3) if self.gradient_origin is None else np.asarray(self.gradient_origin, float)
 
     def h1(self, mol: gto.Mole) -> np.ndarray:
         """One-electron operator -phi_env(r) in mol's AO basis."""
@@ -71,6 +76,10 @@ class Environment:
         if self.field is not None:
             with mol.with_common_orig((0.0, 0.0, 0.0)):
                 h += np.einsum("x,xij->ij", np.asarray(self.field, float), mol.intor("int1e_r", comp=3))
+        if self.gradient is not None:
+            with mol.with_common_orig(self._o()):
+                rr = mol.intor("int1e_rr", comp=9).reshape(3, 3, mol.nao, mol.nao)
+            h += 0.5 * np.einsum("ab,abij->ij", np.asarray(self.gradient, float), rr)
         if self.charges is not None:
             j3 = df.incore.aux_e2(mol, gto.fakemol_for_charges(np.asarray(self.charge_coords, float)),
                                   intor="int3c2e", aosym="s1")
@@ -86,6 +95,9 @@ class Environment:
         phi = np.zeros(len(pts))
         if self.field is not None:
             phi -= pts @ np.asarray(self.field, float)
+        if self.gradient is not None:
+            d = pts - self._o()
+            phi -= 0.5 * np.einsum("pa,ab,pb->p", d, np.asarray(self.gradient, float), d)
         if self.charges is not None:
             r = np.linalg.norm(pts[:, None] - np.asarray(self.charge_coords)[None], axis=2)
             phi += (np.asarray(self.charges)[None] / r).sum(1)
@@ -98,6 +110,8 @@ class Environment:
         out = np.zeros((len(pts), 3))
         if self.field is not None:
             out += np.asarray(self.field, float)
+        if self.gradient is not None:
+            out += (pts - self._o()) @ np.asarray(self.gradient, float).T
         if self.charges is not None:
             d = pts[:, None] - np.asarray(self.charge_coords)[None]
             r = np.linalg.norm(d, axis=2)
@@ -110,6 +124,8 @@ class Environment:
         """G_ab = dE_a/dr_b (P, 3, 3)."""
         pts = np.asarray(points, float).reshape(-1, 3)
         out = np.zeros((len(pts), 3, 3))
+        if self.gradient is not None:
+            out += np.asarray(self.gradient, float)
         if self.charges is not None:
             d = pts[:, None] - np.asarray(self.charge_coords)[None]
             r = np.linalg.norm(d, axis=2)
@@ -128,6 +144,9 @@ class Environment:
         out = {}
         if self.field is not None:
             out["field"] = np.asarray(self.field, float).tolist()
+        if self.gradient is not None:
+            out["gradient"] = np.asarray(self.gradient, float).tolist()
+            out["gradient_origin"] = self._o().tolist()
         if self.charges is not None:
             out["charges"] = np.asarray(self.charges, float).tolist()
             out["charge_coords"] = np.asarray(self.charge_coords, float).tolist()
@@ -320,48 +339,85 @@ def polarize_pair(pa: E.Placed, pb: E.Placed, mutual=True, xc=None, max_iter=30,
 # ---------------------------------------------------------------------------
 # database: uniform-field response and environment records
 # ---------------------------------------------------------------------------
-def field_response(db, name, grid_kw=None, gradients=False, overwrite=False, cache="pol", method="auto",
-                   step=1e-3) -> dict:
-    """Uniform-field linear response of a database monomer: d dm / d F_x, the polarizability
-    alpha_xy = d mu_x / d F_y, d(second moment)/dF, and on the monomer grid d phi / d F (P, 3), d E / d F
-    (P, 3, 3) [, d G / d F (P, 3, 3, 3)]. Cached in ``db/<cache>/<name>.npz``.
+def _quad_basis():
+    """The five traceless symmetric matrices B_k of the spherical quadrupole components (rsfff.ff.multipole
+    ``spherical_to_cartesian_quadrupole`` of the unit vectors): the uniform field gradients G_k = B_k."""
+    import torch
+    from ..ff.multipole import spherical_to_cartesian_quadrupole
+    return spherical_to_cartesian_quadrupole(torch.eye(5, dtype=torch.float64)).numpy()
 
-    ``method``: "cpks" (closed shell), "finite" (central differences of field-perturbed SCF, +-``step`` au;
-    any spin, includes every kernel term), "auto" (cpks for closed shells, finite otherwise)."""
+
+def field_response(db, name, grid_kw=None, gradients=False, overwrite=False, cache="pol", method="auto",
+                   step=1e-3, field_gradients=False, gstep=None) -> dict:
+    """Linear response of a database monomer to uniform fields (and, with ``field_gradients``, uniform
+    field gradients), cached in ``db/<cache>/<name>.npz`` (a cached record gains missing parts on request).
+
+    Fields F_x: ``ddm_dF`` (3, nao, nao), ``alpha`` (alpha_xy = d mu_x / d F_y), ``dQ_dF`` (second moments),
+    and on the monomer grid ``dphi_dF`` (P, 3), ``dE_dF`` (P, 3, 3) [``dG_dF`` (P, 3, 3, 3) with ``gradients``].
+    Field gradients G_k = B_k (``_quad_basis``; phi = -1/2 (r - o)^T G (r - o), o = centre of nuclear charge
+    ``origin``): ``ddm_dG`` (5, nao, nao), ``dmu_dG`` (3, 5), ``dQ_dG`` (3, 3, 5) about o, ``dphi_dG`` (P, 5),
+    ``dE_dG`` (P, 3, 5).
+
+    ``method``: "cpks" (closed shell), "finite" (central differences of perturbed SCF, +-``step`` au field,
+    +-``gstep`` (default ``step``) au gradient; any spin, every kernel term), "auto" (cpks for closed shells).
+    """
     from . import elst_db as D
     out = db.root / cache / f"{name}.npz"
-    if out.exists() and not overwrite:
-        return dict(np.load(out))
+    rec = dict(np.load(out)) if out.exists() and not overwrite else {}
+    need_F = "dphi_dF" not in rec
+    need_G = field_gradients and "dphi_dG" not in rec
+    need_GF = gradients and "dG_dF" not in rec
+    if not (need_F or need_G or need_GF):
+        return rec
     out.parent.mkdir(exist_ok=True)
     m = db.get(name)
     p = m.place()
     g = D.monomer_grid(db, name, **(grid_kw or {}))
-    mf0 = isolated(p, m.meta.get("xc"), key=name)
+    xc = m.meta.get("xc")
+    mf0 = isolated(p, xc, key=name)
     if method == "auto":
         method = "cpks" if m.spin == 0 else "finite"
-    if method == "cpks":
-        with p.mol.with_common_orig((0.0, 0.0, 0.0)):
-            V = p.mol.intor("int1e_r", comp=3)            # h1 = F . r
-        d1 = linear_response(mf0, V)                      # (3, nao, nao): d dm / d F_x
-    else:
-        d0 = _total_dm(mf0)
-        d1 = []
-        for x in range(3):
-            Fv = np.zeros(3)
-            Fv[x] = step
-            dp = _total_dm(scf(p, Environment(field=Fv), m.meta.get("xc"), dm0=mf0.make_rdm1(), conv_tol=1e-12))
-            dm = _total_dm(scf(p, Environment(field=-Fv), m.meta.get("xc"), dm0=mf0.make_rdm1(), conv_tol=1e-12))
-            d1.append((dp - dm) / (2 * step))
-        d1 = np.stack(d1)
-        del d0
-    mom = [induced_moments(p.mol, d1[x]) for x in range(3)]
-    rec = {"ddm_dF": d1, "alpha": np.stack([mu for mu, _ in mom], 1),     # alpha[x, y] = d mu_x / d F_y
-           "dQ_dF": np.stack([Q for _, Q in mom], 2), "origin": charge_center(p.mol),
-           "points": g["points"], "scale": g["scale"], "coords": p.coords, "method": method,
-           "dphi_dF": np.stack([induced_potential(p, d1[x], g["points"]) for x in range(3)], 1),
-           "dE_dF": np.stack([induced_field(p, d1[x], g["points"]) for x in range(3)], 2)}
-    if gradients:
-        rec["dG_dF"] = np.stack([induced_field_gradient(p, d1[x], g["points"]) for x in range(3)], 3)
+    o = charge_center(p.mol)
+
+    def respond(envs_plus, Vs):
+        if method == "cpks":
+            return linear_response(mf0, np.stack(Vs))
+        res = []
+        for env_p, env_m, h in envs_plus:
+            dp = _total_dm(scf(p, env_p, xc, dm0=mf0.make_rdm1(), conv_tol=1e-12))
+            dm = _total_dm(scf(p, env_m, xc, dm0=mf0.make_rdm1(), conv_tol=1e-12))
+            res.append((dp - dm) / (2 * h))
+        return np.stack(res)
+
+    if need_F or need_GF:
+        if need_F:
+            Vs, envs = [], []
+            for x in range(3):
+                Fv = np.zeros(3)
+                Fv[x] = 1.0
+                Vs.append(Environment(field=Fv).h1(p.mol))
+                envs.append((Environment(field=step * Fv), Environment(field=-step * Fv), step))
+            d1 = respond(envs, Vs)
+            mom = [induced_moments(p.mol, d1[x]) for x in range(3)]
+            rec.update({"ddm_dF": d1, "alpha": np.stack([mu for mu, _ in mom], 1),     # alpha[x, y] = d mu_x / d F_y
+                        "dQ_dF": np.stack([Q for _, Q in mom], 2), "origin": o,
+                        "points": g["points"], "scale": g["scale"], "coords": p.coords, "method": method,
+                        "dphi_dF": np.stack([induced_potential(p, d1[x], g["points"]) for x in range(3)], 1),
+                        "dE_dF": np.stack([induced_field(p, d1[x], g["points"]) for x in range(3)], 2)})
+        if gradients:
+            rec["dG_dF"] = np.stack([induced_field_gradient(p, rec["ddm_dF"][x], g["points"]) for x in range(3)], 3)
+    if need_G:
+        B = _quad_basis()
+        hG = gstep or step
+        Vs = [Environment(gradient=B[k], gradient_origin=o).h1(p.mol) for k in range(5)]
+        envs = [(Environment(gradient=hG * B[k], gradient_origin=o), Environment(gradient=-hG * B[k], gradient_origin=o), hG)
+                for k in range(5)]
+        dG = respond(envs, Vs)
+        mom = [induced_moments(p.mol, dG[k], origin=o) for k in range(5)]
+        rec.update({"ddm_dG": dG, "dmu_dG": np.stack([mu for mu, _ in mom], 1), "dQ_dG": np.stack([Q for _, Q in mom], 2),
+                    "dphi_dG": np.stack([induced_potential(p, dG[k], rec["points"]) for k in range(5)], 1),
+                    "dE_dG": np.stack([induced_field(p, dG[k], rec["points"]) for k in range(5)], 2),
+                    "gradient_origin": o, "quad_basis": B})
     np.savez(out, **rec)
     return rec
 

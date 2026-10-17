@@ -75,23 +75,106 @@ def test_exact_parameterizations_hold_for_any_parameters():
     rng = np.random.default_rng(1)
     M = rng.normal(size=(3, 3))
     T = M @ M.T + 5 * np.eye(3)
-    for aniso in (False, True):
-        mod = PF.PolFit([8, 1, 1], PF.PolConfig(aniso=aniso, alpha="exact"), alpha_ref=T)
+    X = np.array([[0.0, 0.0, 0.2214], [0.0, 1.4309, -0.8865], [0.0, -1.4309, -0.8865]])
+    for aniso, quad, cf in ((False, False, False), (True, False, False), (True, True, False), (False, True, True), (True, True, True)):
+        mod = PF.PolFit([8, 1, 1], PF.PolConfig(aniso=aniso, quadrupole=quad, charge_flow=cf, alpha="exact"),
+                        alpha_ref=T, coords=X)
         with torch.no_grad():
             for p in mod.parameters():
                 p.add_(torch.randn_like(p))
-        A = mod.site_alpha()
-        if aniso:      # full tensor exact, each site positive definite
-            assert torch.allclose(A.sum(0), torch.tensor(T, dtype=D), atol=1e-10)
-            assert (torch.linalg.eigvalsh(A) > 0).all()
-        else:          # isotropic mean exact
-            assert abs(float(torch.trace(A.sum(0))) - np.trace(T)) < 1e-10
-            assert (A[:, 0, 0] > 0).all()
+        Pi = mod.blocks()
+        assert (torch.linalg.eigvalsh(Pi) > -1e-10).all()                       # every site response PSD
+        if mod.full_tensor_exact():
+            assert torch.allclose(mod.molecular_alpha(), torch.tensor(T, dtype=D), atol=1e-10)
+        else:
+            assert abs(float(torch.trace(mod.molecular_alpha())) - np.trace(T)) < 1e-10
     mod = PF.PolFit([8, 1, 1], PF.PolConfig(alpha="exact", alpha_fixed={1: 1.2}), alpha_ref=T)
     a = mod.site_alpha()[:, 0, 0]
     assert torch.allclose(a[1:], torch.tensor([1.2, 1.2], dtype=D)) and abs(float(a.sum()) - np.trace(T) / 3) < 1e-12
     mod = PF.PolFit([8, 1], PF.PolConfig(b_fixed={1: 2.0}, b_min=1.5, tie_elements=True), b_init=0.1)
     assert float(mod.b()[1]) == 2.0 and float(mod.b()[0]) >= 1.5
+    mod = PF.PolFit([8, 1], PF.PolConfig(b_sites=[2.3, 1.9]))
+    assert torch.allclose(mod.b(), torch.tensor([2.3, 1.9], dtype=D)) and not mod.rb.requires_grad
+
+
+def test_split_charge_response_is_the_sqe_minimum():
+    X = np.array([[0.0, 0.0, 0.2214], [0.0, 1.4309, -0.8865], [0.0, -1.4309, -0.8865]])
+    mod = PF.PolFit([8, 1, 1], PF.PolConfig(charge_flow=True), coords=X)
+    with torch.no_grad():
+        mod.ls.copy_(torch.tensor([-0.3, 0.4], dtype=D))
+        mod.leta.copy_(torch.tensor([0.2, -0.5, 1.0], dtype=D))
+    phi = torch.tensor([0.03, -0.02, 0.05], dtype=D)
+    # direct minimization of E(p) = sum 1/2 eta q^2 + q phi + 1/2 sum p^2 / s over the bond transfers
+    B, H, S = mod.Bm, torch.diag(mod.hardness()), torch.diag(mod.compliance())
+    p = -torch.linalg.solve(B.T @ H @ B + torch.linalg.inv(S), B.T @ phi)
+    dq, _, _ = mod.induced(torch.zeros(1, 3, 3, dtype=D), None, phi[None])
+    assert torch.allclose(dq[0], B @ p, atol=1e-14) and abs(float(dq.sum())) < 1e-14
+    acf = mod.charge_flow_alpha()
+    assert (torch.linalg.eigvalsh(acf) > -1e-12).all() and abs(float(acf[0, 0])) < 1e-12      # in-plane, PSD
+    # uniform field: dipole of dq = alpha_cf F
+    Fv = torch.tensor([0.0, 0.01, -0.02], dtype=D)
+    dq, _, _ = mod.induced(torch.zeros(1, 3, 3, dtype=D), None, -(torch.tensor(X) @ Fv)[None])
+    assert torch.allclose(torch.tensor(X).T @ dq[0], acf @ Fv, atol=1e-14)
+    # eta = 0: independent bonds, dq = -s (phi_i - phi_j)
+    mod0 = PF.PolFit([8, 1, 1], PF.PolConfig(charge_flow=True, hardness="none"), coords=X)
+    s = mod0.compliance()
+    dq, _, _ = mod0.induced(torch.zeros(1, 3, 3, dtype=D), None, phi[None])
+    ref = torch.stack([-s[0] * (phi[0] - phi[1]) - s[1] * (phi[0] - phi[2]), s[0] * (phi[0] - phi[1]), s[1] * (phi[0] - phi[2])])
+    assert torch.allclose(dq[0], ref, atol=1e-14)
+
+
+def test_quadrupole_conventions():
+    rng = np.random.default_rng(5)
+    th = torch.tensor(rng.normal(size=5), dtype=D)
+    G = PF.QUAD_BASIS.T.reshape(3, 3, 5) @ torch.tensor(rng.normal(size=5), dtype=D)    # some traceless G
+    G = 0.5 * (G + G.T)
+    Theta = PF.spherical_to_cartesian_quadrupole(th)
+    assert abs(float(-(Theta * G).sum() / 3 + th @ PF.grad_drive(G))) < 1e-14          # U = -Theta:G/3 = -theta.g
+    # induced quadrupole potential = the permanent model's damped quadrupole (elst_fit)
+    X = torch.tensor([[0.2, -0.1, 0.3]], dtype=D)
+    P = torch.tensor(rng.normal(size=(15, 3)) * 3, dtype=D)
+    b = torch.tensor([1.7], dtype=D)
+    w = torch.tensor([[0.2, 0.3, 0.5]], dtype=D)
+    T = PF.kernels(X, b, w, P, 2)
+    phi, E = PF.moments_potential_field(T, torch.zeros(1, 1, dtype=D), torch.zeros(1, 1, 3, dtype=D), Theta[None, None])
+    sp = PF.F.SiteParams(torch.zeros(1, dtype=D), torch.zeros(1, 3, dtype=D), Theta[None], torch.zeros(1, dtype=D), b, w)
+    ref_phi, ref_E = PF.F.potential_field(X, sp, P, max_rank=2, create_graph=False)
+    assert torch.allclose(phi[:, 0], ref_phi, atol=1e-12) and torch.allclose(E[..., 0], ref_E, atol=1e-12)
+    # gradient columns: E = -grad phi, the drive is that of B_k
+    Xs = torch.tensor(rng.normal(size=(3, 3)), dtype=D)
+    Ek, gk, phik = PF.gradient_columns(Xs, [0.1, 0.0, -0.2])
+    h = 1e-6
+    for a in range(3):
+        e = torch.zeros(3, dtype=D); e[a] = h
+        dphi = (PF.gradient_columns(Xs + e, [0.1, 0.0, -0.2])[2] - PF.gradient_columns(Xs - e, [0.1, 0.0, -0.2])[2]) / (2 * h)
+        assert torch.allclose(Ek[..., a], -dphi, atol=1e-8)
+    assert torch.allclose(gk[:, 0], PF.grad_drive(PF.QUAD_BASIS))
+
+
+def test_gradient_response_cpks_matches_finite_and_quadrupoles_help(tmp_path):
+    from rsfff.qcgen import elst_db as Db, pol_ref as R
+    db = Db.MonomerDB(tmp_path)
+    db.add("w", ["O", "H", "H"], np.array([[0.0, 0.0, 0.1173], [0.0, 0.7572, -0.4692], [0.0, -0.7572, -0.4692]]),
+           xc="b3lyp", basis="def2-svpd")
+    rec = R.field_response(db, "w", field_gradients=True, grid_kw=dict(density=1.0))
+    fin = R.field_response(db, "w", field_gradients=True, grid_kw=dict(density=1.0), cache="pol_fd", method="finite",
+                           step=5e-4)
+    for k in ("alpha", "dmu_dG", "dQ_dG"):
+        assert np.allclose(rec[k], fin[k], atol=2e-3 * np.abs(rec[k]).max()), k
+    X = db.get("w").coords
+    base = PF.fit_response(rec, [8, 1, 1], PF.PolConfig(aniso=True, alpha="exact"), coords=X, b_starts=(1.0,))[1]
+    quad = PF.fit_response(rec, [8, 1, 1], PF.PolConfig(aniso=True, alpha="exact", quadrupole=True), coords=X,
+                           b_starts=(1.0,))[1]
+    err = lambda m, key: float(np.mean([v["phi_rel"] for v in m[key].values()]))
+    assert err(quad, "scales_G") < err(base, "scales_G")
+
+
+def test_reference_c_of_the_hydrogen_convention():
+    """A record built from the exact H quadrupole response (C = 15) returns C = 15."""
+    g0 = PF.grad_drive(PF.QUAD_BASIS)                        # drives of the five unit gradients
+    Theta = PF.spherical_to_cartesian_quadrupole(15.0 * g0)  # (5, 3, 3) Buckingham
+    Q = (2.0 / 3.0) * Theta.numpy()                          # traceless second moments
+    assert abs(PF.reference_c({"dQ_dG": np.moveaxis(Q, 0, -1)}) - 15.0) < 1e-10
 
 
 def test_qm_hydrogen_atom_matches_exact(tmp_path):
@@ -125,22 +208,38 @@ def test_fast_kernels_match_autograd_potential():
         assert torch.allclose(fast[1], torch.stack([s_[1] for s_ in slow], 2), atol=1e-12)
 
 
-def test_charge_flow_alpha_and_constraints():
-    X = np.array([[0.0, 0.0, 0.2214], [0.0, 1.4309, -0.8865], [0.0, -1.4309, -0.8865]])     # water, bohr
-    T = np.diag([9.6, 10.1, 9.8])
-    mod = PF.PolFit([8, 1, 1], PF.PolConfig(charge_flow=True, alpha="exact"), alpha_ref=T, coords=X)
-    assert mod.bonds == [(0, 1), (0, 2)]
+def test_exact_hydrogen_quadrupole_response_is_a_shaped_quadrupole_density():
+    """G = B_0 (phi_ext = -1/2 r^2 P2): exact induced charge density (r^2/2 + r^3/3) e^{-2r} P2 / pi (Dalgarno-Lewis)
+    = second derivative of the r^0..r^3 parent with weights (7, 21, 32, 20)/80 at b = 2, and C = 15."""
+    rho2 = lambda s: (s * s / 2 + s ** 3 / 3) * np.exp(-2 * s) / np.pi
+    R2 = lambda r: 4 * np.pi / 5 * (quad(lambda s: s ** 4 * rho2(s), 0, r)[0] / r ** 3 + r ** 2 * quad(lambda s: rho2(s) / s, r, np.inf)[0])
+    w = torch.tensor([PF.HYDROGEN_EXACT["w_quad"]], dtype=D)
+    r = np.array([0.3, 1.0, 2.0, 4.0, 8.0])
+    P = torch.tensor(np.stack([np.zeros_like(r), np.zeros_like(r), r], 1), dtype=D)
+    T = PF.kernels(torch.zeros(1, 3, dtype=D), torch.tensor([2.0], dtype=D), None, P, 2, w_quad=w)
+    g0 = PF.grad_drive(PF.QUAD_BASIS[0])
+    Theta = PF.spherical_to_cartesian_quadrupole(PF.HYDROGEN_EXACT["c"] * g0)
+    phi, _ = PF.moments_potential_field(T, torch.zeros(1, 1, dtype=D), torch.zeros(1, 1, 3, dtype=D), Theta[None, None])
+    assert np.allclose(phi[:, 0].numpy(), [R2(x) for x in r], atol=1e-11)
+
+
+def test_second_moments_match_the_induced_density():
+    """Model molecular second moment = second moment of the site charge/dipole/quadrupole densities."""
+    X = np.array([[0.0, 0.0, 0.2214], [0.0, 1.4309, -0.8865], [0.0, -1.4309, -0.8865]])
+    mod = PF.PolFit([8, 1, 1], PF.PolConfig(aniso=True, quadrupole=True, charge_flow=True), coords=X)
     with torch.no_grad():
         for p in mod.parameters():
-            p.add_(torch.randn_like(p))
-    A, k = mod.pieces()
-    acf = mod.charge_flow_alpha()
-    assert (k > 0).all() and (torch.linalg.eigvalsh(acf) > -1e-12).all() and abs(float(acf[0, 0])) < 1e-12
-    assert abs(float(torch.trace(mod.molecular_alpha())) - np.trace(T)) < 1e-10        # isotropic mean exact
-    dq = mod.dq_dF(k)
-    assert torch.allclose(dq.sum(0), torch.zeros(3, dtype=D), atol=1e-14)
-    # charge-flow dipole per unit field = alpha_cf
-    assert torch.allclose(torch.as_tensor(X).T @ dq, acf, atol=1e-12)
-    # environment: dq from potential differences, uniform field reproduces dq_dF
-    F_ = np.array([0.0, 0.01, 0.0])
-    assert torch.allclose(mod.dq_env(-X @ F_), dq @ torch.tensor(F_), atol=1e-14)
+            p.add_(0.3 * torch.randn_like(p))
+    E, g, ph = PF.gradient_columns(mod.X, [0.1, 0.2, -0.1])
+    dq, mu, Th = mod.induced(E, g, ph)
+    M = mod.second_moments(dq, mu, Th, [0.1, 0.2, -0.1])
+    # far-field potential of the moments vs the quadrupole term of the model's own potential
+    P = torch.tensor([[0.0, 0.0, 4000.0], [3000.0, 0.0, 0.0], [0.0, 2500.0, 2500.0]], dtype=D)
+    T = mod.kernels(P)
+    phi, _ = PF.moments_potential_field(T, dq, mu, Th)
+    o = torch.tensor([0.1, 0.2, -0.1], dtype=D)
+    d = P - o
+    r = d.norm(dim=1)
+    dip = torch.einsum("cna->ca", mu) + torch.einsum("cn,na->ca", dq, mod.X - o)
+    pred = (d @ dip.T) / r[:, None] ** 3 + 1.5 * torch.einsum("pa,cab,pb->pc", d, M, d) / r[:, None] ** 5
+    assert torch.allclose(phi, pred, rtol=1e-4, atol=1e-16)
