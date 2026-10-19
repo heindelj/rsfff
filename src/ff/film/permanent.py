@@ -25,8 +25,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ...features.features import LambdaFeatures
-from ...mlip.heads import mlp, zero_init_readout
+from bb.features import LambdaFeatures
+from bb.nn import mlp, zero_init_readout
 from ...mlip.response_heads import AtomicQuadrupoleHead, AtomicVectorHead
 from .state import StateDescriptor
 

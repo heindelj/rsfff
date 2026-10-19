@@ -308,3 +308,65 @@ def test_force_loss_gradient_matches_central_differences(both_backends, name):
         if checked == 4:
             break
     assert checked >= 2
+
+
+# --- the non-variational model (unrolled loop, field kernel called directly) ---------------
+
+def _nv_model():
+    return small_model(seed=3, randomize=True, nonbonded="exclusions", model="nonvariational",
+                       n_iter=3).to(DEVICE)
+
+
+@needs_torchff
+@pytest.mark.parametrize("n_waters", [1, 3])
+def test_nonvariational_model_agrees_across_backends(both_backends, n_waters):
+    """The unrolled loop calls ``slater_elec_field`` K times with the induced widths and zero
+    nuclei; on CUDA with ``slater_elec_field_hvp`` that is the kernel path all the way
+    through the force-loss gradient (``differentiable=True`` no longer forces the reference)."""
+    model = _nv_model()
+    model.train()
+    batch = water_cluster_batch(n_waters, jitter=0.08, seed=11)
+    a = _run(model, batch, "torch", second_order=True)
+    b = _run(model, batch, "torchff", second_order=True)
+    for key in a:
+        assert torch.allclose(a[key], b[key], rtol=1e-9, atol=1e-11), key
+
+
+@pytest.mark.parametrize("name", ["torch", pytest.param("torchff", marks=needs_torchff)])
+def test_nonvariational_force_loss_gradient_matches_central_differences(both_backends, name):
+    backend.set_backend(name)
+    torch.manual_seed(0)
+    model = _nv_model().double()
+    model.train()
+    batch = _to(water_cluster_batch(3, jitter=0.08, seed=11), DEVICE)
+    params = [p for p in model.parameters() if p.requires_grad]
+
+    def loss_value(create_graph):
+        b = batch
+        b.positions = b.positions.detach().clone().requires_grad_(True)
+        out = model(b)
+        (forces,) = torch.autograd.grad(out.energy.sum(), b.positions, create_graph=create_graph)
+        return forces.pow(2).sum() + out.energy.pow(2).sum()
+
+    loss = loss_value(True)
+    grads = torch.autograd.grad(loss, params, allow_unused=True)
+    checked = 0
+    h = 1e-4
+    for p, g in zip(params, grads):
+        if g is None or g.numel() == 0 or float(g.abs().max()) < 1e-6:
+            continue
+        idx = int(g.abs().reshape(-1).argmax())
+        flat = p.data.reshape(-1)
+        old = float(flat[idx])
+        flat[idx] = old + h
+        lp = float(loss_value(False))
+        flat[idx] = old - h
+        lm = float(loss_value(False))
+        flat[idx] = old
+        fd = (lp - lm) / (2 * h)
+        an = float(g.reshape(-1)[idx])
+        assert abs(fd - an) < 2e-5 * max(1.0, abs(fd)), (p.shape, idx, fd, an)
+        checked += 1
+        if checked == 4:
+            break
+    assert checked >= 2

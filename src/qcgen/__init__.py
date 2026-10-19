@@ -13,6 +13,8 @@ The compute core (:mod:`rsfff.qcgen.backend`, :mod:`rsfff.qcgen.compute`) prefer
 from . import (
     backend,
     compute,
+    elst_db,
+    elst_ref,
     extxyz,
     pipeline,
     probe_charges,
@@ -23,6 +25,8 @@ from . import (
 __all__ = [
     "backend",
     "compute",
+    "elst_db",
+    "elst_ref",
     "extxyz",
     "pipeline",
     "probe_charges",

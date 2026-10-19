@@ -1,0 +1,157 @@
+# The film model (variational: converged coupled solve) on ammonia clusters.
+#
+#   python -m rsfff.train.train_film configs/nh3_film.yaml
+#
+# New relative to water:
+#
+#   impropers: true   an out-of-plane (Wilson-angle) term on every bond-degree-3 center -- the
+#                     umbrella mode of NH3 (rsfff.ff.film.bonded). The cosine angles alone tie
+#                     the inversion barrier, umbrella (A1) and E bend to one (theta_eq,
+#                     k_theta); the improper decouples them. Priors fitted jointly to NH3:
+#                     scripts/fit_bonded_priors_nh3.py.
+#   bonded priors     N-H Morse, H-N-H angle and N improper (film.bonded tables).
+#   exclusions        every NH3 intra pair is 1-2 or 1-3, so the monomer is purely bonded.
+#
+# What to watch, beyond the water list: env_improper_c / env_improper_k (the improper's
+# environment shift) and a one-body umbrella scan through the planar geometry against the
+# reference -- the barrier is the quantity the improper exists for. bond_var now also sees the
+# improper deviations.
+#
+# Everything else is film_committee_100k_excl's recipe (rsfff_active_learning/train/
+# water_film_excl_al.yaml): ~100k parameters, hard 1-2/1-3 exclusions, same loss weights and
+# isolated -> full stages. Element priors for the new species live in the code tables
+# (rsfff.ff.response / pauli / dispersion / film.bonded) with their provenance; all are
+# learnable starting points.
+#
+# Data layout (the water conventions -- ALMO-EDA extxyz with fragment_idx, eda_cls_elec /
+# eda_mod_pauli / eda_disp / eda_pol / eda_ct, fragment_energies / _dipoles /
+# _second_moments, fragment_charges / _multiplicities, forces; the monomer file adds
+# polarizability). The paths below are placeholders for files that do not exist yet; for
+# rsfff_active_learning/train/train_committee.py, data.path may instead be a glob.
+#
+# Reference energies: data/atomic_references_wb97mv_tzvpd.json extended with N, e.g.
+#   python scripts/atomic_references.py --backend pyscf --method wB97M-V --basis def2-TZVPD \
+#       --out data/atomic_references_wb97mv_tzvpd.json N
+# (a per-atom constant offset is absorbed by the Morse D, as for water).
+
+run_name: nh3_film
+device: auto
+dtype: float64
+checkpoint_root: checkpoints
+
+data:
+  path:
+    - data/nh3_wb97mv_tzvpd/nh3_2_wb97mv_tzvpd.xyz
+    - data/nh3_wb97mv_tzvpd/nh3_3_wb97mv_tzvpd.xyz
+    - data/nh3_wb97mv_tzvpd/nh3_4_wb97mv_tzvpd.xyz
+    - data/nh3_wb97mv_tzvpd/nh3_5_wb97mv_tzvpd.xyz
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  monomer_path: data/nh3_wb97mv_tzvpd/nh3_wb97mv_tzvpd_pol.xyz
+  holdout_fraction: 0.1
+  seed: 0
+
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas: [0, 1, 2]
+  backend: e3nn
+  density_channels: 8
+
+film:
+  # --- the strictly non-reactive film: hard exclusions, no range heads --------------------
+  nonbonded: exclusions
+  exclude_through: 3
+  impropers: true            # NH3 umbrella (see header)
+
+  # --- film_committee_100k_excl's architecture (~100k parameters) -------------------------
+  conditioning_mode: film
+  cross_lambdas: [0]
+  block_dim: 32
+  hidden: 48
+  depth: 2
+  film_hidden: 16
+  film_depth: 1
+  gate_a0: 0.5
+  max_rank: 2
+  fragment_state_dim: 4
+  emb_dim: 16
+  head_hidden: 24
+  head_depth: 1
+  equiv_channels: 16
+  bonded_hidden: 24
+  bonded_depth: 1
+  eta_init: 0.5
+  eta_floor: 0.05
+  s_init: 0.5
+  disp_b_prior: per_element
+
+  # --- classical reach -----------------------------------------------------------------------
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+
+  induction: true
+  cg_rtol: 1.0e-9
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+
+  # --- loss: as film_committee_100k_excl -----------------------------------------------------
+  energy_scale: 3.8093e-4
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  induction_weight: 30.0
+  total_energy_weight: 5.0
+  force_weight: 1.0
+  force_scale: 1.0e-3
+  force_every: 2
+  fragment_weight: 10.0
+  fragment_batch_size: 128
+  anchor_weight: 10.0
+  anchor_batch_size: 32
+  anchor_force_every: 5
+  env_penalty_weight: 0.0
+  bonded_variance_weight: 1.0e-2
+
+elec:
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
+
+onebody:
+  energy_scale: 3.8093e-4
+  force_weight: 1.0
+  force_scale: 1.0e-3
+
+train:
+  epochs: 80
+  init_from: ""
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 128
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  eval_every: 5
+  seed: 0
+
+stages:
+  - name: isolated
+    train:
+      epochs: 15
+      lr_schedule: none
+    film:
+      induction: false
+      force_weight: 0.0
+      fragment_weight: 30.0
+
+  - name: full
+    train:
+      epochs: 80
+    film:
+      induction: true

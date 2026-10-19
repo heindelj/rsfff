@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import torch
 
-from ..features.features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
+from bb.graph import DEFAULT_MAX_NUM_NEIGHBORS
+
 from ..ff.dispersion import DispersionParameterHeads, build_log_priors
+from ..ff.coupled_solve import DEFAULT_CG_CHECK_EVERY
 from ..ff.expert_model import ClassicalSpec
 from ..ff.film import (
     BondedParameterHead,
@@ -26,11 +29,11 @@ from ..ff.film import (
 )
 from ..ff.fragment_state import FragmentStateEmbedding
 from ..ff.multipole import irrep2_to_spherical
+from ..ff.nonvariational import NonvariationalModel
 from ..ff.pauli import PauliMultipoleHeads, build_pauli_priors
 from ..ff.range_heads import RangeSeparationHeads
 from ..ff.range_priors import RANGE_CHANNELS, build_range_priors
-from ..ff.response import build_elec_priors
-from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS
+from ..ff.response import alpha_scale_prior, build_elec_priors
 
 __all__ = ["build_film_model"]
 
@@ -101,7 +104,15 @@ def build_film_model(
         hidden=int(_get(film_cfg, "bonded_hidden", 64)),
         depth=int(_get(film_cfg, "bonded_depth", 1)),
         emb_dim=int(_get(film_cfg, "bonded_emb_dim", 8)),
+        impropers=bool(_get(film_cfg, "impropers", False)),
     )
+
+    # `film.model`: "film" (converged coupled solve) or "nonvariational" (fixed-K unrolled
+    # solve with learned mutual damping, docs/fff_nonvariational.md).
+    model_kind = str(_get(film_cfg, "model", "film"))
+    if model_kind not in ("film", "nonvariational"):
+        raise ValueError(f"film.model must be 'film' or 'nonvariational', got {model_kind!r}")
+    nonvariational = model_kind == "nonvariational"
 
     log_z, log_b_elec, q0_prior = build_elec_priors(neighbor_types)
     permanent_heads = PermanentMultipoleHeads(
@@ -124,6 +135,17 @@ def build_film_model(
         psd_floor=float(_get(film_cfg, "psd_floor", 1e-4)),
         compliance_cutoff=featurizer.cutoff,
         s_init=float(_get(film_cfg, "s_init", 0.5)),
+        # the nonvariational model's heads; absent (no parameters) under `model: film`, so
+        # film checkpoints keep loading whatever the config defaults say
+        induced_width=nonvariational and bool(_get(film_cfg, "induced_width", True)),
+        induced_width_mode=str(_get(film_cfg, "induced_width_mode", "broaden")),
+        induced_width_bias_init=float(_get(film_cfg, "induced_width_bias_init", -3.0)),
+        induced_quadrupoles=nonvariational and bool(_get(film_cfg, "induced_quadrupoles", True)),
+        cquad_init=float(_get(film_cfg, "cquad_init", 1.0)),
+        cquad_floor=float(_get(film_cfg, "cquad_floor", 1.0e-4)),
+        alpha_scale=(
+            alpha_scale_prior(neighbor_types) if bool(_get(film_cfg, "alpha_prior", True)) else None
+        ),
     )
 
     log_q, log_b_pauli, mu_scale, quad_scale = build_pauli_priors(neighbor_types)
@@ -164,20 +186,37 @@ def build_film_model(
         gate_a0=float(_get(film_cfg, "gate_a0", 0.5)),
     )
 
-    range_heads = RangeSeparationHeads(
-        0, n_species,
-        log_r0_prior=build_range_priors(neighbor_types),
-        alpha_init=float(_get(film_cfg, "alpha_init", 40.0)),
-        p_env=0, channels=RANGE_CHANNELS,
-        environment_r0=False,
-    )
+    # `film.nonbonded`: "range_separated" (Fermi-switched; the default, so configs pickled
+    # into older checkpoints keep loading) or "exclusions" (hard 1-2/1-3 exclusions, no range
+    # heads, strictly non-reactive). See rsfff.ff.film.model.
+    nonbonded = str(_get(film_cfg, "nonbonded", "range_separated"))
+    range_heads = None
+    if nonbonded == "range_separated":
+        range_heads = RangeSeparationHeads(
+            0, n_species,
+            log_r0_prior=build_range_priors(neighbor_types),
+            alpha_init=float(_get(film_cfg, "alpha_init", 40.0)),
+            p_env=0, channels=RANGE_CHANNELS,
+            environment_r0=False,
+        )
 
-    return FilmModel(
+    cls, extra = FilmModel, {}
+    if nonvariational:
+        cls, extra = NonvariationalModel, dict(
+            n_iter=int(_get(film_cfg, "n_iter", 3)),
+            iterate_weights=bool(_get(film_cfg, "iterate_weights", True)),
+            with_residual=bool(_get(film_cfg, "solve_residual", False)),
+        )
+
+    return cls(
         projector,
         state_embedding,
         network,
         range_heads,
         reference_energies,
+        **extra,
+        nonbonded=nonbonded,
+        exclude_through=int(_get(film_cfg, "exclude_through", 3)),
         max_rank=max_rank,
         classical={
             "elst": ClassicalSpec(
@@ -198,5 +237,5 @@ def build_film_model(
         cg_rtol=float(_get(film_cfg, "cg_rtol", 1.0e-9)),
         cg_atol=float(_get(film_cfg, "cg_atol", 1.0e-12)),
         cg_maxiter=int(_get(film_cfg, "cg_maxiter", 100)),
-        cg_check_every=int(_get(film_cfg, "cg_check_every", 1)),
+        cg_check_every=int(_get(film_cfg, "cg_check_every", DEFAULT_CG_CHECK_EVERY)),
     )

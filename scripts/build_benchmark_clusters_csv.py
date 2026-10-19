@@ -3,7 +3,7 @@
     python scripts/build_benchmark_clusters_csv.py
 
 Writes ``data/kristina_clusters/benchmark_clusters.csv``, one row per cluster, holding the
-literature numbers alongside the two film checkpoints so the notebook
+literature numbers alongside every film model in ``MODELS`` so the notebook
 ``notebooks/benchmark_clusters.ipynb`` only ever has to read a single file.
 
 The literature block below is transcribed by hand from the published comparison tables
@@ -26,8 +26,9 @@ something slightly different; treat the MB-Pol *column* as good enough to plot a
 
 The film columns come straight out of ``scripts/optimize_clusters.py``: the binding energy at
 the model's own relaxed geometry (the same quantity the other methods report) and the all-atom
-Kabsch RMSD to the reference minimum. Re-run that script for both checkpoints before re-running
-this one whenever either model is retrained.
+Kabsch RMSD to the reference minimum. Re-run that script for a checkpoint before re-running
+this one whenever that model is retrained; a model whose optimizer CSV is missing is left
+blank rather than failing the merge.
 """
 
 import argparse
@@ -70,12 +71,25 @@ LITERATURE = [
     (25, "Isomer 2",     -276.50, -266.04, -271.37, -272.02, None,    -276.30,  0.029, 0.049, 0.054, 0.023),
 ]
 
+#: column key -> the ``scripts/optimize_clusters.py`` CSV it is read from, and the checkpoint
+#: that CSV was relaxed on (for the record; the script does not reopen it).
+MODELS = {
+    # checkpoints/water_film_full/best.pt (the original ~450k film fit, w2-w5)
+    "film": DATA / "all_clusters_film_opt.csv",
+    # checkpoints/water_film_large/best.pt (+ the w4-w23 large stream)
+    "film_large": DATA / "all_clusters_film_large_opt.csv",
+    # rsfff_active_learning/committees/film_committee_100k, member 0 (range-separated)
+    "film_100k": DATA / "all_clusters_film_100k_opt.csv",
+    # rsfff_active_learning/committees/film_committee_100k_excl, member 0 (1-2/1-3 exclusions)
+    "film_100k_excl": DATA / "all_clusters_film_100k_excl_opt.csv",
+}
+
 FIELDS = [
     "n_waters", "isomer", "repo_label",
     "energy_q_aqua", "energy_mbpol", "energy_cmm", "energy_wb97xv", "energy_hippo",
-    "energy_film", "energy_film_large", "energy_reference",
+    *(f"energy_{key}" for key in MODELS), "energy_reference",
     "rmsd_q_aqua", "rmsd_mbpol", "rmsd_cmm", "rmsd_wb97xv",
-    "rmsd_film", "rmsd_film_large",
+    *(f"rmsd_{key}" for key in MODELS),
 ]
 
 
@@ -84,72 +98,95 @@ def read_optimizer_csv(path):
         return list(csv.DictReader(fh))
 
 
-def build_rows(small_path, large_path):
-    small = read_optimizer_csv(small_path)
-    large = read_optimizer_csv(large_path)
-    if not len(small) == len(large) == len(LITERATURE):
-        raise SystemExit(
-            f"row-count mismatch: {len(small)} small, {len(large)} large, "
-            f"{len(LITERATURE)} literature -- the tables are no longer the same cluster set"
-        )
+def build_rows(model_csvs):
+    """``model_csvs``: ``{key: optimizer CSV path}``; a missing file leaves that model blank."""
+    models = {}
+    for key, path in model_csvs.items():
+        if not Path(path).exists():
+            print(f"[benchmark] {key}: {path} not found; its columns are left blank")
+            continue
+        models[key] = read_optimizer_csv(path)
+        if len(models[key]) != len(LITERATURE):
+            raise SystemExit(
+                f"row-count mismatch: {key} has {len(models[key])} rows, the literature "
+                f"{len(LITERATURE)} -- the tables are no longer the same cluster set"
+            )
+    if not models:
+        raise SystemExit("no optimizer CSV found for any model")
 
     rows = []
-    for lit, s, l in zip(LITERATURE, small, large):
+    for i, lit in enumerate(LITERATURE):
         n, isomer, qa, mbpol, cmm, wb97xv, hippo, ref, r_qa, r_mbpol, r_cmm, r_wb97xv = lit
-        if not int(s["n_waters"]) == int(l["n_waters"]) == n:
-            raise SystemExit(
-                f"cluster order diverged at '{s['label']}': the optimizer CSVs have "
-                f"{s['n_waters']}/{l['n_waters']} waters where the table has {n}"
-            )
-        rows.append({
+        for key, table in models.items():
+            if int(table[i]["n_waters"]) != n:
+                raise SystemExit(
+                    f"cluster order diverged at '{table[i]['label']}': {key} has "
+                    f"{table[i]['n_waters']} waters where the table has {n}"
+                )
+        first = next(iter(models.values()))[i]
+        row = {
             "n_waters": n,
             "isomer": isomer,
-            "repo_label": s["label"],
+            "repo_label": first["label"],
             "energy_q_aqua": qa,
             "energy_mbpol": mbpol,
             "energy_cmm": cmm,
             "energy_wb97xv": wb97xv,
             "energy_hippo": "" if hippo is None else hippo,
-            "energy_film": round(float(s["binding_energy_kcal_mol"]), 2),
-            "energy_film_large": round(float(l["binding_energy_kcal_mol"]), 2),
             "energy_reference": ref,
             "rmsd_q_aqua": r_qa,
             "rmsd_mbpol": r_mbpol,
             "rmsd_cmm": r_cmm,
             "rmsd_wb97xv": r_wb97xv,
-            "rmsd_film": round(float(s["rmsd_all_angstrom"]), 3),
-            "rmsd_film_large": round(float(l["rmsd_all_angstrom"]), 3),
-        })
+        }
+        for key in MODELS:
+            table = models.get(key)
+            row[f"energy_{key}"] = (
+                "" if table is None else round(float(table[i]["binding_energy_kcal_mol"]), 2)
+            )
+            row[f"rmsd_{key}"] = (
+                "" if table is None else round(float(table[i]["rmsd_all_angstrom"]), 3)
+            )
+        rows.append(row)
     return rows
 
 
 def summarize(rows):
     """MAE/n and mean RMSD per method -- the same footers the published tables carry."""
     lines = []
-    for method in ("q_aqua", "mbpol", "cmm", "wb97xv", "hippo", "film", "film_large"):
+    for method in ("q_aqua", "mbpol", "cmm", "wb97xv", "hippo", *MODELS):
         errors = [
             abs(float(r[f"energy_{method}"]) - float(r["energy_reference"])) / r["n_waters"]
             for r in rows if r[f"energy_{method}"] != ""
         ]
+        if not errors:
+            lines.append(f"{method:>15}: (no values)")
+            continue
         mae = sum(errors) / len(errors)
         rmsd_key = f"rmsd_{method}"
-        if rmsd_key in FIELDS:
+        if rmsd_key in FIELDS and rows[0][rmsd_key] != "":
             values = [float(r[rmsd_key]) for r in rows]
             tail = f"   mean RMSD {sum(values) / len(values):.3f} A"
         else:
             tail = ""
-        lines.append(f"{method:>11}: MAE/n {mae:.3f} kcal/mol  (n={len(errors)}){tail}")
+        lines.append(f"{method:>15}: MAE/n {mae:.3f} kcal/mol  (n={len(errors)}){tail}")
     return "\n".join(lines)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--small-csv", type=Path, default=DATA / "all_clusters_film_opt.csv")
-    parser.add_argument("--large-csv", type=Path, default=DATA / "all_clusters_film_large_opt.csv")
+    parser.add_argument("--model", action="append", default=[], metavar="KEY=CSV",
+                        help="override one entry of MODELS (repeatable)")
     parser.add_argument("--out", type=Path, default=DATA / "benchmark_clusters.csv")
     args = parser.parse_args()
 
-    rows = build_rows(args.small_csv, args.large_csv)
+    csvs = dict(MODELS)
+    for item in args.model:
+        key, _, path = item.partition("=")
+        if key not in MODELS:
+            raise SystemExit(f"unknown model {key!r}; add it to MODELS (and FIELDS follows)")
+        csvs[key] = Path(path)
+    rows = build_rows(csvs)
     with open(args.out, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=FIELDS)
         writer.writeheader()

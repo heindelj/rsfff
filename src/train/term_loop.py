@@ -23,7 +23,12 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import re
+
 import torch
+
+from bb.compat import upgrade_state_dict
+from bb.nn import parameter_groups  # noqa: F401  (moved to bb; re-exported for importers)
 
 from ..ff.units import KJMOL_PER_HARTREE
 from .train import _iter_minibatches
@@ -60,47 +65,6 @@ def eda_component_fit(out, batch, cfg):
         "corr_share": float((corr / (ff + corr).clamp(min=1e-30)).mean()),
     }
     return loss, metrics, target
-
-
-def parameter_groups(model, weight_decay: float) -> list[dict]:
-    """Optimizer groups, exempting modules that declare ``no_weight_decay``.
-
-    Exemption is declared at two granularities, and both are read here:
-
-    * **per module**, ``module.no_weight_decay``, set by
-      :func:`rsfff.mlip.heads.zero_init_readout` -- a block whose readout starts at zero gets
-      *no loss gradient at all* on the first step, weight decay is then the only force acting on
-      it, and it does not recover. Five such blocks in this model were measured going to zero
-      over a staged fit, taking the many-body dispersion, the per-channel compliance and the
-      quadrupole anisotropy with them, silently.
-    * **per parameter**, ``param._no_weight_decay``, set by
-      :func:`rsfff.mlip.heads.exempt_parameter` and hence by
-      :func:`rsfff.mlip.heads.mark_env_slot`. A :class:`~rsfff.mlip.heads.TwoSlotLinear` needs
-      this granularity: its ``w_frag`` half is normally initialized and should keep decaying,
-      while its ``w_env`` half is governed by the named ``L_env`` penalty instead. Flagging the
-      module would exempt both.
-
-    Nothing else is exempt. Per-species tables, the featurizer and the plainly-initialized
-    heads all keep decaying, because they have live gradients to push back with.
-    """
-    decayed, exempt = [], []
-    seen: set[int] = set()
-    for module in model.modules():
-        if not getattr(module, "no_weight_decay", False):
-            continue
-        for p in module.parameters():
-            if p.requires_grad and id(p) not in seen:
-                seen.add(id(p))
-                exempt.append(p)
-    for p in model.parameters():
-        if not p.requires_grad or id(p) in seen:
-            continue
-        seen.add(id(p))
-        (exempt if getattr(p, "_no_weight_decay", False) else decayed).append(p)
-    groups = [{"params": decayed, "weight_decay": float(weight_decay)}]
-    if exempt:
-        groups.append({"params": exempt, "weight_decay": 0.0})
-    return groups
 
 
 def build_scheduler(optimizer, train_cfg):
@@ -144,6 +108,14 @@ def build_scheduler(optimizer, train_cfg):
 #: ``sqrt(equiv_channels)`` (5.66 at the default 32), and the observed dead value was a
 #: denormal 2e-315, so anything in between separates the two cases cleanly.
 _DEAD_NORM = 1.0e-6
+
+#: A channel reduction's key: ``equiv_reduce`` in pre-bb heads (and the ``ff`` energy heads that
+#: still use that name), ``reduce.<irrep>`` in the bb readouts.
+_REDUCTION_KEY = re.compile(r"(^|\.)(equiv_reduce|reduce\.\d+[eo])$")
+
+
+def _is_channel_reduction(key: str) -> bool:
+    return bool(_REDUCTION_KEY.search(key))
 
 
 def warm_start(model, path: str | None) -> None:
@@ -189,14 +161,17 @@ def warm_start(model, path: str | None) -> None:
     if not path:
         return
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    saved = ckpt.get("model_state", ckpt)
+    # Rename pre-bb keys (``gate_mlp.`` -> ``mlp.``, ``equiv_reduce`` -> ``reduce.<irrep>``, ...)
+    # before matching them by name below; otherwise an old checkpoint's heads would read as
+    # "not in this model" and be dropped silently.
+    saved = upgrade_state_dict(model, ckpt.get("model_state", ckpt))
     current = model.state_dict()
     take, padded, dropped, revived = {}, [], [], []
     for k, v in saved.items():
         if k not in current:
             continue
         want = current[k]
-        if k.endswith("equiv_reduce") and float(v.norm()) < _DEAD_NORM:
+        if _is_channel_reduction(k) and float(v.norm()) < _DEAD_NORM:
             # A channel reduction that reached zero is not a trained value, it is a deleted
             # block: `equiv_reduce == 0` zeroes its head's output, which zeroes the gradient
             # into the zero-initialized gate, which holds the gate at zero and keeps
@@ -217,6 +192,11 @@ def warm_start(model, path: str | None) -> None:
             dropped.append(f"{k} {tuple(v.shape)} vs {tuple(want.shape)}")
     revived_keys = {r.split(" ", 1)[0] for r in revived}
     missing = [k for k in current if k not in take and k not in revived_keys]
+    # Hand the model its own value for whatever the checkpoint lacks, so "left at
+    # initialization" is literal: a module that supplies a default for a key missing from an
+    # *old* checkpoint (FilmResponseHeads.alpha_scale -> ones, to reproduce it) must not have
+    # that default replace this model's fresh value in a warm start.
+    take.update({k: current[k] for k in missing})
     model.load_state_dict(take, strict=False)
     parts = [f"warm start from {path}: loaded {len(take)}/{len(current)} tensors"]
     if padded:

@@ -1,0 +1,32 @@
+# rsfff environment (Python 3.12, for torch-sim). Same file on the Mac and on Perlmutter;
+# scripts/make_env.sh creates it and then does the platform-specific steps (rsfff itself,
+# the cuequivariance CUDA ops matched to torch's CUDA, and the torchff-lib build).
+#
+#   bash scripts/make_env.sh                 # Mac: conda env `rsfff`
+#   bash scripts/make_env.sh -p <prefix>     # Perlmutter (login node)
+#
+# Plain `conda env create -f environment.yml` also works, followed by the steps in make_env.sh.
+name: rsfff
+channels: [conda-forge]
+dependencies:
+  - python=3.12
+  - pip
+  - setuptools
+  - wheel
+  - packmol
+  - ipykernel
+  - pip:
+      # From PyPI on both machines: CPU/MPS on macOS, CUDA (currently 13.x) on Linux.
+      # >=2.11 because cuequivariance-ops-torch requires it; torch-sim needs >=2.8.
+      - torch>=2.11
+      - numpy
+      - scipy
+      - pyyaml
+      - e3nn
+      - ase
+      - torch-sim-atomistic
+      # cuequivariance frontends are pure Python and install everywhere (the cue feature
+      # backend falls back to CPU off CUDA). The fused CUDA ops package is Linux-only and
+      # is cu12/cu13-specific, so make_env.sh installs it to match torch.version.cuda.
+      - cuequivariance>=0.10
+      - cuequivariance-torch>=0.10

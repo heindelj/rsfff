@@ -8,7 +8,14 @@ scipy
 [cue]
 cuequivariance>=0.10
 cuequivariance-torch>=0.10
+
+[cue-cu12]
+rsfff[cue]
 cuequivariance-ops-torch-cu12
+
+[cue-cu13]
+rsfff[cue]
+cuequivariance-ops-torch-cu13
 
 [neighbors]
 torch-cluster

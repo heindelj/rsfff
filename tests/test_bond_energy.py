@@ -20,10 +20,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from rsfff.features.equivariant_backend import get_backend
+from bb.nn import env_parameters
+from bb.o3 import get_backend
+
 from rsfff.ff.bond_energy import FragmentBondEnergy
 from rsfff.ff.multipole import irrep2_to_spherical
-from rsfff.mlip.heads import env_parameters
 
 P0, P1, P2, P_ENV, P1_ENV, P2_ENV = 6, 5, 7, 4, 3, 2
 N_SPECIES, EMB, K = 2, 3, 4

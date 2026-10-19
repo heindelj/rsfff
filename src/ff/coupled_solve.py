@@ -89,6 +89,7 @@ from dataclasses import dataclass
 
 import torch
 
+from ..linalg_guard import finite_or_identity
 from ..mlip.sqe import _local_index
 from .multipole import build_polytensor, spherical_to_cartesian_quadrupole
 
@@ -540,20 +541,24 @@ class _Preconditioner:
                 + s_p.unsqueeze(-1) * eye
                 + floor * eye
             )
+            # A frame with non-finite eta / compliance factorizes the identity instead: the
+            # batched GPU LU can fault on NaN input and take the process down; CG on the same
+            # inputs still leaves that frame NaN, so nothing is hidden.
+            mat, _ = finite_or_identity(mat)
             self.lu = torch.linalg.lu_factor(mat)
             self.bond_local, self.nb_max = bond_local, nb_max
 
         self.alpha_inv = None
         if sys.has_dipole:
             eye3 = torch.eye(3, dtype=dtype, device=device)
-            self.alpha_inv = torch.linalg.inv(sys.alpha + floor * eye3)
+            self.alpha_inv = torch.linalg.inv(finite_or_identity(sys.alpha + floor * eye3)[0])
         self.cquad_inv = None
         if sys.has_quad:
             if sys.cquad.dim() == 1:
                 self.cquad_inv = 1.0 / (sys.cquad + floor)
             else:
                 eye5 = torch.eye(5, dtype=dtype, device=device)
-                self.cquad_inv = torch.linalg.inv(sys.cquad + floor * eye5)
+                self.cquad_inv = torch.linalg.inv(finite_or_identity(sys.cquad + floor * eye5)[0])
 
     def __call__(self, r: State) -> State:
         sys = self.sys
@@ -606,6 +611,12 @@ def _cg_iteration(sys, d_map, g0, pre, x, r, p, rz, converged, pd_fail, target):
     return x, r, p, rz_new, converged, pd_fail
 
 
+#: Default number of CG iterations between convergence tests. Each test is a device->host
+#: sync (``bool(converged.all())``); converged frames take exact zero steps in between, so
+#: the answer does not depend on it -- a larger value trades up to k-1 wasted iterations for
+#: k times fewer syncs.
+DEFAULT_CG_CHECK_EVERY = 4
+
 _COMPILED_ITERATION = None
 _COMPILE = os.environ.get("RSFFF_COMPILE", "").strip().lower()
 
@@ -641,7 +652,7 @@ def pcg(
     rtol: float = 1.0e-10,
     atol: float = 1.0e-12,
     maxiter: int = 200,
-    check_every: int = 1,
+    check_every: int = DEFAULT_CG_CHECK_EVERY,
     d_map=None,
 ) -> tuple[State, CoupledInfo]:
     """Solve ``A x = rhs`` (default ``rhs = -b``, i.e. minimize the functional).
@@ -762,7 +773,9 @@ class _CoupledSolve(torch.autograd.Function):
         ctx.has_rhs = rhs is not None
         ctx.save_for_backward(*x, *(rhs if rhs is not None else ()), *params)
         ctx.info = info
-        n_iter = torch.tensor([info.n_iter], dtype=torch.int64, device=x[0].device)
+        # on the host: it is a Python int already, and `.item()` on a device copy would be
+        # one more full stream sync per solve
+        n_iter = torch.tensor([info.n_iter], dtype=torch.int64)
         ctx.mark_non_differentiable(n_iter)
         return x[0], x[1], x[2], n_iter
 
@@ -876,7 +889,7 @@ def coupled_solve(
     rtol: float = 1.0e-10,
     atol: float = 1.0e-12,
     maxiter: int = 200,
-    check_every: int = 1,
+    check_every: int = DEFAULT_CG_CHECK_EVERY,
     info_out: list | None = None,
 ) -> tuple[State, int]:
     """Minimize the coupled functional. Differentiable through the adjoint, to second order.
@@ -927,6 +940,7 @@ def coupled_solve_dense(sys: CoupledSystem) -> State:
 
 
 __all__ = [
+    "DEFAULT_CG_CHECK_EVERY",
     "CoupledInfo",
     "CoupledSystem",
     "State",

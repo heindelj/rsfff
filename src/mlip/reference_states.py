@@ -38,7 +38,8 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 
-from .heads import mlp, zero_init_readout
+from bb.features import AtomWeightNet  # noqa: F401  (moved to bb; re-exported)
+from bb.nn import mlp, zero_init_readout
 
 
 def _fragment_mean(x: torch.Tensor, fragment_idx: torch.Tensor, n_fragments: int):
@@ -135,28 +136,6 @@ class ReferenceEmbedding(nn.Module):
         )                                                                 # (N, 3 + n_species)
         gamma, beta = self.film_mlp(state).chunk(2, dim=-1)                # (N, D) each
         return ReferenceStateOutput(embedding=elem * (1.0 + gamma) + beta, baseline_charge=q0)
-
-
-class AtomWeightNet(nn.Module):
-    """Map a reference embedding ``e`` to density-channel weights ``w(e)``: (N, Kw).
-
-    ``w(e_j)`` weights neighbor ``j``'s contribution to the state-decorated density
-    ``A[i,k,n,lm] = sum_j w_k(e_j) R_n(r_ij) Y_lm f_cut`` (§2.1). Because ``e_j`` carries the
-    neighbor's diabatic identity -- element, fragment charge, fragment spin -- the density
-    distinguishes, say, an H of hydroxide from an H of hydronium, which a species one-hot
-    cannot. The weights are invariant scalars, so the density and everything built from it stay
-    exactly equivariant.
-    """
-
-    def __init__(
-        self, emb_dim: int, weight_channels: int, *, hidden: int = 32, depth: int = 1
-    ) -> None:
-        super().__init__()
-        self.weight_channels = int(weight_channels)
-        self.net = mlp(emb_dim, hidden, depth, weight_channels)
-
-    def forward(self, embedding: torch.Tensor) -> torch.Tensor:
-        return self.net(embedding)                                  # (N, Kw)
 
 
 class AtomicStateReference:

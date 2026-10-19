@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from rsfff.features.features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
 from rsfff.ff.electrostatics import SlaterElectrostatics
 from rsfff.ff.many_body import mbe_decompose
 from rsfff.ff.multipole import irrep2_to_spherical

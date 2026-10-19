@@ -33,7 +33,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from rsfff.mlip.heads import env_parameters
+from bb.nn import env_parameters
 from rsfff.mlip.reference_states import AtomicStateReference
 from rsfff.train.build_expert import build_expert_model
 from rsfff.train.config import Config

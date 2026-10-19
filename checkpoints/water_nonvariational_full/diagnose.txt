@@ -1,0 +1,7 @@
+NonvariationalModel K = 3 c_k = [1.0, 0.9623844919523256, 0.9776948358431448]
+frames: 24  waters/frame: [2, 3, 5, 5, 2, 4, 4, 4, 2, 3, 4, 5, 5, 4, 3, 4, 5, 5, 2, 4, 2, 5, 4, 2]
+E(x_K) - E(x*) [kJ/mol]: mean 0.1279  max 0.5828  min 0.0000
+residual max 1.895e-02   dq_max 9.769e-03   dmu_max 1.151e-02   CG iters 16
+induction energy [kJ/mol]: mean -36.05  -> gap/|ind| = 2.75e-03
+s_ind: mean 0.311 max 0.358 (b_ind/b min 0.699); cquad mean 6.759 (iso 6.326)
+energy+forces, 24 frames, CPU torch backend: unrolled 0.21s  converged CG 0.20s

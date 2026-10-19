@@ -15,7 +15,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..mlip.heads import mlp
+from bb.nn import mlp
 
 __all__ = ["FragmentStateEmbedding"]
 

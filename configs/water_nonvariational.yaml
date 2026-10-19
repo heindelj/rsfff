@@ -1,0 +1,152 @@
+# The nonvariational model of docs/fff_nonvariational.md on the strictly non-reactive film:
+# rsfff_active_learning/train/water_film_excl_al.yaml (film_committee_100k_excl's fit --
+# hard 1-2/1-3 exclusions, the ~100k-parameter architecture, loss weights and stages) with the
+# converged coupled solve replaced by K = 3 unrolled iterations whose mutual induction carries
+# learned induced-density widths; induced charges, dipoles AND quadrupoles; the energy is the
+# physical functional at the unrolled state; forces by autograd through the loop.
+#
+#   python -m rsfff.train.train_film configs/water_nonvariational.yaml
+#
+# Data: the w2-w5 files in the checkout (the `original` part of the committee's training set,
+# without the 81 benchmark clusters that live in rsfff_data on Perlmutter). The committee-style
+# fit on the full set is rsfff_active_learning/train/water_nonvariational_excl_al.yaml.
+#
+# Differences from the film config, all under `film:`:
+#
+#   model: nonvariational      selects rsfff.ff.nonvariational.NonvariationalModel
+#   n_iter: 3                  K; changing it means refitting. Scan {2, 3, 4}.
+#   iterate_weights: true      global OPT-style c_2..c_K on the corrections (c_1 = 1 fixed)
+#   induced_width: true        b_ind = b exp(-s), s >= 0 ("broaden"), exactly b in isolation
+#   induced_quadrupoles: true  isotropic quadrupole polarizability
+#   solve_residual: true       log max |A x_K + b| per step as ind_res (one extra matvec)
+#
+# What to watch, beyond the film's list:
+#
+#   ind_res     the physical residual at x_K. Not driven to zero -- that is the point -- but it
+#               should be stable; a growing residual means alpha / the widths are drifting to a
+#               regime where three iterations are far from the series' limit.
+#   env_b_ind   mean |log b_ind - log b|: how much short-range mutual damping is being learned.
+#               Read next to env_alpha: the hope is that part of alpha's environment shift
+#               moves here.
+#   env_cquad   the quadrupole polarizability's environment shift.
+#   cg_ind      is K, constant; cg_fail is identically zero.
+#
+# The cg_* settings are unused by the model; rsfff.ff.nonvariational.diagnose uses them for the
+# converged reference on validation data.
+
+run_name: water_nonvariational
+device: auto
+checkpoint_root: checkpoints
+dtype: float64
+data:
+  path:
+  - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
+  - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+  - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+  - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
+  holdout_fraction: 0.1
+  seed: 0
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas:
+  - 0
+  - 1
+  - 2
+  backend: e3nn
+  density_channels: 8
+film:
+  nonbonded: exclusions     # hard 1-2/1-3 exclusions, no range heads
+  exclude_through: 3        # 3: 1-2 and 1-3; 4 would add 1-4
+  # --- the nonvariational solve (docs/fff_nonvariational.md) --------------------------------
+  model: nonvariational
+  n_iter: 3
+  iterate_weights: true
+  induced_width: true
+  induced_width_mode: broaden
+  induced_quadrupoles: true
+  solve_residual: true
+  conditioning_mode: film
+  cross_lambdas:
+  - 0
+  block_dim: 32
+  hidden: 48
+  depth: 2
+  film_hidden: 16
+  film_depth: 1
+  gate_a0: 0.5
+  max_rank: 2
+  fragment_state_dim: 4
+  emb_dim: 16
+  head_hidden: 24
+  head_depth: 1
+  equiv_channels: 16
+  bonded_hidden: 24
+  bonded_depth: 1
+  eta_init: 0.5
+  eta_floor: 0.05
+  s_init: 0.5
+  disp_b_prior: per_element
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+  induction: true
+  cg_rtol: 1.0e-09
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+  energy_scale: 0.00038093
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  induction_weight: 30.0
+  total_energy_weight: 5.0
+  force_weight: 1.0
+  force_scale: 0.001
+  force_every: 2
+  fragment_weight: 10.0
+  fragment_batch_size: 128
+  anchor_weight: 10.0
+  anchor_batch_size: 32
+  anchor_force_every: 5
+  env_penalty_weight: 0.0
+  bonded_variance_weight: 0.01
+elec:
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
+onebody:
+  energy_scale: 0.00038093
+  force_weight: 1.0
+  force_scale: 0.001
+train:
+  epochs: 80
+  init_from: ''
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 128
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  grad_clip: 5.0
+  eval_every: 5
+  seed: 0
+stages:
+- name: isolated
+  train:
+    epochs: 15
+    lr_schedule: none
+  film:
+    induction: false
+    force_weight: 0.0
+    fragment_weight: 30.0
+- name: full
+  train:
+    epochs: 80
+  film:
+    induction: true

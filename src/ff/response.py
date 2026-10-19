@@ -29,14 +29,17 @@ rather than assumed (``tests/test_ff_electrostatics.py``, ``tests/test_ff_onebod
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
-from ..features.features import LambdaFeatures
+from bb.features import LambdaFeatures
+from bb.nn import two_slot_mlp, zero_init_readout
+
 from ..mlip.eem import atomic_dipoles, atomic_quadrupoles
-from ..mlip.heads import two_slot_mlp, zero_init_readout
 from ..mlip.response_heads import (
     AtomicAlphaHead,
     AtomicQuadrupoleHead,
@@ -61,6 +64,15 @@ from .units import BOHR_ANG
 DEFAULT_ELEC_PRIOR: dict[int, tuple[float, float]] = {
     8: (3.61565, 2.13358),   # O
     1: (0.93619, 2.33322),   # H
+    # Na+/Cl-: the CMM ion model (pyCMM/scripts/ion_water_refit.xml, na+/cl-). Cl-'s fitted
+    # Z_cp sits at the full nuclear charge (17); kept as fitted.
+    11: (2.14133, 2.16955),  # Na+
+    17: (17.0, 1.93144),     # Cl-
+    # N (NH3) and F (HF) have no fitted CMM values. Z_cp is scaled from O by valence-electron
+    # count (O: 3.616 for 6 -> ~0.6 per electron), b from O by the molecular-IP decay
+    # exponent 2 sqrt(2 IP) (H2O 12.6, NH3 10.1, HF 16.0 eV). Starting points, learnable.
+    7: (3.0, 1.91),          # N
+    9: (4.2, 2.41),          # F
 }
 
 #: Per-element **baseline** charges ``q0``, from the same water model's permanent monopoles.
@@ -78,7 +90,54 @@ DEFAULT_ELEC_PRIOR: dict[int, tuple[float, float]] = {
 #: Starting from a physical baseline puts the optimizer on the right side of that saddle.
 #: This is what SQE's ``q0`` is *for* -- it is the diabatic baseline, and ``MonomerModel``
 #: uses ``ReferenceEmbedding.baseline_charge`` the same way.
-DEFAULT_Q0_PRIOR: dict[int, float] = {8: -0.390896, 1: 0.195448}
+#: Per-element **isotropic atomic dipole polarizability** priors, a0^3, for elements whose
+#: polarizability is not shared with neighbours by charge flow -- the monatomic ions, where the
+#: atom *is* the fragment and its alpha is the fragment's whole polarizability.
+#:
+#: Without these, ``AtomicAlphaHead`` starts every element at ``softplus(0) + floor`` =
+#: 0.693 a0^3 and has to *learn* the magnitude through its readout. That is fine for water
+#: (O and H sit at ~1 a0^3 each next to the charge flow) and hopeless for Cl-: 31.3 a0^3 is a
+#: raw output of ~31, and an Adam step moves a readout by ~lr, so a NaCl committee sat at
+#: Cl- ~ 0.7 a0^3 for its whole fit (``alpha_mae`` flat at ~4.06 e^2 A^2/Ha, committee_r2).
+#: With a prior the head's output *multiplies* it (:func:`alpha_scale_prior`), so the network
+#: learns a relative correction -- which is also the scale on which the environment changes
+#: it (Pauli confinement lowers an anion's alpha by tens of percent, not by 30 a0^3 of raw
+#: output).
+#:
+#: Values: isolated-ion polarizabilities at wB97M-V/def2-TZVPD, Q-Chem JOBTYPE =
+#: polarizability (the NaCl walk's monomer anchors, research/rsfff
+#: train/nacl/anchors/nacl_monomers.xyz).
+#:
+#: Keyed by element, so a *neutral* Cl (HCl, say) would inherit the anion's value as its
+#: starting point; extend with care, and only for elements that appear as monatomic ions.
+DEFAULT_ALPHA_PRIOR: dict[int, float] = {
+    11: 0.961,     # Na+
+    17: 31.315,    # Cl-
+}
+
+
+def alpha_scale_prior(neighbor_types, *, prior: dict[int, float] | None = None) -> torch.Tensor:
+    """Per-species multiplier on :class:`~rsfff.mlip.response_heads.AtomicAlphaHead`'s output,
+    ordered like ``neighbor_types``: ``alpha_prior / ln 2`` for an element in
+    :data:`DEFAULT_ALPHA_PRIOR` (so ``softplus(0)``, the head's attractor, lands on the prior)
+    and exactly ``1`` for every other element, which leaves those species' alpha bit-identical
+    to the head without a prior."""
+    table = dict(DEFAULT_ALPHA_PRIOR)
+    if prior:
+        table.update(prior)
+    ln2 = math.log(2.0)
+    return torch.tensor([float(table[int(z)]) / ln2 if int(z) in table else 1.0 for z in neighbor_types])
+
+
+DEFAULT_Q0_PRIOR: dict[int, float] = {
+    8: -0.390896, 1: 0.195448,
+    11: 1.0, 17: -1.0,
+    # The point-charge dipole charges of NH3 (1.47 D) and HF (1.82 D) scaled by the same
+    # 0.59 that maps water's point-charge q_H (0.33) onto CMM's (0.195) -- the rest of the
+    # dipole lives in the atomic dipoles. Only the sign really matters (see above); the exact
+    # charge projection restores fragment neutrality whatever H's table value is.
+    7: -0.474, 9: -0.244,
+}
 
 
 def build_elec_priors(

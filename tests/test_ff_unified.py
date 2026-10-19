@@ -15,11 +15,13 @@ a dimer as one fragment moves energy between the decomposition's buckets without
 total.
 """
 
+import re
+
 import numpy as np
 import pytest
 import torch
 
-from rsfff.features.features import DensityExpansion, FlatLambdaSOAPFeaturizer
+from bb.features import DensityExpansion, FlatLambdaSOAPFeaturizer
 from rsfff.ff.dispersion import (
     DispersionParameterHeads,
     TTDispersion,
@@ -1227,8 +1229,9 @@ def test_every_zero_initialized_readout_block_is_exempt_from_weight_decay():
         "environment.inv_mlp", "environment.vec_gate", "environment.equiv_gate",
         "disp_params.c6_mlp", "pauli_params.q_mlp",
         "response.compliance_head.net", "response.params.chi_mlp", "response.params.eta_mlp",
-        "response.params.chivec_head.gate_mlp", "response.params.chiquad_head.gate_mlp",
-        "pauli_params.dipole_head.gate_mlp", "pauli_params.quadrupole_head.gate_mlp",
+        # the equivariant heads' gates (``gate_mlp`` before bb's readouts named it ``mlp``)
+        "response.params.chivec_head.mlp", "response.params.chiquad_head.mlp",
+        "pauli_params.dipole_head.mlp", "pauli_params.quadrupole_head.mlp",
         "pair_head.trunk", "pair_head.readout", "pair_head.range_readout",
     ]
     for prefix in casualties:
@@ -1255,7 +1258,11 @@ def test_every_equivariant_channel_reduction_is_exempt_from_weight_decay():
         id(p) for g in parameter_groups(model, 1.0e-4) if g["weight_decay"] == 0.0
         for p in g["params"]
     }
-    reductions = [n for n, _ in model.named_parameters() if n.endswith("equiv_reduce")]
+    # ``equiv_reduce`` in the energy heads, ``reduce.<irrep>`` in the bb readouts
+    reductions = [
+        n for n, _ in model.named_parameters()
+        if n.endswith("equiv_reduce") or re.search(r"\.reduce\.\d+[eo]$", n)
+    ]
     assert len(reductions) >= 5, f"the equivariant heads have moved: {reductions}"
     named = dict(model.named_parameters())
     missed = [n for n in reductions if id(named[n]) not in exempt]

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import torch
 
-from ..neighbors import build_radius_graph
+from bb.graph import build_radius_graph
 
 
 def inter_fragment_pairs(

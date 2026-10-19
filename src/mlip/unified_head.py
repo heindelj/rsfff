@@ -36,8 +36,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ..features.features import BesselBasis
-from .heads import zero_init_readout
+from bb.features import BesselBasis
+from bb.nn import zero_init_readout
 from .switch import pairwise_switch
 
 

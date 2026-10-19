@@ -8,16 +8,17 @@ It shares the featurizer primitives and every physical energy term with v4; what
 - projection of the shared neighbor density into internal/environment channels *before* the
   nonlinear contractions, plus the bilinear cross block between them
   (:class:`FragmentProjector`);
-- a FiLM-conditioned shared parameter trunk (:mod:`rsfff.ff.film.conditioning`);
+- a FiLM-conditioned shared parameter trunk (:mod:`bb.nn.conditioning`);
 - physically-parameterized bonded terms -- Morse bonds and cosine angles -- in place of the
   NN bond-energy head (:mod:`rsfff.ff.film.bonded`);
 - direct permanent multipoles on the fragment-internal features only, with the polarization
   response solved *around* them (no frozen SQE solve).
 """
 
+from bb.nn import ConditionedTrunk, FiLMGenerator, FiLMLayer
+
 from .state import StateDescriptor
 from .projector import FragmentProjector, ProjectedFeatures
-from .conditioning import ConditionedTrunk, FiLMGenerator, FiLMLayer
 from .bonded import (
     BondedParameterHead,
     BondedParameters,

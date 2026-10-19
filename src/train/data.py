@@ -901,6 +901,7 @@ def load_cluster_datasets(
 
     parts: list[MoleculeDataset] = []
     next_group = 0
+    named: dict[str, int] = {}     # split_group label -> group id, shared across files
     for path in paths:
         available = frame_fragmentations(path)
         if fragmentations == "all":
@@ -921,7 +922,35 @@ def load_cluster_datasets(
             part._group_id = torch.arange(len(part), dtype=torch.long) + base
             parts.append(part)
             next_group = max(next_group, base + len(part))
+        labels = frame_split_groups(path)
+        if labels is not None:
+            # Frames that name a split group (an active-learning trajectory, say) share an
+            # id with every other frame of that group, in this file or another, so the
+            # train/val split takes or leaves the whole group: consecutive frames of one
+            # trajectory in both halves would make validation a memory test.
+            ids = []
+            for label in labels:
+                if label not in named:
+                    named[label] = next_group
+                    next_group += 1
+                ids.append(named[label])
+            ids = torch.tensor(ids, dtype=torch.long)
+            for part in parts[len(parts) - len(wanted):]:
+                part._group_id = ids.clone()
     return concatenate_datasets(parts)
+
+
+def frame_split_groups(path) -> list[str] | None:
+    """The ``split_group`` header value of every frame of ``path``, or None when no frame
+    has one. A file where some frames name a group and others do not is refused."""
+    from ase.io import iread
+
+    labels = [atoms.info.get("split_group") for atoms in iread(str(path), index=":")]
+    if all(label is None for label in labels):
+        return None
+    if any(label is None for label in labels):
+        raise ValueError(f"{path}: split_group on some frames but not all")
+    return [str(label) for label in labels]
 
 
 def split_indices_grouped(group_id, holdout_fraction: float, seed: int = 0):

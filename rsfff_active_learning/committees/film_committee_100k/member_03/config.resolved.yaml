@@ -1,0 +1,128 @@
+run_name: member_03
+device: cuda
+dtype: float64
+checkpoint_root: /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/runs/film_committee_100k/member_03
+data:
+  path:
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w10_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w11_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w12_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w13_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w14_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w16_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w17_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w18_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w19_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w20_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w21_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w22_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w23_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w4_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w5_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w6_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w7_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w8_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/benchmark/w9_wb97mv_def2-tzvpd_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/original/w2_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/original/w3_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/original/w4_wb97mv_tzvpd.xyz
+  - /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/clusters/original/w5_wb97mv_tzvpd.xyz
+  reference_energies: /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/atomic_references_wb97mv_tzvpd.json
+  monomer_path: /global/cfs/cdirs/m3196/heindelj/rsfff_data/train/data/monomer/h2o_wb97mv_tzvpd_pol.xyz
+  holdout_fraction: 0.1
+  seed: 0
+features:
+  cutoff: 5.0
+  n_max: 4
+  l_max: 3
+  selected_lambdas:
+  - 0
+  - 1
+  - 2
+  backend: e3nn
+  density_channels: 8
+film:
+  conditioning_mode: film
+  cross_lambdas:
+  - 0
+  block_dim: 32
+  hidden: 48
+  depth: 2
+  film_hidden: 16
+  film_depth: 1
+  gate_a0: 0.5
+  max_rank: 2
+  fragment_state_dim: 4
+  emb_dim: 16
+  head_hidden: 24
+  head_depth: 1
+  equiv_channels: 16
+  bonded_hidden: 24
+  bonded_depth: 1
+  eta_init: 0.5
+  eta_floor: 0.05
+  s_init: 0.5
+  disp_b_prior: per_element
+  alpha_init: 40.0
+  elst_cutoff: 12.0
+  pauli_cutoff: 7.0
+  disp_cutoff: 10.0
+  taper_width: 1.0
+  induction: true
+  cg_rtol: 1.0e-09
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+  energy_scale: 0.00038093
+  elst_weight: 30.0
+  pauli_weight: 30.0
+  disp_weight: 30.0
+  induction_weight: 30.0
+  total_energy_weight: 5.0
+  force_weight: 1.0
+  force_scale: 0.001
+  force_every: 2
+  fragment_weight: 10.0
+  fragment_batch_size: 128
+  anchor_weight: 10.0
+  anchor_batch_size: 32
+  anchor_force_every: 5
+  env_penalty_weight: 0.0
+  bonded_variance_weight: 0.01
+  r0_weight: 0.05
+  r0_spread_weight: 1.0
+elec:
+  dipole_weight: 1.0
+  dipole_scale: 0.05
+  quadrupole_weight: 1.0
+  quadrupole_scale: 0.2
+  polarizability_weight: 1.0
+  polarizability_scale: 0.5
+onebody:
+  energy_scale: 0.00038093
+  force_weight: 1.0
+  force_scale: 0.001
+train:
+  epochs: 80
+  init_from: ''
+  lr_schedule: cosine
+  lr_final_factor: 0.02
+  batch_size: 128
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  grad_clip: 5.0
+  eval_every: 5
+  seed: 3
+stages:
+- name: isolated
+  train:
+    epochs: 15
+    lr_schedule: none
+  film:
+    induction: false
+    force_weight: 0.0
+    fragment_weight: 30.0
+- name: full
+  train:
+    epochs: 80
+  film:
+    induction: true

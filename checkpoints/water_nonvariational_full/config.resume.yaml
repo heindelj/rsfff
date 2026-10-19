@@ -1,0 +1,108 @@
+checkpoint_root: checkpoints
+data:
+  holdout_fraction: 0.1
+  monomer_path: data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz
+  path:
+  - data/wb97mv_tzvpd/w2_wb97mv_tzvpd.xyz
+  - data/wb97mv_tzvpd/w3_wb97mv_tzvpd.xyz
+  - data/wb97mv_tzvpd/w4_wb97mv_tzvpd.xyz
+  - data/wb97mv_tzvpd/w5_wb97mv_tzvpd.xyz
+  reference_energies: data/atomic_references_wb97mv_tzvpd.json
+  seed: 0
+device: auto
+dtype: float64
+elec:
+  dipole_scale: 0.05
+  dipole_weight: 1.0
+  polarizability_scale: 0.5
+  polarizability_weight: 1.0
+  quadrupole_scale: 0.2
+  quadrupole_weight: 1.0
+features:
+  backend: e3nn
+  cutoff: 5.0
+  density_channels: 8
+  l_max: 3
+  n_max: 4
+  selected_lambdas:
+  - 0
+  - 1
+  - 2
+film:
+  anchor_batch_size: 32
+  anchor_force_every: 5
+  anchor_weight: 10.0
+  block_dim: 32
+  bonded_depth: 1
+  bonded_hidden: 24
+  bonded_variance_weight: 0.01
+  cg_atol: 1.0e-12
+  cg_maxiter: 100
+  cg_rtol: 1.0e-09
+  conditioning_mode: film
+  cross_lambdas:
+  - 0
+  depth: 2
+  disp_b_prior: per_element
+  disp_cutoff: 10.0
+  disp_weight: 30.0
+  elst_cutoff: 12.0
+  elst_weight: 30.0
+  emb_dim: 16
+  energy_scale: 0.00038093
+  env_penalty_weight: 0.0
+  equiv_channels: 16
+  eta_floor: 0.05
+  eta_init: 0.5
+  exclude_through: 3
+  film_depth: 1
+  film_hidden: 16
+  force_every: 2
+  force_scale: 0.001
+  force_weight: 1.0
+  fragment_batch_size: 128
+  fragment_state_dim: 4
+  fragment_weight: 10.0
+  gate_a0: 0.5
+  head_depth: 1
+  head_hidden: 24
+  hidden: 48
+  induced_quadrupoles: true
+  induced_width: true
+  induced_width_mode: broaden
+  induction: true
+  induction_weight: 30.0
+  iterate_weights: true
+  max_rank: 2
+  model: nonvariational
+  n_iter: 3
+  nonbonded: exclusions
+  pauli_cutoff: 7.0
+  pauli_weight: 30.0
+  s_init: 0.5
+  solve_residual: true
+  taper_width: 1.0
+  total_energy_weight: 5.0
+onebody:
+  energy_scale: 0.00038093
+  force_scale: 0.001
+  force_weight: 1.0
+run_name: water_nonvariational
+stages:
+- film:
+    induction: true
+  name: full
+  train:
+    epochs: 73
+    init_from: checkpoints/water_nonvariational_full_ep7/best.pt
+train:
+  batch_size: 128
+  epochs: 80
+  eval_every: 5
+  grad_clip: 5.0
+  init_from: ''
+  learning_rate: 0.001
+  lr_final_factor: 0.02
+  lr_schedule: cosine
+  seed: 0
+  weight_decay: 0.0001

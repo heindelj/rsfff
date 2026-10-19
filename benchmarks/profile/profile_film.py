@@ -46,7 +46,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from rsfff import neighbors  # noqa: E402
+from bb.graph import neighbors  # noqa: E402
 from rsfff.ff import backend as ff_backend  # noqa: E402
 from rsfff.ff.film import model as film_model  # noqa: E402
 from rsfff.ff.film import bonded as film_bonded  # noqa: E402

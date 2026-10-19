@@ -12,7 +12,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..mlip.heads import two_slot_mlp, zero_init_readout
+from bb.nn import two_slot_mlp, zero_init_readout
 from .range_priors import RANGE_CHANNELS
 
 __all__ = ["RangeSeparationHeads"]

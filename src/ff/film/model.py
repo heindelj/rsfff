@@ -30,6 +30,26 @@ No ``eta``-slot or environment path reaches ``fragment_energy``: the bonded ``th
 the isolated latent, the permanent multipoles read the isolated latent by construction, and the
 intra classical pairs read ``theta_0``. The v4 headline invariant survives with fewer moving
 parts -- there is no ``energy_internal`` and no frozen-solve bookkeeping at all.
+
+**Two nonbonded modes** (``film.nonbonded``):
+
+``range_separated`` (the original film model, and what ``film_committee_100k`` was fitted with)
+    every pair -- intra and inter -- carries the classical channels behind a per-element Fermi
+    switch ``fermi(r; r0, alpha)`` learned by :class:`rsfff.ff.range_heads.RangeSeparationHeads`.
+    Intra pairs hand over to the bonded terms as ``r`` shrinks, which is what lets the model
+    in principle be reactive -- and what puts a kink in the one-body stretch scans wherever a
+    switch turns an intra pair's classical energy back on while the bonded terms must cancel it.
+
+``exclusions`` (strictly non-reactive)
+    what a classical force field does: the 1-2 and 1-3 pairs of the covalent graph
+    (``film.exclude_through: 3``; ``4`` adds 1-4) are removed from the pair list outright, so
+    their energy is the bonded Morse + angle and nothing else, and no nonbonded channel can
+    ever switch on for them. Every surviving pair carries its channels at full strength,
+    switched only by the smooth taper at each channel's cutoff; there is no ``r0``/``alpha``
+    and no range head. The exclusion list comes from the fragment topology, never a
+    distance, so the model needs the topology as input and cannot change it -- the reactive
+    model is ``rsfff.ff.pairing`` on the ``pairing`` branch. Induction is unchanged: it was
+    already inter-fragment only (``gate_ind`` carries ``1 - P_ij``).
 """
 
 from __future__ import annotations
@@ -44,6 +64,7 @@ from ...mlip.sqe import sqe_solve
 from ..damping import fermi_switch
 from .. import backend as ff_backend
 from ..backend import slater_elec_pair_energy, slater_pauli_pair_energy
+from ..coupled_solve import DEFAULT_CG_CHECK_EVERY
 from ..expert_model import ClassicalSpec
 from ..fragment_state import FragmentStateEmbedding
 from ..multipole import build_polytensor, spherical_to_cartesian_quadrupole
@@ -51,7 +72,7 @@ from ..pairs import intra_fragment_channels, union_channels, union_pairs
 from ..polarization import LevelOutput, coupled_response
 from ..response import ResponseParameters, fragment_polarizability
 from ..units import BOHR_ANG
-from .bonded import BondedTopology
+from .bonded import BondedTopology, improper_energy
 from .network import ConditionedParameterNetwork, FilmParameters
 from .projector import FragmentProjector
 from .state import StateDescriptor
@@ -80,6 +101,7 @@ class FilmOutput:
     energy_ref: torch.Tensor                  # (F,) sum_i E0[Z_i]
     energy_bonded: torch.Tensor               # (F,) Morse + angle at theta_0
     energy_intra: torch.Tensor                # (F,) intra classical pairs at theta_0
+                                              # (identically zero for water under exclusions)
     parameters: FilmParameters                # every generated parameter, both evaluations
     topology: BondedTopology
     pair_index: torch.Tensor                  # (2, P)
@@ -88,8 +110,10 @@ class FilmOutput:
     pair_frag: torch.Tensor                   # (P,) fragment id, -1 for inter pairs
     p_intra: torch.Tensor                     # (P,) soft co-membership on the pair list
     e_pair: dict[str, torch.Tensor]           # (P,) gate * classical, per channel
-    gate: dict[str, torch.Tensor]             # (P,) fermi * taper per channel
-    r0: dict[str, torch.Tensor]               # (N,) per-atom, element table
+    gate: dict[str, torch.Tensor]             # (P,) fermi * taper per channel (taper only
+                                              # under exclusions)
+    r0: dict[str, torch.Tensor]               # (N,) per-atom, element table ({} under
+                                              # exclusions, as are r0_pair/alpha/log_r0_prior*)
     r0_pair: dict[str, torch.Tensor]          # (P,)
     alpha: dict[str, torch.Tensor]            # () per channel
     log_r0_prior: dict[str, torch.Tensor]     # (N,)
@@ -183,7 +207,12 @@ class FilmModel(nn.Module):
     network            : :class:`ConditionedParameterNetwork` -- every generated parameter.
     range_heads        : element-only ``r0``/``alpha`` tables (reused verbatim from v4; the
                          v4 lesson stands: ``r0`` must not read the atom's description).
+                         ``None`` with ``nonbonded="exclusions"``.
     reference_energies : (n_species,) isolated-atom energies, frozen buffer.
+    nonbonded          : ``"range_separated"`` (Fermi-switched, default) or ``"exclusions"``
+                         (hard 1-2/1-3 exclusions, non-reactive). See the module docstring.
+    exclude_through    : with exclusions, the largest bond separation removed: 3 -> 1-2 and
+                         1-3, 4 -> also 1-4.
     """
 
     def __init__(
@@ -191,9 +220,11 @@ class FilmModel(nn.Module):
         projector: FragmentProjector,
         state_embedding: FragmentStateEmbedding,
         network: ConditionedParameterNetwork,
-        range_heads: nn.Module,
+        range_heads: nn.Module | None,
         reference_energies: torch.Tensor,
         *,
+        nonbonded: str = "range_separated",
+        exclude_through: int = 3,
         max_rank: int = 2,
         classical: dict[str, ClassicalSpec] | None = None,
         induction: bool = True,
@@ -201,9 +232,27 @@ class FilmModel(nn.Module):
         cg_rtol: float = 1.0e-9,
         cg_atol: float = 1.0e-12,
         cg_maxiter: int = 100,
-        cg_check_every: int = 1,
+        cg_check_every: int = DEFAULT_CG_CHECK_EVERY,
     ) -> None:
         super().__init__()
+        if nonbonded not in ("range_separated", "exclusions"):
+            raise ValueError(
+                f"nonbonded must be 'range_separated' or 'exclusions', got {nonbonded!r}"
+            )
+        if nonbonded == "range_separated" and range_heads is None:
+            raise ValueError("nonbonded='range_separated' needs range_heads")
+        if nonbonded == "exclusions":
+            if range_heads is not None:
+                raise ValueError(
+                    "nonbonded='exclusions' has no range separation; pass range_heads=None"
+                )
+            if int(exclude_through) not in (3, 4):
+                raise ValueError(
+                    f"exclude_through must be 3 (1-2, 1-3) or 4 (also 1-4), "
+                    f"got {exclude_through}"
+                )
+        self.nonbonded = str(nonbonded)
+        self.exclude_through = int(exclude_through)
         self.projector = projector
         self.state_embedding = state_embedding
         self.network = network
@@ -220,7 +269,13 @@ class FilmModel(nn.Module):
     # -- helpers -------------------------------------------------------------------------
 
     def _gates(self, r, species_idx, pair_index):
-        """Element-table Fermi switch x compact taper, per channel."""
+        """Element-table Fermi switch x compact taper, per channel (taper only if excluding)."""
+        if self.range_heads is None:
+            gate = {
+                name: pairwise_switch(r, spec.cutoff - spec.taper_width, spec.cutoff)
+                for name, spec in self.classical.items()
+            }
+            return gate, {}, {}, {}, {}, {}
         i, j = pair_index[0], pair_index[1]
         zero_width = r.new_zeros(species_idx.shape[0], 0)
         r0, alpha = self.range_heads(zero_width, species_idx)
@@ -248,6 +303,41 @@ class FilmModel(nn.Module):
             return theta0
         w = p_intra.reshape(-1, *([1] * (theta0.dim() - 1)))
         return w * theta0 + (1.0 - w) * theta
+
+    # -- the induction level (the nonvariational model overrides these two) ---------------
+
+    def _response_parameters(self, params: FilmParameters) -> ResponseParameters:
+        """The coupled level's parameters: the env-dressed response family around the
+        permanent multipoles. ``chi = -eta q_perm`` with ``q0 = q_perm`` makes the charge
+        drive vanish in isolation; ``mu0``/``quad0`` is the direct parameterization."""
+        resp = params.response
+        return ResponseParameters(
+            chi=-resp.eta * params.q_perm,
+            eta=resp.eta,
+            q0=params.q_perm,
+            compliance=resp.compliance,
+            chivec=None,
+            alpha=resp.alpha,
+            chiquad=None,
+            cquad=None,
+            z=resp.z,
+            b=resp.b,
+            mu0=params.mu_perm,
+            quad0=params.quad_perm,
+        )
+
+    def _induction_level(
+        self, rp: ResponseParameters, params: FilmParameters, *, positions, batch, state,
+        bond_index, bond_batch, pair_index, gate, solver: dict,
+    ) -> LevelOutput:
+        """One converged coupled solve; records ``solver["ind"]`` for the training metrics."""
+        level = coupled_response(
+            rp, positions=positions, batch_idx=batch.batch_idx, n_systems=int(batch.n_systems),
+            bond_index=bond_index, bond_batch=bond_batch, pair_index=pair_index,
+            gate=gate, max_rank=self.max_rank, **self.cg,
+        )
+        solver["ind"] = (level.n_iter, level.converged, level.pd_fail)
+        return level
 
     # -- forward -------------------------------------------------------------------------
 
@@ -285,6 +375,17 @@ class FilmModel(nn.Module):
             positions, batch.batch_idx, frag, self.cutoff_max,
             max_num_neighbors=self.max_num_neighbors,
         )
+        if self.nonbonded == "exclusions":
+            # Hard 1-2/1-3(/1-4) exclusions: those pairs' energy is the bonded terms alone.
+            # A filter on the one pair list, so every channel -- and the induction coupling,
+            # which reads the same list -- loses exactly the same pairs.
+            n_atoms = positions.shape[0]
+            excl = topo.exclusions(n_atoms, self.exclude_through)
+            keep = ~torch.isin(
+                pair_index[0] * n_atoms + pair_index[1], excl[0] * n_atoms + excl[1]
+            )
+            pair_index, r = pair_index[:, keep], r[keep]
+            is_intra, pair_frag = is_intra[keep], pair_frag[keep]
         i, j = pair_index[0], pair_index[1]
         dr_au = (positions[j] - positions[i]) / BOHR_ANG
         r_au = r / BOHR_ANG
@@ -378,6 +479,10 @@ class FilmModel(nn.Module):
             .index_add_(0, topo.bond_frag, e_bond0)
             .index_add_(0, topo.angle_frag, e_angle0)
         )
+        # Out-of-plane impropers (degree-3 centers; only with `film.impropers: true`).
+        e_imp0 = improper_energy(positions, topo, params.bonded0)
+        if e_imp0 is not None:
+            energy_bonded = energy_bonded.index_add(0, topo.improper_frag, e_imp0)
 
         # --- fragment energies ------------------------------------------------------------
         # Intra classical pairs at theta_0. `pair_frag` is only valid where `is_intra`; a
@@ -396,28 +501,13 @@ class FilmModel(nn.Module):
         energy_bonded_env = None
         solver: dict[str, tuple] = {}
         if induction:
-            resp = params.response
-            rp = ResponseParameters(
-                chi=-resp.eta * params.q_perm,
-                eta=resp.eta,
-                q0=params.q_perm,
-                compliance=resp.compliance,
-                chivec=None,
-                alpha=resp.alpha,
-                chiquad=None,
-                cquad=None,
-                z=resp.z,
-                b=resp.b,
-                mu0=params.mu_perm,
-                quad0=params.quad_perm,
-            )
+            rp = self._response_parameters(params)
             gate_ind = gate["elst"] * (1.0 - p_intra)
-            level_ind = coupled_response(
-                rp, positions=positions, batch_idx=batch.batch_idx, n_systems=n_sys,
+            level_ind = self._induction_level(
+                rp, params, positions=positions, batch=batch, state=state,
                 bond_index=ch_ind, bond_batch=chb_ind, pair_index=pair_index,
-                gate=gate_ind, max_rank=self.max_rank, **self.cg,
+                gate=gate_ind, solver=solver,
             )
-            solver["ind"] = (level_ind.n_iter, level_ind.converged, level_ind.pd_fail)
 
             # The same functional at zero response. The internal part collapses to
             # `chi q0 + 1/2 eta q0^2 = -1/2 eta q_perm^2` by the chi-trick; the pair part is
@@ -438,6 +528,11 @@ class FilmModel(nn.Module):
                 .index_add_(0, topo.bond_frag, e_bond_env)
                 .index_add_(0, topo.angle_frag, e_angle_env)
             )
+            e_imp_env = improper_energy(positions, topo, params.bonded)
+            if e_imp_env is not None:
+                energy_bonded_env = energy_bonded_env.index_add(
+                    0, topo.improper_frag, e_imp_env
+                )
             d_bond = energy_bonded_env - energy_bonded
             interaction["induction"] = (
                 (level_ind.energy - e0_ref)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from rsfff.features.features import FlatLambdaSOAPFeaturizer
+from bb.features import FlatLambdaSOAPFeaturizer
 from rsfff.ff.film import FragmentProjector, StateDescriptor
 from rsfff.train.data import Batch
 

@@ -63,7 +63,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..mlip.heads import exempt_from_weight_decay, mlp, zero_init_readout
+from bb.nn import exempt_from_weight_decay, mlp, zero_init_readout
 from .state_invariants import state_invariants
 
 

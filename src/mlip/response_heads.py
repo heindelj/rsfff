@@ -1,115 +1,107 @@
-"""Equivariant per-atom tensor heads for response properties.
+"""Equivariant per-atom tensor heads for response properties, built on bb readouts.
 
-Ported from the pauli_fierz_pinn repo (``src/models/heads.py``): the rank-2
-:class:`AtomicAlphaHead` (per-atom symmetric polarizability) and the rank-1
-:class:`AtomicVectorHead` (per-atom dipole). Both use the same construction: an
-invariant MLP produces channel *gates*, and a learned channel matmul reduces the
-equivariant feature channels without ever mixing the component (``m``) axis -- so
-the output stays equivariant while its magnitude/sign is conditioned on the
-invariant environment.
+Each head is a :class:`bb.heads.IrrepsReadout` configured for its output irreps: an invariant
+MLP produces channel *gates*, and a learned channel matmul reduces the equivariant feature
+channels without ever mixing the component (``m``) axis -- so the output stays equivariant
+while its magnitude and sign are conditioned on the invariant environment. Physical meaning is
+added here: the polarizability goes through :func:`bb.heads.psd_symmetric` / ``to_voigt``, the
+quadrupole through the injected ``irrep2_to_spherical`` change of basis.
 
-The ``emb`` input slot is the per-atom conditioning vector; here it receives the
-charge-aware embedding ``z_i`` (see ``charge_embedding.py``), so for an isolated
-atom (all SOAP features exactly zero) the heads reduce to functions of
-``(element, q)`` alone -- the free-atom limit required by the design doc.
+The ``emb`` input is the per-atom conditioning vector (the charge-aware embedding ``z_i``), so
+for an isolated atom (all SOAP features exactly zero) the heads reduce to functions of
+``(element, q)`` alone -- the free-atom limit the design requires.
 
-The ``(1x0e + 1x2e) -> Voigt(6)`` change of basis is injected from
-``rsfff.features.EquivariantBackend.irrep6_to_voigt()`` (numerically identical to
-the e3nn-derived constant used in the source repo).
+**Two-slot inputs.** ``p_env`` / ``p1_env`` / ``p2_env`` are the trailing environment channels
+of each input block (``bb.nn.TwoSlotLinear`` and ``env_reduce_parameter``); a block handed
+without them is evaluated as the isolated fragment, bit-identically to zeroing them.
+
+**Checkpoints written before the move to bb load unchanged.** Each head renames its old keys on
+load (``base_mlp.* / gate_mlp.* -> mlp.*``, ``equiv_reduce(_env) -> reduce(_env).<irrep>``),
+and the old attribute names are kept as read-only aliases (``head.gate_mlp``,
+``head.equiv_reduce``, ...). Code that matches checkpoint keys by name itself goes through
+:func:`bb.compat.upgrade_state_dict` first (``rsfff.train.term_loop.warm_start`` does).
 """
 
 from __future__ import annotations
 
-import math
 
 import torch
 import torch.nn as nn
 
-from .heads import (
-    env_reduce_parameter,
-    exempt_from_weight_decay,
-    slot_reduce,
-    two_slot_mlp,
-    zero_init_readout,
-)
+from bb.compat import register_legacy_keys
+from bb.heads import IrrepsReadout, psd_symmetric, to_voigt
+from bb.nn import exempt_from_weight_decay
+from bb.o3 import matrix_to_voigt, min_eig_sym3x3, voigt_to_matrix
+
+__all__ = [
+    "voigt_vector_to_symmetric_matrix",
+    "symmetric_matrix_to_voigt_vector",
+    "min_eig_sym3x3",
+    "AtomicAlphaHead",
+    "AtomicVectorHead",
+    "AxialQuadrupolePolarizabilityHead",
+    "AtomicQuadrupoleHead",
+]
 
 
 def voigt_vector_to_symmetric_matrix(values: torch.Tensor) -> torch.Tensor:
     """Expand ``(..., 6)`` vectors in ``xx yy zz yz xz xy`` order to ``(..., 3, 3)``."""
-    if not isinstance(values, torch.Tensor):
-        values = torch.as_tensor(values, dtype=torch.get_default_dtype())
-    if values.shape[-1] != 6:
-        raise ValueError(
-            f"Expected last dimension 6 for xx yy zz yz xz xy data, got {tuple(values.shape)}"
-        )
-    xx, yy, zz, yz, xz, xy = (values[..., i] for i in range(6))
-    row_x = torch.stack((xx, xy, xz), dim=-1)
-    row_y = torch.stack((xy, yy, yz), dim=-1)
-    row_z = torch.stack((xz, yz, zz), dim=-1)
-    return torch.stack((row_x, row_y, row_z), dim=-2)
+    return voigt_to_matrix(values)
 
 
 def symmetric_matrix_to_voigt_vector(matrix: torch.Tensor) -> torch.Tensor:
     """Collapse ``(..., 3, 3)`` symmetric matrices to Voigt ``(..., 6)`` vectors."""
-    return torch.stack(
-        (
-            matrix[..., 0, 0], matrix[..., 1, 1], matrix[..., 2, 2],
-            matrix[..., 1, 2], matrix[..., 0, 2], matrix[..., 0, 1],
-        ),
-        dim=-1,
-    )
+    return matrix_to_voigt(matrix)
 
 
-def min_eig_sym3x3(A: torch.Tensor) -> torch.Tensor:
-    """Smallest eigenvalue of a batch of symmetric 3x3 matrices, in closed form.
-
-    Trigonometric (Smith) solution of the characteristic cubic. Pure torch,
-    differentiable, device-agnostic. Deliberately avoids ``torch.linalg.eigvalsh``,
-    whose batched cuSOLVER kernel raises ``CUSOLVER_STATUS_INVALID_VALUE`` for large
-    batch sizes and is unimplemented on MPS. ``A`` is assumed symmetric; only the
-    upper entries are read.
-    """
-    a00 = A[..., 0, 0]; a11 = A[..., 1, 1]; a22 = A[..., 2, 2]
-    a01 = A[..., 0, 1]; a02 = A[..., 0, 2]; a12 = A[..., 1, 2]
-    p1 = a01 * a01 + a02 * a02 + a12 * a12
-    q = (a00 + a11 + a22) / 3.0
-    d0 = a00 - q; d1 = a11 - q; d2 = a22 - q
-    p2 = d0 * d0 + d1 * d1 + d2 * d2 + 2.0 * p1
-    # p == 0 only for an isotropic (triple-root) matrix; the clamp keeps the division
-    # and the sqrt gradient finite there, and the result correctly reduces to q.
-    p = torch.sqrt(torch.clamp(p2 / 6.0, min=1e-30))
-    b00 = d0 / p; b11 = d1 / p; b22 = d2 / p
-    b01 = a01 / p; b02 = a02 / p; b12 = a12 / p
-    detB = (b00 * (b11 * b22 - b12 * b12)
-            - b01 * (b01 * b22 - b12 * b02)
-            + b02 * (b01 * b12 - b11 * b02))
-    # r in [-1, 1]; clamp strictly inside so that at a double root (r -> +/-1, where
-    # acos' diverges) the 0*inf does not poison the backward pass with NaNs.
-    r = torch.clamp(detB / 2.0, min=-1.0 + 1e-6, max=1.0 - 1e-6)
-    phi = torch.acos(r) / 3.0
-    # Eigenvalues are q + 2p*cos(phi + 2*pi*k/3); the k=1 branch is the smallest.
-    return q + 2.0 * p * torch.cos(phi + (2.0 * math.pi / 3.0))
+def _env(widths: dict) -> dict | None:
+    env = {k: int(v) for k, v in widths.items() if v}
+    return env or None
 
 
-class AtomicAlphaHead(nn.Module):
+def _legacy_rules(irrep: str, gate: str) -> list[tuple[str, str]]:
+    return [(f"{gate}.", "mlp."), ("equiv_reduce_env", f"reduce_env.{irrep}"),
+            ("equiv_reduce", f"reduce.{irrep}")]
+
+
+class _GatedHead(IrrepsReadout):
+    """The shared ``{0e, ir} -> 1x<ir>`` gated readout with its pre-bb key names."""
+
+    _irrep: str = ""
+    _gate: str = "gate_mlp"
+
+    def _install_legacy_keys(self) -> None:
+        register_legacy_keys(self, _legacy_rules(self._irrep, self._gate))
+
+    @property
+    def equiv_reduce(self) -> nn.Parameter:      # the pre-bb name
+        return self.reduce[self._irrep]
+
+    @property
+    def equiv_reduce_env(self) -> nn.Parameter | None:
+        return self.reduce_env[self._irrep] if self._irrep in self.reduce_env else None
+
+
+class AtomicAlphaHead(_GatedHead):
     """Per-atom symmetric rank-2 polarizability as a Voigt vector ``(N, 6)``.
 
-    Predicts the irrep vector ``[a0 (0e), a2 (2e)]``: ``a0`` (isotropic) from an
-    invariant MLP, ``a2`` (traceless) by invariant-gating a learned equivariant
-    reduction of the lambda=2 channels.
+    A ``1x0e + 1x2e`` readout: ``a0`` (isotropic) from the invariant MLP, ``a2`` (traceless) by
+    invariant-gating a learned reduction of the lambda=2 channels.
 
-    With ``positive_isotropic=True`` the polarizability is built as
-    ``alpha = alpha_aniso + a0_iso * I`` directly in Cartesian space, where the
-    isotropic shift ``a0_iso = softplus(a0_raw) + floor`` is strictly positive.
-    When ``enforce_psd`` is on (the default) the shift is additionally raised above
-    the most-negative anisotropic eigenvalue,
-    ``a0_iso -> a0_iso - min_eig(alpha_aniso)``, so **every** eigenvalue of
-    ``alpha`` is ``>= floor``. (Adding the isotropic part in Cartesian is what makes
-    this exact: the ``0e`` irrep maps to ``(1/sqrt 3) I``, so shifting ``a0`` in
-    irrep space would only move eigenvalues by ``1/sqrt 3`` and would *not*
-    guarantee PSD.) PSD alpha is what the future long-range/Applequist stage needs;
-    for the current short-range phase it is simply a physically sensible prior.
+    With ``positive_isotropic=True`` the polarizability is ``alpha = alpha_aniso + a0_iso * I``
+    built in Cartesian space with ``a0_iso = softplus(a0_raw) + floor``; with ``enforce_psd`` (the
+    default) the shift is raised above the most negative anisotropic eigenvalue (the hard shift,
+    ``smooth=None``), so **every** eigenvalue of ``alpha`` is ``>= floor``
+    (:func:`bb.heads.psd_symmetric`). The ``0e`` irrep maps to ``(1/sqrt 3) I``, which is why the
+    shift is applied in Cartesian rather than irrep space.
+
+    Not zero-initialized -- a zero readout would pin every species at ``softplus(0) + floor`` --
+    but still exempt from weight decay as a whole: decay pulls ``a0_raw`` toward the
+    ``0.693 a0^3`` attractor and erodes the reduction until alpha is isotropic (measured
+    ``equiv_reduce`` 0.712 -> 0.176 across a staged fit).
     """
+
+    _irrep, _gate = "2e", "base_mlp"
 
     def __init__(
         self,
@@ -126,24 +118,22 @@ class AtomicAlphaHead(nn.Module):
         positive_isotropic: bool = True,
         psd_floor: float = 1e-4,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            {"0e": p0 + p_env, "2e": p2 + p2_env}, "1x0e + 1x2e", scalar_dim=emb_dim,
+            hidden=hidden, depth=depth, reduce_channels=equiv_channels, zero_init=False,
+            exempt_decay=True, env_widths=_env({"0e": p_env, "2e": p2_env}),
+        )
         self.equiv_channels = equiv_channels
         self.positive_isotropic = positive_isotropic
         self.psd_floor = float(psd_floor)
         # Toggle for the strict-PSD eigenvalue shift; set False to skip the shift.
         self.enforce_psd = True
-        self.equiv_reduce = nn.Parameter(torch.randn(p2, equiv_channels) / (p2 ** 0.5))
-        self.equiv_reduce_env = env_reduce_parameter(p2_env, equiv_channels)
-        self.base_mlp = two_slot_mlp(
-            p0, p_env, hidden, depth, 1 + equiv_channels, p_tail=emb_dim
-        )
         self.register_buffer("_irrep6_to_voigt", irrep6_to_voigt, persistent=False)
-        # `base_mlp` is *not* zero-initialized here -- a zero readout would pin every species at
-        # `softplus(0) + psd_floor` -- so this head does not lose the race described in
-        # `zero_init_readout`. It loses the slower version of it: decay pulls `a0_raw` toward 0,
-        # whose attractor is 0.693 a0^3 per atom, and erodes `equiv_reduce` until alpha is
-        # isotropic. Measured across a staged fit, `equiv_reduce` fell 0.712 -> 0.176.
-        exempt_from_weight_decay(self)
+        self._install_legacy_keys()
+
+    @property
+    def base_mlp(self) -> nn.Sequential:        # the pre-bb name
+        return self.mlp
 
     def forward(
         self,
@@ -151,42 +141,25 @@ class AtomicAlphaHead(nn.Module):
         emb: torch.Tensor,          # (N, emb_dim)
         equiv_feats: torch.Tensor,  # (N, 5, P2)
     ) -> torch.Tensor:
-        out = self.base_mlp(torch.cat((inv_feats, emb), dim=-1))   # (N, 1+K)
-        a0_raw = out[:, :1]                                        # (N, 1)
-        gate = out[:, 1:]                                          # (N, K)
-        reduce = slot_reduce(self.equiv_reduce, self.equiv_reduce_env, equiv_feats.shape[-1])
-        equiv_k = torch.einsum("nmp,pk->nmk", equiv_feats, reduce)             # (N,5,K)
-        a2 = torch.einsum("nmk,nk->nm", equiv_k, gate)             # (N, 5)
-
+        y = super().forward({"0e": inv_feats.unsqueeze(1), "2e": equiv_feats}, emb)
+        a0, a2 = y["0e"][:, 0, :], y["2e"][..., 0]                  # (N, 1), (N, 5)
         if not self.positive_isotropic:
-            irrep6 = torch.cat((a0_raw, a2), dim=-1)               # (N, 6) [0e, 2e]
-            return irrep6 @ self._irrep6_to_voigt.t()              # (N, 6) Voigt
-
-        # Anisotropic (traceless) part in Voigt, then the strictly-positive
-        # isotropic shift added on the diagonal -- all in Cartesian.
-        a0_zero = torch.zeros_like(a0_raw)
-        voigt_aniso = torch.cat((a0_zero, a2), dim=-1) @ self._irrep6_to_voigt.t()  # (N, 6)
-        a0_iso = torch.nn.functional.softplus(a0_raw) + self.psd_floor              # (N, 1)
-
-        if self.enforce_psd:
-            # Raise the isotropic shift above the most-negative anisotropic
-            # eigenvalue so min_eig(alpha) = min_eig(aniso) + a0_iso >= floor.
-            alpha_aniso = voigt_vector_to_symmetric_matrix(voigt_aniso)             # (N, 3, 3)
-            min_eig = min_eig_sym3x3(alpha_aniso).unsqueeze(-1).clamp(max=0.0)      # (N, 1)
-            a0_iso = a0_iso - min_eig
-
-        # alpha = alpha_aniso + a0_iso * I  ->  add a0_iso to xx, yy, zz Voigt entries.
-        iso = torch.cat((a0_iso, a0_iso, a0_iso, a0_iso.new_zeros(a0_iso.shape[0], 3)), dim=-1)
-        return voigt_aniso + iso
+            return to_voigt(a0, a2, self._irrep6_to_voigt)           # (N, 6) Voigt
+        return psd_symmetric(
+            a0, a2, floor=self.psd_floor, enforce=self.enforce_psd, smooth=None,
+            irrep6_to_voigt_matrix=self._irrep6_to_voigt,
+        )
 
 
-class AtomicVectorHead(nn.Module):
+class AtomicVectorHead(_GatedHead):
     """Per-atom equivariant vector ``(N, 3)`` (e.g. an atomic dipole, 1o).
 
-    Reduces the lambda=1 (odd-parity) feature channels with an invariant gate,
-    mirroring :class:`AtomicAlphaHead`'s 2e construction. Zero-initialized so the
-    permanent atomic dipole starts at zero.
+    A ``1x1o`` readout of the lambda=1 (odd-parity) channels. Zero-initialized, so the permanent
+    atomic dipole starts at zero, and exempt from weight decay as a whole: the reduction has no
+    gradient while the gate is zero (see :mod:`rsfff.mlip.heads`).
     """
+
+    _irrep = "1o"
 
     def __init__(
         self,
@@ -200,16 +173,17 @@ class AtomicVectorHead(nn.Module):
         depth: int = 2,
         equiv_channels: int = 32,
     ) -> None:
-        super().__init__()
-        self.equiv_channels = equiv_channels
-        self.equiv_reduce = nn.Parameter(torch.randn(p1, equiv_channels) / (p1 ** 0.5))
-        self.equiv_reduce_env = env_reduce_parameter(p1_env, equiv_channels)
-        self.gate_mlp = zero_init_readout(
-            two_slot_mlp(p0, p_env, hidden, depth, equiv_channels, p_tail=emb_dim)
+        super().__init__(
+            {"0e": p0 + p_env, "1o": p1 + p1_env}, "1x1o", scalar_dim=emb_dim, hidden=hidden,
+            depth=depth, reduce_channels=equiv_channels, zero_init=True, exempt_decay=True,
+            env_widths=_env({"0e": p_env, "1o": p1_env}),
         )
-        # The whole head, not just the gate: `equiv_reduce` has no gradient while the gate is
-        # zero, so leaving it decaying deadlocks the pair. See `zero_init_readout`.
-        exempt_from_weight_decay(self)
+        self.equiv_channels = equiv_channels
+        self._install_legacy_keys()
+
+    @property
+    def gate_mlp(self) -> nn.Sequential:        # the pre-bb name
+        return self.mlp
 
     def forward(
         self,
@@ -217,10 +191,8 @@ class AtomicVectorHead(nn.Module):
         emb: torch.Tensor,        # (N, emb_dim)
         vec_feats: torch.Tensor,  # (N, 3, P1)
     ) -> torch.Tensor:
-        gate = self.gate_mlp(torch.cat((inv_feats, emb), dim=-1))         # (N, K)
-        reduce = slot_reduce(self.equiv_reduce, self.equiv_reduce_env, vec_feats.shape[-1])
-        vec_k = torch.einsum("nmp,pk->nmk", vec_feats, reduce)                 # (N,3,K)
-        return torch.einsum("nmk,nk->nm", vec_k, gate)                     # (N, 3)
+        y = super().forward({"0e": inv_feats.unsqueeze(1), "1o": vec_feats}, emb)
+        return y["1o"][..., 0]                                       # (N, 3)
 
 
 class AxialQuadrupolePolarizabilityHead(nn.Module):
@@ -320,25 +292,24 @@ class AxialQuadrupolePolarizabilityHead(nn.Module):
         return torch.bmm(s, s)
 
 
-class AtomicQuadrupoleHead(nn.Module):
+class AtomicQuadrupoleHead(_GatedHead):
     """Per-atom traceless quadrupole as **spherical** components ``(N, 5)``.
 
-    Same construction as :class:`AtomicVectorHead` one rank up: an invariant MLP gates a
-    learned reduction of the lambda=2 (even-parity) channels, so the output is equivariant
-    while its magnitude is conditioned on the invariant environment. Zero-initialized, so
-    the quadrupole starts at exactly zero.
+    A ``1x2e`` readout of the lambda=2 (even-parity) channels, zero-initialized so the
+    quadrupole starts at exactly zero.
 
-    Emits ``(q20, q21c, q21s, q22c, q22s)`` -- the convention the multipole force field
-    quotes -- rather than the backend's raw lambda=2 slots. The two are *not* the same
-    labeling: e3nn's real spherical harmonics carry a permuted axis convention that mixes
-    m=0 with m=2c, so the ``irrep2_to_spherical`` change of basis is injected here (built
-    by :func:`rsfff.ff.multipole.irrep2_to_spherical` from the backend's own tested
-    constant) exactly as :class:`AtomicAlphaHead` injects ``irrep6_to_voigt``.
+    Emits ``(q20, q21c, q21s, q22c, q22s)`` -- the convention the multipole force field quotes --
+    rather than the backend's raw lambda=2 slots. The two are *not* the same labeling: e3nn's
+    real spherical harmonics carry a permuted axis convention that mixes m=0 with m=2c, so the
+    ``irrep2_to_spherical`` change of basis is injected here (built by
+    :func:`rsfff.ff.multipole.irrep2_to_spherical` from the backend's own tested constant).
 
-    Five components rather than six Cartesian ones is deliberate: the traceless constraint
-    is then structural. A six-component prediction would carry an isotropic degree of
-    freedom the interaction tensor cannot see -- an unconstrained gauge on the parameters.
+    Five components rather than six Cartesian ones is deliberate: the traceless constraint is
+    then structural. A six-component prediction would carry an isotropic degree of freedom the
+    interaction tensor cannot see -- an unconstrained gauge on the parameters.
     """
+
+    _irrep = "2e"
 
     def __init__(
         self,
@@ -353,20 +324,22 @@ class AtomicQuadrupoleHead(nn.Module):
         depth: int = 2,
         equiv_channels: int = 32,
     ) -> None:
-        super().__init__()
         if irrep2_to_spherical.shape != (5, 5):
             raise ValueError(
                 f"irrep2_to_spherical must be (5, 5), got {tuple(irrep2_to_spherical.shape)}"
             )
-        self.equiv_channels = equiv_channels
-        self.equiv_reduce = nn.Parameter(torch.randn(p2, equiv_channels) / (p2 ** 0.5))
-        self.equiv_reduce_env = env_reduce_parameter(p2_env, equiv_channels)
-        self.gate_mlp = zero_init_readout(
-            two_slot_mlp(p0, p_env, hidden, depth, equiv_channels, p_tail=emb_dim)
+        super().__init__(
+            {"0e": p0 + p_env, "2e": p2 + p2_env}, "1x2e", scalar_dim=emb_dim, hidden=hidden,
+            depth=depth, reduce_channels=equiv_channels, zero_init=True, exempt_decay=True,
+            env_widths=_env({"0e": p_env, "2e": p2_env}),
         )
+        self.equiv_channels = equiv_channels
         self.register_buffer("_to_spherical", irrep2_to_spherical, persistent=False)
-        # Same zero-gate deadlock as `AtomicVectorHead`; see `zero_init_readout`.
-        exempt_from_weight_decay(self)
+        self._install_legacy_keys()
+
+    @property
+    def gate_mlp(self) -> nn.Sequential:        # the pre-bb name
+        return self.mlp
 
     def forward(
         self,
@@ -374,8 +347,5 @@ class AtomicQuadrupoleHead(nn.Module):
         emb: torch.Tensor,          # (N, emb_dim)
         equiv_feats: torch.Tensor,  # (N, 5, P2)
     ) -> torch.Tensor:
-        gate = self.gate_mlp(torch.cat((inv_feats, emb), dim=-1))              # (N, K)
-        reduce = slot_reduce(self.equiv_reduce, self.equiv_reduce_env, equiv_feats.shape[-1])
-        equiv_k = torch.einsum("nmp,pk->nmk", equiv_feats, reduce)             # (N,5,K)
-        a2 = torch.einsum("nmk,nk->nm", equiv_k, gate)                         # (N, 5)
-        return a2 @ self._to_spherical                                         # (N, 5)
+        y = super().forward({"0e": inv_feats.unsqueeze(1), "2e": equiv_feats}, emb)
+        return y["2e"][..., 0] @ self._to_spherical                  # (N, 5)

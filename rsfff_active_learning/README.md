@@ -31,6 +31,7 @@ rsfff_al/
     assess.py       score_frames + the assess stage
 train/
     train_committee.py, water_film_al.yaml, anchors/ (monomer set, atomic references)
+    water_film_excl_al.yaml   the same fit with hard 1-2/1-3 exclusions (non-reactive film)
     scripts/committee.slurm, gpu_check.py, check_data.py, check_committee.py
 scripts/
     run_loop.py      the loop (--config configs/water_udd.yaml | --quick)

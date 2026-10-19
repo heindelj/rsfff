@@ -14,7 +14,7 @@ from typing import Sequence
 
 import yaml
 
-from ..neighbors import DEFAULT_MAX_NUM_NEIGHBORS
+from bb.graph import DEFAULT_MAX_NUM_NEIGHBORS
 
 
 @dataclass
@@ -65,6 +65,14 @@ class DataConfig:
     #: Fraction of large-stream *geometries* held out. Reported as ``lg_*`` on the val line,
     #: which is the number that says whether the large clusters were fitted or memorized.
     large_holdout_fraction: float = 0.15
+    #: Cluster files labeled with energies and forces but **no EDA** -- the active-learning
+    #: labels of clusters too large for an ALMO-EDA. They cannot be concatenated onto ``path``
+    #: (the EDA channels would have no target, and ``concatenate_datasets`` refuses the mix),
+    #: so they are a stream of their own, fitted on total energy per fragment and forces and
+    #: weighted by ``film.force_stream_weight``. Frames with a ``split_group`` header key are
+    #: split by it (whole trajectories held out), like ``path``.
+    force_path: str | list[str] | None = None
+    force_holdout_fraction: float = 0.1
     #: Which decompositions to load from a multi-fragmentation cluster file: ``"all"``, a
     #: single index, or a list. Files with one fragmentation per frame ignore it.
     #: ``"all"`` is what makes a geometry contribute every placement of its excess charge.
@@ -855,7 +863,8 @@ class ExpertConfig:
     cg_maxiter: int = 100
     #: Test CG convergence every k iterations (one host sync each) rather than every one;
     #: converged frames take exact zero steps meanwhile, so the answer is unchanged.
-    cg_check_every: int = 1
+    #: Mirrors ``rsfff.ff.coupled_solve.DEFAULT_CG_CHECK_EVERY``.
+    cg_check_every: int = 4
 
     # --- loss ---------------------------------------------------------------------------
     #: One kJ/mol in Hartree. Every error is divided by this before squaring, so every weight
@@ -992,7 +1001,7 @@ class FilmConfig:
     * permanent multipoles are direct heads on the internal features -- there is no frozen
       SQE solve, hence no ``internal``/``bond`` split to configure or watch;
     * conditioning is FiLM over ``c_i = [k_i, u_i]`` with per-family modulators
-      (:mod:`rsfff.ff.film.conditioning`); ``conditioning_mode`` is the ablation dial.
+      (:mod:`bb.nn.conditioning`); ``conditioning_mode`` is the ablation dial.
     """
 
     # --- architecture -------------------------------------------------------------------
@@ -1025,15 +1034,32 @@ class FilmConfig:
     bonded_hidden: int = 64
     bonded_depth: int = 1
     bonded_emb_dim: int = 8
+    #: Out-of-plane (Wilson-angle) impropers on every atom of bond-degree 3 -- the umbrella
+    #: mode of NH3 / H3O+ (:mod:`rsfff.ff.film.bonded`). Off by default so existing
+    #: checkpoints keep their exact parameter set; inert for water (no degree-3 centers).
+    impropers: bool = False
     #: Reserved hook (decision: strict physical form). Setting it raises in the builder.
     bonded_nn_residual: bool = False
     eta_init: float = 0.5
     eta_floor: float = 0.05
     psd_floor: float = 1e-4
+    #: Multiply the atomic alpha by the per-element prior of the monatomic ions
+    #: (rsfff.ff.response.DEFAULT_ALPHA_PRIOR: Na+, Cl-); every other element is unaffected.
+    #: Off reproduces the head without a prior, which cannot reach Cl-'s 31 a0^3.
+    alpha_prior: bool = True
     s_init: float = 0.5
     disp_b_prior: str = "per_element"
 
-    # --- range separation ----------------------------------------------------------------
+    # --- nonbonded treatment of intra-fragment pairs -------------------------------------
+    #: "range_separated": every pair carries the classical channels behind a learned
+    #: per-element Fermi switch (r0, alpha) -- the original film model, film_committee_100k.
+    #: "exclusions": the 1-2/1-3 pairs of the covalent graph are dropped from the pair list
+    #: (their energy is the bonded terms alone), no range heads, strictly non-reactive.
+    #: The default stays "range_separated" so configs pickled in older checkpoints load.
+    nonbonded: str = "range_separated"
+    #: With exclusions: 3 -> exclude 1-2 and 1-3; 4 -> also 1-4.
+    exclude_through: int = 3
+    #: Range separation only (ignored under exclusions, as are r0_weight/r0_spread_weight).
     alpha_init: float = 40.0
 
     # --- classical reach -------------------------------------------------------------------
@@ -1042,6 +1068,26 @@ class FilmConfig:
     disp_cutoff: float = 10.0
     taper_width: float = 1.0
 
+    # --- which model ----------------------------------------------------------------------
+    #: "film": the converged coupled solve (PCG + adjoint). "nonvariational": the fixed-K
+    #: unrolled solve with learned mutual damping of ``docs/fff_nonvariational.md``; the
+    #: ``cg_*`` settings are then unused except by ``rsfff.ff.nonvariational.diagnose``.
+    model: str = "film"
+    #: nonvariational: K mutual-induction iterations after the exact fragment solve.
+    n_iter: int = 3
+    #: nonvariational: learn the global OPT-style weights c_2..c_K on the corrections.
+    iterate_weights: bool = True
+    #: nonvariational: the induced-density width head b_ind = b exp(-s) ("broaden": s >= 0).
+    induced_width: bool = True
+    induced_width_mode: str = "broaden"
+    induced_width_bias_init: float = -3.0
+    #: nonvariational: isotropic quadrupole polarizability (induced quadrupoles).
+    induced_quadrupoles: bool = True
+    cquad_init: float = 1.0
+    cquad_floor: float = 1.0e-4
+    #: nonvariational: log the physical residual at x_K (one extra matvec per step).
+    solve_residual: bool = False
+
     # --- induction ---------------------------------------------------------------------------
     induction: bool = True
     cg_rtol: float = 1.0e-9
@@ -1049,7 +1095,8 @@ class FilmConfig:
     cg_maxiter: int = 100
     #: Test CG convergence every k iterations (one host sync each) rather than every one;
     #: converged frames take exact zero steps meanwhile, so the answer is unchanged.
-    cg_check_every: int = 1
+    #: Mirrors ``rsfff.ff.coupled_solve.DEFAULT_CG_CHECK_EVERY``.
+    cg_check_every: int = 4
 
     # --- loss ----------------------------------------------------------------------------------
     #: One kJ/mol in Hartree; every error is divided by this before squaring.
@@ -1078,6 +1125,17 @@ class FilmConfig:
     #: Force striding for the large stream, counted in its own steps. Kept separate from
     #: ``force_every`` because the large batch is the expensive second-order backward.
     large_force_every: int = 2
+    #: The force-only stream (``data.force_path``): total energy per fragment and forces on
+    #: its own minibatch, scaled by ``force_stream_weight`` (0 disables it). The energy term is
+    #: per fragment so that a 64-water frame does not outweigh a dimer by its size alone;
+    #: ``force_stream_energy_weight`` sets it relative to the force term, which uses the main
+    #: stream's ``force_scale``.
+    force_stream_weight: float = 0.0
+    force_stream_batch_size: int = 8
+    force_stream_force_every: int = 1
+    force_stream_energy_weight: float = 1.0
+    #: Frames of the held-out split evaluated per validation pass (a leading slice).
+    force_stream_val_size: int = 64
 
     # --- penalties ---------------------------------------------------------------------------------
     #: L1 on ``|theta - theta_0|`` per quantity (log-space for positives) -- the dial deciding
@@ -1239,6 +1297,10 @@ def load_config(path) -> Config:
         large_path=_monomer_paths(data.get("large_path")),
         large_holdout_fraction=float(
             data.get("large_holdout_fraction", DataConfig.large_holdout_fraction)
+        ),
+        force_path=_monomer_paths(data.get("force_path")),
+        force_holdout_fraction=float(
+            data.get("force_holdout_fraction", DataConfig.force_holdout_fraction)
         ),
         fragmentations=data.get("fragmentations", DataConfig.fragmentations),
         holdout_fraction=float(data.get("holdout_fraction", DataConfig.holdout_fraction)),

@@ -15,7 +15,7 @@ makes a fragmentation crossover a state being lifted off an integer rather than 
 encodings being averaged (:mod:`rsfff.ff.partition`).
 
 ``eta`` is the cross-fragment lambda-SOAP, identically zero when a fragment is alone
-(:meth:`rsfff.features.features.FlatLambdaSOAPFeaturizer.forward`, ``also_cross=True``), so
+(:meth:`bb.features.SOAPFeaturizer.forward`, ``also_cross=True``), so
 ``theta_0`` is exactly what the model says about a fragment on its own -- not by an anchoring
 subtraction and not only at initialization.
 
@@ -80,7 +80,7 @@ non-variational consumer of ``M*`` differentiate correctly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -387,7 +387,7 @@ class FragmentExpertModel(nn.Module):
                     frag, feats.species_idx, self.fragment_state.n_species
                 ),
             )
-        return replace(feats, inv_feats=torch.cat((feats.inv_feats, state), dim=-1))
+        return feats.replace(inv_feats=torch.cat((feats.inv_feats, state), dim=-1))
 
     def frozen_polarizability(self, batch) -> torch.Tensor | None:
         """``(F, 3, 3)`` each fragment's frozen molecular polarizability, without the pair model.
@@ -471,7 +471,7 @@ class FragmentExpertModel(nn.Module):
         """
         return self.decoder.response.response_parameters(
             batch,
-            replace(feats, species_idx=species_idx, batch_idx=batch_idx),
+            feats.replace(species_idx=species_idx, batch_idx=batch_idx),
             bond_index=bond_index,
         )
 

@@ -30,6 +30,8 @@ import torch
 from ase import Atoms
 from ase.io import read
 
+from bb.nn import env_parameters
+
 from rsfff.ff.mediator import MediatorHead
 from rsfff.ff.mixture_model import intra_pairs_unsorted, mixture_forward
 from rsfff.md import (
@@ -43,7 +45,6 @@ from rsfff.md import (
     transfer_delta,
 )
 from rsfff.md.assign import DEFAULT_BUMP, AssignmentError, rank_oh_fragment_assignments
-from rsfff.mlip.heads import env_parameters
 from rsfff.mlip.reference_states import AtomicStateReference
 from rsfff.qcgen.multifrag import read_multifrag_extxyz
 from rsfff.train.build_expert import build_expert_model
