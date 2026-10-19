@@ -92,6 +92,7 @@ packages = [
     "rsfff",
     "rsfff.features",
     "rsfff.ff",
+    "rsfff.ff.complete",
     "rsfff.ff.film",
     "rsfff.ff.v1",
     "rsfff.md",

@@ -368,6 +368,10 @@ def main():
                     help="all ct-scan pair frames, and the ct-polar pair geometries, go to the test split")
     ap.add_argument("--w-alpha", type=float, default=0.0, help="weight of the ct-polar alpha loss (bohr^3 per ion)")
     ap.add_argument("--polar-test", nargs="*", default=list(POLAR_TEST))
+    ap.add_argument("--env", default="soap", choices=("soap", "density"),
+                    help="per-ion environment features: SOAP invariants (bb), or the C0 field/overlap projections onto "
+                         "the ion's own densities (rsfff.ff.complete.DensityEnvironment; complete model plan)")
+    ap.add_argument("--env-probes", nargs="*", default=None, help="density env: which probes (default all)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=10)
     a = ap.parse_args()
@@ -375,8 +379,13 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     tab, chan = IonTable.load(a.params), CT.ChannelTable.load(a.params)
-    from bb.features import SOAPFeaturizer
-    feat = SOAPFeaturizer(cutoff=6.0, n_max=6, l_max=3, neighbor_types=(11, 17), selected_lambdas=(0,)).double()
+    if a.env == "density":
+        from rsfff.ff.complete import DensityEnvironment, PROBE_NAMES
+        feat = DensityEnvironment(tab, probes=a.env_probes or PROBE_NAMES)
+        print(f"environment: density projections, {feat.n_feat} invariants", flush=True)
+    else:
+        from bb.features import SOAPFeaturizer
+        feat = SOAPFeaturizer(cutoff=6.0, n_max=6, l_max=3, neighbor_types=(11, 17), selected_lambdas=(0,)).double()
     frames = load_frames(a.ct_sets, a.walk_eda, a.ct_max_pair, a.max_ho_ratio)
     print(f"ct label kept for {sum(f[2]['ct_mask'] for f in frames)} of {len(frames)} frames", flush=True)
     tags = split(frames, a.test, seed=a.seed)
