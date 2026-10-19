@@ -299,7 +299,8 @@ def shaped_one_center_damp(u: torch.Tensor, w: torch.Tensor, max_rank: int = 1) 
     e = torch.exp(-u)
     out = []
     for n in (1, 3, 5, 7, 9)[: 2 * max_rank + 1]:
-        out.append(e * sum(w[:, k] * _poly(SHAPE_ONE_CENTER[k][n], u) for k in range(w.shape[1])))
+        out.append(e * sum(w[:, k] * _poly(SHAPE_ONE_CENTER[k][n], u) for k in range(w.shape[1])
+                           if bool((w[:, k] != 0).any())))
     return _stack(out, dim=0)
 
 
@@ -328,8 +329,12 @@ def shaped_two_center_damp(
     eu = torch.exp(-u)
     out = [torch.zeros_like(rr) for _ in range(nord)]
     K = wi.shape[1] - 1
+    live_i = [bool((wi[:, k] != 0).any()) for k in range(K + 1)]     # skip shape powers no pair carries
+    live_j = [bool((wj[:, k] != 0).any()) for k in range(K + 1)]
     for k in range(K + 1):
         for l in range(K + 1):
+            if not (live_i[k] and live_j[l]):
+                continue
             wk = wi[:, k] * wj[:, l]
             if k <= l:
                 cl = CLOSED[(k, l)](ai, aj, rr, Ei, Ej)
