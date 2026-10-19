@@ -54,6 +54,20 @@ def _aux_integrals(auxmol: gto.Mole) -> np.ndarray:
     return ao.T @ grids.weights
 
 
+def make_auxmol(mol: gto.Mole, auxbasis: str) -> gto.Mole:
+    """The auxiliary basis for a density fit: a named basis, or ``"etb"`` / ``"etb:<beta>"`` for pyscf's
+    even-tempered basis generated from ``mol``'s own basis (``df.aug_etb``, default beta 2.0).
+
+    The named def2-universal-jkfit is not flexible enough in the tail of a diffuse anion: the robust-fit
+    Cl-...Cl- pair energy is off by 0.3 kJ/mol at 2.8 A (A1 check, 2026-10-19). ``etb:1.8`` brings every
+    NaCl pair within 0.01 kJ/mol of the exact four-centre value at the same cost.
+    """
+    if isinstance(auxbasis, str) and auxbasis.startswith("etb"):
+        beta = float(auxbasis.split(":", 1)[1]) if ":" in auxbasis else 2.0
+        return df.addons.make_auxmol(mol, df.aug_etb(mol, beta=beta))
+    return df.addons.make_auxmol(mol, auxbasis)
+
+
 def fit_density(mol: gto.Mole, dm: np.ndarray, auxbasis: str = "def2-universal-jkfit"):
     """Coulomb-metric fit of the electron density of ``dm`` (AO, total) with the charge constrained.
 
@@ -62,7 +76,7 @@ def fit_density(mol: gto.Mole, dm: np.ndarray, auxbasis: str = "def2-universal-j
     dm = np.asarray(dm)
     if dm.ndim == 3:            # unrestricted (alpha, beta)
         dm = dm[0] + dm[1]
-    auxmol = df.addons.make_auxmol(mol, auxbasis)
+    auxmol = make_auxmol(mol, auxbasis)
     j2c = auxmol.intor("int2c2e")
     j3c = df.incore.aux_e2(mol, auxmol, intor="int3c2e", aosym="s1")      # (nao, nao, naux)
     b = np.einsum("ijq,ji->q", j3c, dm)
@@ -192,7 +206,7 @@ class Monomer:
                      symmetry=False, verbose=0, **kw)
 
     def auxmol(self, coords=None) -> gto.Mole:
-        return df.addons.make_auxmol(self.mol(coords), self.auxbasis)
+        return make_auxmol(self.mol(coords), self.auxbasis)
 
     def place(self, rot=None, shift=None) -> "Placed":
         rot = np.eye(3) if rot is None else np.asarray(rot, float)
@@ -201,7 +215,7 @@ class Monomer:
             raise ValueError("rot must be a proper rotation")
         coords = self.coords @ rot.T + shift
         mol = self.mol(coords)
-        aux = df.addons.make_auxmol(mol, self.auxbasis)
+        aux = make_auxmol(mol, self.auxbasis)
         dm, coef = self.dm, self.coef
         if not np.allclose(rot, np.eye(3)):
             U = _rotate_blocks(mol, rot)
