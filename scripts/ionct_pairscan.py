@@ -34,11 +34,8 @@ def load(run):
     ck = torch.load(Path(run) / "model.pt", weights_only=False)
     a = ck["args"]
     tab, chan = IonTable.load(a["params"]), CT.ChannelTable.load(a["params"])
-    m = IonCTModel(tab, chan, ck["n_feat"], hidden=a["hidden"], wkb=a["wkb"], c_range=tuple(a["c_range"]),
-                   confine=a.get("confine"), pseudo=a.get("pseudo", False), joint=a.get("joint", False),
-                   ct_pol=a.get("ct_pol", False), gap_form=a.get("gap_form", "pair"),
-                       tie_c=a.get("tie_c", False), coupling_resp=a.get("coupling_resp", "barrier"),
-                       ct_form=a.get("ct_form", "channels"), pol_form=a.get("pol_form", "confine"), pauli_nn=a.get("pauli_nn", False))
+    from rsfff.train.train_ionct import build_model
+    m = build_model(a, tab, chan, ck["n_feat"], ck["state"].get("feat_scale"), ck.get("feature_names"))
     m.load_state_dict(ck["state"])
     m.eval()
     from rsfff.train.train_ionct import featurizer_for

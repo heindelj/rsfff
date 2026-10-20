@@ -257,9 +257,9 @@ def split(frames, test_parents, val_frac=0.1, seed=0):
 _PP = {}
 
 
-def _pp_init(tab, chan, featurizer, lean):
+def _pp_init(tab, chan, featurizer, lean, frontier=False):
     torch.set_num_threads(1)
-    _PP.update(tab=tab, chan=chan, featurizer=featurizer, lean=lean)
+    _PP.update(tab=tab, chan=chan, featurizer=featurizer, lean=lean, frontier=frontier)
 
 
 def _pp_one(item):
@@ -268,24 +268,29 @@ def _pp_one(item):
     import io
     k, sym, X = item
     buf = io.BytesIO()
-    torch.save(precompute(sym, X, _PP["tab"], _PP["chan"], _PP["featurizer"], lean=_PP["lean"]), buf)
+    torch.save(precompute(sym, X, _PP["tab"], _PP["chan"], _PP["featurizer"], lean=_PP["lean"],
+                          frontier=_PP["frontier"]), buf)
     return k, buf.getvalue()
 
 
-def cache_key(params_path, env, lean, frames):
-    """A short hash of what the precompute depends on: the parameter table's contents, the environment, lean,
-    and the frames' geometries (species + coordinates), in order."""
+CACHE_VERSION = 2     # 2: equivariant environment blocks on the frame caches
+
+
+def cache_key(params_path, env, lean, frames, frontier=False):
+    """A short hash of what the precompute depends on: the parameter table's contents, the environment, lean (and
+    whether the lean cache keeps the frontier potentials), the cache layout version and the frames' geometries
+    (species + coordinates), in order."""
     import hashlib
     h = hashlib.sha1()
     h.update(Path(params_path).read_bytes())
-    h.update(f"|{env}|lean={int(lean)}|{len(frames)}|".encode())
+    h.update(f"|{env}|lean={int(lean)}|frontier={int(frontier)}|v{CACHE_VERSION}|{len(frames)}|".encode())
     for sym, X, *_ in frames:
         h.update("".join(sym).encode())
         h.update(np.asarray(X, dtype=np.float64).round(6).tobytes())
     return h.hexdigest()[:16]
 
 
-def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0):
+def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0, frontier=False):
     """The per-frame precompute (:func:`rsfff.ff.ionct.model.precompute`), from ``path`` when it holds a complete
     cache for these frames, else computed -- in ``workers`` processes when > 0 (the frames are independent; each
     worker runs single-threaded, so use the node's cores) -- and saved there. Labels and masks always come from
@@ -306,7 +311,7 @@ def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0)
         from concurrent.futures import ProcessPoolExecutor
         items = [(k, sym, X) for k, (sym, X, *_rest) in enumerate(frames)]
         with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"), initializer=_pp_init,
-                                 initargs=(tab, chan, featurizer, lean)) as ex:
+                                 initargs=(tab, chan, featurizer, lean, frontier)) as ex:
             done = 0
             import io
             for k, blob in ex.map(_pp_one, items, chunksize=8):
@@ -316,7 +321,7 @@ def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0)
                     print(f"  precomputed {done}/{len(frames)} [{time.time() - t0:.0f}s, {workers} workers]", flush=True)
     else:
         for k, (sym, X, *_rest) in enumerate(frames):
-            caches[k] = precompute(sym, X, tab, chan, featurizer, lean=lean)
+            caches[k] = precompute(sym, X, tab, chan, featurizer, lean=lean, frontier=frontier)
             if (k + 1) % 200 == 0:
                 print(f"  precomputed {k + 1}/{len(frames)} [{time.time() - t0:.0f}s]", flush=True)
     for c, (sym, X, lab, meta) in zip(caches, frames):
@@ -326,6 +331,24 @@ def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(caches, path)
     return caches
+
+
+def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None):
+    """The model of a run from its arguments (train_ionct's, as saved in model.pt): the ion CT model or, with
+    ``model == "complete"``, the complete model on the environment heads."""
+    g = a.get
+    if g("model", "ionct") == "complete":
+        from ..ff.complete import CompleteModel
+        return CompleteModel(tab, chan, n_feat, feature_names=feature_names, hidden=g("hidden", 64),
+                             feat_scale=feat_scale, c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"),
+                             pseudo=g("pseudo", False), tie_c=g("tie_c", False), species_emb=g("species_emb", False),
+                             aniso=not g("no_aniso", False), ct_gap=not g("no_ct_gap", False),
+                             dphi_scale=g("dphi_scale", 0.05))
+    return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
+                      c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
+                      joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
+                      tie_c=g("tie_c", False), coupling_resp=g("coupling_resp", "barrier"),
+                      ct_form=g("ct_form", "channels"), pol_form=g("pol_form", "confine"), pauli_nn=g("pauli_nn", False))
 
 
 def loss_terms(out, bt):
@@ -441,6 +464,12 @@ def main():
                     help="per-ion environment features: SOAP invariants (bb), or the C0 field/overlap projections onto "
                          "the ion's own densities (rsfff.ff.complete.DensityEnvironment; complete model plan)")
     ap.add_argument("--env-probes", nargs="*", default=None, help="density env: which probes (default all)")
+    ap.add_argument("--model", default="ionct", choices=("ionct", "complete"),
+                    help="complete: environment heads, anisotropic alpha, CT gap factor (direct CT, density env)")
+    ap.add_argument("--species-emb", action="store_true", help="complete: species embedding on the heads' input")
+    ap.add_argument("--no-aniso", action="store_true", help="complete: isotropic polarizability")
+    ap.add_argument("--no-ct-gap", action="store_true", help="complete: no environment gap factor on the CT")
+    ap.add_argument("--dphi-scale", type=float, default=0.05, help="complete: scale (Eh/e) of the CT gap potential")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=10)
     a = ap.parse_args()
@@ -458,26 +487,29 @@ def main():
         tags = ["test" if (m["workflow"] == "ct-scan" and m["n"] == 2) else t for t, (*_, m) in zip(tags, frames)]
         print(f"held out {sum(m['workflow'] == 'ct-scan' and m['n'] == 2 for *_, m in frames)} pair-scan frames", flush=True)
     print(f"{len(frames)} frames: " + ", ".join(f"{t} {tags.count(t)}" for t in ("train", "val", "test")), flush=True)
+    if a.model == "complete":
+        if a.ct_form != "direct" or a.env != "density":
+            raise SystemExit("--model complete needs --ct-form direct and --env density")
     lean = (a.ct_form == "direct") and not a.full_precompute
+    frontier = a.model == "complete" and not a.no_ct_gap
     cache_path = a.cache
     if cache_path is None and a.cache_dir:
-        cache_path = Path(a.cache_dir) / f"cache_{cache_key(a.params, a.env, lean, frames)}.pt"
+        cache_path = Path(a.cache_dir) / f"cache_{cache_key(a.params, a.env, lean, frames, frontier)}.pt"
         print(f"cache: {cache_path}", flush=True)
-    caches = build_cache(frames, tab, chan, feat, cache_path or out / "cache.pt", lean=lean, workers=a.precompute_workers)
+    caches = build_cache(frames, tab, chan, feat, cache_path or out / "cache.pt", lean=lean, workers=a.precompute_workers,
+                         frontier=frontier)
     tr = [c for c, t in zip(caches, tags) if t == "train"]
     va = [c for c, t in zip(caches, tags) if t == "val"]
     te = [c for c, t in zip(caches, tags) if t == "test"]
     F = torch.cat([c.feats for c in tr])
     nz = F.abs().sum(1) > 0
     scale = F[nz].std(0).clamp(min=1e-6)
-    model = IonCTModel(tab, chan, F.shape[1], hidden=a.hidden, wkb=a.wkb, feat_scale=scale, c_range=tuple(a.c_range),
-                        confine=a.confine, pseudo=a.pseudo, joint=a.joint, ct_pol=a.ct_pol, gap_form=a.gap_form,
-                        tie_c=a.tie_c, coupling_resp=a.coupling_resp, ct_form=a.ct_form,
-                        pol_form=a.pol_form, pauli_nn=a.pauli_nn)
+    model = build_model(vars(a), tab, chan, F.shape[1], scale, getattr(feat, "feature_names", None))
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
         for pid, sym, X, tgt, ok in polar_targets(a.ct_sets):
-            c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean)
+            c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
+                           frontier=frontier)
             held = pid in set(a.polar_test) or (a.holdout_scans and pid.startswith("pair_"))
             (polar_te if held else polar_tr).append(c)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)
@@ -551,7 +583,10 @@ def main():
         print("CT-state excess polarizability (bohr^3): acceptor " +
               ", ".join(f"{x} {v:.1f}" for x, v in zip(tab.symbols, aa.tolist())) + "; donor " +
               ", ".join(f"{x} {v:.1f}" for x, v in zip(tab.symbols, ad.tolist())), flush=True)
-    torch.save({"state": model.state_dict(), "args": vars(a), "n_feat": F.shape[1]}, out / "model.pt")
+    if hasattr(model, "summary"):
+        print("complete model: " + json.dumps(model.summary()), flush=True)
+    torch.save({"state": model.state_dict(), "args": vars(a), "n_feat": F.shape[1],
+                "feature_names": getattr(feat, "feature_names", None)}, out / "model.pt")
     res = {}
     with open(out / "predictions.csv", "w", newline="") as fh:
         w = None

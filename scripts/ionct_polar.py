@@ -69,11 +69,8 @@ class Evaluator:
         ck = torch.load(Path(run) / "model.pt", weights_only=False)
         a = ck["args"]
         self.tab, self.chan = IonTable.load(a["params"]), CT.ChannelTable.load(a["params"])
-        self.model = IonCTModel(self.tab, self.chan, ck["n_feat"], hidden=a["hidden"], wkb=a["wkb"],
-                                c_range=tuple(a.get("c_range", (0.05, 1.25))), confine=a.get("confine"),
-                                pseudo=a.get("pseudo", False), joint=a.get("joint", False), ct_pol=a.get("ct_pol", False), gap_form=a.get("gap_form", "pair"),
-                       tie_c=a.get("tie_c", False), coupling_resp=a.get("coupling_resp", "barrier"),
-                       ct_form=a.get("ct_form", "channels"), pol_form=a.get("pol_form", "confine"), pauli_nn=a.get("pauli_nn", False))
+        from rsfff.train.train_ionct import build_model
+        self.model = build_model(a, self.tab, self.chan, ck["n_feat"], ck["state"].get("feat_scale"), ck.get("feature_names"))
         self.model.load_state_dict(ck["state"])
         # ct-polar geometries the alpha loss trained on (none unless --w-alpha)
         self.alpha_trained = None
@@ -82,9 +79,8 @@ class Evaluator:
             self.holdout_pairs = bool(a.get("holdout_scans"))
             self.alpha_trained = True
         self.model.eval()
-        from bb.features import SOAPFeaturizer
-        self.feat = SOAPFeaturizer(cutoff=6.0, n_max=6, l_max=3, neighbor_types=(11, 17),
-                                   selected_lambdas=(0,)).double()
+        from rsfff.train.train_ionct import featurizer_for
+        self.feat = featurizer_for(a, self.tab)
 
     @torch.no_grad()
     def alpha(self, symbols, X):

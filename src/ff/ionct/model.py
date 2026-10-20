@@ -101,20 +101,23 @@ class FrameCache:
     ch_Kmid: torch.Tensor = None    # (C, N, 8) ... induced kernel
     labels: dict = field(default_factory=dict)   # 'pol', 'ct' (Hartree), masks
     meta: dict = field(default_factory=dict)
+    env: dict = None                # equivariant environment blocks, "<probe>:<V0|V1|V2|S0|S1|S2>" -> (N, ...)
 
 
 def precompute(symbols, pos_ang, tab: IonTable, chan: CT.ChannelTable, featurizer, labels=None, meta=None,
-               differentiable=False, lean=False) -> FrameCache:
+               differentiable=False, lean=False, frontier=False) -> FrameCache:
     """Geometry-dependent tensors of one frame. With ``differentiable`` they keep the graph to ``pos_ang`` (forces
     through the cached forward); otherwise they are computed without autograd. ``lean`` computes only what the
     direct CT form and the confinement / pseudo-potential polarization use (induction operator, channel list,
     pseudo drive, features): the frontier potentials, fields, midpoint potentials and electron-hole Coulomb of the
-    channel CT model are left out (zeros / None), which is most of the cost."""
+    channel CT model are left out (zeros / None), which is most of the cost. ``frontier`` keeps the frontier
+    potentials (VD, KD, VA, KA; cheap) in the lean cache -- the complete model's CT gap factor uses them. When the
+    featurizer returns equivariant blocks (:class:`rsfff.ff.complete.EnvFeatures`), they are kept on ``env``."""
     with torch.set_grad_enabled(differentiable and torch.is_grad_enabled()):
-        return _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean)
+        return _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean, frontier)
 
 
-def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=False) -> FrameCache:
+def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=False, frontier=False) -> FrameCache:
     Zmap = {"Na": 11, "Cl": 17}
     pos = torch.as_tensor(pos_ang, dtype=torch.float64)
     Z = torch.tensor([Zmap[s] for s in symbols])
@@ -123,18 +126,28 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
     L, A_off = K.induction_operator(pos, s, b, tab)
     geom = CT.channel_geometry(pos, s, b, tab, chan)
     ch_type = torch.tensor([CHANNEL_TYPES.index(n) for n in geom["names"]], dtype=torch.long)
-    feats = featurizer(positions=pos, atomic_numbers=Z, batch_idx=b).inv_feats.to(torch.float64)
+    ef = featurizer(positions=pos, atomic_numbers=Z, batch_idx=b)
+    feats = ef.inv_feats.to(torch.float64)
+    env = None
+    if type(ef).__name__ == "EnvFeatures" and ef.blocks:        # rsfff.ff.complete.EnvFeatures (no import cycle)
+        env = {f"{p}:{k}": v.to(torch.float64) for p, blk in ef.blocks.items() for k, v in blk.items()}
     ps_index, ps_r, ps_basis = K.pseudo_drive_basis(pos, s, b, tab, PSEUDO_CUTOFF)
     ps_type = pseudo_types(s, ps_index, tab)
     ch_ltaper = torch.log(CT._taper(geom["r"], chan.cutoff, chan.taper).clamp(min=1e-300))
     if lean:
         N = pos.shape[0]
-        z2, z3 = pos.new_zeros(N, N), pos.new_zeros(N, N, K.D_SITE)
-        fc = FrameCache(s, pos, L, A_off, z2, z3, z2.clone(), z3.clone(), geom["index"], ch_type, geom["r"],
+        if frontier:
+            VD, KD = K.frontier_operator(pos, s, b, tab, "donor")
+            VA, KA = K.frontier_operator(pos, s, b, tab, "acceptor")
+        else:
+            VD, KD = pos.new_zeros(N, N), pos.new_zeros(N, N, K.D_SITE)
+            VA, KA = VD.clone(), KD.clone()
+        fc = FrameCache(s, pos, L, A_off, VD, KD, VA, KA, geom["index"], ch_type, geom["r"],
                         geom["g"], geom["lnW"], geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis,
-                        labels=dict(labels or {}), meta=dict(meta or {}))
+                        labels=dict(labels or {}), meta=dict(meta or {}), env=env)
         fc.ch_ltaper = ch_ltaper
         fc.meta["lean"] = True
+        fc.meta["frontier"] = bool(frontier)
         return fc
     VD, KD = K.frontier_operator(pos, s, b, tab, "donor")
     VA, KA = K.frontier_operator(pos, s, b, tab, "acceptor")
@@ -147,7 +160,7 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
     ch_Vmid, ch_Kmid = K.point_potential_operator(pos, s, tab, ch_mid, i)
     return FrameCache(s, pos, L, A_off, VD, KD, VA, KA, geom["index"], ch_type, geom["r"], geom["g"], geom["lnW"],
                       geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis, EVD, EKD, EVA, EKA, ch_EP,
-                      ch_J, ch_ltaper, ch_mid, ch_Vmid, ch_Kmid, dict(labels or {}), dict(meta or {}))
+                      ch_J, ch_ltaper, ch_mid, ch_Vmid, ch_Kmid, dict(labels or {}), dict(meta or {}), env)
 
 
 def pseudo_types(species, idx, tab: IonTable):
@@ -214,6 +227,9 @@ def collate(frames: list[FrameCache]) -> dict:
             ps_r.append(f.ps_r)
             ps_basis.append(f.ps_basis)
         off += n
+    env = None
+    if all(f.env for f in frames):
+        env = {k: torch.cat([f.env[k] for f in frames]) for k in frames[0].env}
     lab = {key: torch.tensor([f.labels.get(key, float("nan")) for f in frames], dtype=dt)
            for key in ("pol", "ct", "pauli")}
     lab["ct_mask"] = torch.tensor([bool(f.labels.get("ct_mask", True)) for f in frames])
@@ -233,7 +249,7 @@ def collate(frames: list[FrameCache]) -> dict:
             "ch_EP": torch.cat(ch_EP) if has_E else None,
             "ch_J": torch.cat(cJ) if has_D else None, "ch_ltaper": torch.cat(cT) if has_T else None,
             "ch_mid": torch.cat(cM) if has_D else None, "ch_Vmid": torch.cat(cV) if has_D else None,
-            "ch_Kmid": torch.cat(cK) if has_D else None}
+            "ch_Kmid": torch.cat(cK) if has_D else None, "env": env}
 
 
 def _mlp(i, h, o, depth):
