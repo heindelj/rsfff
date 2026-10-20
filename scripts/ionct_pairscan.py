@@ -41,8 +41,8 @@ def load(run):
                        ct_form=a.get("ct_form", "channels"), pol_form=a.get("pol_form", "confine"), pauli_nn=a.get("pauli_nn", False))
     m.load_state_dict(ck["state"])
     m.eval()
-    from bb.features import SOAPFeaturizer
-    feat = SOAPFeaturizer(cutoff=6.0, n_max=6, l_max=3, neighbor_types=(11, 17), selected_lambdas=(0,)).double()
+    from rsfff.train.train_ionct import featurizer_for
+    feat = featurizer_for(a, tab)
     return m, tab, chan, feat, a
 
 
@@ -116,6 +116,12 @@ def main():
             # per frame, per ion / channel / pseudo pair
             cl = (sp == tab.symbols.index("Cl")).nonzero().squeeze(1)
             c_cl = o["c"][cl].reshape(B, -1, 2)[:, 0]                       # first Cl of each frame
+            # direct CT: the donor / acceptor charges of the first ion of each species per frame
+            qct = {}
+            if getattr(m, "ct_form", "channels") == "direct" and o.get("q_ct") is not None and o["q_ct"].numel():
+                for sym in set(pair):
+                    idx = (sp == tab.symbols.index(sym)).nonzero().squeeze(1)
+                    qct[sym] = o["q_ct"][idx].reshape(B, -1, 2)[:, 0]
             names = [CHANNEL_TYPES[t] for t in bt["ch_type"].tolist()]
             fr = bt["ch_frame"]
             st = o.get("stark", torch.zeros_like(o["dov"]))
@@ -185,6 +191,8 @@ def main():
             for name, aa in att.items():
                 row[f"a_ct_par_smooth_{name}"] = aa[k, 2, 1].item()
                 row[f"a_pol_par_smooth_{name}"] = aa[k, 2, 0].item()
+            for sym, qq in qct.items():
+                row[f"qD_{sym}"], row[f"qA_{sym}"] = qq[k, 0].item(), qq[k, 1].item()
             for (kk, nm), d in per.items():
                 if kk == k:
                     for f, v in d.items():
@@ -241,38 +249,65 @@ def plot(df, path):
         ax.plot(R, g.c_alpha_Cl, "k-", label="c_α (Cl)")
         ax.plot(R, g.c_C_Cl, "k--", label="c_C (Cl)")
         for c in [c for c in g.columns if c.startswith("A[")]:
-            ax.plot(R, g[c] / g[c].abs().max(), label=f"{c} / max ({g[c].abs().max():.2g})")
+            mx = g[c].abs().max()
+            if np.isfinite(mx) and mx > 0:
+                ax.plot(R, g[c] / mx, label=f"{c} / max ({mx:.2g})")
         for r in tr.r.unique():
             ax.axvline(r, color="0.8", lw=0.8, zorder=0)
         ax.set_title("network: confinement, pseudo-potential (grey: α-trained R)")
         ax.legend(fontsize=7)
-        # overlap gaps
+        direct = "qD_Cl" in g.columns and g["qD_Cl"].notna().any()
         ax = axs[2, col]
-        for c in [c for c in g.columns if c.startswith("dov[")]:
-            ax.plot(R, g[c], label=f"Δ^ov {c[4:-1]}")
-        for c in [c for c in g.columns if c.startswith("stark[")]:
-            ax.plot(R, g[c], ":", label=f"Stark {c[6:-1]}")
+        if direct:
+            # direct CT: the donor / acceptor charges along R (exactly 1 for an isolated ion)
+            for sym, ls in (("Cl", "-"), ("Na", "--")):
+                if f"qD_{sym}" in g and g[f"qD_{sym}"].notna().any():
+                    ax.plot(R, g[f"qD_{sym}"], "C0", ls=ls, label=f"qD ({sym})")
+                    ax.plot(R, g[f"qA_{sym}"], "C1", ls=ls, label=f"qA ({sym})")
+            ax.axhline(1.0, color="0.6", lw=0.8)
+            ax.set_ylabel("e")
+            ax.set_title("network: direct CT charges (1 = isolated)")
+        else:
+            for c in [c for c in g.columns if c.startswith("dov[")]:
+                ax.plot(R, g[c], label=f"Δ^ov {c[4:-1]}")
+            for c in [c for c in g.columns if c.startswith("stark[")]:
+                ax.plot(R, g[c], ":", label=f"Stark {c[6:-1]}")
+            ax.set_ylabel("Eh")
+            ax.set_title("network: overlap gaps; Stark shift")
         for r in tr.r.unique():
             ax.axvline(r, color="0.8", lw=0.8, zorder=0)
-        ax.set_ylabel("Eh")
-        ax.set_title("network: overlap gaps; Stark shift")
         ax.legend(fontsize=7)
         # alpha with attribution
         ax = axs[3, col]
-        ax.plot(R, g.a_ct_par, "C3-", lw=2, label="α_CT∥ model")
-        for name, ls in (("dov", "--"), ("c", ":"), ("A", "-.")):
-            k = f"a_ct_par_smooth_{name}"
-            if k in g:
-                ax.plot(R, g[k], "C3", ls=ls, lw=1, label=f"… with {name} smoothed in R")
-        ax.plot(R, g.a_pol_par - g.a_pol_par.iloc[-1], "C0-", lw=1, label="α_pol∥ (shifted)")
-        if "qm_ct_par" in g:
-            q = g.dropna(subset=["qm_ct_par"])
-            ax.plot(q.r, q.qm_ct_par, "C3o", mfc="none", label="ALMO α_CT∥")
-            qt = q[q.alpha_trained]
-            ax.plot(qt.r, qt.qm_ct_par, "C3o", ms=6, alpha=0.4, label="(in α loss)")
+        if direct:
+            # the direct form has no field response (α_CT = 0): show α_pol against ALMO's α_MI instead
+            ax.plot(R, g.a_pol_par, "C0-", lw=2, label="α_pol∥ model")
+            ax.plot(R, g.a_pol_perp, "C0--", lw=1, label="α_pol⊥ model")
+            for name, ls in (("c", ":"), ("A", "-.")):
+                k = f"a_pol_par_smooth_{name}"
+                if k in g:
+                    ax.plot(R, g[k], "C0", ls=ls, lw=1, label=f"∥ with {name} smoothed in R")
+            if "qm_mi_par" in g:
+                q = g.dropna(subset=["qm_mi_par"])
+                ax.plot(q.r, q.qm_mi_par, "C0o", mfc="none", label="ALMO α_MI∥")
+                qt = q[q.alpha_trained]
+                ax.plot(qt.r, qt.qm_mi_par, "C0o", ms=6, alpha=0.4, label="(in α loss)")
+            ax.set_title("α_pol along the bond vs ALMO α_MI (direct CT: α_CT ≡ 0)")
+        else:
+            ax.plot(R, g.a_ct_par, "C3-", lw=2, label="α_CT∥ model")
+            for name, ls in (("dov", "--"), ("c", ":"), ("A", "-.")):
+                k = f"a_ct_par_smooth_{name}"
+                if k in g:
+                    ax.plot(R, g[k], "C3", ls=ls, lw=1, label=f"… with {name} smoothed in R")
+            ax.plot(R, g.a_pol_par - g.a_pol_par.iloc[-1], "C0-", lw=1, label="α_pol∥ (shifted)")
+            if "qm_ct_par" in g:
+                q = g.dropna(subset=["qm_ct_par"])
+                ax.plot(q.r, q.qm_ct_par, "C3o", mfc="none", label="ALMO α_CT∥")
+                qt = q[q.alpha_trained]
+                ax.plot(qt.r, qt.qm_ct_par, "C3o", ms=6, alpha=0.4, label="(in α loss)")
+            ax.set_title("α along the bond; attribution")
         ax.set_xlabel("R (Å)")
         ax.set_ylabel("bohr³")
-        ax.set_title("α along the bond; attribution")
         ax.legend(fontsize=7)
         for a in axs[:, col]:
             a.grid(alpha=0.25)
