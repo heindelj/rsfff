@@ -665,6 +665,7 @@ def main():
     scale = F[nz].std(0).clamp(min=1e-6)
     model = build_model(vars(a), tab, chan, F.shape[1], scale, getattr(feat, "feature_names", None))
     dev = torch.device(a.device)
+    tab_cpu = tab                       # the per-frame precompute and the radial table are built on the CPU
     if dev.type != "cpu":
         tab = tab.to(dev)
         model.tab = tab
@@ -673,7 +674,7 @@ def main():
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
         for pid, sym, X, tgt, ok in polar_targets(a.ct_sets):
-            c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
+            c = precompute(sym, X, tab_cpu, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
                            frontier=frontier)
             held = pid in set(a.polar_test) or (a.holdout_scans and pid.startswith("pair_"))
             (polar_te if held else polar_tr).append(c)
@@ -696,7 +697,7 @@ def main():
         force_tr = [f for f in ff if f[3]["file"] not in held]
         force_te = [f for f in ff if f[3]["file"] in held]
         print(f"force frames: {len(force_tr)} train, {len(force_te)} held out ({', '.join(sorted(held))})", flush=True)
-        table = radial_table(tab, a.params, a.cache_dir).to(dev)
+        table = radial_table(tab_cpu, a.params, a.cache_dir).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs, eta_min=a.lr * 0.02)
     best, best_state, log = math.inf, None, []
