@@ -119,9 +119,9 @@ def polar_loss(model, pb):
     """Per-ion alpha errors (bohr^3): (B, 3) for alpha_pol vs ALMO alpha_MI, (B, 3) for alpha_CT (0 where masked)."""
     caches = pb["caches"]
     a = polar_alpha(model, pb)
-    t = torch.stack([c.labels["alpha"] for c in caches])
-    n = torch.tensor([c.species.shape[0] for c in caches], dtype=a.dtype)[:, None]
-    ok = torch.tensor([c.labels["ct_ok"] for c in caches])[:, None]
+    t = torch.stack([torch.as_tensor(c.labels["alpha"]) for c in caches]).to(a.device)
+    n = torch.tensor([c.species.shape[0] for c in caches], dtype=a.dtype, device=a.device)[:, None]
+    ok = torch.tensor([c.labels["ct_ok"] for c in caches], device=a.device)[:, None]
     have = torch.isfinite(t[..., 0])
     t = torch.nan_to_num(t)
     z = torch.zeros_like(a[..., 0])
@@ -389,21 +389,35 @@ def radial_table(tab, params_path, cache_dir=None):
     return table
 
 
+def to_device(obj, device):
+    """Recursively move the tensors of a batch dict / list to ``device`` (no-op on CPU)."""
+    if device is None or str(device) == "cpu":
+        return obj
+    if torch.is_tensor(obj):
+        return obj.to(device)
+    if isinstance(obj, dict):
+        return {k: to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(to_device(v, device) for v in obj)
+    return obj
+
+
 def force_terms(model, frames, tab, table, chan):
     """Energy (per ion, kJ/mol) and force (per component, kJ/mol/A) errors of a list of force frames through the
     batched differentiable precompute: (B,), (sum N, 3). Forces are -dE/dx with the graph kept for training."""
     from ..ff.complete import batched_precompute
     Zmap = {"Na": 11, "Cl": 17}
-    pos = torch.tensor(np.concatenate([X for _, X, *_ in frames]), dtype=torch.float64, requires_grad=True)
-    Z = torch.tensor([Zmap[x] for sym, *_ in frames for x in sym])
-    fr = torch.cat([torch.full((len(sym),), k, dtype=torch.long) for k, (sym, *_) in enumerate(frames)])
+    dev = table.device
+    pos = torch.tensor(np.concatenate([X for _, X, *_ in frames]), dtype=torch.float64, device=dev, requires_grad=True)
+    Z = torch.tensor([Zmap[x] for sym, *_ in frames for x in sym], device=dev)
+    fr = torch.cat([torch.full((len(sym),), k, dtype=torch.long) for k, (sym, *_) in enumerate(frames)]).to(dev)
     bt = batched_precompute(pos, Z, fr, tab, table, chan)
     out = model(bt)
     E = out["e_int"]
     F = -torch.autograd.grad(E.sum(), pos, create_graph=True)[0]
-    e_ref = torch.tensor([lab["int"] for _, _, lab, _ in frames], dtype=torch.float64)
-    f_ref = torch.tensor(np.concatenate([lab["forces"] for _, _, lab, _ in frames]), dtype=torch.float64)
-    n = torch.tensor([len(sym) for sym, *_ in frames], dtype=torch.float64)
+    e_ref = torch.tensor([lab["int"] for _, _, lab, _ in frames], dtype=torch.float64, device=dev)
+    f_ref = torch.tensor(np.concatenate([lab["forces"] for _, _, lab, _ in frames]), dtype=torch.float64, device=dev)
+    n = torch.tensor([len(sym) for sym, *_ in frames], dtype=torch.float64, device=dev)
     return (E - e_ref) * KJ / n, F * KJ - f_ref * KJ_ANG, out      # model forces are Hartree/A, labels Hartree/bohr
 
 
@@ -417,7 +431,7 @@ def force_metrics(model, frames, tab, table, chan, bs=16):
     for k in range(0, len(frames), bs):
         chunk = frames[k:k + bs]
         e, f, _ = force_terms(model, chunk, tab, table, chan)
-        e, f = e.detach(), f.detach()
+        e, f = e.detach().cpu(), f.detach().cpu()
         es.append(e)
         fs.append(f)
         off = 0
@@ -491,11 +505,12 @@ def _term(e, bt, key):
 def evaluate(model, caches, bs=64):
     rows = []
     model.eval()
+    dev = next(model.parameters()).device
     with torch.no_grad():
         for k in range(0, len(caches), bs):
             chunk = caches[k:k + bs]
-            bt = collate(chunk)
-            out = model(bt)
+            bt = to_device(collate(chunk), dev)
+            out = {k_: (v.cpu() if torch.is_tensor(v) else v) for k_, v in model(bt).items()}
             for q, f in enumerate(chunk):
                 rows.append({**{k: v for k, v in f.meta.items() if k != "cta_E"}, "pol_ref": f.labels["pol"] * KJ, "ct_ref": f.labels["ct"] * KJ,
                              "pol": out["e_pol"][q].item() * KJ, "ct": out["e_ct"][q].item() * KJ,
@@ -610,6 +625,7 @@ def main():
     ap.add_argument("--force-batch", type=int, default=16)
     ap.add_argument("--force-test", nargs="*", default=list(FORCE_TEST), help="force files (stems) held out")
     ap.add_argument("--init-from", default=None, help="model.pt of a previous run to start from (same architecture)")
+    ap.add_argument("--device", default="cpu", help="cpu | cuda | cuda:N (complete model; batches are moved per step)")
     ap.add_argument("--w-disp", type=float, default=0.0, help="weight of the dispersion energy vs ALMO disp")
     ap.add_argument("--w-int", type=float, default=0.0,
                     help="weight of the total interaction energy (cls_elec label + pauli + disp + pol + ct) vs ALMO int")
@@ -648,6 +664,12 @@ def main():
     nz = F.abs().sum(1) > 0
     scale = F[nz].std(0).clamp(min=1e-6)
     model = build_model(vars(a), tab, chan, F.shape[1], scale, getattr(feat, "feature_names", None))
+    dev = torch.device(a.device)
+    if dev.type != "cpu":
+        tab = tab.to(dev)
+        model.tab = tab
+        model.to(dev)
+        print(f"device: {dev} ({torch.cuda.get_device_name(dev) if dev.type == 'cuda' else ''})", flush=True)
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
         for pid, sym, X, tgt, ok in polar_targets(a.ct_sets):
@@ -656,7 +678,7 @@ def main():
             held = pid in set(a.polar_test) or (a.holdout_scans and pid.startswith("pair_"))
             (polar_te if held else polar_tr).append(c)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)
-        pb_tr, pb_all = polar_batch(polar_tr), polar_batch(polar_tr + polar_te)
+        pb_tr, pb_all = to_device(polar_batch(polar_tr), dev), to_device(polar_batch(polar_tr + polar_te), dev)
     if a.init_from:
         ck = torch.load(a.init_from, weights_only=False)
         missing, unexpected = model.load_state_dict(ck["state"], strict=False)
@@ -674,7 +696,7 @@ def main():
         force_tr = [f for f in ff if f[3]["file"] not in held]
         force_te = [f for f in ff if f[3]["file"] in held]
         print(f"force frames: {len(force_tr)} train, {len(force_te)} held out ({', '.join(sorted(held))})", flush=True)
-        table = radial_table(tab, a.params, a.cache_dir)
+        table = radial_table(tab, a.params, a.cache_dir).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs, eta_min=a.lr * 0.02)
     best, best_state, log = math.inf, None, []
@@ -683,7 +705,7 @@ def main():
         random.shuffle(tr)
         tot = 0.0
         for step, k in enumerate(range(0, len(tr), a.batch)):
-            bt = collate(tr[k:k + a.batch])
+            bt = to_device(collate(tr[k:k + a.batch]), dev)
             o = model(bt)
             ep_, ec_, ech_ = loss_terms(o, bt)
             loss = (a.w_pol * ep_ ** 2 + a.w_ct * ec_ ** 2 + a.w_chan * (ech_ ** 2).sum(1)).mean()
@@ -713,7 +735,7 @@ def main():
             score = (sv.get("pol_mae", 0) + sv.get("ct_mae", 0) + (sv.get("pauli_mae", 0) if a.w_pauli > 0 else 0)
                      + (sv.get("disp_mae", 0) if a.w_disp > 0 else 0))
             if score < best:
-                best, best_state = score, {k: v.clone() for k, v in model.state_dict().items()}
+                best, best_state = score, {k: v.detach().clone() for k, v in model.state_dict().items()}
             log.append({"epoch": ep, "train_loss": tot / len(tr), **{f"val_{k}": v for k, v in sv.items()}})
             msg = ""
             if polar_tr:
@@ -759,7 +781,7 @@ def main():
               ", ".join(f"{x} {v:.1f}" for x, v in zip(tab.symbols, ad.tolist())), flush=True)
     if hasattr(model, "summary"):
         print("complete model: " + json.dumps(model.summary()), flush=True)
-    torch.save({"state": model.state_dict(), "args": vars(a), "n_feat": F.shape[1],
+    torch.save({"state": {k: v.cpu() for k, v in model.state_dict().items()}, "args": vars(a), "n_feat": F.shape[1],
                 "feature_names": getattr(feat, "feature_names", None)}, out / "model.pt")
     res = {}
     with open(out / "predictions.csv", "w", newline="") as fh:

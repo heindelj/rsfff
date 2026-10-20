@@ -103,10 +103,17 @@ class IonTable:
             A_acceptor=t([float("nan") if ions[s]["A_acceptor"] is None else ions[s]["A_acceptor"] for s in symbols]),
         )
 
+    def to(self, device) -> "IonTable":
+        """A copy with every tensor on ``device``."""
+        import dataclasses
+        mv = lambda v: (v.to(device) if torch.is_tensor(v) else {k: x.to(device) for k, x in v.items()} if isinstance(v, dict) else v)
+        return dataclasses.replace(self, **{f.name: mv(getattr(self, f.name)) for f in dataclasses.fields(self)})
+
     def species_index(self, atomic_numbers: torch.Tensor) -> torch.Tensor:
-        lut = torch.full((int(self.numbers.max()) + 1,), -1, dtype=torch.long)
-        lut[self.numbers] = torch.arange(len(self.symbols))
-        s = lut[atomic_numbers.long()]
+        dev = self.numbers.device
+        lut = torch.full((int(self.numbers.max()) + 1,), -1, dtype=torch.long, device=dev)
+        lut[self.numbers] = torch.arange(len(self.symbols), device=dev)
+        s = lut[atomic_numbers.long().to(dev)]
         if (s < 0).any():
             raise ValueError(f"atomic numbers outside the ion table {self.symbols}")
         return s

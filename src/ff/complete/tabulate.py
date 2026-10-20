@@ -147,6 +147,15 @@ class RadialTable:
         return res
 
     # ---- evaluation ------------------------------------------------------------------------------------------
+    def to(self, device):
+        self.coef = self.coef.to(device)
+        self.r = self.r.to(device)
+        return self
+
+    @property
+    def device(self):
+        return self.coef.device
+
     def __call__(self, si, sj, r_ang):
         """All functions at r (P,) Angstrom for species pairs (si, sj) (P,): (P, F). Quintic Hermite, zero past r_max,
         clamped below r_min."""
@@ -170,32 +179,60 @@ class RadialTable:
              + c0[..., 2] * h4[:, None] + c1[..., 2] * h5[:, None])
         return y * inside.to(y.dtype)[:, None]
 
-    def pick(self, y, prefix):
-        """(P, NORD) rows ``prefix:0..4`` of an evaluation (P, F)."""
-        return torch.stack([y[:, self.index[f"{prefix}:{n}"]] for n in range(NORD)], 0)       # (NORD, P)
+    def rows(self, y, prefixes):
+        """(K, NORD, P): the damping rows ``prefix:0..4`` of an evaluation (P, F) for several prefixes at once."""
+        idx = torch.tensor([[self.index[f"{p}:{n}"] for n in range(NORD)] for p in prefixes], device=y.device)
+        return y[:, idx].permute(1, 2, 0)
 
 
-def _local_index(batch_idx):
-    counts = torch.bincount(batch_idx)
-    return batch_idx.shape[0], counts, torch.arange(batch_idx.shape[0]) - (torch.cumsum(counts, 0) - counts)[batch_idx]
+def _basis_tensors(dr):
+    """The five pure-order damped tensors T_n(dr) (NORD, P, 10, 10): T(dr, lam) = sum_n lam_n T_n (the damped tensor
+    is linear in its damping rows), built in one call of the transcription on NORD replicas of the pairs."""
+    P_ = dr.shape[0]
+    rep = dr.repeat(NORD, 1)
+    damp = dr.new_zeros(NORD, NORD * P_)
+    for n in range(NORD):
+        damp[n, n * P_:(n + 1) * P_] = 1.0
+    return K._tensor(rep, damp).reshape(NORD, P_, 10, 10)
+
+
+def _luts(tab, chan):
+    """Species-pair lookup tables: pseudo type index (S, S) and channel type index (S, S; -1 where the pair has no
+    channel), to replace per-pair name building."""
+    S = len(tab.symbols)
+    ps = torch.full((S, S), -1, dtype=torch.long)
+    ch = torch.full((S, S), -1, dtype=torch.long)
+    for a in range(S):
+        for b in range(S):
+            nm = f"{tab.symbols[a]}<{tab.symbols[b]}"
+            if nm in PSEUDO_TYPES:
+                ps[a, b] = PSEUDO_TYPES.index(nm)
+            nm = f"{tab.symbols[a]}>{tab.symbols[b]}"
+            if nm in chan.types and nm in CHANNEL_TYPES:
+                ch[a, b] = CHANNEL_TYPES.index(nm)
+    return ps, ch
 
 
 def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table: RadialTable, chan: CT.ChannelTable,
                        labels: dict | None = None) -> dict:
     """The collated batch of the complete model straight from positions (N, 3) Angstrom (autograd flows through),
     atomic numbers (N,), frame index (N,) sorted by frame. ``labels``: a dict of per-frame tensors (B,) to attach.
+    Runs on the device of ``pos_ang``; ``tab`` and ``table`` must live there too (``IonTable.to``, ``RadialTable.to``).
 
     Produces the keys ``collate`` makes that :class:`CompleteModel` reads: L, A_off, VD/KD/VA/KA (padded), mask,
-    species, feats, frame, pos, channels (index, type, r, frame, ltaper), pseudo drive (index, type, r, basis), env."""
+    species, feats, frame, pos, channels (index, type, r, frame, ltaper), pseudo drive (index, type, r, basis), env.
+    The damped tensors of every pair are built once as the five pure-order basis tensors and every term is a single
+    contraction of table rows against them."""
     X = pos_ang / BOHR
+    dev, dt = X.device, X.dtype
     N = X.shape[0]
-    b_idx = torch.as_tensor(batch_idx)
+    b_idx = torch.as_tensor(batch_idx, device=dev)
     B = int(b_idx.max()) + 1 if N else 0
-    s = tab.species_index(torch.as_tensor(atomic_numbers))
-    dt = X.dtype
-    _, counts, loc = _local_index(b_idx)
+    s = tab.species_index(torch.as_tensor(atomic_numbers, device=dev))
+    counts = torch.bincount(b_idx, minlength=B)
+    loc = torch.arange(N, device=dev) - (torch.cumsum(counts, 0) - counts)[b_idx]
     nmax = int(counts.max()) if N else 0
-    P = K._poly_map(dt, X.device)
+    P = K._poly_map(dt, dev)
     pairs = K.all_pairs(b_idx)
     dp = torch.cat([pairs, pairs.flip(0)], dim=1)                  # directed (i <- j)
     i, j = dp
@@ -205,22 +242,32 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     rhat = dr / r[:, None]
     y = table(s[i], s[j], r_ang)                                     # (Pd, F)
     qj = tab.charge[s[j]]
+    Tb = _basis_tensors(dr)                                          # (NORD, Pd, 10, 10)
+    T0 = Tb[:, :, 0, :]                                              # (NORD, Pd, 10): row 0, the source as a charge
+    Tc = Tb[:, :, :, 0]                                              # column 0: the probe as a unit charge
+    probes = list(table.probes)
+    # all drive-type rows at once: 2 parents + 6 probes + 2 pseudo (complements c; lam = q_j - c, or d for ps)
+    drive_keys = ["drive:dip", "drive:quad"] + [f"envV:{p}" for p in probes] + ["ps:dip", "ps:quad"]
+    rows = table.rows(y, drive_keys)                                 # (K, NORD, Pd)
+    nq = 2 + len(probes)
+    lam = torch.cat([qj[None, None] - rows[:nq], rows[nq:]], 0)
+    R0 = torch.einsum("knp,npb->kpb", lam, T0)                       # (K, Pd, 10)
+    Rp = R0 @ P                                                      # (K, Pd, 8)
     # -- induction drive ------------------------------------------------------------------------------------------
-    Ld = K._tensor(dr, qj[None] - table.pick(y, "drive:dip"))[:, 0, :] @ P
-    Lq = K._tensor(dr, qj[None] - table.pick(y, "drive:quad"))[:, 0, :] @ P
-    Lflat = X.new_zeros(N, 8).index_add(0, i, torch.cat([Ld[:, :3], Lq[:, 3:]], 1))
+    Lpair = torch.cat([Rp[0, :, :3], Rp[1, :, 3:]], 1)
+    Lflat = X.new_zeros(N, 8).index_add(0, i, Lpair)
     L = X.new_zeros(B, nmax, 8).index_put((b_idx, loc), Lflat)
     # -- induced-induced coupling (undirected pairs: the first half of dp) --------------------------------------
-    nP = pairs.shape[1]
+    nP = pairs.shape[0] and pairs.shape[1]
     ii, jj = pairs
-    dr_u, y_u = dr[:nP], y[:nP]
+    PTP = torch.einsum("ab,npbc,cd->npad", P.T, Tb[:, :nP], P)       # (NORD, nP, 8, 8) basis blocks
+    arows = table.rows(y[:nP], ["aoff:dd", "aoff:dq", "aoff:qd", "aoff:qq"])     # (4, NORD, nP)
+    blocks = torch.einsum("knp,npab->kpab", 1 - arows, PTP)          # (4, nP, 8, 8): [a c] = dd, dq, qd, qq
     sl = {"d": slice(0, 3), "q": slice(3, 8)}
     Bij = X.new_zeros(nP, 8, 8)
-    for a in "dq":
-        for c in "dq":
-            blk = P.T @ K._tensor(dr_u, 1 - table.pick(y_u, f"aoff:{a}{c}")) @ P
-            Bij[:, sl[c], sl[a]] = blk[:, sl[c], sl[a]]
-    ar = torch.arange(8)
+    for k_, (a, c) in enumerate((("d", "d"), ("d", "q"), ("q", "d"), ("q", "q"))):
+        Bij[:, sl[c], sl[a]] = blocks[k_][:, sl[c], sl[a]]
+    ar = torch.arange(8, device=dev)
     A = X.new_zeros(B, nmax, 8, nmax, 8)
     fb = b_idx[ii][:, None, None]
     A = A.index_put((fb, loc[jj][:, None, None], ar[None, :, None], loc[ii][:, None, None], ar[None, None, :]), Bij, accumulate=True)
@@ -228,66 +275,65 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
                     Bij.transpose(1, 2), accumulate=True)
     A_off = A.reshape(B, 8 * nmax, 8 * nmax)
     # -- frontier potentials --------------------------------------------------------------------------------------
+    fkeys = ["front:donor:dip", "front:donor:quad", "front:acceptor:dip", "front:acceptor:quad"]
+    frows = table.rows(y, fkeys)                                      # (4, NORD, Pd)
+    KC = torch.einsum("knp,npa->kpa", 1 - frows, Tc) @ P             # (4, Pd, 8)
     front = {}
-    for role, key in (("donor", "D"), ("acceptor", "A")):
+    for q_, (role, key) in enumerate((("donor", "D"), ("acceptor", "A"))):
         v = (qj - y[:, table.index[f"front:{role}:v"]]) / r
-        ks = []
-        for p in ("dip", "quad"):
-            lam = 1 - table.pick(y, f"front:{role}:{p}")
-            ks.append(K._tensor(dr, lam)[:, :, 0] @ P)
-        kv = torch.cat([ks[0][:, :3], ks[1][:, 3:]], 1)
-        V = X.new_zeros(B, nmax, nmax).index_put((b_idx[i], loc[i], loc[j]), v)
-        Km = X.new_zeros(B, nmax, nmax, 8).index_put((b_idx[i], loc[i], loc[j]), kv)
-        front[f"V{key}"], front[f"K{key}"] = V, Km
-    # -- environment features -------------------------------------------------------------------------------------
-    inv, env = [], {}
-    outer = rhat[:, :, None] * rhat[:, None, :] - torch.eye(3, dtype=dt)[None] / 3
-    for name in table.probes:
-        D = K._tensor(dr, qj[None] - table.pick(y, f"envV:{name}"))[:, 0, :]
-        Dp = D @ P
-        v0 = D[:, 0] - qj / r
-        V0 = X.new_zeros(N).index_add(0, i, v0)
-        V1 = X.new_zeros(N, 3).index_add(0, i, -Dp[:, :3])
-        V2 = X.new_zeros(N, 5).index_add(0, i, Dp[:, 3:])
-        S0p, S1p, S2p = (y[:, table.index[f"envS:{name}:{k}"]] for k in range(3))
-        S0 = X.new_zeros(N).index_add(0, i, S0p)
-        S1 = X.new_zeros(N, 3).index_add(0, i, -S1p[:, None] * rhat)
-        S2 = X.new_zeros(N, 3, 3).index_add(0, i, (S2p - S1p / r)[:, None, None] * outer)
-        if name == "breath":
-            has = (tab.a0[s] > 0).to(dt)
-            V0, V1, V2, S0, S1, S2 = (V0 * has, V1 * has[:, None], V2 * has[:, None], S0 * has, S1 * has[:, None],
-                                      S2 * has[:, None, None])
-        inv.append(torch.stack([V0, V1.norm(dim=-1), V2.norm(dim=-1), S0, S1.norm(dim=-1), S2.flatten(1).norm(dim=-1),
-                                (V1 * S1).sum(-1)], 1))
-        for k_, v_ in (("V0", V0), ("V1", V1), ("V2", V2), ("S0", S0), ("S1", S1), ("S2", S2)):
-            env[f"{name}:{k_}"] = v_
-    feats = torch.cat(inv, 1)
+        kv = torch.cat([KC[2 * q_][:, :3], KC[2 * q_ + 1][:, 3:]], 1)
+        front[f"V{key}"] = X.new_zeros(B, nmax, nmax).index_put((b_idx[i], loc[i], loc[j]), v)
+        front[f"K{key}"] = X.new_zeros(B, nmax, nmax, 8).index_put((b_idx[i], loc[i], loc[j]), kv)
+    # -- environment features (all probes at once) ---------------------------------------------------------------
+    nprobe = len(probes)
+    D0 = R0[2:2 + nprobe]                                             # (nprobe, Pd, 10)
+    Dp = Rp[2:2 + nprobe]
+    v0 = (D0[:, :, 0] - (qj / r)[None]).T                             # (Pd, nprobe)
+    V0 = X.new_zeros(N, nprobe).index_add(0, i, v0)
+    V1 = X.new_zeros(N, nprobe, 3).index_add(0, i, -Dp[:, :, :3].permute(1, 0, 2))
+    V2 = X.new_zeros(N, nprobe, 5).index_add(0, i, Dp[:, :, 3:].permute(1, 0, 2))
+    sidx = torch.tensor([[table.index[f"envS:{p_}:{k}"] for k in range(3)] for p_ in probes], device=dev)
+    Sy = y[:, sidx]                                                   # (Pd, nprobe, 3)
+    S0p, S1p, S2p = Sy[..., 0], Sy[..., 1], Sy[..., 2]
+    outer = rhat[:, :, None] * rhat[:, None, :] - torch.eye(3, dtype=dt, device=dev)[None] / 3
+    S0 = X.new_zeros(N, nprobe).index_add(0, i, S0p)
+    S1 = X.new_zeros(N, nprobe, 3).index_add(0, i, -S1p[:, :, None] * rhat[:, None, :])
+    S2 = X.new_zeros(N, nprobe, 3, 3).index_add(0, i, (S2p - S1p / r[:, None])[:, :, None, None] * outer[:, None])
+    if "breath" in probes:
+        kb = probes.index("breath")
+        has = (tab.a0[s] > 0).to(dt)
+        V0[:, kb], S0[:, kb] = V0[:, kb] * has, S0[:, kb] * has
+        V1[:, kb], V2[:, kb], S1[:, kb] = V1[:, kb] * has[:, None], V2[:, kb] * has[:, None], S1[:, kb] * has[:, None]
+        S2[:, kb] = S2[:, kb] * has[:, None, None]
+    inv = torch.stack([V0, V1.norm(dim=-1), V2.norm(dim=-1), S0, S1.norm(dim=-1), S2.flatten(2).norm(dim=-1),
+                       (V1 * S1).sum(-1)], 2)                         # (N, nprobe, 7)
+    feats = inv.reshape(N, -1)                                        # probe-major, like DensityEnvironment
+    env = {}
+    for k_, name in enumerate(probes):
+        for key, val in (("V0", V0), ("V1", V1), ("V2", V2), ("S0", S0), ("S1", S1), ("S2", S2)):
+            env[f"{name}:{key}"] = val[:, k_]
     # -- pseudo-potential drive basis -----------------------------------------------------------------------------
     keep = r_ang < table.pseudo_cutoff
-    ps_i, ps_j, dr_p, y_p = i[keep], j[keep], dr[keep], y[keep]
-    bd = K._tensor(dr_p, table.pick(y_p, "ps:dip"))[:, 0, :] @ P
-    bq = K._tensor(dr_p, table.pick(y_p, "ps:quad"))[:, 0, :] @ P
-    ps_basis = torch.cat([bd[:, :3], bq[:, 3:]], 1)
-    sym = tab.symbols
-    ps_type = torch.tensor([PSEUDO_TYPES.index(f"{sym[a]}<{sym[b]}") for a, b in zip(s[ps_i].tolist(), s[ps_j].tolist())],
-                           dtype=torch.long)
+    ps_lut, ch_lut = _luts(tab, chan)
+    ps_lut, ch_lut = ps_lut.to(dev), ch_lut.to(dev)
+    ps_basis = torch.cat([Rp[nq][:, :3], Rp[nq + 1][:, 3:]], 1)[keep]
+    ps_type = ps_lut[s[i], s[j]][keep]
     # -- channels (direct CT) ----------------------------------------------------------------------------------------
-    names = [f"{sym[a]}>{sym[b]}" for a, b in zip(s[i].tolist(), s[j].tolist())]
-    ck = torch.tensor([n in chan.types for n in names], dtype=torch.bool) & (r_ang < chan.cutoff)
+    ct = ch_lut[s[i], s[j]]
+    ck = (ct >= 0) & (r_ang < chan.cutoff)
     ch_index = dp[:, ck]
     ch_r = r_ang[ck]
-    ch_type = torch.tensor([CHANNEL_TYPES.index(n) for n, k in zip(names, ck.tolist()) if k], dtype=torch.long)
     ch_ltaper = torch.log(CT._taper(ch_r, chan.cutoff, chan.taper).clamp(min=1e-300))
-    mask = torch.zeros(B, nmax, dtype=torch.bool).index_put((b_idx, loc), torch.ones(N, dtype=torch.bool))
+    mask = torch.zeros(B, nmax, dtype=torch.bool, device=dev).index_put((b_idx, loc), torch.ones(N, dtype=torch.bool, device=dev))
     lab = dict(labels or {})
     lab.setdefault("n", counts.to(dt))
-    lab.setdefault("ct_mask", torch.ones(B, dtype=torch.bool))
+    lab.setdefault("ct_mask", torch.ones(B, dtype=torch.bool, device=dev))
     nT = len(CHANNEL_TYPES)
-    lab.setdefault("chan", torch.full((B, nT), float("nan"), dtype=dt))
+    lab.setdefault("chan", torch.full((B, nT), float("nan"), dtype=dt, device=dev))
     for key in ("pol", "ct", "pauli", "disp", "elec", "int"):
-        lab.setdefault(key, torch.full((B,), float("nan"), dtype=dt))
+        lab.setdefault(key, torch.full((B,), float("nan"), dtype=dt, device=dev))
     return {"B": B, "nmax": nmax, "L": L, "A_off": A_off, "VD": front["VD"], "KD": front["KD"], "VA": front["VA"],
             "KA": front["KA"], "mask": mask, "species": s, "feats": feats, "frame": b_idx, "pos": pos_ang,
-            "ch_index": ch_index, "ch_type": ch_type, "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]],
-            "ch_ltaper": ch_ltaper, "ps_index": torch.stack([ps_i, ps_j]), "ps_type": ps_type, "ps_r": r_ang[keep],
+            "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]],
+            "ch_ltaper": ch_ltaper, "ps_index": dp[:, keep], "ps_type": ps_type, "ps_r": r_ang[keep],
             "ps_basis": ps_basis, "env": env, "labels": lab}

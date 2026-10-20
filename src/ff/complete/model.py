@@ -160,7 +160,7 @@ class CompleteModel(IonCTModel):
     def alpha_inverse(self, alpha, sp, env):
         """(N, 3, 3) inverse polarizability: isotropic 1/alpha times expm(kappa S2 / s2)."""
         if not self.aniso or env is None or "dip:S2" not in env:
-            return torch.eye(3, dtype=alpha.dtype)[None] / alpha[:, None, None]
+            return torch.eye(3, dtype=alpha.dtype, device=alpha.device)[None] / alpha[:, None, None]
         M = torch.linalg.matrix_exp(self.kappa_aniso[sp][:, None, None] * env["dip:S2"] / self.s2_scale)
         return M / alpha[:, None, None]
 
@@ -168,7 +168,7 @@ class CompleteModel(IonCTModel):
     def _local(bt):
         fr = bt["frame"]
         counts = torch.bincount(fr, minlength=bt["B"])
-        return fr, torch.arange(fr.shape[0]) - (torch.cumsum(counts, 0) - counts)[fr]
+        return fr, torch.arange(fr.shape[0], device=fr.device) - (torch.cumsum(counts, 0) - counts)[fr]
 
     def dphi_pairs(self, bt, x, phi_ext):
         """(C,) donor-minus-acceptor environment potential (Eh/e) of each channel i -> j, every atom but i and j."""
@@ -229,7 +229,7 @@ class CompleteModel(IonCTModel):
         n = sp.shape[0]
         c = self.confinement(I, None, sp)
         alpha_flat = self.tab.alpha[sp] * c[:, 0]
-        Cq = torch.ones(B, nmax, dtype=I.dtype).masked_scatter(mask, self.tab.C[sp] * c[:, 1])
+        Cq = torch.ones(B, nmax, dtype=I.dtype, device=I.device).masked_scatter(mask, self.tab.C[sp] * c[:, 1])
         Lflat = I.new_zeros(n, 8)
         A_ps = I.new_zeros(0)
         if self.pseudo and bt["ps_index"].shape[1]:
@@ -243,7 +243,7 @@ class CompleteModel(IonCTModel):
             phi_ext = -(Fa * bt["pos"] / K.BOHR_ANG).sum(-1)
         L = bt["L"] + I.new_zeros(B, nmax, 8).masked_scatter(mask[..., None].expand(B, nmax, 8), Lflat)
         ainv = self.alpha_inverse(alpha_flat, sp, bt.get("env"))
-        ainv_pad = torch.eye(3, dtype=I.dtype).expand(B, nmax, 3, 3).clone()
+        ainv_pad = torch.eye(3, dtype=I.dtype, device=I.device).expand(B, nmax, 3, 3).clone()
         ainv_pad = ainv_pad.masked_scatter(mask[..., None, None].expand(B, nmax, 3, 3), ainv)
         x0 = solve_induction_blocks(L, bt["A_off"], ainv_pad, Cq, quadrupoles)
         e_pol = 0.5 * (L * x0).sum((1, 2))
