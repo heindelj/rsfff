@@ -343,7 +343,7 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              feat_scale=feat_scale, c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"),
                              pseudo=g("pseudo", False), tie_c=g("tie_c", False), species_emb=g("species_emb", False),
                              aniso=not g("no_aniso", False), ct_gap=not g("no_ct_gap", False),
-                             dphi_scale=g("dphi_scale", 0.05))
+                             dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -364,9 +364,25 @@ def loss_terms(out, bt):
 
 def pauli_term(out, bt):
     """Per-frame per-ion error (kJ/mol) of the frozen Pauli energy against ALMO mod_pauli (zero where no label)."""
+    return _term(out["e_pauli"], bt, "pauli")
+
+
+def disp_term(out, bt):
+    return _term(out["e_disp"], bt, "disp")
+
+
+def int_term(out, bt):
+    """Total interaction energy: the cls_elec label (fixed electrostatics, Stage A parity) + the model's Pauli,
+    dispersion, polarization and CT, against ALMO int."""
     lab = bt["labels"]
-    y = lab["pauli"]
-    return torch.where(torch.isfinite(y), (out["e_pauli"] - torch.nan_to_num(y)) * KJ / lab["n"], torch.zeros_like(y))
+    e = lab["elec"] + out["e_pauli"] + out["e_disp"] + out["e_pol"] + out["e_ct"]
+    return torch.where(lab["ct_mask"], _term(e, bt, "int"), torch.zeros_like(e))     # no CT label: no total either
+
+
+def _term(e, bt, key):
+    lab = bt["labels"]
+    y = lab[key]
+    return torch.where(torch.isfinite(y), (e - torch.nan_to_num(y)) * KJ / lab["n"], torch.zeros_like(y))
 
 
 def evaluate(model, caches, bs=64):
@@ -381,6 +397,11 @@ def evaluate(model, caches, bs=64):
                 rows.append({**{k: v for k, v in f.meta.items() if k != "cta_E"}, "pol_ref": f.labels["pol"] * KJ, "ct_ref": f.labels["ct"] * KJ,
                              "pol": out["e_pol"][q].item() * KJ, "ct": out["e_ct"][q].item() * KJ,
                              "pauli_ref": f.labels.get("pauli", float("nan")) * KJ, "pauli": out["e_pauli"][q].item() * KJ,
+                             "disp_ref": f.labels.get("disp", float("nan")) * KJ,
+                             "disp": out["e_disp"][q].item() * KJ if "e_disp" in out else float("nan"),
+                             "int_ref": f.labels.get("int", float("nan")) * KJ,
+                             "int": (f.labels.get("elec", float("nan")) + out["e_pauli"][q].item() + out.get("e_disp", out["e_pauli"])[q].item()
+                                     + out["e_pol"][q].item() + out["e_ct"][q].item()) * KJ,
                              "ct_mask": bool(f.labels["ct_mask"])})
     model.train()
     return rows
@@ -397,6 +418,12 @@ def summarize(rows):
         pa = np.array([r["pauli"] - r["pauli_ref"] for r in sel if np.isfinite(r.get("pauli_ref", np.nan))])
         if len(pa) and any(r["pauli"] != 0 for r in sel):
             out["pauli_mae"] = float(np.abs(pa).mean())
+        if any(r["pauli"] != 0 for r in sel):          # a model with frozen terms: dispersion and total interaction
+            for key in ("disp", "int"):
+                d = np.array([r[key] - r[f"{key}_ref"] for r in sel if (key != "int" or r["ct_mask"])
+                              and np.isfinite(r.get(f"{key}_ref", np.nan)) and np.isfinite(r.get(key, np.nan))])
+                if len(d):
+                    out[f"{key}_mae"] = float(np.abs(d).mean())
         if len(c):
             out.update(ct_mae=float(np.abs(c).mean()), ct_rms=float(np.sqrt((c ** 2).mean())),
                        ct_rel=float(np.abs(c).sum() / max(np.abs(cr).sum(), 1e-12)))
@@ -470,6 +497,10 @@ def main():
     ap.add_argument("--no-aniso", action="store_true", help="complete: isotropic polarizability")
     ap.add_argument("--no-ct-gap", action="store_true", help="complete: no environment gap factor on the CT")
     ap.add_argument("--dphi-scale", type=float, default=0.05, help="complete: scale (Eh/e) of the CT gap potential")
+    ap.add_argument("--frozen", action="store_true", help="complete: frozen Pauli (env qP) and dispersion (env C6) terms")
+    ap.add_argument("--w-disp", type=float, default=0.0, help="weight of the dispersion energy vs ALMO disp")
+    ap.add_argument("--w-int", type=float, default=0.0,
+                    help="weight of the total interaction energy (cls_elec label + pauli + disp + pol + ct) vs ALMO int")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=10)
     a = ap.parse_args()
@@ -528,6 +559,10 @@ def main():
             loss = (a.w_pol * ep_ ** 2 + a.w_ct * ec_ ** 2 + a.w_chan * (ech_ ** 2).sum(1)).mean()
             if a.w_pauli > 0:
                 loss = loss + a.w_pauli * (pauli_term(o, bt) ** 2).mean()
+            if a.w_disp > 0:
+                loss = loss + a.w_disp * (disp_term(o, bt) ** 2).mean()
+            if a.w_int > 0:
+                loss = loss + a.w_int * (int_term(o, bt) ** 2).mean()
             if polar_tr and step % a.alpha_every == 0:      # the stencil batch is the costly part: every k-th step, k x weight
                 ap_, ac_ = polar_loss(model, pb_tr)
                 loss = loss + a.alpha_every * a.w_alpha * (ap_ ** 2 + a.w_alpha_ct * ac_ ** 2).mean()
@@ -541,7 +576,8 @@ def main():
         sched.step()
         if ep % a.log_every == 0 or ep == a.epochs:
             sv = summarize(evaluate(model, va))["all"]
-            score = sv.get("pol_mae", 0) + sv.get("ct_mae", 0) + (sv.get("pauli_mae", 0) if a.w_pauli > 0 else 0)
+            score = (sv.get("pol_mae", 0) + sv.get("ct_mae", 0) + (sv.get("pauli_mae", 0) if a.w_pauli > 0 else 0)
+                     + (sv.get("disp_mae", 0) if a.w_disp > 0 else 0))
             if score < best:
                 best, best_state = score, {k: v.clone() for k, v in model.state_dict().items()}
             log.append({"epoch": ep, "train_loss": tot / len(tr), **{f"val_{k}": v for k, v in sv.items()}})
@@ -551,7 +587,7 @@ def main():
                     ap_, ac_ = polar_loss(model, pb_all)
                 msg = f" | alpha/ion |err| pol {ap_.abs().mean():.2f} ct {ac_.abs().mean():.2f} bohr^3"
             if "pauli_mae" in sv:
-                msg = f" pauli MAE {sv['pauli_mae']:.2f}" + msg
+                msg = f" pauli MAE {sv['pauli_mae']:.2f}" + (f" disp MAE {sv['disp_mae']:.2f}" if "disp_mae" in sv else "") + msg
             print(f"ep {ep:4d} loss {tot / len(tr):.4f} | val pol MAE {sv.get('pol_mae', 0):.2f} ct MAE "
                   f"{sv.get('ct_mae', 0):.2f} kJ/mol{msg} [{time.time() - t0:.0f}s]", flush=True)
     model.load_state_dict(best_state)
@@ -602,7 +638,8 @@ def main():
     json.dump({"metrics": res, "log": log, "args": vars(a)}, open(out / "metrics.json", "w"), indent=1)
     for name in ("train", "val", "test"):
         m = res[name]["all"]
-        print(f"{name:5} pol MAE {m.get('pol_mae', 0):.2f}  ct MAE {m.get('ct_mae', 0):.2f} kJ/mol "
+        extra = "".join(f"  {k} MAE {m[f'{k}_mae']:.2f}" for k in ("pauli", "disp", "int") if f"{k}_mae" in m)
+        print(f"{name:5} pol MAE {m.get('pol_mae', 0):.2f}  ct MAE {m.get('ct_mae', 0):.2f}{extra} kJ/mol "
               f"(ct rel {m.get('ct_rel', 0):.3f}); full clusters: {res[name].get('full', {})}")
 
 

@@ -231,7 +231,7 @@ def collate(frames: list[FrameCache]) -> dict:
     if all(f.env for f in frames):
         env = {k: torch.cat([f.env[k] for f in frames]) for k in frames[0].env}
     lab = {key: torch.tensor([f.labels.get(key, float("nan")) for f in frames], dtype=dt)
-           for key in ("pol", "ct", "pauli")}
+           for key in ("pol", "ct", "pauli", "disp", "elec", "int")}
     lab["ct_mask"] = torch.tensor([bool(f.labels.get("ct_mask", True)) for f in frames])
     nT = len(CHANNEL_TYPES)
     lab["chan"] = torch.tensor([f.labels.get("chan") or [float("nan")] * nT for f in frames], dtype=dt)

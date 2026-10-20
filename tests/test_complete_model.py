@@ -97,3 +97,18 @@ def test_forces_match_finite_differences(setup):
         m.kappa_aniso.zero_()
         m.gap_lamD.zero_()
         m.gap_lamA.zero_()
+
+
+def test_frozen_terms_signs_and_isolated_limit(setup):
+    tab, chan, feat, c, m = setup
+    mf = CompleteModel(tab, chan, c.feats.shape[1], feature_names=feat.feature_names, feat_scale=m.feat_scale,
+                       pseudo=True, frozen=True)
+    iso = precompute(["Cl"], [[0, 0, 0]], tab, chan, feat, lean=True, frontier=True)
+    o = mf(collate([c, iso]))
+    assert o["e_pauli"][0] > 0 and o["e_disp"][0] < 0
+    assert o["e_pauli"][1] == 0 and o["e_disp"][1] == 0
+    qP, bP, C6, b6 = o["frozen_params"]
+    assert torch.allclose(qP[-1], mf.pauli_lnq0[c.species.new_tensor(tab.symbols.index("Cl"))].exp())
+    # the frozen heads only see overlaps
+    names = [feat.feature_names[k] for k in mf.frozen_cols.tolist()]
+    assert all(n.split(":")[-1] in ("S0", "|S1|", "|S2|") for n in names)

@@ -14,6 +14,12 @@ and two equivariant pieces that the invariant-only model cannot express:
   OTHER atoms over the donor frontier density of i and the acceptor frontier density of j. For a dimer dphi = 0 (the
   pair kernel carries the pair), so this is the three-body shift of the CT gap by the environment; lam = 0 at start.
 
+Frozen-level terms (``frozen=True``), labels ``mod_pauli`` and ``disp``, heads on the overlap invariants only
+(the EDA hierarchy: no fields at the frozen level):
+
+    E_P    = sum_{i<j} qP_i qP_j f(bP_i, bP_j; r) / r,   qP_i = qP0[s] exp(head_P(S_i))      (penetration kernel >= 0)
+    E_disp = -sum_{i<j} f6(sqrt(b_i b_j) r) sqrt(C6_i C6_j) / r^6,   C6_i = C60[s] exp(head_6(S_i))   (Tang-Toennies)
+
 Species enter only through the isolated-atom parameters (alpha0, C0, the CT charges qD0 / qA0 and exponents, kappa,
 lam) and the pseudo-potential pair types; the heads are shared (``species_emb`` adds an embedding to their input).
 """
@@ -24,8 +30,9 @@ import math
 import torch
 from torch import nn
 
+from ..dispersion import DEFAULT_C6_PRIOR, tt_damped_c6_energy
 from ..ionct import kernels as K
-from ..ionct.model import CHANNEL_TYPES, IonCTModel
+from ..ionct.model import CHANNEL_TYPES, PAULI_INIT, IonCTModel
 from ..ionct.params import IonTable
 from ..ionct.ct import ChannelTable
 from ..multipole import slater_two_center_damp_unequal
@@ -34,6 +41,13 @@ from .heads import EnvironmentHead
 __all__ = ["CompleteModel", "solve_induction_blocks"]
 
 GAP_EXP_MAX = 4.0     # bound on the log of the CT gap factor
+#: start values from a fit to the ct-scan pair labels (R >= 2.2 A), unequal-exponent penetration kernel:
+#: Pauli (qP [e], bP [1/bohr]) vs mod_pauli (rel rms Na-Cl 12 %, Cl-Cl 3 %); dispersion (C6 [Ha bohr^6], b [1/bohr])
+#: vs disp with geometric-mean combination (rms Cl-Cl 0.37, Na-Cl 0.84 kJ/mol -- the combination rule is the weak
+#: spot, the environment head and a learned b take it from there). Other species: DEFAULT_C6_PRIOR / fallback.
+PAULI_INIT_UNEQUAL = {"Na": (1.077, 1.453), "Cl": (7.035, 1.599)}
+DISP_INIT = {"Na": (3.41, 3.872), "Cl": (554.7, 1.130)}
+DISP_FALLBACK = (10.0, 2.0)
 
 
 def solve_induction_blocks(L, A_off, alpha_inv, C, quadrupoles=True):
@@ -63,7 +77,7 @@ class CompleteModel(IonCTModel):
 
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
-                 species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05):
+                 species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=pseudo, ps_init=ps_init, tie_c=tie_c, ct_form="direct",
                          gap_form="pair", pol_form="confine")
@@ -84,6 +98,20 @@ class CompleteModel(IonCTModel):
         if ct_gap:
             self.gap_lamD = nn.Parameter(torch.zeros(S, dtype=torch.float64))
             self.gap_lamA = nn.Parameter(torch.zeros(S, dtype=torch.float64))
+        self.frozen = frozen
+        if frozen:
+            f64 = dict(dtype=torch.float64)
+            sym = tab.symbols
+            pp = [PAULI_INIT_UNEQUAL.get(x, PAULI_INIT.get(x, (1.0, 1.5))) for x in sym]
+            self.pauli_lnq0 = nn.Parameter(torch.tensor([math.log(q) for q, _ in pp], **f64))
+            self.pauli_lnb = nn.Parameter(torch.tensor([math.log(b) for _, b in pp], **f64))
+            pri = [DISP_INIT.get(x, DEFAULT_C6_PRIOR.get(int(z), DISP_FALLBACK)) for x, z in zip(sym, tab.Z.tolist())]
+            self.disp_lnc60 = nn.Parameter(torch.tensor([math.log(c) for c, _ in pri], **f64))
+            self.disp_lnb = nn.Parameter(torch.tensor([math.log(b) for _, b in pri], **f64))
+            # the frozen heads see the overlap invariants only (no fields at the frozen level)
+            cols = [k for k, nm in enumerate(names) if nm.split(":")[-1] in ("S0", "|S1|", "|S2|")] or list(range(n_feat))
+            self.register_buffer("frozen_cols", torch.tensor(cols, dtype=torch.long))
+            self.head_frozen = EnvironmentHead(len(cols), 2, hidden, depth, ns)     # log qP / qP0, log C6 / C60
         self.double()
 
     # -- heads --
@@ -152,6 +180,27 @@ class CompleteModel(IonCTModel):
         e_type = e_ch.new_zeros(B * nT).index_add(0, bt["ch_frame"] * nT + bt["ch_type"], e_ch).reshape(B, nT)
         return e, e_type, e_ch, dphi
 
+    def frozen_params(self, I, sp):
+        """Per atom: Pauli charge qP, exponent bP, C6, dispersion exponent (each (N,))."""
+        u = self.head_frozen(I[:, self.frozen_cols], sp)
+        qP = torch.exp(self.pauli_lnq0[sp] + u[:, 0])
+        C6 = torch.exp(self.disp_lnc60[sp] + u[:, 1])
+        return qP, self.pauli_lnb[sp].exp(), C6, self.disp_lnb[sp].exp()
+
+    def frozen_terms(self, I, bt, sp):
+        """Frozen Pauli and dispersion energies per frame (B,), (B,) and the parameters."""
+        B = bt["B"]
+        qP, bP, C6, b6 = self.frozen_params(I, sp)
+        pairs = K.all_pairs(bt["frame"])
+        i, j = pairs
+        r_ang = (bt["pos"][j] - bt["pos"][i]).norm(dim=-1)
+        rb = r_ang / K.BOHR_ANG
+        f = slater_two_center_damp_unequal(bP[i], bP[j], rb, 0)[0]
+        e_p = qP[i] * qP[j] * f / rb
+        e_d = tt_damped_c6_energy(r_ang, torch.sqrt(C6[i] * C6[j]), torch.sqrt(b6[i] * b6[j]))
+        fr = bt["frame"][i]
+        return I.new_zeros(B).index_add(0, fr, e_p), I.new_zeros(B).index_add(0, fr, e_d), (qP, bP, C6, b6)
+
     # -- the model --
     def forward(self, bt: dict, quadrupoles=True, field=None) -> dict:
         sp = bt["species"]
@@ -185,10 +234,13 @@ class CompleteModel(IonCTModel):
         else:
             e_ct, e_type, e_ch, dphi = I.new_zeros(B), I.new_zeros(B, len(CHANNEL_TYPES)), I.new_zeros(0), I.new_zeros(0)
         z = I.new_zeros(nC)
+        e_pauli, e_disp, frz = I.new_zeros(B), I.new_zeros(B), None
+        if self.frozen:
+            e_pauli, e_disp, frz = self.frozen_terms(I, bt, sp)
         return {"e_pol": e_pol, "e_ct": e_ct, "e_ct_post": e_ct, "e_type": e_type, "c": c, "dov": z, "A_ps": A_ps,
                 "W": z, "Delta": z, "delta": z, "p": z, "dq": I.new_zeros(n), "x": x0, "x_pol": x0,
-                "joint_iters": 0, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": I.new_zeros(B), "dphi": dphi,
-                "alpha_inv": ainv}
+                "joint_iters": 0, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": e_pauli, "e_disp": e_disp,
+                "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv}
 
     def smoothness_penalty(self, bt, sigma=0.05):
         """Feature-noise penalty on the heads' log outputs (log c, log q) and the pseudo-potential strengths."""
@@ -199,6 +251,9 @@ class CompleteModel(IonCTModel):
         I1, I2 = self.scaled(f), self.scaled(f + noise)
         pen = ((torch.log(self.confinement_from(I2, sp)) - torch.log(self.confinement_from(I1, sp))) ** 2).mean()
         pen = pen + ((self.head_ctq(I2, sp) - self.head_ctq(I1, sp)) ** 2).mean()
+        if self.frozen:
+            c_ = self.frozen_cols
+            pen = pen + ((self.head_frozen(I2[:, c_], sp) - self.head_frozen(I1[:, c_], sp)) ** 2).mean()
         if self.pseudo and bt["ps_index"].shape[1]:
             h1, _ = self.latents(f, sp)
             h2, _ = self.latents(f + noise, sp)
@@ -208,12 +263,18 @@ class CompleteModel(IonCTModel):
             pen = pen + ((torch.log1p(a2 / A0) - torch.log1p(a1 / A0)) ** 2).mean()
         return pen / sigma ** 2
 
+    @torch.no_grad()
     def summary(self):
         sym = self.tab.symbols
         out = {"qD0/qA0": {x: [round(v, 4) for v in self.ct_lnq0[k].exp().tolist()] for k, x in enumerate(sym)}}
         if self.aniso:
-            out["kappa_aniso"] = {x: round(float(self.kappa_aniso[k]), 4) for k, x in enumerate(sym)}
+            out["kappa_aniso"] = {x: round(float(self.kappa_aniso[k].detach()), 4) for k, x in enumerate(sym)}
         if self.ct_gap:
             out["lam_D"] = {x: round(float(self.gap_lamD[k]), 4) for k, x in enumerate(sym)}
             out["lam_A"] = {x: round(float(self.gap_lamA[k]), 4) for k, x in enumerate(sym)}
+        if self.frozen:
+            out["pauli qP0/bP"] = {x: [round(float(self.pauli_lnq0[k].exp()), 4), round(float(self.pauli_lnb[k].exp()), 4)]
+                                  for k, x in enumerate(sym)}
+            out["disp C60/b"] = {x: [round(float(self.disp_lnc60[k].exp()), 3), round(float(self.disp_lnb[k].exp()), 4)]
+                                for k, x in enumerate(sym)}
         return out
