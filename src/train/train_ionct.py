@@ -333,6 +333,109 @@ def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0,
     return caches
 
 
+FORCE_TEST = ("nacl14", "nacl16", "nacl18", "nacl20")
+KJ_ANG = KJ / 0.529177210903          # Hartree/bohr -> kJ/mol/A
+
+
+def monomer_energies(eda_dirs):
+    """{symbol: isolated-ion SCF energy (Hartree)} from the ``fragment_energies`` of EDA extxyz files."""
+    from ase.io import read
+    out = {}
+    for d in eda_dirs:
+        for f in sorted(Path(d).glob("*.xyz")):
+            for a in read(f, ":"):
+                fe = a.info.get("fragment_energies")
+                if fe is None:
+                    continue
+                fi = a.arrays["fragment_idx"]
+                for k, e in enumerate(np.asarray(fe, float).reshape(-1)):
+                    out.setdefault(a.get_chemical_symbols()[int(np.argmax(fi == k))], float(e))
+                if len(out) >= 2:
+                    return out
+    return out
+
+
+def load_force_frames(dirs, mono, species=("Na", "Cl")):
+    """[(symbols, coords A, {'int': Hartree, 'forces': (N, 3) Hartree/bohr}, meta)] from extxyz files with total
+    energies and forces (atomic units); the interaction energy is E - sum of the isolated-ion energies."""
+    from ase.io import read
+    out = []
+    for d in dirs:
+        for f in sorted(Path(d).glob("*.xyz")):
+            for k, a in enumerate(read(f, ":")):
+                sym = a.get_chemical_symbols()
+                if not set(sym) <= set(species) or a.calc is None or "forces" not in a.calc.results:
+                    continue
+                e_int = float(a.get_potential_energy()) - sum(mono[x] for x in sym)
+                out.append((sym, np.asarray(a.positions, float), {"int": e_int, "forces": np.asarray(a.get_forces(), float)},
+                            {"workflow": "force", "parent": f.stem, "file": f.stem, "index": k, "n": len(sym)}))
+    return out
+
+
+def radial_table(tab, params_path, cache_dir=None):
+    """The complete model's :class:`RadialTable` for this parameter table, cached on disk by the table's hash."""
+    import hashlib
+    from ..ff.complete import RadialTable
+    key = hashlib.sha1(Path(params_path).read_bytes()).hexdigest()[:16]
+    path = Path(cache_dir) / f"table_{key}.pt" if cache_dir else None
+    if path and path.exists():
+        return torch.load(path, weights_only=False)
+    t0 = time.time()
+    table = RadialTable(tab)
+    print(f"radial table: {table.n_funcs} functions x {table.G} points in {time.time() - t0:.0f}s", flush=True)
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(table, path)
+    return table
+
+
+def force_terms(model, frames, tab, table, chan):
+    """Energy (per ion, kJ/mol) and force (per component, kJ/mol/A) errors of a list of force frames through the
+    batched differentiable precompute: (B,), (sum N, 3). Forces are -dE/dx with the graph kept for training."""
+    from ..ff.complete import batched_precompute
+    Zmap = {"Na": 11, "Cl": 17}
+    pos = torch.tensor(np.concatenate([X for _, X, *_ in frames]), dtype=torch.float64, requires_grad=True)
+    Z = torch.tensor([Zmap[x] for sym, *_ in frames for x in sym])
+    fr = torch.cat([torch.full((len(sym),), k, dtype=torch.long) for k, (sym, *_) in enumerate(frames)])
+    bt = batched_precompute(pos, Z, fr, tab, table, chan)
+    out = model(bt)
+    E = out["e_int"]
+    F = -torch.autograd.grad(E.sum(), pos, create_graph=True)[0]
+    e_ref = torch.tensor([lab["int"] for _, _, lab, _ in frames], dtype=torch.float64)
+    f_ref = torch.tensor(np.concatenate([lab["forces"] for _, _, lab, _ in frames]), dtype=torch.float64)
+    n = torch.tensor([len(sym) for sym, *_ in frames], dtype=torch.float64)
+    return (E - e_ref) * KJ / n, F * KJ - f_ref * KJ_ANG, out      # model forces are Hartree/A, labels Hartree/bohr
+
+
+def force_metrics(model, frames, tab, table, chan, bs=16):
+    """Held-out energy and force errors over force frames: E/ion MAE and rms (kJ/mol), force rms and MAE per
+    component (kJ/mol/A), max |dF|, and the same per file."""
+    if not frames:
+        return {}
+    model.eval()
+    es, fs, per = [], [], {}
+    for k in range(0, len(frames), bs):
+        chunk = frames[k:k + bs]
+        e, f, _ = force_terms(model, chunk, tab, table, chan)
+        e, f = e.detach(), f.detach()
+        es.append(e)
+        fs.append(f)
+        off = 0
+        for (sym, _, _, meta), ek in zip(chunk, e):
+            n = len(sym)
+            d = per.setdefault(meta["file"], {"e": [], "f": []})
+            d["e"].append(abs(float(ek)))
+            d["f"].append(float((f[off:off + n] ** 2).mean().sqrt()))
+            off += n
+    model.train()
+    e, f = torch.cat(es), torch.cat(fs)
+    out = {"n": len(frames), "e_mae": float(e.abs().mean()), "e_rms": float((e ** 2).mean().sqrt()),
+           "f_rms": float((f ** 2).mean().sqrt()), "f_mae": float(f.abs().mean()), "f_max": float(f.abs().max())}
+    out["per_file"] = {k: {"e_mae": float(np.mean(v["e"])), "f_rms": float(np.sqrt(np.mean(np.square(v["f"]))))}
+                       for k, v in sorted(per.items())}
+    return out
+
+
 def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None):
     """The model of a run from its arguments (train_ionct's, as saved in model.pt): the ion CT model or, with
     ``model == "complete"``, the complete model on the environment heads."""
@@ -498,6 +601,15 @@ def main():
     ap.add_argument("--no-ct-gap", action="store_true", help="complete: no environment gap factor on the CT")
     ap.add_argument("--dphi-scale", type=float, default=0.05, help="complete: scale (Eh/e) of the CT gap potential")
     ap.add_argument("--frozen", action="store_true", help="complete: frozen Pauli (env qP) and dispersion (env C6) terms")
+    ap.add_argument("--force-data", nargs="*", default=None,
+                    help="complete + frozen: extxyz dirs with total energies and forces (atomic units); trains total "
+                         "interaction energies and forces through the tabulated, differentiable precompute")
+    ap.add_argument("--w-force", type=float, default=0.0, help="weight of the force loss (kJ/mol/A per component)")
+    ap.add_argument("--w-fe", type=float, default=1.0, help="weight of the force frames' total energy (kJ/mol per ion)")
+    ap.add_argument("--force-every", type=int, default=1, help="force step every k-th energy step (weight x k)")
+    ap.add_argument("--force-batch", type=int, default=16)
+    ap.add_argument("--force-test", nargs="*", default=list(FORCE_TEST), help="force files (stems) held out")
+    ap.add_argument("--init-from", default=None, help="model.pt of a previous run to start from (same architecture)")
     ap.add_argument("--w-disp", type=float, default=0.0, help="weight of the dispersion energy vs ALMO disp")
     ap.add_argument("--w-int", type=float, default=0.0,
                     help="weight of the total interaction energy (cls_elec label + pauli + disp + pol + ct) vs ALMO int")
@@ -545,6 +657,24 @@ def main():
             (polar_te if held else polar_tr).append(c)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)
         pb_tr, pb_all = polar_batch(polar_tr), polar_batch(polar_tr + polar_te)
+    if a.init_from:
+        ck = torch.load(a.init_from, weights_only=False)
+        missing, unexpected = model.load_state_dict(ck["state"], strict=False)
+        print(f"init from {a.init_from}: {len(missing)} new parameters, {len(unexpected)} dropped", flush=True)
+    force_tr, force_te, table = [], [], None
+    if a.force_data:
+        if not (a.model == "complete" and a.frozen):
+            raise SystemExit("--force-data needs --model complete --frozen (the model must own every term)")
+        mono = monomer_energies([a.walk_eda] if a.walk_eda else [])
+        if len(mono) < 2:
+            raise SystemExit("monomer energies: --walk-eda files with fragment_energies are needed")
+        print(f"monomer energies (Hartree): {mono}", flush=True)
+        ff = load_force_frames(a.force_data, mono)
+        held = set(a.force_test)
+        force_tr = [f for f in ff if f[3]["file"] not in held]
+        force_te = [f for f in ff if f[3]["file"] in held]
+        print(f"force frames: {len(force_tr)} train, {len(force_te)} held out ({', '.join(sorted(held))})", flush=True)
+        table = radial_table(tab, a.params, a.cache_dir)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs, eta_min=a.lr * 0.02)
     best, best_state, log = math.inf, None, []
@@ -568,6 +698,10 @@ def main():
                 loss = loss + a.alpha_every * a.w_alpha * (ap_ ** 2 + a.w_alpha_ct * ac_ ** 2).mean()
             if a.w_smooth > 0:
                 loss = loss + a.w_smooth * model.smoothness_penalty(bt, a.smooth_sigma)
+            if force_tr and a.w_force > 0 and step % a.force_every == 0:
+                fb = random.sample(force_tr, min(a.force_batch, len(force_tr)))
+                fe_, ff_, _ = force_terms(model, fb, tab, table, chan)
+                loss = loss + a.force_every * (a.w_fe * (fe_ ** 2).mean() + a.w_force * (ff_ ** 2).mean())
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
@@ -588,6 +722,10 @@ def main():
                 msg = f" | alpha/ion |err| pol {ap_.abs().mean():.2f} ct {ac_.abs().mean():.2f} bohr^3"
             if "pauli_mae" in sv:
                 msg = f" pauli MAE {sv['pauli_mae']:.2f}" + (f" disp MAE {sv['disp_mae']:.2f}" if "disp_mae" in sv else "") + msg
+            if force_te:
+                fm = force_metrics(model, force_te, tab, table, chan)
+                msg += f" | held-out forces: E/ion MAE {fm['e_mae']:.2f} kJ/mol, F rms {fm['f_rms']:.1f} kJ/mol/A"
+                log[-1].update({f"force_{k}": v for k, v in fm.items()})
             print(f"ep {ep:4d} loss {tot / len(tr):.4f} | val pol MAE {sv.get('pol_mae', 0):.2f} ct MAE "
                   f"{sv.get('ct_mae', 0):.2f} kJ/mol{msg} [{time.time() - t0:.0f}s]", flush=True)
     model.load_state_dict(best_state)
@@ -635,6 +773,11 @@ def main():
                     w = csv.DictWriter(fh, fieldnames=list(r))
                     w.writeheader()
                 w.writerow({k: r.get(k) for k in w.fieldnames})
+    if force_tr or force_te:
+        res["force_train"] = force_metrics(model, force_tr, tab, table, chan)
+        res["force_test"] = force_metrics(model, force_te, tab, table, chan)
+        for name in ("force_train", "force_test"):
+            print(f"{name}: " + json.dumps(res[name]), flush=True)
     json.dump({"metrics": res, "log": log, "args": vars(a)}, open(out / "metrics.json", "w"), indent=1)
     for name in ("train", "val", "test"):
         m = res[name]["all"]

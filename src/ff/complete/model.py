@@ -46,6 +46,7 @@ from ..ionct.model import CHANNEL_TYPES, PAULI_INIT, IonCTModel
 from ..ionct.params import IonTable
 from ..ionct.ct import ChannelTable
 from ..multipole import slater_two_center_damp_unequal
+from .elst import permanent_electrostatics
 from .heads import EnvironmentHead
 
 __all__ = ["CompleteModel", "solve_induction_blocks"]
@@ -262,10 +263,12 @@ class CompleteModel(IonCTModel):
         e_pauli, e_disp, frz = I.new_zeros(B), I.new_zeros(B), None
         if self.frozen:
             e_pauli, e_disp, frz = self.frozen_terms(I, bt, sp)
+        e_elst = permanent_electrostatics(bt["pos"], sp, bt["frame"], self.tab) if self.frozen else I.new_zeros(B)
         return {"e_pol": e_pol, "e_ct": e_ct, "e_ct_post": e_ct, "e_type": e_type, "c": c, "dov": z, "A_ps": A_ps,
                 "W": z, "Delta": z, "delta": z, "p": z, "dq": I.new_zeros(n), "x": x0, "x_pol": x0,
                 "joint_iters": 0, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": e_pauli, "e_disp": e_disp,
-                "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv, "e_breath_atom": e_breath_atom}
+                "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv, "e_breath_atom": e_breath_atom,
+                "e_elst": e_elst, "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct}
 
     def smoothness_penalty(self, bt, sigma=0.05):
         """Feature-noise penalty on the heads' log outputs (log c, log q) and the pseudo-potential strengths."""
