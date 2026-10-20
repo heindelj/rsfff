@@ -88,7 +88,7 @@ class CompleteModel(IonCTModel):
 
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
-                 species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False):
+                 species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh"):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=pseudo, ps_init=ps_init, tie_c=tie_c, ct_form="direct",
                          gap_form="pair", pol_form="confine")
@@ -96,6 +96,13 @@ class CompleteModel(IonCTModel):
         S = len(tab.symbols)
         ns = S if species_emb else 0
         self.head_conf = EnvironmentHead(n_feat, 2, hidden, depth, ns)     # log c_alpha, log c_C
+        # conf_form="mono": stiffening only -- log c_alpha = -softplus(a_s + head) * S[shell]^(0) / s, so c <= 1,
+        # exactly 1 at zero overlap and decreasing in it; any enhancement is the overlap drive's job (M3 analysis:
+        # the two mechanisms otherwise trade off and the network switches between them)
+        self.conf_form = conf_form
+        if conf_form == "mono":
+            self.conf_a = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
+            self.conf_s0_col = list(feature_names or []).index("shell:S0")
         self.head_ctq = EnvironmentHead(n_feat, 2, hidden, depth, ns)      # log qD / qD0, log qA / qA0
         self.ct_lnq0 = nn.Parameter(torch.zeros(S, 2, dtype=torch.float64))
         self.aniso, self.ct_gap, self.dphi_scale = aniso, ct_gap, dphi_scale
@@ -141,8 +148,12 @@ class CompleteModel(IonCTModel):
     def confinement_from(self, I, sp):
         """(N, 2) scales on alpha0 and C0 (c_range, tanh-saturated like the ion CT model), 1 for an isolated atom."""
         u = self.head_conf(I, sp) * self.confine_mask[sp][:, None]
-        lo, hi = self.log_c_lo, self.log_c_hi
-        logc = torch.where(u > 0, hi * torch.tanh(u / hi), lo * torch.tanh(u / lo))
+        if self.conf_form == "mono":
+            rate = nn.functional.softplus(self.conf_a[sp][:, None] + u)          # (N, 2) >= 0
+            logc = -rate * I[:, self.conf_s0_col:self.conf_s0_col + 1].clamp(min=0) * self.confine_mask[sp][:, None]
+        else:
+            lo, hi = self.log_c_lo, self.log_c_hi
+            logc = torch.where(u > 0, hi * torch.tanh(u / hi), lo * torch.tanh(u / lo))
         if self.tie_c:
             logc = torch.stack([logc[:, 0], logc[:, 0] * 5.0 / 3.0], 1)
         return logc.exp()
@@ -300,6 +311,8 @@ class CompleteModel(IonCTModel):
         if self.ct_gap:
             out["lam_D"] = {x: round(float(self.gap_lamD[k]), 4) for k, x in enumerate(sym)}
             out["lam_A"] = {x: round(float(self.gap_lamA[k]), 4) for k, x in enumerate(sym)}
+        if self.conf_form == "mono":
+            out["conf rate softplus(a)"] = {x: round(float(nn.functional.softplus(self.conf_a[k])), 4) for k, x in enumerate(sym)}
         if self.breath:
             out["breath a0 scale"] = {x: round(float(self.breath_lna[k].exp()), 4) for k, x in enumerate(sym)}
             out["breath lam0"] = {x: round(float(self.breath_lam[k]), 4) for k, x in enumerate(sym)}

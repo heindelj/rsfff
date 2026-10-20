@@ -460,7 +460,8 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              feat_scale=feat_scale, c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"),
                              pseudo=g("pseudo", False), tie_c=g("tie_c", False), species_emb=g("species_emb", False),
                              aniso=not g("no_aniso", False), ct_gap=not g("no_ct_gap", False),
-                             dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False))
+                             dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False),
+                             conf_form=g("conf_form", "tanh"))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -616,6 +617,9 @@ def main():
     ap.add_argument("--no-ct-gap", action="store_true", help="complete: no environment gap factor on the CT")
     ap.add_argument("--dphi-scale", type=float, default=0.05, help="complete: scale (Eh/e) of the CT gap potential")
     ap.add_argument("--frozen", action="store_true", help="complete: frozen Pauli (env qP) and dispersion (env C6) terms")
+    ap.add_argument("--conf-form", default="tanh", choices=("tanh", "mono"),
+                    help="complete: confinement form -- tanh (c_range-bounded, either sign) or mono (stiffening only, "
+                         "c <= 1, overlap-gated)")
     ap.add_argument("--force-data", nargs="*", default=None,
                     help="complete + frozen: extxyz dirs with total energies and forces (atomic units); trains total "
                          "interaction energies and forces through the tabulated, differentiable precompute")
@@ -665,7 +669,6 @@ def main():
     scale = F[nz].std(0).clamp(min=1e-6)
     model = build_model(vars(a), tab, chan, F.shape[1], scale, getattr(feat, "feature_names", None))
     dev = torch.device(a.device)
-    tab_cpu = tab                       # the per-frame precompute and the radial table are built on the CPU
     if dev.type != "cpu":
         tab = tab.to(dev)
         model.tab = tab
@@ -674,7 +677,7 @@ def main():
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
         for pid, sym, X, tgt, ok in polar_targets(a.ct_sets):
-            c = precompute(sym, X, tab_cpu, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
+            c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
                            frontier=frontier)
             held = pid in set(a.polar_test) or (a.holdout_scans and pid.startswith("pair_"))
             (polar_te if held else polar_tr).append(c)
@@ -697,7 +700,7 @@ def main():
         force_tr = [f for f in ff if f[3]["file"] not in held]
         force_te = [f for f in ff if f[3]["file"] in held]
         print(f"force frames: {len(force_tr)} train, {len(force_te)} held out ({', '.join(sorted(held))})", flush=True)
-        table = radial_table(tab_cpu, a.params, a.cache_dir).to(dev)
+        table = radial_table(tab, a.params, a.cache_dir).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs, eta_min=a.lr * 0.02)
     best, best_state, log = math.inf, None, []
