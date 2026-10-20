@@ -37,6 +37,7 @@ from ..multipole import (
     build_polytensor,
     damped_interaction_tensor,
     shaped_one_center_damp,
+    shaped_one_center_multi,
     shaped_two_center_damp,
     slater_one_center_damp,
     slater_two_center_damp,
@@ -128,7 +129,7 @@ def _drive_from_permanent(X, species, dpairs, tab, b_par, w_par):
     r = _r(dr)
     si, sj = species[i], species[j]
     bp, wp = b_par[i], w_par[i]
-    lam = 1 - shaped_one_center_damp(bp * r, wp, 2)
+    lam = 1 - shaped_one_center_multi(bp, wp, r, 2)
     out = tab.Z[sj, None] * _tensor(dr, lam)[:, 0, :]
     one = _onehot0(r.shape[0], r)
     for t in range(tab.shell_n.shape[1]):
@@ -165,7 +166,7 @@ def pseudo_drive_basis(pos_ang, species, batch_idx, tab: IonTable, cutoff: float
     out = []
     for bpar, wpar in ((tab.b_dip, tab.w_dip), (tab.b_quad, tab.w_quad)):
         bp, wp = bpar[s[i]], wpar[s[i]]
-        t_pt = _tensor(dr, 1 - shaped_one_center_damp(bp * r, wp, 2))[:, 0, :]
+        t_pt = _tensor(dr, 1 - shaped_one_center_multi(bp, wp, r, 2))[:, 0, :]
         t_sh = _tensor(dr, 1 - shaped_two_center_damp(bp, bP, wp, one, r, 2))[:, 0, :]
         out.append((t_sh - t_pt) @ P)
     basis = torch.cat([out[0][:, :3], out[1][:, 3:]], dim=1)
@@ -479,6 +480,12 @@ def shaped_density_ft(b, w, k):
     """Fourier transform rho(k) (C, K) of the normalized shaped density sum_n w_n N_n r^n e^{-b r} (n = 0..3, each
     component normalized), b (C,), w (C, 4): rho_n(k) = b^{n+3} sin((n+2) theta) / ((n+2) k (b^2 + k^2)^{(n+2)/2}),
     theta = atan2(k, b); rho(0) = 1."""
+    if b.dim() == 2:                                # multi-term shape: sum of its terms
+        out = 0.0
+        for t in range(b.shape[1]):
+            if t == 0 or bool((w[:, t] != 0).any()):
+                out = out + shaped_density_ft(b[:, t], w[:, t], k)
+        return out
     bb, kk = b[:, None], k[None, :]
     th = torch.atan2(kk, bb)
     rr = torch.sqrt(bb * bb + kk * kk)

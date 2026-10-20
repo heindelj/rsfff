@@ -91,3 +91,29 @@ def test_finite_gradients_at_equal_exponents():
     slater_two_center_damp_unequal(b, c, r, 2).sum().backward()
     for t in (b, c, r):
         assert torch.isfinite(t.grad).all()
+
+
+def test_multi_term_shapes_are_sums_of_terms():
+    """A shape split into two half-weight terms with the same exponent equals the single term (bilinearity), and
+    a multi-term shape on one side only also matches the explicit sum."""
+    import torch
+    from rsfff.ff.multipole import shaped_one_center_multi, shaped_two_center_damp
+    torch.manual_seed(1)
+    P = 7
+    r = torch.linspace(1.0, 9.0, P, dtype=torch.float64)
+    bi = torch.full((P,), 1.3, dtype=torch.float64)
+    bj = torch.full((P,), 2.1, dtype=torch.float64)
+    wi = torch.tensor([0.2, 0.3, 0.1, 0.4], dtype=torch.float64).expand(P, 4)
+    wj = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float64).expand(P, 4)
+    single = shaped_two_center_damp(bi, bj, wi, wj, r, 2)
+    bm = torch.stack([bi, bi], 1)
+    wm = torch.stack([0.5 * wi, 0.5 * wi], 1)
+    assert torch.allclose(shaped_two_center_damp(bm, bj, wm, wj, r, 2), single, atol=1e-12)
+    # two different exponents on side i: the sum of the two single-term results
+    b2 = torch.stack([bi, bi * 1.7], 1)
+    w2 = torch.stack([0.6 * wi, 0.4 * wi], 1)
+    ref = 0.6 * shaped_two_center_damp(bi, bj, wi, wj, r, 2) + 0.4 * shaped_two_center_damp(bi * 1.7, bj, wi, wj, r, 2)
+    assert torch.allclose(shaped_two_center_damp(b2, bj, w2, wj, r, 2), ref, atol=1e-12)
+    from rsfff.ff.multipole import shaped_one_center_damp
+    ref1 = 0.6 * shaped_one_center_damp(bi * r, wi, 2) + 0.4 * shaped_one_center_damp(bi * 1.7 * r, wi, 2)
+    assert torch.allclose(shaped_one_center_multi(b2, w2, r, 2), ref1, atol=1e-12)

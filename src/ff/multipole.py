@@ -304,6 +304,24 @@ def shaped_one_center_damp(u: torch.Tensor, w: torch.Tensor, max_rank: int = 1) 
     return _stack(out, dim=0)
 
 
+def _terms(b, w):
+    """A shape as a list of (b (P,), w (P, K+1)) terms: single-term inputs (b (P,), w (P, K+1)) or multi-term
+    (b (P, T), w (P, T, K+1)) -- a multi-term shape is the sum of its (unnormalized) terms, so every shaped kernel,
+    being linear in each density, is the sum over term pairs. Terms with all-zero weights are dropped."""
+    if b.dim() == 1:
+        return [(b, w)]
+    keep = [t for t in range(b.shape[1]) if b.shape[0] == 0 or bool((w[:, t] != 0).any())]
+    return [(b[:, t], w[:, t]) for t in (keep or [0])]
+
+
+def shaped_one_center_multi(b: torch.Tensor, w: torch.Tensor, r: torch.Tensor, max_rank: int = 1) -> torch.Tensor:
+    """:func:`shaped_one_center_damp` for a single- or multi-term shape at distance r (P,): ``(2*max_rank+1, P)``."""
+    out = 0
+    for bt, wt in _terms(b, w):
+        out = out + shaped_one_center_damp(bt * r, wt, max_rank)
+    return out
+
+
 def shaped_two_center_damp(
     b_i: torch.Tensor, b_j: torch.Tensor, w_i: torch.Tensor, w_j: torch.Tensor, r: torch.Tensor,
     max_rank: int = 1, switch: float = SHAPE_SWITCH,
@@ -311,7 +329,14 @@ def shaped_two_center_damp(
     """Two-center overlap complements between shaped densities (exponents b_i, b_j; weights w_i, w_j
     ``(P, K+1)``, K <= 3): ``(2*max_rank+1, P)``. Reduces to :func:`slater_two_center_damp_unequal` for
     pure 1s weights. Computed in float64 and returned in the input dtype (the closed forms cancel
-    strongly near b_i = b_j; float32 cannot carry them)."""
+    strongly near b_i = b_j; float32 cannot carry them). Either side may be a multi-term shape
+    (``b (P, T)``, ``w (P, T, K+1)``, see :func:`_terms`): the result is the sum over term pairs."""
+    if b_i.dim() == 2 or b_j.dim() == 2:
+        out = 0
+        for bi_, wi_ in _terms(b_i, w_i):
+            for bj_, wj_ in _terms(b_j, w_j):
+                out = out + shaped_two_center_damp(bi_, bj_, wi_, wj_, r, max_rank, switch)
+        return out
     from ._slater_shape_tables import CLOSED, SERIES
     max_rank = _check_rank(max_rank)
     nord = 2 * max_rank + 1

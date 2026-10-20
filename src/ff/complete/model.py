@@ -14,6 +14,16 @@ and two equivariant pieces that the invariant-only model cannot express:
   OTHER atoms over the donor frontier density of i and the acceptor frontier density of j. For a dimer dphi = 0 (the
   pair kernel carries the pair), so this is the three-body shift of the CT gap by the environment; lam = 0 at start.
 
+Breathing (l = 0) response, when the table carries it (``a0 > 0``, from ``scripts/ion_parents.py``):
+
+    E_0,i = -1/2 a0[s] exp(head_0(I_i)) (V[breath]_i^(0) + lam0[s] S[breath]_i^(0))^2
+
+with V[breath]^(0) the penetration potential of all the other frozen densities over the ion's l = 0 response shape
+(the ``breath`` probe of the environment) and S[breath]^(0) their overlap with it: the Coulomb drive (fitted to the
+CPKS point-charge response) and the Pauli-pressure drive (exchange polarization at l = 0 -- the density contracts
+to relieve overlap; lam0 learned, 0 at start). The drive is a scalar, so it adds coherently over neighbours -- the
+polarization of an ion in a symmetric cage that no dipole / quadrupole response can give.
+
 Frozen-level terms (``frozen=True``), labels ``mod_pauli`` and ``disp``, heads on the overlap invariants only
 (the EDA hierarchy: no fields at the frozen level):
 
@@ -98,6 +108,15 @@ class CompleteModel(IonCTModel):
         if ct_gap:
             self.gap_lamD = nn.Parameter(torch.zeros(S, dtype=torch.float64))
             self.gap_lamA = nn.Parameter(torch.zeros(S, dtype=torch.float64))
+        self.breath = bool((tab.a0 > 0).any()) and "breath:V0_pen" in names
+        if self.breath:
+            self.breath_col = names.index("breath:V0_pen")
+            self.breath_s0_col = names.index("breath:S0")
+            self.head_breath = EnvironmentHead(n_feat, 1, hidden, depth, ns)
+            self.breath_lna = nn.Parameter(torch.zeros(S, dtype=torch.float64))     # scale on the fitted a0
+            self.breath_lam = nn.Parameter(torch.zeros(S, dtype=torch.float64))     # Pauli-pressure drive per overlap
+            sv = float(feat_scale[self.breath_col] / feat_scale[self.breath_s0_col]) if feat_scale is not None else 1.0
+            self.register_buffer("breath_s0_scale", torch.tensor(sv, dtype=torch.float64))
         self.frozen = frozen
         if frozen:
             f64 = dict(dtype=torch.float64)
@@ -227,6 +246,12 @@ class CompleteModel(IonCTModel):
         ainv_pad = ainv_pad.masked_scatter(mask[..., None, None].expand(B, nmax, 3, 3), ainv)
         x0 = solve_induction_blocks(L, bt["A_off"], ainv_pad, Cq, quadrupoles)
         e_pol = 0.5 * (L * x0).sum((1, 2))
+        e_breath_atom = I.new_zeros(n)
+        if self.breath:
+            v0 = bt["feats"][:, self.breath_col] + self.breath_lam[sp] * self.breath_s0_scale * bt["feats"][:, self.breath_s0_col]
+            a = self.tab.a0[sp] * torch.exp(self.breath_lna[sp] + self.head_breath(I, sp)[:, 0])
+            e_breath_atom = -0.5 * a * v0 * v0
+            e_pol = e_pol + I.new_zeros(B).index_add(0, bt["frame"], e_breath_atom)
         q = self.ct_charges_from(I, sp)
         nC = bt["ch_index"].shape[1]
         if nC:
@@ -240,7 +265,7 @@ class CompleteModel(IonCTModel):
         return {"e_pol": e_pol, "e_ct": e_ct, "e_ct_post": e_ct, "e_type": e_type, "c": c, "dov": z, "A_ps": A_ps,
                 "W": z, "Delta": z, "delta": z, "p": z, "dq": I.new_zeros(n), "x": x0, "x_pol": x0,
                 "joint_iters": 0, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": e_pauli, "e_disp": e_disp,
-                "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv}
+                "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv, "e_breath_atom": e_breath_atom}
 
     def smoothness_penalty(self, bt, sigma=0.05):
         """Feature-noise penalty on the heads' log outputs (log c, log q) and the pseudo-potential strengths."""
@@ -272,6 +297,9 @@ class CompleteModel(IonCTModel):
         if self.ct_gap:
             out["lam_D"] = {x: round(float(self.gap_lamD[k]), 4) for k, x in enumerate(sym)}
             out["lam_A"] = {x: round(float(self.gap_lamA[k]), 4) for k, x in enumerate(sym)}
+        if self.breath:
+            out["breath a0 scale"] = {x: round(float(self.breath_lna[k].exp()), 4) for k, x in enumerate(sym)}
+            out["breath lam0"] = {x: round(float(self.breath_lam[k]), 4) for k, x in enumerate(sym)}
         if self.frozen:
             out["pauli qP0/bP"] = {x: [round(float(self.pauli_lnq0[k].exp()), 4), round(float(self.pauli_lnb[k].exp()), 4)]
                                   for k, x in enumerate(sym)}

@@ -35,7 +35,7 @@ from ..units import BOHR_ANG
 
 __all__ = ["DensityEnvironment", "EnvFeatures", "shaped_overlap_derivs", "PROBE_NAMES"]
 
-PROBE_NAMES = ("shell", "dip", "quad", "donor", "acceptor")
+PROBE_NAMES = ("shell", "dip", "quad", "donor", "acceptor", "breath")
 INVARIANT_NAMES = ("V0_pen", "|V1|", "|V2|", "S0", "|S1|", "|S2|", "V1.S1")
 
 
@@ -69,7 +69,8 @@ def shaped_overlap_derivs(bD, wD, bA, wA, R):
 class DensityEnvironment:
     """Callable with the featurizer signature ``(positions, atomic_numbers, batch_idx) -> EnvFeatures``.
 
-    ``probes``: which of the table's densities to project onto (:data:`PROBE_NAMES`). ``overlap`` / ``coulomb`` switch
+    ``probes``: which of the table's densities to project onto (:data:`PROBE_NAMES`; ``breath`` is the l = 0
+    response shape, whose penetration projection V^(0) drives the breathing term of the complete model). ``overlap`` / ``coulomb`` switch
     the two kinds on or off; ``cutoff`` (Angstrom) restricts the overlap sums (the Coulomb projections are summed over
     every other atom of the frame -- they are fields)."""
 
@@ -86,7 +87,9 @@ class DensityEnvironment:
         one[:, 0] = 1.0
         self._probe = {"shell": (b_outer, one), "dip": (tab.b_dip, tab.w_dip), "quad": (tab.b_quad, tab.w_quad),
                        "donor": (tab.front_b["donor"], tab.front_w["donor"]),
-                       "acceptor": (tab.front_b["acceptor"], tab.front_w["acceptor"])}
+                       "acceptor": (tab.front_b["acceptor"], tab.front_w["acceptor"]),
+                       "breath": (tab.b_breath, tab.w_breath)}
+        # a species without an l = 0 response shape (a0 = 0, zero weights) gets zero projections for that probe
 
     def _species(self, atomic_numbers):
         return self.tab.species_index(torch.as_tensor(atomic_numbers))
@@ -146,6 +149,9 @@ class DensityEnvironment:
                 blk["S2"] = X.new_zeros(N, 3, 3).index_add(0, i, t2)
             else:
                 blk["S0"], blk["S1"], blk["S2"] = X.new_zeros(N), X.new_zeros(N, 3), X.new_zeros(N, 3, 3)
+            if name == "breath":            # species without the l = 0 shape: no such projections
+                has = (tab.a0[s] > 0).to(X.dtype)
+                blk = {k: v * has.reshape(-1, *([1] * (v.dim() - 1))) for k, v in blk.items()}
             cols = [blk["V0"], blk["V1"].norm(dim=-1), blk["V2"].norm(dim=-1), blk["S0"], blk["S1"].norm(dim=-1),
                     blk["S2"].flatten(1).norm(dim=-1), (blk["V1"] * blk["S1"]).sum(-1)]
             inv.append(torch.stack(cols, 1))
