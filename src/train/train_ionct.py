@@ -129,6 +129,15 @@ def polar_loss(model, pb):
             torch.where(have & ok, (a[..., 1] - t[..., 1]) / n, z))
 
 
+def featurizer_for(a, tab):
+    """The environment featurizer a run was trained with (train_ionct --env)."""
+    if a.get("env", "soap") == "density":
+        from rsfff.ff.complete import PROBE_NAMES, DensityEnvironment
+        return DensityEnvironment(tab, probes=a.get("env_probes") or PROBE_NAMES)
+    from bb.features import SOAPFeaturizer
+    return SOAPFeaturizer(cutoff=6.0, n_max=6, l_max=3, neighbor_types=(11, 17), selected_lambdas=(0,)).double()
+
+
 def _geom_key(symbols, coords):
     """Rigid-motion invariant key: species counts and the sorted, rounded interatomic distances by species pair."""
     a = np.asarray(coords, float)
@@ -245,21 +254,74 @@ def split(frames, test_parents, val_frac=0.1, seed=0):
     return [tag(m["parent"]) for *_, m in frames]
 
 
-def build_cache(frames, tab, chan, featurizer, path=None):
+_PP = {}
+
+
+def _pp_init(tab, chan, featurizer, lean):
+    torch.set_num_threads(1)
+    _PP.update(tab=tab, chan=chan, featurizer=featurizer, lean=lean)
+
+
+def _pp_one(item):
+    """One frame's cache, serialized with torch.save (bytes): torch's own pickling of tensors between processes
+    passes shared-memory file descriptors and runs out of them on big batches ("received 0 items of ancdata")."""
+    import io
+    k, sym, X = item
+    buf = io.BytesIO()
+    torch.save(precompute(sym, X, _PP["tab"], _PP["chan"], _PP["featurizer"], lean=_PP["lean"]), buf)
+    return k, buf.getvalue()
+
+
+def cache_key(params_path, env, lean, frames):
+    """A short hash of what the precompute depends on: the parameter table's contents, the environment, lean,
+    and the frames' geometries (species + coordinates), in order."""
+    import hashlib
+    h = hashlib.sha1()
+    h.update(Path(params_path).read_bytes())
+    h.update(f"|{env}|lean={int(lean)}|{len(frames)}|".encode())
+    for sym, X, *_ in frames:
+        h.update("".join(sym).encode())
+        h.update(np.asarray(X, dtype=np.float64).round(6).tobytes())
+    return h.hexdigest()[:16]
+
+
+def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0):
+    """The per-frame precompute (:func:`rsfff.ff.ionct.model.precompute`), from ``path`` when it holds a complete
+    cache for these frames, else computed -- in ``workers`` processes when > 0 (the frames are independent; each
+    worker runs single-threaded, so use the node's cores) -- and saved there. Labels and masks always come from
+    the data, never from the cache."""
     if path and Path(path).exists():
         caches = torch.load(path, weights_only=False)
-        complete = all(getattr(caches[0], k, None) is not None for k in ("ps_index", "EVD", "ch_EP", "ch_J")) if caches else False
+        need = ("ps_index",) if lean else ("ps_index", "EVD", "ch_EP", "ch_J")
+        complete = all(getattr(caches[0], k, None) is not None for k in need) if caches else False
         if len(caches) == len(frames) and complete:   # geometry is cached; labels and masks always come from the data
             for c, (sym, X, lab, meta) in zip(caches, frames):
                 assert len(sym) == c.species.shape[0]
                 c.labels, c.meta = dict(lab), dict(meta)
             return caches
-    caches = []
     t0 = time.time()
-    for k, (sym, X, lab, meta) in enumerate(frames):
-        caches.append(precompute(sym, X, tab, chan, featurizer, lab, meta))
-        if (k + 1) % 200 == 0:
-            print(f"  precomputed {k + 1}/{len(frames)} [{time.time() - t0:.0f}s]", flush=True)
+    caches = [None] * len(frames)
+    if workers and workers > 1 and len(frames) > 2 * workers:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        items = [(k, sym, X) for k, (sym, X, *_rest) in enumerate(frames)]
+        with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"), initializer=_pp_init,
+                                 initargs=(tab, chan, featurizer, lean)) as ex:
+            done = 0
+            import io
+            for k, blob in ex.map(_pp_one, items, chunksize=8):
+                caches[k] = torch.load(io.BytesIO(blob), weights_only=False)
+                done += 1
+                if done % 500 == 0:
+                    print(f"  precomputed {done}/{len(frames)} [{time.time() - t0:.0f}s, {workers} workers]", flush=True)
+    else:
+        for k, (sym, X, *_rest) in enumerate(frames):
+            caches[k] = precompute(sym, X, tab, chan, featurizer, lean=lean)
+            if (k + 1) % 200 == 0:
+                print(f"  precomputed {k + 1}/{len(frames)} [{time.time() - t0:.0f}s]", flush=True)
+    for c, (sym, X, lab, meta) in zip(caches, frames):
+        c.labels, c.meta = dict(lab), dict(meta)
+    print(f"  precompute done: {len(frames)} frames in {time.time() - t0:.0f}s (lean={lean})", flush=True)
     if path:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(caches, path)
@@ -330,7 +392,14 @@ def main():
     ap.add_argument("--walk-eda", default=None)
     ap.add_argument("--params", default=str(Path(__file__).resolve().parents[2] / "params" / "ions_wb97mv_tzvpd.json"))
     ap.add_argument("--out", default="runs/ionct")
-    ap.add_argument("--cache", default=None)
+    ap.add_argument("--cache", default=None, help="the precompute cache file (default: <out>/cache.pt, or --cache-dir)")
+    ap.add_argument("--cache-dir", default=None,
+                    help="directory of keyed caches, cache_<hash>.pt with the hash of (params, env, lean, geometries): "
+                         "runs sharing them share the precompute")
+    ap.add_argument("--precompute-workers", type=int, default=0,
+                    help="processes for the precompute (0: this process; e.g. the node's cores)")
+    ap.add_argument("--full-precompute", action="store_true",
+                    help="compute the channel CT model's tensors too (the default is lean when --ct-form direct)")
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=2e-3)
@@ -379,13 +448,9 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     tab, chan = IonTable.load(a.params), CT.ChannelTable.load(a.params)
+    feat = featurizer_for(vars(a), tab)
     if a.env == "density":
-        from rsfff.ff.complete import DensityEnvironment, PROBE_NAMES
-        feat = DensityEnvironment(tab, probes=a.env_probes or PROBE_NAMES)
         print(f"environment: density projections, {feat.n_feat} invariants", flush=True)
-    else:
-        from bb.features import SOAPFeaturizer
-        feat = SOAPFeaturizer(cutoff=6.0, n_max=6, l_max=3, neighbor_types=(11, 17), selected_lambdas=(0,)).double()
     frames = load_frames(a.ct_sets, a.walk_eda, a.ct_max_pair, a.max_ho_ratio)
     print(f"ct label kept for {sum(f[2]['ct_mask'] for f in frames)} of {len(frames)} frames", flush=True)
     tags = split(frames, a.test, seed=a.seed)
@@ -393,7 +458,12 @@ def main():
         tags = ["test" if (m["workflow"] == "ct-scan" and m["n"] == 2) else t for t, (*_, m) in zip(tags, frames)]
         print(f"held out {sum(m['workflow'] == 'ct-scan' and m['n'] == 2 for *_, m in frames)} pair-scan frames", flush=True)
     print(f"{len(frames)} frames: " + ", ".join(f"{t} {tags.count(t)}" for t in ("train", "val", "test")), flush=True)
-    caches = build_cache(frames, tab, chan, feat, a.cache or out / "cache.pt")
+    lean = (a.ct_form == "direct") and not a.full_precompute
+    cache_path = a.cache
+    if cache_path is None and a.cache_dir:
+        cache_path = Path(a.cache_dir) / f"cache_{cache_key(a.params, a.env, lean, frames)}.pt"
+        print(f"cache: {cache_path}", flush=True)
+    caches = build_cache(frames, tab, chan, feat, cache_path or out / "cache.pt", lean=lean, workers=a.precompute_workers)
     tr = [c for c, t in zip(caches, tags) if t == "train"]
     va = [c for c, t in zip(caches, tags) if t == "val"]
     te = [c for c, t in zip(caches, tags) if t == "test"]
@@ -407,7 +477,7 @@ def main():
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
         for pid, sym, X, tgt, ok in polar_targets(a.ct_sets):
-            c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid})
+            c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean)
             held = pid in set(a.polar_test) or (a.holdout_scans and pid.startswith("pair_"))
             (polar_te if held else polar_tr).append(c)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)

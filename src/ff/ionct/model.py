@@ -104,33 +104,45 @@ class FrameCache:
 
 
 def precompute(symbols, pos_ang, tab: IonTable, chan: CT.ChannelTable, featurizer, labels=None, meta=None,
-               differentiable=False) -> FrameCache:
+               differentiable=False, lean=False) -> FrameCache:
     """Geometry-dependent tensors of one frame. With ``differentiable`` they keep the graph to ``pos_ang`` (forces
-    through the cached forward); otherwise they are computed without autograd."""
+    through the cached forward); otherwise they are computed without autograd. ``lean`` computes only what the
+    direct CT form and the confinement / pseudo-potential polarization use (induction operator, channel list,
+    pseudo drive, features): the frontier potentials, fields, midpoint potentials and electron-hole Coulomb of the
+    channel CT model are left out (zeros / None), which is most of the cost."""
     with torch.set_grad_enabled(differentiable and torch.is_grad_enabled()):
-        return _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta)
+        return _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean)
 
 
-def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta) -> FrameCache:
+def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=False) -> FrameCache:
     Zmap = {"Na": 11, "Cl": 17}
     pos = torch.as_tensor(pos_ang, dtype=torch.float64)
     Z = torch.tensor([Zmap[s] for s in symbols])
     s = tab.species_index(Z)
     b = torch.zeros(len(symbols), dtype=torch.long)
     L, A_off = K.induction_operator(pos, s, b, tab)
-    VD, KD = K.frontier_operator(pos, s, b, tab, "donor")
-    VA, KA = K.frontier_operator(pos, s, b, tab, "acceptor")
     geom = CT.channel_geometry(pos, s, b, tab, chan)
     ch_type = torch.tensor([CHANNEL_TYPES.index(n) for n in geom["names"]], dtype=torch.long)
     feats = featurizer(positions=pos, atomic_numbers=Z, batch_idx=b).inv_feats.to(torch.float64)
     ps_index, ps_r, ps_basis = K.pseudo_drive_basis(pos, s, b, tab, PSEUDO_CUTOFF)
     ps_type = pseudo_types(s, ps_index, tab)
+    ch_ltaper = torch.log(CT._taper(geom["r"], chan.cutoff, chan.taper).clamp(min=1e-300))
+    if lean:
+        N = pos.shape[0]
+        z2, z3 = pos.new_zeros(N, N), pos.new_zeros(N, N, K.D_SITE)
+        fc = FrameCache(s, pos, L, A_off, z2, z3, z2.clone(), z3.clone(), geom["index"], ch_type, geom["r"],
+                        geom["g"], geom["lnW"], geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis,
+                        labels=dict(labels or {}), meta=dict(meta or {}))
+        fc.ch_ltaper = ch_ltaper
+        fc.meta["lean"] = True
+        return fc
+    VD, KD = K.frontier_operator(pos, s, b, tab, "donor")
+    VA, KA = K.frontier_operator(pos, s, b, tab, "acceptor")
     EVD, EKD = K.frontier_field_operator(pos, s, b, tab, "donor")
     EVA, EKA = K.frontier_field_operator(pos, s, b, tab, "acceptor")
     ch_EP = K.frontier_hole_field(pos, s, tab, geom["index"])
     i, j = geom["index"]
     ch_J = K.frontier_pair_coulomb(pos, s, tab, geom["index"])
-    ch_ltaper = torch.log(CT._taper(geom["r"], chan.cutoff, chan.taper).clamp(min=1e-300))
     ch_mid = 0.5 * (pos[i] + pos[j])
     ch_Vmid, ch_Kmid = K.point_potential_operator(pos, s, tab, ch_mid, i)
     return FrameCache(s, pos, L, A_off, VD, KD, VA, KA, geom["index"], ch_type, geom["r"], geom["g"], geom["lnW"],
@@ -165,6 +177,7 @@ def collate(frames: list[FrameCache]) -> dict:
     EKA = torch.zeros(B, nmax, nmax, 3, 8, dtype=dt) if has_E else None
     ch_EP = []
     has_D = all(f.ch_J is not None for f in frames)
+    has_T = all(f.ch_ltaper is not None for f in frames)
     cJ, cT, cM, cV, cK = [], [], [], [], []
     off = 0
     for k, f in enumerate(frames):
@@ -187,10 +200,11 @@ def collate(frames: list[FrameCache]) -> dict:
         if has_E:
             EVD[k, :n, :n], EVA[k, :n, :n], EKD[k, :n, :n], EKA[k, :n, :n] = f.EVD, f.EVA, f.EKD, f.EKA
             ch_EP.append(f.ch_EP)
+        if has_T:
+            cT.append(f.ch_ltaper)
         if has_D:
             C = f.ch_J.shape[0]
             cJ.append(f.ch_J)
-            cT.append(f.ch_ltaper)
             cM.append(f.ch_mid)
             cV.append(torch.cat([f.ch_Vmid, f.ch_Vmid.new_zeros(C, nmax - n)], 1))
             cK.append(torch.cat([f.ch_Kmid, f.ch_Kmid.new_zeros(C, nmax - n, 8)], 1))
@@ -217,7 +231,7 @@ def collate(frames: list[FrameCache]) -> dict:
             "ps_basis": torch.cat(ps_basis) if ps_basis else torch.zeros(0, 8, dtype=dt),
             "EVD": EVD, "EVA": EVA, "EKD": EKD, "EKA": EKA,
             "ch_EP": torch.cat(ch_EP) if has_E else None,
-            "ch_J": torch.cat(cJ) if has_D else None, "ch_ltaper": torch.cat(cT) if has_D else None,
+            "ch_J": torch.cat(cJ) if has_D else None, "ch_ltaper": torch.cat(cT) if has_T else None,
             "ch_mid": torch.cat(cM) if has_D else None, "ch_Vmid": torch.cat(cV) if has_D else None,
             "ch_Kmid": torch.cat(cK) if has_D else None}
 
