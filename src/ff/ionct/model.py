@@ -135,9 +135,9 @@ def precompute(symbols, pos_ang, tab: IonTable, chan: CT.ChannelTable, featurize
 
 
 def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=False, frontier=False) -> FrameCache:
-    Zmap = {"Na": 11, "Cl": 17}
+    from .params import ATOMIC_NUMBER
     pos = torch.as_tensor(pos_ang, dtype=torch.float64)
-    Z = torch.tensor([Zmap[s] for s in symbols])
+    Z = torch.tensor([ATOMIC_NUMBER[s] for s in symbols])
     s = tab.species_index(Z)
     b = torch.zeros(len(symbols), dtype=torch.long)
     L, A_off = K.induction_operator(pos, s, b, tab)

@@ -60,7 +60,21 @@ def to_numpy(x):
 # ---------------------------------------------------------------------------
 # Molecule / mean-field construction
 # ---------------------------------------------------------------------------
-def make_mol(symbols, coords_ang, charge=0, spin=0, basis="def2-svpd", verbose=0):
+#: elements for which the Karlsruhe def2 basis sets are defined with the def2-ECP (Rb and heavier): Q-Chem needs
+#: ``ECP = def2-ecp`` for them, pyscf takes the same potentials by the basis name (``ecp="def2-tzvpd"``): the
+#: Stuttgart/Koeln small-core sets, e.g. Rb ECP28MWB, Cs ECP46MWB, I ECP28MDF
+ECP_FROM_Z = 37
+
+
+def default_ecp(symbols, basis):
+    """The ECP a def2 basis implies for these atoms (``None`` when no atom needs one or the basis is not def2)."""
+    if not isinstance(basis, str) or not basis.lower().startswith("def2"):
+        return None
+    from pyscf.data.elements import charge as _z
+    return basis if any(_z(s) >= ECP_FROM_Z for s in symbols) else None
+
+
+def make_mol(symbols, coords_ang, charge=0, spin=0, basis="def2-svpd", verbose=0, ecp="auto"):
     """Build a :class:`pyscf.gto.Mole` in the *input* Cartesian frame.
 
     ``spin`` is pyscf's convention (Nalpha - Nbeta = 2S), so a doublet is
@@ -68,12 +82,16 @@ def make_mol(symbols, coords_ang, charge=0, spin=0, basis="def2-svpd", verbose=0
     keeps the exact coordinates passed in, so gradients/forces evaluated later
     share the frame of the coordinates we serialize.
 
-    Coordinates are in Angstrom.
+    Coordinates are in Angstrom. ``ecp="auto"`` assigns the def2-ECP to Rb and heavier atoms when the basis is a
+    def2 set (:func:`default_ecp`); pass a name to force one or ``None`` for all-electron.
     """
     atom = [
         (sym, (float(x), float(y), float(z)))
         for sym, (x, y, z) in zip(symbols, np.asarray(coords_ang))
     ]
+    if ecp == "auto":
+        ecp = default_ecp(symbols, basis)
+    kw = {} if ecp is None else {"ecp": ecp}
     mol = pyscf.M(
         atom=atom,
         unit="Angstrom",
@@ -82,6 +100,7 @@ def make_mol(symbols, coords_ang, charge=0, spin=0, basis="def2-svpd", verbose=0
         spin=int(spin),
         symmetry=False,
         verbose=verbose,
+        **kw,
     )
     return mol
 

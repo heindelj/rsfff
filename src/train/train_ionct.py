@@ -408,7 +408,7 @@ def force_terms(model, frames, tab, table, chan):
     """Energy (per ion, kJ/mol) and force (per component, kJ/mol/A) errors of a list of force frames through the
     batched differentiable precompute: (B,), (sum N, 3). Forces are -dE/dx with the graph kept for training."""
     from ..ff.complete import batched_precompute
-    Zmap = {"Na": 11, "Cl": 17}
+    from ..ff.ionct.params import ATOMIC_NUMBER as Zmap
     dev = table.device
     pos = torch.tensor(np.concatenate([X for _, X, *_ in frames]), dtype=torch.float64, device=dev, requires_grad=True)
     Z = torch.tensor([Zmap[x] for sym, *_ in frames for x in sym], device=dev)

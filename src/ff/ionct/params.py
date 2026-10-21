@@ -24,7 +24,7 @@ from pathlib import Path
 
 import torch
 
-ATOMIC_NUMBER = {"Li": 3, "F": 9, "Na": 11, "Cl": 17, "K": 19, "Br": 35}
+ATOMIC_NUMBER = {"Li": 3, "F": 9, "Na": 11, "Cl": 17, "K": 19, "Br": 35, "Rb": 37, "I": 53, "Cs": 55}
 N_SHAPE = 4                     # r^0..r^3, what rsfff.ff.multipole's shaped kernels carry
 ROLES = ("donor", "acceptor")
 DEFAULT_PARAMS = Path(__file__).resolve().parents[3] / "params" / "ions_wb97mv_tzvpd.json"

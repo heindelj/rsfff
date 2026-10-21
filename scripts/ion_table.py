@@ -8,8 +8,12 @@ Per ion, in order (each step cached under WORK so the command is resumable; noth
      ESP grid and its uniform-field / field-gradient CPKS responses (``rsfff.qcgen.pol_ref.field_response``);
   2. joint fit (``ion_params.py``'s): Slater 1s shells on a pseudo-nucleus Z_eff, free-ion alpha (exact) and C,
      the single-exponent response parents (kept as the T = 1 fallback);
-  3. frontier densities: the Fukui fits of DB/shapes/ion_shells.json (one r^3 e^{-br} term) and the CT energies
-     I_donor / A_acceptor (anions: EA from the Fukui Delta-SCF; cations: IP of the atom from the same, IP2 from NIST);
+  3. frontier densities: the Fukui fits of DB/shapes/ion_shells.json (one r^3 e^{-br} term; computed here with the
+     same recipe when the file has no entry) and the CT energies I_donor / A_acceptor (anions: EA from the Fukui
+     Delta-SCF; cations: IP of the atom from the same, IP2 from NIST);
+  0. (first) the monomer is added to the database if missing. Rb, Cs, I use the def2-ECP (Q-Chem: ECP = def2-ecp;
+     pyscf: the basis name), assigned automatically by rsfff.qcgen.backend.make_mol; their Z_eff is the valence
+     pseudo-nucleus like the lighter ions' (the ECP core never enters).
   4. shell refinement on frozen pair scans: the exact-ee pair energies of every pair among the requested ions
      (``elst_ref.pair_energy``) refit the shells' (n, b) with a log penalty toward the ESP fit (``ion_elec_pairfit``'s
      idea, species-generic), R >= --r-min;
@@ -65,8 +69,94 @@ REGISTRY = {
     "F": dict(db="Fm", Z=9, zv=7.0, charge=-1, n_shells=2, free=True, role="donor", ip2=None),
     "Cl": dict(db="Clm", Z=17, zv=11.0, charge=-1, n_shells=2, free=True, role="donor", ip2=None),
     "Br": dict(db="Brm", Z=35, zv=11.0, charge=-1, n_shells=2, free=True, role="donor", ip2=None),
+    # def2-ECP ions (Rb ECP28MWB, Cs ECP46MWB, I ECP28MDF: Q-Chem ECP = def2-ecp, pyscf ecp = the basis name, set by
+    # rsfff.qcgen.backend.make_mol): the ECP core is gone from the SCF, Z_eff is the valence pseudo-nucleus as before
+    "Rb": dict(db="Rbp", Z=37, zv=9.0, charge=1, n_shells=1, free=False, role="acceptor", ip2=27.2895),
+    "Cs": dict(db="Csp", Z=55, zv=9.0, charge=1, n_shells=1, free=False, role="acceptor", ip2=23.1575),
+    "I": dict(db="Im", Z=53, zv=11.0, charge=-1, n_shells=2, free=True, role="donor", ip2=None),
 }
+#: elst_db settings for monomers the pipeline has to add (the validated database choices)
+DB_KW = dict(xc="wb97m-v", basis="def2-tzvpd", auxbasis="etb:1.8")
 FUKUI_K = 3
+
+
+# ---- 0: the monomer in the database -----------------------------------------------------------------------------
+def ensure_monomer(db, sym, reg, log):
+    """Add the isolated ion to the elst_db if it is missing (SCF + density fit; the def2-ECP is assigned by
+    make_mol for Rb and heavier)."""
+    name = reg["db"]
+    if name in db.index:
+        return
+    t0 = time.time()
+    db.add(name, [sym], np.zeros((1, 3)), reg["charge"], 0, species=f"{sym}{'+' if reg['charge'] > 0 else '-'}", **DB_KW)
+    m = db.get(name)
+    log(f"  {sym}: monomer {name} added ({DB_KW['basis']}, ecp {m.ecp}; {time.time() - t0:.0f}s)")
+
+
+# ---- 3': Fukui shape when DB/shapes/ion_shells.json has none ---------------------------------------------------
+def fukui_shape(sym, reg, cache, log):
+    """f- = rho(X-) - rho(X) (anion donor) or f+ = rho(M) - rho(M+) (cation acceptor), spherically averaged (UKS,
+    the database level, same ECP), its potential fitted with one r^k e^{-br} term for k = 0..6, and I = EA(X) or
+    IP(M) by Delta-SCF -- the same recipe as data/elst_db/shapes/ion_shells.py. Cached as JSON."""
+    if cache.exists():
+        return json.load(open(cache))
+    from pyscf.dft.LebedevGrid import MakeAngularGrid
+    from rsfff.qcgen.backend import make_mf, make_mol
+    from scipy.integrate import cumulative_trapezoid as ct
+    t0 = time.time()
+    r = np.geomspace(0.01, 25.0, 900)
+    ang = MakeAngularGrid(110)
+    u, wa = ang[:, :3], ang[:, 3] / ang[:, 3].sum()
+
+    def radial_density(charge, spin):
+        mol = make_mol([sym], np.zeros((1, 3)), charge=charge, spin=spin, basis=DB_KW["basis"])
+        mf = make_mf(mol, DB_KW["xc"], spin=spin)
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        dm = mf.make_rdm1()
+        dm = dm[0] + dm[1] if np.asarray(dm).ndim == 3 else dm
+        rho = np.zeros(len(r))
+        for i, x in enumerate(r):
+            ao = mol.eval_gto("GTOval", x * u)
+            rho[i] = (np.einsum("pi,ij,pj->p", ao, dm, ao) * wa).sum()
+        return rho, float(mf.e_tot)
+
+    q = reg["charge"]
+    rho_ion, e_ion = radial_density(q, 0)
+    rho_n, e_n = radial_density(0, 1)
+    f = rho_ion - rho_n if q < 0 else rho_n - rho_ion
+    f = f / np.trapezoid(4 * np.pi * r ** 2 * f, r)
+    I = (e_n - e_ion) if q < 0 else (e_ion - e_n)
+    q_in = ct(4 * np.pi * r ** 2 * f, r, initial=0)
+    out_ = ct((4 * np.pi * r * f)[::-1], r[::-1], initial=0)[::-1] * -1
+    phi_f = q_in / r + out_
+    sel = (r > 0.5) & (r < 15)
+    rr, ref = torch.tensor(r[sel]), torch.tensor(phi_f[sel])
+    fits = {}
+    for k in range(0, 7):
+        def f1_k(x):
+            Q = lambda n: torch.exp(-x) * sum(x ** j / math.factorial(j) for j in range(n))
+            return Q(k + 3) - x * Q(k + 2) / (k + 2)
+        best = None
+        for b0 in (0.6, 1.0, 1.5, 2.5, 4.0):
+            lb = torch.tensor(math.log(b0), requires_grad=True)
+            opt = torch.optim.LBFGS([lb], max_iter=200, line_search_fn="strong_wolfe")
+
+            def closure():
+                opt.zero_grad()
+                phi = (1 - f1_k(lb.exp() * rr)) / rr
+                loss = (((phi - ref) / ref) ** 2).mean()
+                loss.backward()
+                return loss
+            L = float(opt.step(closure))
+            if best is None or L < best[0]:
+                best = (L, float(lb.exp()))
+        fits[str(k)] = [best[1], math.sqrt(best[0])]
+    out = {"I_eV": I * EV, "fits": fits, "norm": 1.0, "source": "ion_table.py fukui_shape (UKS Delta-SCF)"}
+    json.dump(out, open(cache, "w"), indent=1)
+    log(f"  {sym}: Fukui {'f-' if q < 0 else 'f+'}: {'EA' if q < 0 else 'IP'} {I * EV:.2f} eV, r^3 b {fits['3'][0]:.3f} "
+        f"(err {fits['3'][1]:.1e}) [{time.time() - t0:.0f}s]")
+    return out
 
 
 # ---- 1 + 2: monomer references and the joint fit -------------------------------------------------------------
@@ -247,6 +337,9 @@ def main():
         cache = work / f"{s}_joint.json"
         if "joint" in a.skip and s in ions:
             continue
+        ensure_monomer(db, s, REGISTRY[s], log)
+        if REGISTRY[s]["db"] not in shapes:
+            shapes[REGISTRY[s]["db"]] = fukui_shape(s, REGISTRY[s], work / f"{s}_fukui.json", log)
         if cache.exists():
             p = json.load(open(cache))
         else:
