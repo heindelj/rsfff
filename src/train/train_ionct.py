@@ -461,7 +461,8 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              pseudo=g("pseudo", False), tie_c=g("tie_c", False), species_emb=g("species_emb", False),
                              aniso=not g("no_aniso", False), ct_gap=not g("no_ct_gap", False),
                              dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False),
-                             conf_form=g("conf_form", "tanh"))
+                             conf_form=g("conf_form", "tanh"), drive_overlap=g("drive_overlap", False),
+                             hyper=g("hyper", False))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -617,6 +618,10 @@ def main():
     ap.add_argument("--no-ct-gap", action="store_true", help="complete: no environment gap factor on the CT")
     ap.add_argument("--dphi-scale", type=float, default=0.05, help="complete: scale (Eh/e) of the CT gap potential")
     ap.add_argument("--frozen", action="store_true", help="complete: frozen Pauli (env qP) and dispersion (env C6) terms")
+    ap.add_argument("--hyper", action="store_true",
+                    help="complete: field-induced polarizability enhancement alpha (1 + g |V[dip]^(1)|^2) (hyperpolarizability)")
+    ap.add_argument("--drive-overlap", action="store_true",
+                    help="complete: the exchange-polarization drive strength carries the pair overlap of the densities")
     ap.add_argument("--conf-form", default="tanh", choices=("tanh", "mono"),
                     help="complete: confinement form -- tanh (c_range-bounded, either sign) or mono (stiffening only, "
                          "c <= 1, overlap-gated)")

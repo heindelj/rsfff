@@ -88,7 +88,8 @@ class CompleteModel(IonCTModel):
 
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
-                 species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh"):
+                 species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
+                 drive_overlap=False, hyper=False):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=pseudo, ps_init=ps_init, tie_c=tie_c, ct_form="direct",
                          gap_form="pair", pol_form="confine")
@@ -99,6 +100,26 @@ class CompleteModel(IonCTModel):
         # conf_form="mono": stiffening only -- log c_alpha = -softplus(a_s + head) * S[shell]^(0) / s, so c <= 1,
         # exactly 1 at zero overlap and decreasing in it; any enhancement is the overlap drive's job (M3 analysis:
         # the two mechanisms otherwise trade off and the network switches between them)
+        # drive_overlap: the pseudo-potential (exchange-polarization) drive strength carries the overlap of the two
+        # permanent densities, A_ij = A0 softplus(net) S_ij / s -- first-order exchange polarization scales with the
+        # overlap, while the drive basis alone decays like the penetration potential; without it the network has to
+        # supply the extra decay itself and does so super-exponentially (the "4 A" tail of the M3 pair scans)
+        self.drive_overlap = drive_overlap
+        self._ps_ovl = None
+        if drive_overlap:
+            names_ = list(feature_names or [])
+            sref = float(feat_scale[names_.index("shell:S0")]) if ("shell:S0" in names_ and feat_scale is not None) else 1.0
+            self.register_buffer("drive_s_ref", torch.tensor(sref, dtype=torch.float64))
+            b_outer = torch.where(tab.shell_n > 0, tab.shell_b, torch.full_like(tab.shell_b, float("inf"))).min(1).values
+            self.register_buffer("drive_b_outer", b_outer)
+        # hyper: field-induced enhancement of the polarizability, alpha -> alpha (1 + softplus(g_s) |V[dip]^(1)|^2 / s^2):
+        # the gamma hyperpolarizability of the ion in the neighbours' field (ALMO alpha_MI of Cl- sits 8 % above the
+        # free-ion value 3-5 A from a Na+); the stiffening head cannot produce c > 1 by design
+        self.hyper = hyper
+        if hyper:
+            names_ = list(feature_names or [])
+            self.hyper_col = names_.index("dip:|V1|")
+            self.hyper_g = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
         self.conf_form = conf_form
         if conf_form == "mono":
             self.conf_a = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
@@ -156,7 +177,12 @@ class CompleteModel(IonCTModel):
             logc = torch.where(u > 0, hi * torch.tanh(u / hi), lo * torch.tanh(u / lo))
         if self.tie_c:
             logc = torch.stack([logc[:, 0], logc[:, 0] * 5.0 / 3.0], 1)
-        return logc.exp()
+        c = logc.exp()
+        if self.hyper:
+            v1 = I[:, self.hyper_col]                                         # scaled |V[dip]^(1)|
+            enh = 1 + nn.functional.softplus(self.hyper_g[sp]) * v1 * v1 * self.confine_mask[sp]
+            c = c * torch.stack([enh, enh ** (5.0 / 3.0) if self.tie_c else torch.ones_like(enh)], 1)
+        return c
 
     def ct_charges_from(self, I, sp):
         return torch.exp(self.ct_lnq0[sp] + self.head_ctq(I, sp))
@@ -167,6 +193,28 @@ class CompleteModel(IonCTModel):
 
     def ct_charges(self, h):
         raise NotImplementedError("CompleteModel: use ct_charges_from(I, species)")
+
+    def pair_overlap(self, idx, r_ang, sp):
+        """Overlap (bohr^-3) of i's outermost permanent shell with j's shells for directed pairs (i <- j)."""
+        i, j = idx
+        rb = r_ang / K.BOHR_ANG
+        one = K._onehot0(rb.shape[0], rb)
+        tab = self.tab
+        S = rb.new_zeros(rb.shape[0])
+        for t in range(tab.shell_n.shape[1]):
+            nt = tab.shell_n[sp[j], t]
+            if bool((nt > 0).any()):
+                S = S + nt * K.shaped_overlap(self.drive_b_outer[sp[i]], one, tab.shell_b[sp[j], t], one, rb)
+        return S
+
+    def pseudo_strength(self, h, idx, r, ty, sp=None):
+        A = super().pseudo_strength(h, idx, r, ty)
+        if self.drive_overlap and idx.shape[1]:
+            ovl = self._ps_ovl
+            if ovl is None or ovl.shape[0] != idx.shape[1]:          # computed once per batch (forward sets it)
+                ovl = self.pair_overlap(idx, r, self._sp if sp is None else sp)
+            A = A * ovl / self.drive_s_ref
+        return A
 
     def alpha_inverse(self, alpha, sp, env):
         """(N, 3, 3) inverse polarizability: isotropic 1/alpha times expm(kappa S2 / s2)."""
@@ -243,7 +291,10 @@ class CompleteModel(IonCTModel):
         Cq = torch.ones(B, nmax, dtype=I.dtype, device=I.device).masked_scatter(mask, self.tab.C[sp] * c[:, 1])
         Lflat = I.new_zeros(n, 8)
         A_ps = I.new_zeros(0)
+        self._sp, self._ps_ovl = sp, None
         if self.pseudo and bt["ps_index"].shape[1]:
+            if self.drive_overlap:
+                self._ps_ovl = self.pair_overlap(bt["ps_index"], bt["ps_r"], sp)
             h, _ = self.latents(bt["feats"], sp)
             Lps, A_ps = self.pseudo_drive(h, bt["ps_index"], bt["ps_r"], bt["ps_type"], bt["ps_basis"], n)
             Lflat = Lflat + Lps
@@ -293,6 +344,7 @@ class CompleteModel(IonCTModel):
         if self.frozen:
             c_ = self.frozen_cols
             pen = pen + ((self.head_frozen(I2[:, c_], sp) - self.head_frozen(I1[:, c_], sp)) ** 2).mean()
+        self._sp = sp          # _ps_ovl from the forward of the same batch is reused
         if self.pseudo and bt["ps_index"].shape[1]:
             h1, _ = self.latents(f, sp)
             h2, _ = self.latents(f + noise, sp)
@@ -311,6 +363,8 @@ class CompleteModel(IonCTModel):
         if self.ct_gap:
             out["lam_D"] = {x: round(float(self.gap_lamD[k]), 4) for k, x in enumerate(sym)}
             out["lam_A"] = {x: round(float(self.gap_lamA[k]), 4) for k, x in enumerate(sym)}
+        if self.hyper:
+            out["hyper softplus(g)"] = {x: round(float(nn.functional.softplus(self.hyper_g[k])), 4) for k, x in enumerate(sym)}
         if self.conf_form == "mono":
             out["conf rate softplus(a)"] = {x: round(float(nn.functional.softplus(self.conf_a[k])), 4) for k, x in enumerate(sym)}
         if self.breath:
