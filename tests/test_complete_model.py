@@ -112,3 +112,17 @@ def test_frozen_terms_signs_and_isolated_limit(setup):
     # the frozen heads only see overlaps
     names = [feat.feature_names[k] for k in mf.frozen_cols.tolist()]
     assert all(n.split(":")[-1] in ("S0", "|S1|", "|S2|") for n in names)
+
+
+def test_pauli_moments_reduce_to_monopole_at_zero(setup):
+    tab, chan, feat, c, m = setup
+    kw = dict(feature_names=feat.feature_names, feat_scale=m.feat_scale, pseudo=True, frozen=True)
+    m0 = CompleteModel(tab, chan, c.feats.shape[1], **kw)
+    m1 = CompleteModel(tab, chan, c.feats.shape[1], pauli_moments=True, **kw)
+    m1.load_state_dict(m0.state_dict(), strict=False)
+    bt = collate([c])
+    assert torch.allclose(m0(bt)["e_pauli"], m1(bt)["e_pauli"])
+    with torch.no_grad():
+        m1.pm_a1.fill_(0.3)
+        m1.pm_a2.fill_(0.3)
+    assert not torch.allclose(m0(bt)["e_pauli"], m1(bt)["e_pauli"])

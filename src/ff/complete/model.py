@@ -45,7 +45,7 @@ from ..ionct import kernels as K
 from ..ionct.model import CHANNEL_TYPES, PAULI_INIT, IonCTModel
 from ..ionct.params import IonTable
 from ..ionct.ct import ChannelTable
-from ..multipole import slater_two_center_damp_unequal
+from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_damp_unequal
 from .elst import permanent_electrostatics
 from .heads import EnvironmentHead
 
@@ -89,7 +89,7 @@ class CompleteModel(IonCTModel):
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
                  species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
-                 drive_overlap=False, hyper=False):
+                 drive_overlap=False, hyper=False, pauli_moments=False):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=pseudo, ps_init=ps_init, tie_c=tie_c, ct_form="direct",
                          gap_form="pair", pol_form="confine")
@@ -146,6 +146,20 @@ class CompleteModel(IonCTModel):
             self.breath_lam = nn.Parameter(torch.zeros(S, dtype=torch.float64))     # Pauli-pressure drive per overlap
             sv = float(feat_scale[self.breath_col] / feat_scale[self.breath_s0_col]) if feat_scale is not None else 1.0
             self.register_buffer("breath_s0_scale", torch.tensor(sv, dtype=torch.float64))
+        # pauli_moments: induced Pauli dipole and quadrupole from the overlap gradients of the outer shell (C1),
+        # mu_P,i = -a1[s] S[shell]^(1)_i / s1, Theta_P,i = a2[s] S[shell]^(2)_i / s2, and the frozen Pauli energy becomes
+        # the full polytensor contraction P_j^T K_P(bP_i, bP_j; r) P_i with the overlap-complement kernel (a1 = a2 = 0
+        # reproduces the monopole form exactly; ions have no permanent Pauli moments)
+        self.pauli_moments = pauli_moments
+        if pauli_moments:
+            if not frozen:
+                raise ValueError("pauli_moments needs frozen=True")
+            names_ = list(feature_names or [])
+            s1 = float(feat_scale[names_.index("shell:|S1|")]) if ("shell:|S1|" in names_ and feat_scale is not None) else 1.0
+            s2 = float(feat_scale[names_.index("shell:|S2|")]) if ("shell:|S2|" in names_ and feat_scale is not None) else 1.0
+            self.register_buffer("pm_scale", torch.tensor([s1, s2], dtype=torch.float64))
+            self.pm_a1 = nn.Parameter(torch.zeros(S, dtype=torch.float64))
+            self.pm_a2 = nn.Parameter(torch.zeros(S, dtype=torch.float64))
         self.frozen = frozen
         if frozen:
             f64 = dict(dtype=torch.float64)
@@ -274,8 +288,21 @@ class CompleteModel(IonCTModel):
         i, j = pairs
         r_ang = (bt["pos"][j] - bt["pos"][i]).norm(dim=-1)
         rb = r_ang / K.BOHR_ANG
-        f = slater_two_center_damp_unequal(bP[i], bP[j], rb, 0)[0]
-        e_p = qP[i] * qP[j] * f / rb
+        if self.pauli_moments and bt.get("env") is not None:
+            env = bt["env"]
+            mu = -self.pm_a1[sp][:, None] * env["shell:S1"] / self.pm_scale[0]
+            th = self.pm_a2[sp][:, None] * cartesian_to_spherical_quadrupole(env["shell:S2"]) / self.pm_scale[1]
+            P = K._poly_map(I.dtype, I.device)
+            poly = torch.cat([mu, th], 1) @ P.T                                  # (N, 10)
+            poly = torch.cat([qP[:, None], poly[:, 1:]], 1)
+            dr = (bt["pos"][j] - bt["pos"][i]) / K.BOHR_ANG
+            f = slater_two_center_damp_unequal(bP[i], bP[j], rb, 2)              # (5, P) complements = the kernel
+            T = K._tensor(dr, f)                                                  # (P, 10, 10) [j, i]
+            e_p = torch.einsum("pa,pab,pb->p", poly[j], T, poly[i])
+            self._pauli_moments_out = (mu, th)
+        else:
+            f = slater_two_center_damp_unequal(bP[i], bP[j], rb, 0)[0]
+            e_p = qP[i] * qP[j] * f / rb
         e_d = tt_damped_c6_energy(r_ang, torch.sqrt(C6[i] * C6[j]), torch.sqrt(b6[i] * b6[j]))
         fr = bt["frame"][i]
         return I.new_zeros(B).index_add(0, fr, e_p), I.new_zeros(B).index_add(0, fr, e_d), (qP, bP, C6, b6)
@@ -370,6 +397,8 @@ class CompleteModel(IonCTModel):
         if self.breath:
             out["breath a0 scale"] = {x: round(float(self.breath_lna[k].exp()), 4) for k, x in enumerate(sym)}
             out["breath lam0"] = {x: round(float(self.breath_lam[k]), 4) for k, x in enumerate(sym)}
+        if self.pauli_moments:
+            out["pauli moments a1/a2"] = {x: [round(float(self.pm_a1[k]), 4), round(float(self.pm_a2[k]), 4)] for k, x in enumerate(sym)}
         if self.frozen:
             out["pauli qP0/bP"] = {x: [round(float(self.pauli_lnq0[k].exp()), 4), round(float(self.pauli_lnb[k].exp()), 4)]
                                   for k, x in enumerate(sym)}
