@@ -181,11 +181,19 @@ class RadialTable:
 
     def rows(self, y, prefixes):
         """(K, NORD, P): the damping rows ``prefix:0..4`` of an evaluation (P, F) for several prefixes at once."""
-        idx = torch.tensor([[self.index[f"{p}:{n}"] for n in range(NORD)] for p in prefixes], device=y.device)
-        return y[:, idx].permute(1, 2, 0)
+        return y[:, self.cols(tuple(f"{p}:{n}" for p in prefixes for n in range(NORD)), y.device).reshape(
+            len(prefixes), NORD)].permute(1, 2, 0)
+
+    def cols(self, names, device):
+        """The column indices of ``names`` (a tuple) as a tensor on ``device``, made once (no copy per call)."""
+        memo = self.__dict__.setdefault("_cols", {})
+        key = (names, str(device))
+        if key not in memo:
+            memo[key] = torch.tensor([self.index[n] for n in names], device=device)
+        return memo[key]
 
 
-def _basis_tensors(dr):
+def _basis_tensors_ref(dr):
     """The five pure-order damped tensors T_n(dr) (NORD, P, 10, 10): T(dr, lam) = sum_n lam_n T_n (the damped tensor
     is linear in its damping rows), built in one call of the transcription on NORD replicas of the pairs."""
     P_ = dr.shape[0]
@@ -194,6 +202,55 @@ def _basis_tensors(dr):
     for n in range(NORD):
         damp[n, n * P_:(n + 1) * P_] = 1.0
     return K._tensor(rep, damp).reshape(NORD, P_, 10, 10)
+
+
+# exponents (a, b, c) of the 35 monomials x^a y^b z^c of degree <= 4
+_MONO = torch.tensor([(a, b, d - a - b) for d in range(5) for a in range(d, -1, -1) for b in range(d - a, -1, -1)])
+_COEF: dict = {}
+
+
+def _monomials(dr):
+    """(P, 35): the monomials of degree <= 4 of the components of dr."""
+    key = ("mono", str(dr.device))
+    if key not in _COEF:
+        _COEF[key] = _MONO.to(dr.device)
+    e = _COEF[key]
+    pw = torch.cat([torch.ones_like(dr)[None], dr[None].expand(4, -1, -1)]).cumprod(0)      # (5, P, 3): dr^0..dr^4
+    return (pw[e[:, 0], :, 0] * pw[e[:, 1], :, 1] * pw[e[:, 2], :, 2]).T
+
+
+def _basis_coef(dtype, device):
+    """C (NORD, 35, 100): T_n(dr) = r^-(2n+1) mono(dr) @ C[n]. The coefficients are the transcription's integers,
+    recovered once by an exact fit of it at random points (checked to round to integers)."""
+    key = (dtype, str(device))
+    if key not in _COEF:
+        dr = torch.randn(256, 3, generator=torch.Generator().manual_seed(0), dtype=torch.float64)
+        ex = 2 * torch.arange(NORD, dtype=torch.float64) + 1
+        y = _basis_tensors_ref(dr).reshape(NORD, -1, 100) * dr.norm(dim=-1)[None, :, None] ** ex[:, None, None]
+        C = torch.linalg.lstsq(_monomials(dr)[None].expand(NORD, -1, -1), y).solution
+        Cr = C.round()
+        if (C - Cr).abs().max() > 1e-6:
+            raise RuntimeError("damped tensor coefficients are not integers: the transcription changed")
+        _COEF[key] = Cr.to(dtype=dtype, device=device)
+    return _COEF[key]
+
+
+def _basis_tensors(dr):
+    """The pure-order basis tensors: the fused contraction on the GPU, where the cost is the op count; the
+    transcription on the CPU, which skips the zero entries the dense contraction computes and is faster for large
+    batches there."""
+    return _basis_tensors_ref(dr) if dr.device.type == "cpu" else _basis_tensors_fused(dr)
+
+
+def _basis_tensors_fused(dr):
+    """:func:`_basis_tensors_ref` as one contraction: the monomials of dr against the integer coefficients of each
+    pure order, times r^-(2n+1) -- a handful of ops instead of the transcription's few hundred (and their double
+    backward under force training)."""
+    C = _basis_coef(dr.dtype, dr.device)
+    ex = 2 * torch.arange(NORD, dtype=dr.dtype, device=dr.device) + 1
+    rp = dr.norm(dim=-1)[None] ** -ex[:, None]                       # (NORD, P)
+    T = (_monomials(dr) @ C) * rp[:, :, None]                        # (NORD, P, 100)
+    return T.reshape(NORD, dr.shape[0], 10, 10)
 
 
 def _luts(tab, chan):
@@ -292,8 +349,8 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     V0 = X.new_zeros(N, nprobe).index_add(0, i, v0)
     V1 = X.new_zeros(N, nprobe, 3).index_add(0, i, -Dp[:, :, :3].permute(1, 0, 2))
     V2 = X.new_zeros(N, nprobe, 5).index_add(0, i, Dp[:, :, 3:].permute(1, 0, 2))
-    sidx = torch.tensor([[table.index[f"envS:{p_}:{k}"] for k in range(3)] for p_ in probes], device=dev)
-    Sy = y[:, sidx]                                                   # (Pd, nprobe, 3)
+    sidx = table.cols(tuple(f"envS:{p_}:{k}" for p_ in probes for k in range(3)), dev).reshape(nprobe, 3)
+    Sy = y[:, sidx]                                                 # (Pd, nprobe, 3)
     S0p, S1p, S2p = Sy[..., 0], Sy[..., 1], Sy[..., 2]
     outer = rhat[:, :, None] * rhat[:, None, :] - torch.eye(3, dtype=dt, device=dev)[None] / 3
     S0 = X.new_zeros(N, nprobe).index_add(0, i, S0p)
@@ -314,8 +371,10 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
             env[f"{name}:{key}"] = val[:, k_]
     # -- pseudo-potential drive basis -----------------------------------------------------------------------------
     keep = r_ang < table.pseudo_cutoff
-    ps_lut, ch_lut = _luts(tab, chan)
-    ps_lut, ch_lut = ps_lut.to(dev), ch_lut.to(dev)
+    memo = table.__dict__.setdefault("_luts", {})
+    if str(dev) not in memo:
+        memo[str(dev)] = tuple(t.to(dev) for t in _luts(tab, chan))
+    ps_lut, ch_lut = memo[str(dev)]
     ps_basis = torch.cat([Rp[nq][:, :3], Rp[nq + 1][:, 3:]], 1)[keep]
     ps_type = ps_lut[s[i], s[j]][keep]
     # -- channels (direct CT) ----------------------------------------------------------------------------------------

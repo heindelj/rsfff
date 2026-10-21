@@ -78,6 +78,32 @@ def test_forces_are_exact_derivatives(setup):
             assert abs((E(pp) - E(pm)) / (2 * h) - g[a, b]) < 1e-7
 
 
+def test_fused_basis_matches_transcription():
+    from rsfff.ff.complete.tabulate import _basis_tensors_fused, _basis_tensors_ref
+    dr = (torch.randn(200, 3, dtype=torch.float64) * 4).requires_grad_(True)
+    a, b = _basis_tensors_ref(dr), _basis_tensors_fused(dr)
+    with torch.no_grad():
+        assert torch.allclose(b, a, rtol=1e-12, atol=1e-14 * float(a.abs().max()))
+    w = torch.randn_like(a)
+    ga = torch.autograd.grad((a * w).sum(), dr, create_graph=True)[0]
+    gb = torch.autograd.grad((b * w).sum(), dr, create_graph=True)[0]
+    assert torch.allclose(gb, ga, rtol=1e-12, atol=1e-14 * float(ga.abs().max()))
+    v = torch.randn_like(ga)        # the double backward force training takes
+    ha, hb = (torch.autograd.grad((g * v).sum(), dr)[0] for g in (ga, gb))
+    assert torch.allclose(hb, ha, rtol=1e-11, atol=1e-13 * float(ha.abs().max()))
+
+
+def test_electrostatics_matches_pairwise(setup):
+    from rsfff.ff.ionct import kernels as K
+    tab, chan, table, feat, frames = setup
+    pos, Z, fr = _flat(frames)
+    s = tab.species_index(Z)
+    pairs = K.all_pairs(fr)
+    ref = torch.zeros(len(frames), dtype=torch.float64).index_add(0, fr[pairs[0]],
+                                                                  K.permanent_pair_energy(pos, s, pairs, tab))
+    assert torch.allclose(permanent_electrostatics(pos, s, fr, tab), ref, rtol=1e-12, atol=1e-12)
+
+
 def test_electrostatics_pair_limit(setup):
     tab, chan, table, feat, frames = setup
     X = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 20.0]], dtype=torch.float64)

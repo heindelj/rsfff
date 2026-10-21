@@ -25,17 +25,13 @@ def permanent_electrostatics(pos_ang, species, batch_idx, tab: IonTable):
     i, j = pairs
     r = (X[j] - X[i]).norm(dim=-1)
     si, sj = species[i], species[j]
-    e = tab.Z[si] * tab.Z[sj]
-    M = tab.shell_n.shape[1]
-    for t in range(M):
-        nt, bt = tab.shell_n[sj, t], tab.shell_b[sj, t]
-        e = e - tab.Z[si] * nt * (1 - slater_one_center_damp(bt * r, 0)[0])
-        nu, bu = tab.shell_n[si, t], tab.shell_b[si, t]
-        e = e - tab.Z[sj] * nu * (1 - slater_one_center_damp(bu * r, 0)[0])
-    for t in range(M):
-        for u in range(M):
-            nt, bt = tab.shell_n[si, t], tab.shell_b[si, t]
-            nu, bu = tab.shell_n[sj, u], tab.shell_b[sj, u]
-            e = e + nt * nu * (1 - slater_two_center_damp_unequal(bt, bu, r, 0)[0])
+    ni, bi, nj, bj = tab.shell_n[si], tab.shell_b[si], tab.shell_n[sj], tab.shell_b[sj]      # (P, M)
+    P_, M = ni.shape
+    # every shell of either side against the other nucleus in one call, every shell pair in one call
+    f1 = slater_one_center_damp((torch.cat([bj, bi], 1) * r[:, None]).reshape(-1), 0)[0].reshape(P_, 2 * M)
+    e = tab.Z[si] * tab.Z[sj] - tab.Z[si] * (nj * (1 - f1[:, :M])).sum(1) - tab.Z[sj] * (ni * (1 - f1[:, M:])).sum(1)
+    f2 = slater_two_center_damp_unequal(bi[:, :, None].expand(-1, -1, M).reshape(-1), bj[:, None, :].expand(-1, M, -1).reshape(-1),
+                                        r[:, None].expand(-1, M * M).reshape(-1), 0)[0].reshape(P_, M, M)
+    e = e + (ni[:, :, None] * nj[:, None, :] * (1 - f2)).sum((1, 2))
     e = e / r
     return X.new_zeros(B).index_add(0, batch_idx[i], e)
