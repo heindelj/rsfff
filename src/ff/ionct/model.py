@@ -30,15 +30,31 @@ from . import kernels as K
 from .params import IonTable
 from ..multipole import slater_two_center_damp_unequal
 
-__all__ = ["FrameCache", "precompute", "collate", "IonCTModel", "CHANNEL_TYPES", "PSEUDO_TYPES"]
+__all__ = ["FrameCache", "precompute", "collate", "IonCTModel", "CHANNEL_TYPES", "PSEUDO_TYPES", "channel_types", "pseudo_type_names"]
 
-CHANNEL_TYPES = ("Cl>Na", "Na>Cl", "Cl>Cl", "Na>Na")
+CHANNEL_TYPES = ("Cl>Na", "Na>Cl", "Cl>Cl", "Na>Na")       # the NaCl legacy order (cached labels and runs)
+
+
+def channel_types(symbols):
+    """Directed channel type names 'D>A' for a species list: the legacy NaCl order for {Na, Cl} (the cached labels
+    and the trained runs index it), every ordered pair otherwise."""
+    if set(symbols) == {"Na", "Cl"}:
+        return CHANNEL_TYPES
+    return tuple(f"{a}>{b}" for a in symbols for b in symbols)
+
+
+def pseudo_type_names(symbols):
+    """Pseudo-potential drive types 'i<j' for a species list (same ordering rule as :func:`channel_types`)."""
+    if set(symbols) == {"Na", "Cl"}:
+        return PSEUDO_TYPES
+    return tuple(f"{a}<{b}" for a in symbols for b in symbols)
 #: Pauli pseudo-potential drive types, "i<j": the response of i to the pseudo-potential of j
 PSEUDO_TYPES = ("Cl<Na", "Na<Cl", "Cl<Cl", "Na<Na")
 #: scale of the pseudo-potential strength per type, so the network's softplus output is O(1): A = A0 softplus(z).
 #: Roughly the strength at which the pseudo drive equals the permanent drive at contact (Na+ is compact, so its
 #: pseudo-potential reaches the Cl- response density weakly)
 PSEUDO_A0 = {"Cl<Na": 40.0, "Na<Cl": 5.0, "Cl<Cl": 5.0, "Na<Na": 5.0}
+PSEUDO_A0_DEFAULT = 5.0
 PSEUDO_CUTOFF = 6.0
 #: saturation (Hartree) of the CT-state Stark shift: Delta -= S tanh(u / S), u = 1/2 a*_A |E_A|^2 + 1/2 a*_D |E_D|^2
 STARK_SAT = 0.3
@@ -102,6 +118,7 @@ class FrameCache:
     labels: dict = field(default_factory=dict)   # 'pol', 'ct' (Hartree), masks
     meta: dict = field(default_factory=dict)
     env: dict = None                # equivariant environment blocks, "<probe>:<V0|V1|V2|S0|S1|S2>" -> (N, ...)
+    n_types: int = len(CHANNEL_TYPES)   # number of channel types of the table (the width of the per-type sums)
 
 
 def precompute(symbols, pos_ang, tab: IonTable, chan: CT.ChannelTable, featurizer, labels=None, meta=None,
@@ -125,7 +142,8 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
     b = torch.zeros(len(symbols), dtype=torch.long)
     L, A_off = K.induction_operator(pos, s, b, tab)
     geom = CT.channel_geometry(pos, s, b, tab, chan)
-    ch_type = torch.tensor([CHANNEL_TYPES.index(n) for n in geom["names"]], dtype=torch.long)
+    ctypes = channel_types(tab.symbols)
+    ch_type = torch.tensor([ctypes.index(n) for n in geom["names"]], dtype=torch.long)
     ef = featurizer(positions=pos, atomic_numbers=Z, batch_idx=b)
     feats = ef.inv_feats.to(torch.float64)
     env = None
@@ -146,6 +164,7 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
                         geom["g"], geom["lnW"], geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis,
                         labels=dict(labels or {}), meta=dict(meta or {}), env=env)
         fc.ch_ltaper = ch_ltaper
+        fc.n_types = len(ctypes)
         fc.meta["lean"] = True
         fc.meta["frontier"] = bool(frontier)
         return fc
@@ -160,12 +179,13 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
     ch_Vmid, ch_Kmid = K.point_potential_operator(pos, s, tab, ch_mid, i)
     return FrameCache(s, pos, L, A_off, VD, KD, VA, KA, geom["index"], ch_type, geom["r"], geom["g"], geom["lnW"],
                       geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis, EVD, EKD, EVA, EKA, ch_EP,
-                      ch_J, ch_ltaper, ch_mid, ch_Vmid, ch_Kmid, dict(labels or {}), dict(meta or {}), env)
+                      ch_J, ch_ltaper, ch_mid, ch_Vmid, ch_Kmid, dict(labels or {}), dict(meta or {}), env, len(ctypes))
 
 
 def pseudo_types(species, idx, tab: IonTable):
     sym = tab.symbols
-    return torch.tensor([PSEUDO_TYPES.index(f"{sym[species[i]]}<{sym[species[j]]}") for i, j in idx.T.tolist()],
+    ptypes = pseudo_type_names(tab.symbols)
+    return torch.tensor([ptypes.index(f"{sym[species[i]]}<{sym[species[j]]}") for i, j in idx.T.tolist()],
                         dtype=torch.long)
 
 
@@ -233,7 +253,7 @@ def collate(frames: list[FrameCache]) -> dict:
     lab = {key: torch.tensor([f.labels.get(key, float("nan")) for f in frames], dtype=dt)
            for key in ("pol", "ct", "pauli", "disp", "elec", "int")}
     lab["ct_mask"] = torch.tensor([bool(f.labels.get("ct_mask", True)) for f in frames])
-    nT = len(CHANNEL_TYPES)
+    nT = getattr(frames[0], "n_types", len(CHANNEL_TYPES))
     lab["chan"] = torch.tensor([f.labels.get("chan") or [float("nan")] * nT for f in frames], dtype=dt)
     lab["n"] = torch.tensor([f.species.shape[0] for f in frames], dtype=dt)
     return {"B": B, "nmax": nmax, "L": L, "A_off": A, "VD": VD, "VA": VA, "KD": KD, "KA": KA, "mask": mask,
@@ -271,6 +291,8 @@ class IonCTModel(nn.Module):
                  pol_form="confine", pauli_nn=False):
         super().__init__()
         self.tab, self.chan, self.wkb = tab, chan, wkb
+        self.ctypes, self.ptypes = channel_types(tab.symbols), pseudo_type_names(tab.symbols)
+        self.nT = len(self.ctypes)
         self.joint, self.joint_tol, self.joint_max_iter = joint, joint_tol, joint_max_iter
         S = len(tab.symbols)
         self.register_buffer("feat_scale", torch.ones(n_feat) if feat_scale is None else feat_scale.clone())
@@ -285,16 +307,16 @@ class IonCTModel(nn.Module):
         self.register_buffer("confine_mask", torch.tensor([float(x in confine) for x in tab.symbols], dtype=torch.float64))
         self.register_buffer("rbf_mu", torch.linspace(r_rbf[0], r_rbf[1], n_rbf))
         self.rbf_w = (r_rbf[1] - r_rbf[0]) / (n_rbf - 1)
-        self.gap = _mlp(2 * hidden + n_rbf + len(CHANNEL_TYPES), hidden, 1, depth)
+        self.gap = _mlp(2 * hidden + n_rbf + self.nT, hidden, 1, depth)
         nn.init.zeros_(self.gap[-1].weight)
         nn.init.constant_(self.gap[-1].bias, math.log(math.expm1(ov_init)))
         # Pauli pseudo-potential strengths A_ij >= 0 (directed pairs within PSEUDO_CUTOFF)
         self.pseudo = pseudo
         if pseudo:
-            self.ps = _mlp(2 * hidden + n_rbf + len(PSEUDO_TYPES), hidden, 1, depth)
+            self.ps = _mlp(2 * hidden + n_rbf + len(self.ptypes), hidden, 1, depth)
             nn.init.zeros_(self.ps[-1].weight)
             nn.init.constant_(self.ps[-1].bias, math.log(math.expm1(ps_init)))
-            self.register_buffer("ps_A0", torch.tensor([PSEUDO_A0[t] for t in PSEUDO_TYPES], dtype=torch.float64))
+            self.register_buffer("ps_A0", torch.tensor([PSEUDO_A0.get(t, PSEUDO_A0_DEFAULT) for t in self.ptypes], dtype=torch.float64))
         # excess polarizability of the CT state (bohr^3 / 100): the transferred electron (acceptor, >= 0) and the
         # hole (donor, either sign), one per species
         self.ct_pol = ct_pol
@@ -341,9 +363,9 @@ class IonCTModel(nn.Module):
             self.aorb_acc_raw = nn.Parameter(torch.stack([sp_(AORB_INIT["acceptor"][x]) for x in tab.symbols]))
             self.aorb_don_raw = nn.Parameter(torch.stack([sp_(AORB_INIT["donor"][x]) for x in tab.symbols]))
         if gap_form == "density":
-            self.lnw = nn.Parameter(torch.tensor([COUPLING_INIT[t][0] for t in CHANNEL_TYPES], dtype=torch.float64))
-            self.gamma = nn.Parameter(torch.tensor([COUPLING_INIT[t][1] for t in CHANNEL_TYPES], dtype=torch.float64))
-            self.lam = nn.Parameter(torch.full((len(CHANNEL_TYPES),), LAMBDA_INIT, dtype=torch.float64))
+            self.lnw = nn.Parameter(torch.tensor([COUPLING_INIT.get(t, (0.0, 1.0))[0] for t in self.ctypes], dtype=torch.float64))
+            self.gamma = nn.Parameter(torch.tensor([COUPLING_INIT.get(t, (0.0, 1.0))[1] for t in self.ctypes], dtype=torch.float64))
+            self.lam = nn.Parameter(torch.full((self.nT,), LAMBDA_INIT, dtype=torch.float64))
             unbound = torch.isnan(tab.A_acceptor)
             self.register_buffer("A_fixed", torch.nan_to_num(tab.A_acceptor))
             self.register_buffer("A_unbound", unbound)
@@ -377,7 +399,7 @@ class IonCTModel(nn.Module):
     def overlap_gap(self, h, idx, r, ty):
         i, j = idx
         rbf = torch.exp(-((r[:, None] - self.rbf_mu) / self.rbf_w) ** 2)
-        onehot = nn.functional.one_hot(ty, len(CHANNEL_TYPES)).to(h.dtype)
+        onehot = nn.functional.one_hot(ty, self.nT).to(h.dtype)
         z = torch.cat([h[i], h[j], rbf, onehot], -1)
         x = ((r - (self.chan.cutoff - 1.0)) / 1.0).clamp(0, 1)
         cut = 1 - x ** 3 * (10 - 15 * x + 6 * x * x)
@@ -401,7 +423,7 @@ class IonCTModel(nn.Module):
         f = slater_two_center_damp_unequal(bD[sp[i]], bA[sp[j]], rb, 0)[0]
         e_ch = -q[i, 0] * q[j, 1] * f / rb * torch.exp(bt["ch_ltaper"])
         e = h.new_zeros(B).index_add(0, bt["ch_frame"], e_ch)
-        nT = len(CHANNEL_TYPES)
+        nT = self.nT
         e_type = h.new_zeros(B * nT).index_add(0, bt["ch_frame"] * nT + bt["ch_type"], e_ch).reshape(B, nT)
         return e, e_type, e_ch, q
 
@@ -443,7 +465,7 @@ class IonCTModel(nn.Module):
         """A_ij >= 0 of each directed pair (i <- j), smoothly zero at PSEUDO_CUTOFF."""
         i, j = idx
         rbf = torch.exp(-((r[:, None] - self.rbf_mu) / self.rbf_w) ** 2)
-        onehot = nn.functional.one_hot(ty, len(PSEUDO_TYPES)).to(h.dtype)
+        onehot = nn.functional.one_hot(ty, len(self.ptypes)).to(h.dtype)
         z = torch.cat([h[i], h[j], rbf, onehot], -1)
         x = ((r - (PSEUDO_CUTOFF - 1.0)) / 1.0).clamp(0, 1)
         cut = 1 - x ** 3 * (10 - 15 * x + 6 * x * x)
@@ -491,7 +513,7 @@ class IonCTModel(nn.Module):
             if nC:
                 e_ct, e_type, e_ch, q = self.direct_ct(h, bt, sp)
             else:
-                e_ct, e_type, e_ch, q = h.new_zeros(B), h.new_zeros(B, len(CHANNEL_TYPES)), h.new_zeros(0), h.new_zeros(n, 2)
+                e_ct, e_type, e_ch, q = h.new_zeros(B), h.new_zeros(B, self.nT), h.new_zeros(0), h.new_zeros(n, 2)
             z = h.new_zeros(nC)
             return {"e_pol": e_pol, "e_ct": e_ct, "e_ct_post": e_ct, "e_type": e_type, "c": c, "dov": z, "A_ps": A_ps,
                     "W": z, "Delta": z, "delta": z, "p": z, "dq": h.new_zeros(n), "x": x0, "x_pol": x0,
@@ -499,7 +521,7 @@ class IonCTModel(nn.Module):
         dov = self.overlap_gap(h, bt["ch_index"], bt["ch_r"], bt["ch_type"])
         if not bt["ch_index"].shape[1]:
             z = h.new_zeros(B)
-            return {"e_pol": e_pol, "e_ct": z, "e_ct_post": z, "e_type": h.new_zeros(B, len(CHANNEL_TYPES)), "c": c,
+            return {"e_pol": e_pol, "e_ct": z, "e_ct_post": z, "e_type": h.new_zeros(B, self.nT), "c": c,
                     "dov": dov, "A_ps": A_ps, "W": dov, "Delta": dov, "delta": dov, "p": dov, "dq": h.new_zeros(n),
                     "x": x0, "x_pol": x0, "joint_iters": 0, "e_pauli": e_pauli}
         ct0 = self._ct(x0, bt, sp, mask, phi_ext, dov, Fa)
@@ -579,7 +601,7 @@ class IonCTModel(nn.Module):
         W = torch.exp(self.lnw[ty] + self.gamma[ty] * torch.log(O.clamp(min=1e-300)) + bt["ch_ltaper"])
         eps, p, dq = CT.arrowhead(W, Delta, bt["ch_index"], n)
         e_ct = x.new_zeros(B).index_add(0, bt["frame"], eps)
-        nT = len(CHANNEL_TYPES)
+        nT = self.nT
         e_type = x.new_zeros(B * nT).index_add(0, bt["ch_frame"] * nT + ty, -W / Delta).reshape(B, nT)
         return {"e_ct": e_ct, "e_type": e_type, "W": W, "Delta": Delta, "delta": u, "p": p, "dq": dq,
                 "stark": stark, "bD": bD}
@@ -674,7 +696,7 @@ class IonCTModel(nn.Module):
             Delta = Delta - stark
         eps, p, dq = CT.arrowhead(W, Delta, bt["ch_index"], n)
         e_ct = x.new_zeros(B).index_add(0, bt["frame"], eps)
-        nT = len(CHANNEL_TYPES)
+        nT = self.nT
         e_type = x.new_zeros(B * nT).index_add(0, bt["ch_frame"] * nT + bt["ch_type"], -W / Delta).reshape(B, nT)
         return {"e_ct": e_ct, "e_type": e_type, "W": W, "Delta": Delta, "delta": delta, "p": p, "dq": dq,
                 "stark": stark}

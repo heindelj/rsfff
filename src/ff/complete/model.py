@@ -42,7 +42,7 @@ from torch import nn
 
 from ..dispersion import DEFAULT_C6_PRIOR, tt_damped_c6_energy
 from ..ionct import kernels as K
-from ..ionct.model import CHANNEL_TYPES, PAULI_INIT, IonCTModel
+from ..ionct.model import PAULI_INIT, IonCTModel
 from ..ionct.params import IonTable
 from ..ionct.ct import ChannelTable
 from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_damp_unequal
@@ -269,7 +269,7 @@ class CompleteModel(IonCTModel):
             u = -lam * dphi / self.dphi_scale
             e_ch = e_ch * torch.exp(GAP_EXP_MAX * torch.tanh(u / GAP_EXP_MAX))     # bounded: at most e^+-GAP_EXP_MAX
         e = e_ch.new_zeros(B).index_add(0, bt["ch_frame"], e_ch)
-        nT = len(CHANNEL_TYPES)
+        nT = self.nT
         e_type = e_ch.new_zeros(B * nT).index_add(0, bt["ch_frame"] * nT + bt["ch_type"], e_ch).reshape(B, nT)
         return e, e_type, e_ch, dphi
 
@@ -347,7 +347,7 @@ class CompleteModel(IonCTModel):
         if nC:
             e_ct, e_type, e_ch, dphi = self.direct_ct_env(q, bt, sp, x0, phi_ext)
         else:
-            e_ct, e_type, e_ch, dphi = I.new_zeros(B), I.new_zeros(B, len(CHANNEL_TYPES)), I.new_zeros(0), I.new_zeros(0)
+            e_ct, e_type, e_ch, dphi = I.new_zeros(B), I.new_zeros(B, self.nT), I.new_zeros(0), I.new_zeros(0)
         z = I.new_zeros(nC)
         e_pauli, e_disp, frz = I.new_zeros(B), I.new_zeros(B), None
         if self.frozen:

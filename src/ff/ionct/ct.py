@@ -93,8 +93,8 @@ class ChannelTable:
     def load(cls, path=DEFAULT_PARAMS, dtype=torch.float64) -> "ChannelTable":
         d = json.load(open(path))
         ch = d.get("channels")
-        if not ch:
-            raise KeyError(f"{path} has no 'channels' section (scripts/ion_ct_pairs.py)")
+        if not ch:          # no calibrated pair functions (a table built by scripts/ion_table.py): the direct CT form only
+            return cls.direct(tuple(d["ions"]))
         types = {}
         for name, v in ch["types"].items():
             types[name] = {"g": float(v["g"]), "lnW": PairFunction(v["R"], v["lnW"], dtype),
@@ -102,6 +102,13 @@ class ChannelTable:
                            "dov_tail": float(v.get("dov_tail", 2.0)), "R_max": float(v["R"][-1])}
         return cls(types=types, s=float(ch.get("s", 1.0)), cutoff=float(ch.get("cutoff", 8.0)),
                    taper=float(ch.get("taper", 1.0)), meta={k: v for k, v in ch.items() if k != "types"})
+
+    @classmethod
+    def direct(cls, symbols, cutoff=8.0, taper=1.0):
+        """Every ordered pair as a channel type with no pair functions: what the direct CT form needs (the channel
+        model's gap / coupling functions are absent, so only names, cutoff and taper are used)."""
+        types = {f"{a}>{b}": None for a in symbols for b in symbols}
+        return cls(types=types, cutoff=cutoff, taper=taper, meta={"form": "direct"})
 
     def overlap_gap(self, name, r):
         """Delta^ov_T(R), clamped >= 0, decaying as exp(-dov_tail (R - R_max)) beyond the fitted range."""
@@ -156,6 +163,8 @@ def channel_geometry(pos_ang, species, batch_idx, tab: IonTable, chan: ChannelTa
     for name in set(names):
         m = torch.tensor([n == name for n in names], dtype=torch.bool, device=r.device)
         t = chan.types[name]
+        if t is None:               # direct-form table: no pair functions
+            continue
         g = torch.where(m, torch.full_like(r, t["g"]), g)
         lnW = torch.where(m, t["lnW"](r), lnW)
         dov = torch.where(m, chan.overlap_gap(name, r), dov)

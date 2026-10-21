@@ -158,10 +158,11 @@ def _ho_ratio(r):
     return r["eda"]["ct"] / pct if pct < 0 else float("inf")
 
 
-def _channel_sums(r, ratio):
+def _channel_sums(r, ratio, types=None):
     """ALMO-CTA channel energies (Hartree) summed per channel type, scaled by E_CT / sum PCT (how the pair
     functions were calibrated); None without CTA."""
     from ..ff.ionct.model import CHANNEL_TYPES
+    CHANNEL_TYPES = types or CHANNEL_TYPES
     c = r.get("cta") or {}
     if not c.get("E") or not np.isfinite(ratio):
         return None
@@ -176,7 +177,8 @@ def _channel_sums(r, ratio):
     return out
 
 
-def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 3.6, max_ho_ratio: float = 1.4):
+def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 3.6, max_ho_ratio: float = 1.4,
+                species=("Na", "Cl"), types=None):
     """[(symbols, coords A, labels, meta)], deduplicated.
 
     The ct label is kept only where ALMO's E_CT is a channel quantity: Na-Cl pairs within ``ct_max_pair`` and, for
@@ -213,7 +215,7 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
             r = json.loads(line)
             if r.get("stage") != "label" or "eda" not in r or not r.get("symbols") or len(r["symbols"]) < 2:
                 continue
-            if not set(r["symbols"]) <= {"Na", "Cl"} or (r.get("tags") or {}).get("field"):
+            if not set(r["symbols"]) <= set(species) or (r.get("tags") or {}).get("field"):
                 continue
             t = r.get("tags") or {}
             if "mbe_set" in t:
@@ -225,7 +227,7 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
             add(r["symbols"], r["coords"], r["eda"]["pol"], r["eda"]["ct"],
                 {"workflow": wf, "parent": parent, "order": int(t.get("mbe_order", len(r["symbols"]))),
                  "full": t.get("mbe_order") == t.get("mbe_n") if "mbe_set" in t else True,
-                 "cta_E": (r.get("cta") or {}).get("E")}, _ho_ratio(r), _channel_sums(r, _ho_ratio(r)),
+                 "cta_E": (r.get("cta") or {}).get("E")}, _ho_ratio(r), _channel_sums(r, _ho_ratio(r), types),
                 r["eda"].get("mod_pauli", float("nan")),
                 {k: r["eda"].get(e, float("nan")) for k, e in (("disp", "disp"), ("elec", "cls_elec"), ("int", "int"))})
     if walk_eda:
@@ -233,7 +235,7 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
         for f in sorted(Path(walk_eda).glob("*.xyz")):
             for k, a in enumerate(read(f, ":")):
                 sym = a.get_chemical_symbols()
-                if "eda_ct" not in a.info:
+                if "eda_ct" not in a.info or not set(sym) <= set(species):
                     continue
                 parent = f"walkeda_{f.stem}_{k}" if len(sym) == 2 else f"walkeda_{f.stem}_{k}"
                 add(sym, a.positions, a.info["eda_pol"] * KJ, a.info["eda_ct"] * KJ,
@@ -650,7 +652,9 @@ def main():
     feat = featurizer_for(vars(a), tab)
     if a.env == "density":
         print(f"environment: density projections, {feat.n_feat} invariants", flush=True)
-    frames = load_frames(a.ct_sets, a.walk_eda, a.ct_max_pair, a.max_ho_ratio)
+    from ..ff.ionct.model import channel_types
+    frames = load_frames(a.ct_sets, a.walk_eda, a.ct_max_pair, a.max_ho_ratio, species=tab.symbols,
+                         types=channel_types(tab.symbols))
     print(f"ct label kept for {sum(f[2]['ct_mask'] for f in frames)} of {len(frames)} frames", flush=True)
     tags = split(frames, a.test, seed=a.seed)
     if a.holdout_scans:
@@ -763,9 +767,8 @@ def main():
                   f"{sv.get('ct_mae', 0):.2f} kJ/mol{msg} [{time.time() - t0:.0f}s]", flush=True)
     model.load_state_dict(best_state)
     if model.gap_form == "density":
-        from ..ff.ionct.model import CHANNEL_TYPES as _CT
         print("coupling ln w / gamma / lambda: " + "; ".join(
-            f"{t} {model.lnw[k]:.2f} / {model.gamma[k]:.3f} / {model.lam[k]:.3f}" for k, t in enumerate(_CT))
+            f"{t} {model.lnw[k]:.2f} / {model.gamma[k]:.3f} / {model.lam[k]:.3f}" for k, t in enumerate(model.ctypes))
             + f" | A_A: {dict(zip(tab.symbols, [round(v, 4) for v in model.acceptor_affinity().tolist()]))}", flush=True)
     if getattr(model, "pol_form", "confine") == "pauli":
         import torch.nn.functional as Fn

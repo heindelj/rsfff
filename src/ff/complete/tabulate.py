@@ -32,7 +32,7 @@ import torch
 
 from ..ionct import ct as CT
 from ..ionct import kernels as K
-from ..ionct.model import CHANNEL_TYPES, PSEUDO_CUTOFF, PSEUDO_TYPES
+from ..ionct.model import PSEUDO_CUTOFF, channel_types, pseudo_type_names
 from ..ionct.params import IonTable
 from ..multipole import shaped_one_center_multi, shaped_two_center_damp
 from .environment import INVARIANT_NAMES, PROBE_NAMES, shaped_overlap_derivs
@@ -257,16 +257,17 @@ def _luts(tab, chan):
     """Species-pair lookup tables: pseudo type index (S, S) and channel type index (S, S; -1 where the pair has no
     channel), to replace per-pair name building."""
     S = len(tab.symbols)
+    ctypes, ptypes = channel_types(tab.symbols), pseudo_type_names(tab.symbols)
     ps = torch.full((S, S), -1, dtype=torch.long)
     ch = torch.full((S, S), -1, dtype=torch.long)
     for a in range(S):
         for b in range(S):
             nm = f"{tab.symbols[a]}<{tab.symbols[b]}"
-            if nm in PSEUDO_TYPES:
-                ps[a, b] = PSEUDO_TYPES.index(nm)
+            if nm in ptypes:
+                ps[a, b] = ptypes.index(nm)
             nm = f"{tab.symbols[a]}>{tab.symbols[b]}"
-            if nm in chan.types and nm in CHANNEL_TYPES:
-                ch[a, b] = CHANNEL_TYPES.index(nm)
+            if nm in chan.types and nm in ctypes:
+                ch[a, b] = ctypes.index(nm)
     return ps, ch
 
 
@@ -387,7 +388,7 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     lab = dict(labels or {})
     lab.setdefault("n", counts.to(dt))
     lab.setdefault("ct_mask", torch.ones(B, dtype=torch.bool, device=dev))
-    nT = len(CHANNEL_TYPES)
+    nT = len(channel_types(tab.symbols))
     lab.setdefault("chan", torch.full((B, nT), float("nan"), dtype=dt, device=dev))
     for key in ("pol", "ct", "pauli", "disp", "elec", "int"):
         lab.setdefault(key, torch.full((B,), float("nan"), dtype=dt, device=dev))
