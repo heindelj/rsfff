@@ -30,8 +30,18 @@ Frozen-level terms (``frozen=True``), labels ``mod_pauli`` and ``disp``, heads o
     E_P    = sum_{i<j} qP_i qP_j f(bP_i, bP_j; r) / r,   qP_i = qP0[s] exp(head_P(S_i))      (penetration kernel >= 0)
     E_disp = -sum_{i<j} f6(sqrt(b_i b_j) r) sqrt(C6_i C6_j) / r^6,   C6_i = C60[s] exp(head_6(S_i))   (Tang-Toennies)
 
+Exchange-polarization drive (``pseudo=True``): the Pauli pseudo-potential of neighbour j acting on i's response is
+atom-centred,
+
+    A_ij = gamma_i qP_j S_ij / s,   gamma_i = gamma0[s] exp(head_gamma(S_i)) >= 0,
+
+the functional derivative of the bilinear (overlap-squared) Pauli energy with respect to i's density: a damped
+exclusion potential whose moment is j's own Pauli charge qP_j (the one of E_P above) and whose range is j's outer
+shell, times the overlap S_ij of i's outermost shell with j's density (fixed geometry), times i's sensitivity
+gamma_i from its overlap invariants. No pair head, no pair types (the CT-only model's pair form is gone).
+
 Species enter only through the isolated-atom parameters (alpha0, C0, the CT charges qD0 / qA0 and exponents, kappa,
-lam) and the pseudo-potential pair types; the heads are shared (``species_emb`` adds an embedding to their input).
+lam, gamma0); the heads are shared (``species_emb`` adds an embedding to their input).
 """
 from __future__ import annotations
 
@@ -42,7 +52,7 @@ from torch import nn
 
 from ..dispersion import DEFAULT_C6_PRIOR, tt_damped_c6_energy
 from ..ionct import kernels as K
-from ..ionct.model import PAULI_INIT, IonCTModel
+from ..ionct.model import PAULI_INIT, PSEUDO_CUTOFF, IonCTModel
 from ..ionct.params import IonTable
 from ..ionct.ct import ChannelTable
 from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_damp_unequal
@@ -57,6 +67,7 @@ GAP_EXP_MAX = 4.0     # bound on the log of the CT gap factor
 #: vs disp with geometric-mean combination (rms Cl-Cl 0.37, Na-Cl 0.84 kJ/mol -- the combination rule is the weak
 #: spot, the environment head and a learned b take it from there). Other species: DEFAULT_C6_PRIOR / fallback.
 PAULI_INIT_UNEQUAL = {"Na": (1.077, 1.453), "Cl": (7.035, 1.599)}
+PSEUDO_GAMMA_PER_ALPHA = 0.1   # start of gamma0[s] per bohr^3 of alpha0[s]
 DISP_INIT = {"Na": (3.41, 3.872), "Cl": (554.7, 1.130)}
 DISP_FALLBACK = (10.0, 2.0)
 
@@ -89,10 +100,11 @@ class CompleteModel(IonCTModel):
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
                  species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
-                 drive_overlap=False, hyper=False, pauli_moments=False):
+                 hyper=False, pauli_moments=False):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
-                         confine=confine, pseudo=pseudo, ps_init=ps_init, tie_c=tie_c, ct_form="direct",
-                         gap_form="pair", pol_form="confine")
+                         confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
+                         pol_form="confine")
+        self.pseudo = pseudo
         del self.conf, self.ctq, self.gap                  # replaced by the environment heads / not used (direct CT)
         S = len(tab.symbols)
         ns = S if species_emb else 0
@@ -100,18 +112,6 @@ class CompleteModel(IonCTModel):
         # conf_form="mono": stiffening only -- log c_alpha = -softplus(a_s + head) * S[shell]^(0) / s, so c <= 1,
         # exactly 1 at zero overlap and decreasing in it; any enhancement is the overlap drive's job (M3 analysis:
         # the two mechanisms otherwise trade off and the network switches between them)
-        # drive_overlap: the pseudo-potential (exchange-polarization) drive strength carries the overlap of the two
-        # permanent densities, A_ij = A0 softplus(net) S_ij / s -- first-order exchange polarization scales with the
-        # overlap, while the drive basis alone decays like the penetration potential; without it the network has to
-        # supply the extra decay itself and does so super-exponentially (the "4 A" tail of the M3 pair scans)
-        self.drive_overlap = drive_overlap
-        self._ps_ovl = None
-        if drive_overlap:
-            names_ = list(feature_names or [])
-            sref = float(feat_scale[names_.index("shell:S0")]) if ("shell:S0" in names_ and feat_scale is not None) else 1.0
-            self.register_buffer("drive_s_ref", torch.tensor(sref, dtype=torch.float64))
-            b_outer = torch.where(tab.shell_n > 0, tab.shell_b, torch.full_like(tab.shell_b, float("inf"))).min(1).values
-            self.register_buffer("drive_b_outer", b_outer)
         # hyper: field-induced enhancement of the polarizability, alpha -> alpha (1 + softplus(g_s) |V[dip]^(1)|^2 / s^2):
         # the gamma hyperpolarizability of the ion in the neighbours' field (ALMO alpha_MI of Cl- sits 8 % above the
         # free-ion value 3-5 A from a Na+); the stiffening head cannot produce c > 1 by design
@@ -161,7 +161,7 @@ class CompleteModel(IonCTModel):
             self.pm_a1 = nn.Parameter(torch.zeros(S, dtype=torch.float64))
             self.pm_a2 = nn.Parameter(torch.zeros(S, dtype=torch.float64))
         self.frozen = frozen
-        if frozen:
+        if frozen or pseudo:
             f64 = dict(dtype=torch.float64)
             sym = tab.symbols
             pp = [PAULI_INIT_UNEQUAL.get(x, PAULI_INIT.get(x, (1.0, 1.5))) for x in sym]
@@ -174,6 +174,23 @@ class CompleteModel(IonCTModel):
             cols = [k for k, nm in enumerate(names) if nm.split(":")[-1] in ("S0", "|S1|", "|S2|")] or list(range(n_feat))
             self.register_buffer("frozen_cols", torch.tensor(cols, dtype=torch.long))
             self.head_frozen = EnvironmentHead(len(cols), 2, hidden, depth, ns)     # log qP / qP0, log C6 / C60
+        if pseudo:
+            # the drive strength carries the overlap S_ij of i's outermost shell with j's density (bilinear Pauli
+            # energy ~ S^2: its derivative with respect to i's density is one overlap times the exclusion potential);
+            # the drive basis alone decays like the penetration potential of j's shell, too slowly: without the factor
+            # the gamma head has to supply the decay from the overlap invariants and does so badly for many-body
+            names_ = list(feature_names or [])
+            sref = float(feat_scale[names_.index("shell:S0")]) if ("shell:S0" in names_ and feat_scale is not None) else 1.0
+            self.register_buffer("drive_s_ref", torch.tensor(sref, dtype=torch.float64))
+            b_outer = torch.where(tab.shell_n > 0, tab.shell_b, torch.full_like(tab.shell_b, float("inf"))).min(1).values
+            self.register_buffer("drive_b_outer", b_outer)
+            self._ps_ovl = None
+            # gamma_i: i's sensitivity to its neighbours' exclusion potentials, overlap invariants only. Start value
+            # proportional to the ion's polarizability (a diffuse response density feels the exclusion more): with
+            # PSEUDO_GAMMA_PER_ALPHA = 0.1, Cl- starts at gamma = 3 (A[Cl<Na] = 3.2, the pair-head runs end near 13)
+            # and Na+ at 0.1 (A[Na<Cl] = 0.7, pair-head runs near 1.5)
+            self.ps_lng0 = nn.Parameter(torch.log(PSEUDO_GAMMA_PER_ALPHA * tab.alpha.clamp(min=1e-3)).double())
+            self.head_ps = EnvironmentHead(len(cols), 1, hidden, depth, ns)
         self.double()
 
     # -- heads --
@@ -208,6 +225,10 @@ class CompleteModel(IonCTModel):
     def ct_charges(self, h):
         raise NotImplementedError("CompleteModel: use ct_charges_from(I, species)")
 
+    def pseudo_gamma(self, I, sp):
+        """(N,) gamma_i >= 0: the response sensitivity of each atom to its neighbours' exclusion potentials."""
+        return torch.exp(self.ps_lng0[sp] + self.head_ps(I[:, self.frozen_cols], sp)[:, 0])
+
     def pair_overlap(self, idx, r_ang, sp):
         """Overlap (bohr^-3) of i's outermost permanent shell with j's shells for directed pairs (i <- j)."""
         i, j = idx
@@ -221,14 +242,21 @@ class CompleteModel(IonCTModel):
                 S = S + nt * K.shaped_overlap(self.drive_b_outer[sp[i]], one, tab.shell_b[sp[j], t], one, rb)
         return S
 
-    def pseudo_strength(self, h, idx, r, ty, sp=None):
-        A = super().pseudo_strength(h, idx, r, ty)
-        if self.drive_overlap and idx.shape[1]:
-            ovl = self._ps_ovl
-            if ovl is None or ovl.shape[0] != idx.shape[1]:          # computed once per batch (forward sets it)
-                ovl = self.pair_overlap(idx, r, self._sp if sp is None else sp)
-            A = A * ovl / self.drive_s_ref
-        return A
+    def pseudo_strength(self, I, idx, r, ty=None):
+        """A_ij = gamma_i qP_j S_ij / s >= 0 of each directed pair (i <- j), smoothly zero at PSEUDO_CUTOFF."""
+        sp = self._sp
+        qP = self.frozen_params(I, sp)[0]
+        ovl = self._ps_ovl
+        if ovl is None or ovl.shape[0] != idx.shape[1]:          # computed once per batch (forward sets it)
+            ovl = self.pair_overlap(idx, r, sp)
+        x = ((r - (PSEUDO_CUTOFF - 1.0)) / 1.0).clamp(0, 1)
+        cut = 1 - x * x * (3 - 2 * x)
+        return self.pseudo_gamma(I, sp)[idx[0]] * qP[idx[1]] * ovl / self.drive_s_ref * cut
+
+    def pseudo_drive(self, I, idx, r, ty, basis, n):
+        """(n, 8): sum_j A_ij basis_ij on every ion, and A (P,)."""
+        A = self.pseudo_strength(I, idx, r, ty)
+        return I.new_zeros(n, 8).index_add(0, idx[0], A[:, None] * basis), A
 
     def alpha_inverse(self, alpha, sp, env):
         """(N, 3, 3) inverse polarizability: isotropic 1/alpha times expm(kappa S2 / s2)."""
@@ -318,12 +346,10 @@ class CompleteModel(IonCTModel):
         Cq = torch.ones(B, nmax, dtype=I.dtype, device=I.device).masked_scatter(mask, self.tab.C[sp] * c[:, 1])
         Lflat = I.new_zeros(n, 8)
         A_ps = I.new_zeros(0)
-        self._sp, self._ps_ovl = sp, None
+        self._sp = sp
         if self.pseudo and bt["ps_index"].shape[1]:
-            if self.drive_overlap:
-                self._ps_ovl = self.pair_overlap(bt["ps_index"], bt["ps_r"], sp)
-            h, _ = self.latents(bt["feats"], sp)
-            Lps, A_ps = self.pseudo_drive(h, bt["ps_index"], bt["ps_r"], bt["ps_type"], bt["ps_basis"], n)
+            self._ps_ovl = self.pair_overlap(bt["ps_index"], bt["ps_r"], sp)
+            Lps, A_ps = self.pseudo_drive(I, bt["ps_index"], bt["ps_r"], bt["ps_type"], bt["ps_basis"], n)
             Lflat = Lflat + Lps
         phi_ext = I.new_zeros(n)
         if field is not None:
@@ -368,17 +394,12 @@ class CompleteModel(IonCTModel):
         I1, I2 = self.scaled(f), self.scaled(f + noise)
         pen = ((torch.log(self.confinement_from(I2, sp)) - torch.log(self.confinement_from(I1, sp))) ** 2).mean()
         pen = pen + ((self.head_ctq(I2, sp) - self.head_ctq(I1, sp)) ** 2).mean()
-        if self.frozen:
+        if self.frozen or self.pseudo:
             c_ = self.frozen_cols
             pen = pen + ((self.head_frozen(I2[:, c_], sp) - self.head_frozen(I1[:, c_], sp)) ** 2).mean()
-        self._sp = sp          # _ps_ovl from the forward of the same batch is reused
-        if self.pseudo and bt["ps_index"].shape[1]:
-            h1, _ = self.latents(f, sp)
-            h2, _ = self.latents(f + noise, sp)
-            A0 = self.ps_A0[bt["ps_type"]]
-            a1 = self.pseudo_strength(h1, bt["ps_index"], bt["ps_r"], bt["ps_type"])
-            a2 = self.pseudo_strength(h2, bt["ps_index"], bt["ps_r"], bt["ps_type"])
-            pen = pen + ((torch.log1p(a2 / A0) - torch.log1p(a1 / A0)) ** 2).mean()
+        if self.pseudo:
+            c_ = self.frozen_cols
+            pen = pen + ((self.head_ps(I2[:, c_], sp) - self.head_ps(I1[:, c_], sp)) ** 2).mean()
         return pen / sigma ** 2
 
     @torch.no_grad()
@@ -399,9 +420,12 @@ class CompleteModel(IonCTModel):
             out["breath lam0"] = {x: round(float(self.breath_lam[k]), 4) for k, x in enumerate(sym)}
         if self.pauli_moments:
             out["pauli moments a1/a2"] = {x: [round(float(self.pm_a1[k]), 4), round(float(self.pm_a2[k]), 4)] for k, x in enumerate(sym)}
-        if self.frozen:
+        if self.frozen or self.pseudo:
             out["pauli qP0/bP"] = {x: [round(float(self.pauli_lnq0[k].exp()), 4), round(float(self.pauli_lnb[k].exp()), 4)]
                                   for k, x in enumerate(sym)}
+        if self.pseudo:
+            out["pseudo gamma0"] = {x: round(float(self.ps_lng0[k].exp()), 4) for k, x in enumerate(sym)}
+        if self.frozen:
             out["disp C60/b"] = {x: [round(float(self.disp_lnc60[k].exp()), 3), round(float(self.disp_lnb[k].exp()), 4)]
                                 for k, x in enumerate(sym)}
         return out

@@ -46,8 +46,13 @@ def test_isolated_atom_and_isotropic_equivalence(setup):
     sp = bt["species"]
     alpha = torch.ones(2, bt["nmax"], dtype=torch.float64).masked_scatter(bt["mask"], tab.alpha[sp] * o["c"][:, 0])
     Cq = torch.ones(2, bt["nmax"], dtype=torch.float64).masked_scatter(bt["mask"], tab.C[sp] * o["c"][:, 1])
-    h, _ = m.latents(bt["feats"], sp)
-    Lps, _ = m.pseudo_drive(h, bt["ps_index"], bt["ps_r"], bt["ps_type"], bt["ps_basis"], sp.shape[0])
+    I = m.scaled(bt["feats"])
+    Lps, A = m.pseudo_drive(I, bt["ps_index"], bt["ps_r"], bt["ps_type"], bt["ps_basis"], sp.shape[0])
+    # atom-centred strength: A_ij = gamma_i qP_j S_ij / s (times the cut-off)
+    i, j = bt["ps_index"]
+    S = m.pair_overlap(bt["ps_index"], bt["ps_r"], sp) / m.drive_s_ref
+    expect = m.pseudo_gamma(I, sp)[i] * m.frozen_params(I, sp)[0][j] * S
+    assert torch.allclose(A[bt["ps_r"] < 5.0], expect[bt["ps_r"] < 5.0])
     L = bt["L"] + torch.zeros_like(bt["L"]).masked_scatter(bt["mask"][..., None].expand_as(bt["L"]), Lps)
     assert torch.allclose(K.solve_induction(L, bt["A_off"], alpha, Cq), o["x"], atol=1e-12)
 

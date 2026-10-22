@@ -463,7 +463,7 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              pseudo=g("pseudo", False), tie_c=g("tie_c", False), species_emb=g("species_emb", False),
                              aniso=not g("no_aniso", False), ct_gap=not g("no_ct_gap", False),
                              dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False),
-                             conf_form=g("conf_form", "tanh"), drive_overlap=g("drive_overlap", False),
+                             conf_form=g("conf_form", "tanh"),
                              hyper=g("hyper", False), pauli_moments=g("pauli_moments", False))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
@@ -624,8 +624,6 @@ def main():
                     help="complete + frozen: induced Pauli dipole / quadrupole from the overlap gradients (polytensor Pauli kernel)")
     ap.add_argument("--hyper", action="store_true",
                     help="complete: field-induced polarizability enhancement alpha (1 + g |V[dip]^(1)|^2) (hyperpolarizability)")
-    ap.add_argument("--drive-overlap", action="store_true",
-                    help="complete: the exchange-polarization drive strength carries the pair overlap of the densities")
     ap.add_argument("--conf-form", default="tanh", choices=("tanh", "mono"),
                     help="complete: confinement form -- tanh (c_range-bounded, either sign) or mono (stiffening only, "
                          "c <= 1, overlap-gated)")
