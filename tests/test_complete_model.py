@@ -131,3 +131,80 @@ def test_pauli_moments_reduce_to_monopole_at_zero(setup):
         m1.pm_a1.fill_(0.3)
         m1.pm_a2.fill_(0.3)
     assert not torch.allclose(m0(bt)["e_pauli"], m1(bt)["e_pauli"])
+
+
+def test_pauli_shells_form(setup):
+    tab, chan, feat, c, m = setup
+    kw = dict(feature_names=feat.feature_names, feat_scale=m.feat_scale, pseudo=True, frozen=True)
+    ms = CompleteModel(tab, chan, c.feats.shape[1], pauli_form="shells", **kw)
+    iso = precompute(["Cl"], [[0, 0, 0]], tab, chan, feat, lean=True, frontier=True)
+    bt = collate([c, iso])
+    o = ms(bt)
+    assert o["e_pauli"][0] > 0 and o["e_pauli"][1] == 0
+    w, b, _, _ = o["frozen_params"]
+    assert w.shape == (5, 2) and (w[:, 1][bt["species"] == tab.symbols.index("Na")] == 0).all()
+    # the per-shell drive: strengths (P, T), summed total reported; Na has one exclusion shell
+    I = ms.scaled(bt["feats"])
+    A = ms.pseudo_strength(I, bt["ps_index"], bt["ps_r"])
+    assert A.shape[1] == 2 and (A[bt["species"][bt["ps_index"][1]] == tab.symbols.index("Na"), 1] == 0).all()
+    assert torch.allclose(o["A_ps"], A.sum(1))
+    # the shells reduce to the single form when only the outer shell carries weight at the single exponent
+    m1 = CompleteModel(tab, chan, c.feats.shape[1], **kw)
+    with torch.no_grad():
+        ms.pauli_lnw.fill_(-30.0)
+        for k in range(len(tab.symbols)):
+            t = int(ms.pauli_outer[k])
+            ms.pauli_lnw[k, t] = m1.pauli_lnq0[k]
+            ms.pauli_lnbs[k] = m1.pauli_lnb[k] - torch.log(tab.shell_b[k, t])
+        ms.ps_lng0.copy_(m1.ps_lng0)
+    ms.head_frozen.load_state_dict(m1.head_frozen.state_dict())
+    ms.head_ps.load_state_dict(m1.head_ps.state_dict())
+    assert torch.allclose(ms(bt)["e_pauli"], m1(bt)["e_pauli"])
+    assert torch.allclose(ms(bt)["e_pol"], m1(bt)["e_pol"])
+
+
+def test_pauli_shells_forces(setup):
+    tab, chan, feat, c, m = setup
+    ms = CompleteModel(tab, chan, c.feats.shape[1], feature_names=feat.feature_names, feat_scale=m.feat_scale,
+                       pseudo=True, frozen=True, pauli_form="shells")
+
+    def E(p):
+        cc = precompute(SYM, p, tab, chan, feat, lean=True, frontier=True, differentiable=True)
+        o = ms(collate([cc]))
+        return o["e_pol"][0] + o["e_pauli"][0]
+
+    pos = torch.tensor(X, dtype=torch.float64, requires_grad=True)
+    g = torch.autograd.grad(E(pos), pos)[0]
+    h = 1e-4
+    with torch.no_grad():
+        for a, b in ((1, 2), (2, 0)):
+            pp, pm = pos.detach().clone(), pos.detach().clone()
+            pp[a, b] += h
+            pm[a, b] -= h
+            assert abs((E(pp) - E(pm)) / (2 * h) - g[a, b]) < 1e-7
+
+
+def test_ct_stark_gives_perpendicular_ct_polarizability(setup):
+    tab, chan, feat, c, m = setup
+    kw = dict(feature_names=feat.feature_names, feat_scale=m.feat_scale, pseudo=True, frozen=True)
+    m0 = CompleteModel(tab, chan, c.feats.shape[1], **kw)
+    m1 = CompleteModel(tab, chan, c.feats.shape[1], ct_stark=True, **kw)
+    m1.load_state_dict(m0.state_dict(), strict=False)
+    dimer = collate([precompute(["Na", "Cl"], [[0, 0, 0], [0, 0, 2.6]], tab, chan, feat, lean=True, frontier=True)])
+    F = 0.002
+
+    def curv(model, axis):
+        e = []
+        for sgn in (1.0, 0.0, -1.0):
+            f = torch.zeros(1, 3, dtype=torch.float64)
+            f[0, axis] = sgn * F
+            e.append(model(dimer, field=f)["e_ct"][0])
+        return (e[0] - 2 * e[1] + e[2]) / F ** 2
+
+    assert abs(curv(m0, 0)) < 1e-9                 # perpendicular: nothing without the Stark term
+    assert abs(curv(m1, 0)) > 1e-3                 # with it: a perpendicular CT polarizability
+    assert curv(m1, 0) < 0                         # the field lowers the gap: more CT, lower energy
+    with torch.no_grad():
+        m0.gap_lamD.fill_(0.3)
+    assert abs(curv(m0, 2)) > 1e-3                 # parallel: the gap factor already responds
+    assert abs(curv(m0, 0)) < 1e-9                 # ... but not perpendicular

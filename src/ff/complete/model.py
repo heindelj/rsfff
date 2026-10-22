@@ -68,6 +68,11 @@ GAP_EXP_MAX = 4.0     # bound on the log of the CT gap factor
 #: spot, the environment head and a learned b take it from there). Other species: DEFAULT_C6_PRIOR / fallback.
 PAULI_INIT_UNEQUAL = {"Na": (1.077, 1.453), "Cl": (7.035, 1.599)}
 PSEUDO_GAMMA_PER_ALPHA = 0.1   # start of gamma0[s] per bohr^3 of alpha0[s]
+#: pauli_form="shells": exclusion weights per permanent shell (outer first? no -- in the table's shell order) and the
+#: per-species scale on the shell exponents, from a fit of sum_{t,u} w_t w_u f1(b_t s, b_u s; r)/r to the ct-scan
+#: mod_pauli labels (R >= 2.2 A) with the pf2p shells: rms ln E 0.155 (Na-Cl 0.12, Cl-Cl 0.20) vs 0.42 for one
+#: Slater per species -- the ion's own shells carry the two-exponent decay of the Cl- Pauli wall
+PAULI_SHELL_INIT = {"Na": ([8.856], 0.871), "Cl": ([9.78, 0.302], 0.893)}
 DISP_INIT = {"Na": (3.41, 3.872), "Cl": (554.7, 1.130)}
 DISP_FALLBACK = (10.0, 2.0)
 
@@ -100,7 +105,7 @@ class CompleteModel(IonCTModel):
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
                  species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
-                 hyper=False, pauli_moments=False):
+                 hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
                          pol_form="confine")
@@ -137,6 +142,19 @@ class CompleteModel(IonCTModel):
         if ct_gap:
             self.gap_lamD = nn.Parameter(torch.zeros(S, dtype=torch.float64))
             self.gap_lamA = nn.Parameter(torch.zeros(S, dtype=torch.float64))
+        # ct_stark: the CT state's second-order Stark lowering of the gap. The CT state (Na0 Cl0 for an ion pair) is
+        # far more polarizable than the ground state, so a field at the donor / acceptor lowers the gap by
+        # 1/2 dalpha |E|^2 at second order -- the one way a field perpendicular to a pair reaches the CT (the gap
+        # factor's potential difference is blind to it: alpha_CT,perp = 0 without this). The fields are the
+        # neighbours' permanent fields over the frontier shapes (env V^(1) of the donor / acceptor probes) plus the
+        # external field; eta >= 0 per species, in units of the training-set field scale.
+        self.ct_stark = ct_stark
+        if ct_stark:
+            names_ = list(feature_names or [])
+            self.stark_sD = float(feat_scale[names_.index("donor:|V1|")]) if ("donor:|V1|" in names_ and feat_scale is not None) else 1.0
+            self.stark_sA = float(feat_scale[names_.index("acceptor:|V1|")]) if ("acceptor:|V1|" in names_ and feat_scale is not None) else 1.0
+            self.stark_D = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
+            self.stark_A = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
         self.breath = bool((tab.a0 > 0).any()) and "breath:V0_pen" in names
         if self.breath:
             self.breath_col = names.index("breath:V0_pen")
@@ -161,12 +179,35 @@ class CompleteModel(IonCTModel):
             self.pm_a1 = nn.Parameter(torch.zeros(S, dtype=torch.float64))
             self.pm_a2 = nn.Parameter(torch.zeros(S, dtype=torch.float64))
         self.frozen = frozen
+        self.pauli_form = pauli_form
+        if pauli_form not in ("slater", "shells"):
+            raise ValueError(f"pauli_form {pauli_form!r}")
         if frozen or pseudo:
             f64 = dict(dtype=torch.float64)
             sym = tab.symbols
             pp = [PAULI_INIT_UNEQUAL.get(x, PAULI_INIT.get(x, (1.0, 1.5))) for x in sym]
             self.pauli_lnq0 = nn.Parameter(torch.tensor([math.log(q) for q, _ in pp], **f64))
             self.pauli_lnb = nn.Parameter(torch.tensor([math.log(b) for _, b in pp], **f64))
+            if pauli_form == "shells":
+                # exclusion density = the ion's own permanent shells with per-shell weights w[s, t] (an absent shell
+                # has weight 0) and exponents b[s, t] * exp(lnbs[s]); unknown species start with the single-Slater
+                # q on the outermost shell
+                T = tab.shell_n.shape[1]
+                lnw = torch.full((S, T), -30.0, **f64)
+                lnbs = torch.zeros(S, **f64)
+                for k, x in enumerate(sym):
+                    occ = [t for t in range(T) if tab.shell_n[k, t] > 0]
+                    if x in PAULI_SHELL_INIT:
+                        ws, bs = PAULI_SHELL_INIT[x]
+                        for t, w in zip(occ, ws):
+                            lnw[k, t] = math.log(w)
+                        lnbs[k] = math.log(bs)
+                    else:
+                        lnw[k, occ[-1]] = math.log(pp[k][0])
+                self.pauli_lnw = nn.Parameter(lnw)
+                self.pauli_lnbs = nn.Parameter(lnbs)
+                self.register_buffer("pauli_shell_mask", (tab.shell_n > 0).to(torch.float64))
+                self.register_buffer("pauli_outer", torch.tensor([max(t for t in range(T) if tab.shell_n[k, t] > 0) for k in range(S)]))
             pri = [DISP_INIT.get(x, DEFAULT_C6_PRIOR.get(int(z), DISP_FALLBACK)) for x, z in zip(sym, tab.Z.tolist())]
             self.disp_lnc60 = nn.Parameter(torch.tensor([math.log(c) for c, _ in pri], **f64))
             self.disp_lnb = nn.Parameter(torch.tensor([math.log(b) for _, b in pri], **f64))
@@ -243,7 +284,9 @@ class CompleteModel(IonCTModel):
         return S
 
     def pseudo_strength(self, I, idx, r, ty=None):
-        """A_ij = gamma_i qP_j S_ij / s >= 0 of each directed pair (i <- j), smoothly zero at PSEUDO_CUTOFF."""
+        """A_ij,t = gamma_i qP_j,t S_ij / s >= 0 of each directed pair (i <- j) and exclusion shell t of j (P, T),
+        smoothly zero at PSEUDO_CUTOFF. With the single-Slater Pauli form the one exclusion charge sits on j's
+        outermost shell."""
         sp = self._sp
         qP = self.frozen_params(I, sp)[0]
         ovl = self._ps_ovl
@@ -251,12 +294,22 @@ class CompleteModel(IonCTModel):
             ovl = self.pair_overlap(idx, r, sp)
         x = ((r - (PSEUDO_CUTOFF - 1.0)) / 1.0).clamp(0, 1)
         cut = 1 - x * x * (3 - 2 * x)
-        return self.pseudo_gamma(I, sp)[idx[0]] * qP[idx[1]] * ovl / self.drive_s_ref * cut
+        A = self.pseudo_gamma(I, sp)[idx[0]] * ovl / self.drive_s_ref * cut             # (P,)
+        if self.pauli_form == "shells":
+            return A[:, None] * qP[idx[1]]
+        T = self.tab.shell_n.shape[1]
+        outer = torch.tensor([max(t for t in range(T) if self.tab.shell_n[k, t] > 0) for k in range(len(self.tab.symbols))],
+                             device=I.device)
+        return (A * qP[idx[1]])[:, None] * nn.functional.one_hot(outer[sp[idx[1]]], T).to(I.dtype)
 
-    def pseudo_drive(self, I, idx, r, ty, basis, n):
-        """(n, 8): sum_j A_ij basis_ij on every ion, and A (P,)."""
+    def pseudo_drive(self, I, idx, r, ty, basis, n, basis_sh=None):
+        """(n, 8): sum_j sum_t A_ij,t basis_ij,t on every ion, and the total strength A (P,). A 1-D strength (an
+        override) is applied to the outer-shell ``basis``."""
         A = self.pseudo_strength(I, idx, r, ty)
-        return I.new_zeros(n, 8).index_add(0, idx[0], A[:, None] * basis), A
+        if A.dim() == 1 or basis_sh is None:
+            At = A if A.dim() == 1 else A.sum(1)
+            return I.new_zeros(n, 8).index_add(0, idx[0], At[:, None] * basis), At
+        return I.new_zeros(n, 8).index_add(0, idx[0], torch.einsum("pt,ptb->pb", A, basis_sh)), A.sum(1)
 
     def alpha_inverse(self, alpha, sp, env):
         """(N, 3, 3) inverse polarizability: isotropic 1/alpha times expm(kappa S2 / s2)."""
@@ -283,7 +336,18 @@ class CompleteModel(IonCTModel):
         dA = phiA[f, lj] - VA[f, lj, li] - (KA[f, lj, li] * x[f, li]).sum(-1)
         return dD - dA + phi_ext[i] - phi_ext[j]
 
-    def direct_ct_env(self, q, bt, sp, x, phi_ext):
+    def stark_gap(self, bt, sp, Fa):
+        """(C,) >= 0: eta_D |E_D|^2 + eta_A |E_A|^2 of each channel, fields in units of the training scale."""
+        i, j = bt["ch_index"]
+        env = bt.get("env") or {}
+        n = sp.shape[0]
+        ED = env.get("donor:V1", Fa.new_zeros(n, 3)) + Fa
+        EA = env.get("acceptor:V1", Fa.new_zeros(n, 3)) + Fa
+        uD = nn.functional.softplus(self.stark_D[sp[i]]) * (ED[i] * ED[i]).sum(-1) / self.stark_sD ** 2
+        uA = nn.functional.softplus(self.stark_A[sp[j]]) * (EA[j] * EA[j]).sum(-1) / self.stark_sA ** 2
+        return uD + uA
+
+    def direct_ct_env(self, q, bt, sp, x, phi_ext, Fa=None):
         B = bt["B"]
         i, j = bt["ch_index"]
         bD, bA = self.ct_exponents()
@@ -291,10 +355,14 @@ class CompleteModel(IonCTModel):
         f = slater_two_center_damp_unequal(bD[sp[i]], bA[sp[j]], rb, 0)[0]
         e_ch = -q[i, 0] * q[j, 1] * f / rb * torch.exp(bt["ch_ltaper"])
         dphi = e_ch.new_zeros(e_ch.shape[0])
+        u = e_ch.new_zeros(e_ch.shape[0])
         if self.ct_gap:
             dphi = self.dphi_pairs(bt, x, phi_ext)
             lam = self.gap_lamD[sp[i]] + self.gap_lamA[sp[j]]
-            u = -lam * dphi / self.dphi_scale
+            u = u - lam * dphi / self.dphi_scale
+        if self.ct_stark:
+            u = u + self.stark_gap(bt, sp, Fa if Fa is not None else e_ch.new_zeros(sp.shape[0], 3))
+        if self.ct_gap or self.ct_stark:
             e_ch = e_ch * torch.exp(GAP_EXP_MAX * torch.tanh(u / GAP_EXP_MAX))     # bounded: at most e^+-GAP_EXP_MAX
         e = e_ch.new_zeros(B).index_add(0, bt["ch_frame"], e_ch)
         nT = self.nT
@@ -302,10 +370,15 @@ class CompleteModel(IonCTModel):
         return e, e_type, e_ch, dphi
 
     def frozen_params(self, I, sp):
-        """Per atom: Pauli charge qP, exponent bP, C6, dispersion exponent (each (N,))."""
+        """Per atom: Pauli charge qP, exponent bP, C6, dispersion exponent (each (N,)); with the shells form qP and
+        bP are (N, T) per permanent shell (weight 0 where the shell is absent)."""
         u = self.head_frozen(I[:, self.frozen_cols], sp)
-        qP = torch.exp(self.pauli_lnq0[sp] + u[:, 0])
         C6 = torch.exp(self.disp_lnc60[sp] + u[:, 1])
+        if self.pauli_form == "shells":
+            w = torch.exp(self.pauli_lnw[sp] + u[:, 0:1]) * self.pauli_shell_mask[sp]
+            b = self.tab.shell_b[sp] * self.pauli_lnbs[sp].exp()[:, None]
+            return w, b, C6, self.disp_lnb[sp].exp()
+        qP = torch.exp(self.pauli_lnq0[sp] + u[:, 0])
         return qP, self.pauli_lnb[sp].exp(), C6, self.disp_lnb[sp].exp()
 
     def frozen_terms(self, I, bt, sp):
@@ -316,21 +389,34 @@ class CompleteModel(IonCTModel):
         i, j = pairs
         r_ang = (bt["pos"][j] - bt["pos"][i]).norm(dim=-1)
         rb = r_ang / K.BOHR_ANG
+        shells = self.pauli_form == "shells"
+        qPs = qP if shells else qP[:, None]                                       # (N, T)
+        bPs = bP if shells else bP[:, None]
+        T_ = qPs.shape[1]
         if self.pauli_moments and bt.get("env") is not None:
             env = bt["env"]
             mu = -self.pm_a1[sp][:, None] * env["shell:S1"] / self.pm_scale[0]
             th = self.pm_a2[sp][:, None] * cartesian_to_spherical_quadrupole(env["shell:S2"]) / self.pm_scale[1]
             P = K._poly_map(I.dtype, I.device)
-            poly = torch.cat([mu, th], 1) @ P.T                                  # (N, 10)
-            poly = torch.cat([qP[:, None], poly[:, 1:]], 1)
+            polym = (torch.cat([mu, th], 1) @ P.T)[:, 1:]                        # (N, 9) induced Pauli moments
             dr = (bt["pos"][j] - bt["pos"][i]) / K.BOHR_ANG
-            f = slater_two_center_damp_unequal(bP[i], bP[j], rb, 2)              # (5, P) complements = the kernel
-            T = K._tensor(dr, f)                                                  # (P, 10, 10) [j, i]
-            e_p = torch.einsum("pa,pab,pb->p", poly[j], T, poly[i])
+            # the induced moments sit on the outermost shell (the overlap-gradient probe)
+            outer = self.pauli_outer[sp] if shells else torch.zeros_like(sp)
+            e_p = rb.new_zeros(rb.shape[0])
+            for t in range(T_):
+                pt = torch.cat([qPs[:, t:t + 1], polym * (outer == t).to(I.dtype)[:, None]], 1)
+                for u in range(T_):
+                    pu = torch.cat([qPs[:, u:u + 1], polym * (outer == u).to(I.dtype)[:, None]], 1)
+                    f = slater_two_center_damp_unequal(bPs[i, t], bPs[j, u], rb, 2)   # (5, P) complements = the kernel
+                    Tt = K._tensor(dr, f)                                             # (P, 10, 10) [j, i]
+                    e_p = e_p + torch.einsum("pa,pab,pb->p", pu[j], Tt, pt[i])
             self._pauli_moments_out = (mu, th)
         else:
-            f = slater_two_center_damp_unequal(bP[i], bP[j], rb, 0)[0]
-            e_p = qP[i] * qP[j] * f / rb
+            e_p = rb.new_zeros(rb.shape[0])
+            for t in range(T_):
+                for u in range(T_):
+                    f = slater_two_center_damp_unequal(bPs[i, t], bPs[j, u], rb, 0)[0]
+                    e_p = e_p + qPs[i, t] * qPs[j, u] * f / rb
         e_d = tt_damped_c6_energy(r_ang, torch.sqrt(C6[i] * C6[j]), torch.sqrt(b6[i] * b6[j]))
         fr = bt["frame"][i]
         return I.new_zeros(B).index_add(0, fr, e_p), I.new_zeros(B).index_add(0, fr, e_d), (qP, bP, C6, b6)
@@ -349,9 +435,11 @@ class CompleteModel(IonCTModel):
         self._sp = sp
         if self.pseudo and bt["ps_index"].shape[1]:
             self._ps_ovl = self.pair_overlap(bt["ps_index"], bt["ps_r"], sp)
-            Lps, A_ps = self.pseudo_drive(I, bt["ps_index"], bt["ps_r"], bt["ps_type"], bt["ps_basis"], n)
+            Lps, A_ps = self.pseudo_drive(I, bt["ps_index"], bt["ps_r"], bt["ps_type"], bt["ps_basis"], n,
+                                          bt.get("ps_basis_sh"))
             Lflat = Lflat + Lps
         phi_ext = I.new_zeros(n)
+        Fa = None
         if field is not None:
             Fa = field[bt["frame"]]
             Lflat = Lflat - torch.cat([Fa, I.new_zeros(n, 5)], 1)
@@ -371,7 +459,7 @@ class CompleteModel(IonCTModel):
         q = self.ct_charges_from(I, sp)
         nC = bt["ch_index"].shape[1]
         if nC:
-            e_ct, e_type, e_ch, dphi = self.direct_ct_env(q, bt, sp, x0, phi_ext)
+            e_ct, e_type, e_ch, dphi = self.direct_ct_env(q, bt, sp, x0, phi_ext, Fa)
         else:
             e_ct, e_type, e_ch, dphi = I.new_zeros(B), I.new_zeros(B, self.nT), I.new_zeros(0), I.new_zeros(0)
         z = I.new_zeros(nC)
@@ -411,6 +499,9 @@ class CompleteModel(IonCTModel):
         if self.ct_gap:
             out["lam_D"] = {x: round(float(self.gap_lamD[k]), 4) for k, x in enumerate(sym)}
             out["lam_A"] = {x: round(float(self.gap_lamA[k]), 4) for k, x in enumerate(sym)}
+        if self.ct_stark:
+            out["ct stark softplus(eta_D/eta_A)"] = {x: [round(float(nn.functional.softplus(self.stark_D[k])), 4),
+                                                        round(float(nn.functional.softplus(self.stark_A[k])), 4)] for k, x in enumerate(sym)}
         if self.hyper:
             out["hyper softplus(g)"] = {x: round(float(nn.functional.softplus(self.hyper_g[k])), 4) for k, x in enumerate(sym)}
         if self.conf_form == "mono":
@@ -420,7 +511,11 @@ class CompleteModel(IonCTModel):
             out["breath lam0"] = {x: round(float(self.breath_lam[k]), 4) for k, x in enumerate(sym)}
         if self.pauli_moments:
             out["pauli moments a1/a2"] = {x: [round(float(self.pm_a1[k]), 4), round(float(self.pm_a2[k]), 4)] for k, x in enumerate(sym)}
-        if self.frozen or self.pseudo:
+        if (self.frozen or self.pseudo) and self.pauli_form == "shells":
+            out["pauli shell w"] = {x: [round(float(v), 4) for v, m in zip(self.pauli_lnw[k].exp(), self.pauli_shell_mask[k]) if m > 0]
+                                    for k, x in enumerate(sym)}
+            out["pauli b scale"] = {x: round(float(self.pauli_lnbs[k].exp()), 4) for k, x in enumerate(sym)}
+        elif self.frozen or self.pseudo:
             out["pauli qP0/bP"] = {x: [round(float(self.pauli_lnq0[k].exp()), 4), round(float(self.pauli_lnb[k].exp()), 4)]
                                   for k, x in enumerate(sym)}
         if self.pseudo:

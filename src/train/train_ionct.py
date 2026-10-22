@@ -275,7 +275,7 @@ def _pp_one(item):
     return k, buf.getvalue()
 
 
-CACHE_VERSION = 2     # 2: equivariant environment blocks on the frame caches
+CACHE_VERSION = 3     # 2: equivariant environment blocks on the frame caches; 3: per-shell pseudo basis
 
 
 def cache_key(params_path, env, lean, frames, frontier=False):
@@ -378,7 +378,7 @@ def radial_table(tab, params_path, cache_dir=None):
     """The complete model's :class:`RadialTable` for this parameter table, cached on disk by the table's hash."""
     import hashlib
     from ..ff.complete import RadialTable
-    key = hashlib.sha1(Path(params_path).read_bytes()).hexdigest()[:16]
+    key = hashlib.sha1(Path(params_path).read_bytes() + b"|table-v2").hexdigest()[:16]     # v2: per-shell ps rows
     path = Path(cache_dir) / f"table_{key}.pt" if cache_dir else None
     if path and path.exists():
         return torch.load(path, weights_only=False)
@@ -464,7 +464,8 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              aniso=not g("no_aniso", False), ct_gap=not g("no_ct_gap", False),
                              dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False),
                              conf_form=g("conf_form", "tanh"),
-                             hyper=g("hyper", False), pauli_moments=g("pauli_moments", False))
+                             hyper=g("hyper", False), pauli_moments=g("pauli_moments", False),
+                             pauli_form=g("pauli_form", "slater"), ct_stark=g("ct_stark", False))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -622,6 +623,12 @@ def main():
     ap.add_argument("--frozen", action="store_true", help="complete: frozen Pauli (env qP) and dispersion (env C6) terms")
     ap.add_argument("--pauli-moments", action="store_true",
                     help="complete + frozen: induced Pauli dipole / quadrupole from the overlap gradients (polytensor Pauli kernel)")
+    ap.add_argument("--pauli-form", default="slater", choices=("slater", "shells"),
+                    help="complete: Pauli exclusion density = one Slater per species, or the ion's own permanent shells "
+                         "with per-shell weights (and the drive basis per shell)")
+    ap.add_argument("--ct-stark", action="store_true",
+                    help="complete: second-order Stark lowering of the CT gap by the fields at donor and acceptor "
+                         "(the CT state's extra polarizability; gives alpha_CT perpendicular to a pair)")
     ap.add_argument("--hyper", action="store_true",
                     help="complete: field-induced polarizability enhancement alpha (1 + g |V[dip]^(1)|^2) (hyperpolarizability)")
     ap.add_argument("--conf-form", default="tanh", choices=("tanh", "mono"),

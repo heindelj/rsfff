@@ -105,6 +105,7 @@ class FrameCache:
     ps_type: torch.Tensor = None    # (P,) index into PSEUDO_TYPES
     ps_r: torch.Tensor = None       # (P,) A
     ps_basis: torch.Tensor = None   # (P, 8) drive on i per unit pseudo-potential strength on j
+    ps_basis_sh: torch.Tensor = None   # (P, T, 8) the same per permanent shell of j (complete model, shells form)
     EVD: torch.Tensor = None        # (N, N, 3) field of j's permanent density over i's donor frontier
     EKD: torch.Tensor = None        # (N, N, 3, 8) ... of j's induced moments
     EVA: torch.Tensor = None        # acceptor-frontier versions
@@ -149,7 +150,7 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
     env = None
     if type(ef).__name__ == "EnvFeatures" and ef.blocks:        # rsfff.ff.complete.EnvFeatures (no import cycle)
         env = {f"{p}:{k}": v.to(torch.float64) for p, blk in ef.blocks.items() for k, v in blk.items()}
-    ps_index, ps_r, ps_basis = K.pseudo_drive_basis(pos, s, b, tab, PSEUDO_CUTOFF)
+    ps_index, ps_r, ps_basis, ps_basis_sh = K.pseudo_drive_basis(pos, s, b, tab, PSEUDO_CUTOFF, shells=True)
     ps_type = pseudo_types(s, ps_index, tab)
     ch_ltaper = torch.log(CT._taper(geom["r"], chan.cutoff, chan.taper).clamp(min=1e-300))
     if lean:
@@ -164,6 +165,7 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
                         geom["g"], geom["lnW"], geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis,
                         labels=dict(labels or {}), meta=dict(meta or {}), env=env)
         fc.ch_ltaper = ch_ltaper
+        fc.ps_basis_sh = ps_basis_sh
         fc.n_types = len(ctypes)
         fc.meta["lean"] = True
         fc.meta["frontier"] = bool(frontier)
@@ -177,9 +179,10 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
     ch_J = K.frontier_pair_coulomb(pos, s, tab, geom["index"])
     ch_mid = 0.5 * (pos[i] + pos[j])
     ch_Vmid, ch_Kmid = K.point_potential_operator(pos, s, tab, ch_mid, i)
-    return FrameCache(s, pos, L, A_off, VD, KD, VA, KA, geom["index"], ch_type, geom["r"], geom["g"], geom["lnW"],
-                      geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis, EVD, EKD, EVA, EKA, ch_EP,
-                      ch_J, ch_ltaper, ch_mid, ch_Vmid, ch_Kmid, dict(labels or {}), dict(meta or {}), env, len(ctypes))
+    fc = FrameCache(s, pos, L, A_off, VD, KD, VA, KA, geom["index"], ch_type, geom["r"], geom["g"], geom["lnW"],
+                    geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis, ps_basis_sh, EVD, EKD, EVA, EKA, ch_EP,
+                    ch_J, ch_ltaper, ch_mid, ch_Vmid, ch_Kmid, dict(labels or {}), dict(meta or {}), env, len(ctypes))
+    return fc
 
 
 def pseudo_types(species, idx, tab: IonTable):
@@ -202,7 +205,8 @@ def collate(frames: list[FrameCache]) -> dict:
     KA = torch.zeros(B, nmax, nmax, 8, dtype=dt)
     mask = torch.zeros(B, nmax, dtype=torch.bool)
     species, feats, frame_of, idx, ty, r, g, lnW, dpp, ch_frame = [], [], [], [], [], [], [], [], [], []
-    pos, ps_idx, ps_ty, ps_r, ps_basis = [], [], [], [], []
+    pos, ps_idx, ps_ty, ps_r, ps_basis, ps_basis_sh = [], [], [], [], [], []
+    has_sh = all(f.ps_basis_sh is not None for f in frames)
     has_E = all(f.EVD is not None for f in frames)
     EVD = torch.zeros(B, nmax, nmax, 3, dtype=dt) if has_E else None
     EVA = torch.zeros(B, nmax, nmax, 3, dtype=dt) if has_E else None
@@ -246,6 +250,8 @@ def collate(frames: list[FrameCache]) -> dict:
             ps_ty.append(f.ps_type)
             ps_r.append(f.ps_r)
             ps_basis.append(f.ps_basis)
+            if has_sh:
+                ps_basis_sh.append(f.ps_basis_sh)
         off += n
     env = None
     if all(f.env for f in frames):
@@ -265,6 +271,7 @@ def collate(frames: list[FrameCache]) -> dict:
             "ps_type": torch.cat(ps_ty) if ps_ty else torch.zeros(0, dtype=torch.long),
             "ps_r": torch.cat(ps_r) if ps_r else torch.zeros(0, dtype=dt),
             "ps_basis": torch.cat(ps_basis) if ps_basis else torch.zeros(0, 8, dtype=dt),
+            "ps_basis_sh": (torch.cat(ps_basis_sh) if ps_basis_sh else None) if has_sh else None,
             "EVD": EVD, "EVA": EVA, "EKD": EKD, "EKA": EKA,
             "ch_EP": torch.cat(ch_EP) if has_E else None,
             "ch_J": torch.cat(cJ) if has_D else None, "ch_ltaper": torch.cat(cT) if has_T else None,

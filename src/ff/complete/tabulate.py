@@ -17,6 +17,7 @@ are not in the table: those kernels are closed-form Slater 1s and stay analytic 
     envV:{probe}:{n}          drive-type complement for each environment probe of i
     envS:{probe}:{0,1,2}      overlap of probe i with j's shells and its first two radial derivatives
     ps:{dip,quad}:{n}         f^pt_n - f^sh_n, the pseudo-potential drive basis (parent of i, outer shell of j)
+    ps{t}:{dip,quad}:{n}      the same for each permanent shell t of j (zero where j has no shell t)
 
 with n = 0..4 the five damping orders of the rank-2 tensor. All of them vanish beyond the overlap range, so the
 table ends at ``r_max`` and returns zero past it.
@@ -101,6 +102,15 @@ class RadialTable:
             d = shaped_one_center_multi(bp, wp, rb, 2) - shaped_two_center_damp(bp, bo, wp, one, rb, 2)
             for n in range(NORD):
                 out[f"ps:{p}:{n}"] = d[n]
+            d_outer = d
+            for t in range(tab.shell_n.shape[1]):
+                if tab.shell_n[sj, t] > 0:
+                    bt_ = tab.shell_b[sj, t].expand(G)
+                    d = shaped_one_center_multi(bp, wp, rb, 2) - shaped_two_center_damp(bp, bt_, wp, one, rb, 2)
+                else:
+                    d = 0.0 * d_outer                          # keeps the graph to r (zero function, zero derivatives)
+                for n in range(NORD):
+                    out[f"ps{t}:{p}:{n}"] = d[n]
         for a, (ba, wa) in parents.items():
             bpa, wpa = _expand(ba, wa, G)
             for c_, (bc, wc) in parents_j.items():
@@ -305,7 +315,9 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     Tc = Tb[:, :, :, 0]                                              # column 0: the probe as a unit charge
     probes = list(table.probes)
     # all drive-type rows at once: 2 parents + 6 probes + 2 pseudo (complements c; lam = q_j - c, or d for ps)
-    drive_keys = ["drive:dip", "drive:quad"] + [f"envV:{p}" for p in probes] + ["ps:dip", "ps:quad"]
+    T_sh = tab.shell_n.shape[1]
+    drive_keys = (["drive:dip", "drive:quad"] + [f"envV:{p}" for p in probes] + ["ps:dip", "ps:quad"]
+                  + [f"ps{t}:{p}" for t in range(T_sh) for p in ("dip", "quad")])
     rows = table.rows(y, drive_keys)                                 # (K, NORD, Pd)
     nq = 2 + len(probes)
     lam = torch.cat([qj[None, None] - rows[:nq], rows[nq:]], 0)
@@ -377,6 +389,7 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
         memo[str(dev)] = tuple(t.to(dev) for t in _luts(tab, chan))
     ps_lut, ch_lut = memo[str(dev)]
     ps_basis = torch.cat([Rp[nq][:, :3], Rp[nq + 1][:, 3:]], 1)[keep]
+    ps_basis_sh = torch.stack([torch.cat([Rp[nq + 2 + 2 * t][:, :3], Rp[nq + 3 + 2 * t][:, 3:]], 1) for t in range(T_sh)], 1)[keep]
     ps_type = ps_lut[s[i], s[j]][keep]
     # -- channels (direct CT) ----------------------------------------------------------------------------------------
     ct = ch_lut[s[i], s[j]]
@@ -396,4 +409,4 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
             "KA": front["KA"], "mask": mask, "species": s, "feats": feats, "frame": b_idx, "pos": pos_ang,
             "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]],
             "ch_ltaper": ch_ltaper, "ps_index": dp[:, keep], "ps_type": ps_type, "ps_r": r_ang[keep],
-            "ps_basis": ps_basis, "env": env, "labels": lab}
+            "ps_basis": ps_basis, "ps_basis_sh": ps_basis_sh, "env": env, "labels": lab}

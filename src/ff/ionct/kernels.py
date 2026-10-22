@@ -139,9 +139,10 @@ def _drive_from_permanent(X, species, dpairs, tab, b_par, w_par):
     return out
 
 
-def pseudo_drive_basis(pos_ang, species, batch_idx, tab: IonTable, cutoff: float = 6.0):
+def pseudo_drive_basis(pos_ang, species, batch_idx, tab: IonTable, cutoff: float = 6.0, shells: bool = False):
     """The induction drive on ion i of a unit Pauli pseudo-potential on its neighbour j, for directed pairs (i <- j)
-    within ``cutoff`` (A): (dpairs (2, P), r (P,) A, basis (P, 8)).
+    within ``cutoff`` (A): (dpairs (2, P), r (P,) A, basis (P, 8)); with ``shells`` also the per-shell basis
+    (P, T, 8), one column per permanent shell of j (zero where j has no shell t).
 
     The pseudo-potential is the penetration potential of j's outermost permanent shell, phi_P = -A [1/r - (1 -
     f(b r))/r] = -A f(b r)/r (a +A smeared charge on top of a -A point charge: no net charge, exponentially short
@@ -160,17 +161,23 @@ def pseudo_drive_basis(pos_ang, species, batch_idx, tab: IonTable, cutoff: float
     M = tab.shell_n.shape[1]
     # outermost occupied shell of each species
     last = torch.tensor([max(t for t in range(M) if tab.shell_n[k, t] > 0) for k in range(len(tab.symbols))])
-    bP = tab.shell_b[s[j], last[s[j]]]
     one = _onehot0(r.shape[0], r)
     P = _poly_map(X.dtype, X.device)
-    out = []
-    for bpar, wpar in ((tab.b_dip, tab.w_dip), (tab.b_quad, tab.w_quad)):
-        bp, wp = bpar[s[i]], wpar[s[i]]
-        t_pt = _tensor(dr, 1 - shaped_one_center_multi(bp, wp, r, 2))[:, 0, :]
-        t_sh = _tensor(dr, 1 - shaped_two_center_damp(bp, bP, wp, one, r, 2))[:, 0, :]
-        out.append((t_sh - t_pt) @ P)
-    basis = torch.cat([out[0][:, :3], out[1][:, 3:]], dim=1)
-    return dp, r * BOHR_ANG, basis
+
+    def basis_for(bP):
+        out = []
+        for bpar, wpar in ((tab.b_dip, tab.w_dip), (tab.b_quad, tab.w_quad)):
+            bp, wp = bpar[s[i]], wpar[s[i]]
+            t_pt = _tensor(dr, 1 - shaped_one_center_multi(bp, wp, r, 2))[:, 0, :]
+            t_sh = _tensor(dr, 1 - shaped_two_center_damp(bp, bP, wp, one, r, 2))[:, 0, :]
+            out.append((t_sh - t_pt) @ P)
+        return torch.cat([out[0][:, :3], out[1][:, 3:]], dim=1)
+
+    basis = basis_for(tab.shell_b[s[j], last[s[j]]])
+    if not shells:
+        return dp, r * BOHR_ANG, basis
+    cols = [basis_for(tab.shell_b[s[j], t]) * (tab.shell_n[s[j], t] > 0).to(X.dtype)[:, None] for t in range(M)]
+    return dp, r * BOHR_ANG, basis, torch.stack(cols, 1)
 
 
 def pauli_kernel(pos_ang, batch_idx, qP, bP, kappa, stiff):
