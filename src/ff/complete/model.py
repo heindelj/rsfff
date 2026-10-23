@@ -52,7 +52,7 @@ from torch import nn
 
 from ..dispersion import DEFAULT_C6_PRIOR, tt_damped_c6_energy
 from ..ionct import kernels as K
-from ..ionct.model import PAULI_INIT, PSEUDO_CUTOFF, IonCTModel
+from ..ionct.model import A_UNBOUND_INIT, PAULI_INIT, PSEUDO_CUTOFF, IonCTModel
 from ..ionct.params import IonTable
 from ..ionct.ct import ChannelTable
 from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_damp_unequal
@@ -62,6 +62,12 @@ from .heads import EnvironmentHead
 __all__ = ["CompleteModel", "solve_induction_blocks"]
 
 GAP_EXP_MAX = 4.0     # bound on the log of the CT gap factor
+CT_GAP_MIN = 0.05     # Hartree: floor of the CT gap (self-consistent CT), a softplus of width CT_GAP_WIDTH above it
+CT_GAP_WIDTH = 0.02
+
+
+def _gap_floor(D):
+    return CT_GAP_MIN + CT_GAP_WIDTH * nn.functional.softplus((D - CT_GAP_MIN) / CT_GAP_WIDTH)
 #: start values from a fit to the ct-scan pair labels (R >= 2.2 A), unequal-exponent penetration kernel:
 #: Pauli (qP [e], bP [1/bohr]) vs mod_pauli (rel rms Na-Cl 12 %, Cl-Cl 3 %); dispersion (C6 [Ha bohr^6], b [1/bohr])
 #: vs disp with geometric-mean combination (rms Cl-Cl 0.37, Na-Cl 0.84 kJ/mol -- the combination rule is the weak
@@ -105,7 +111,7 @@ class CompleteModel(IonCTModel):
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
                  species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
-                 hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False, pauli_ii=False, conf_head=True):
+                 hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False, pauli_ii=False, conf_head=True, ct_sc=0):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
                          pol_form="confine")
@@ -142,6 +148,24 @@ class CompleteModel(IonCTModel):
         # pauli_ii: the induced-induced Pauli kernel in the solve, A -> A + kappa_i kappa_j A_pp (the penetration part
         # of the parent-parent coupling, cached); kappa per species, free sign, small nonzero start (the gradient of
         # a product vanishes at zero)
+        # ct_sc: self-consistent (variational) CT, ct_sc fixed-point iterations. Every channel is a two-state
+        # problem with population p_c: E_c = Delta_c p_c - 2 W_c sqrt(p_c (1 - p_c)), whose minimum over p is
+        # 1/2 (Delta_c - sqrt(Delta_c^2 + 4 W_c^2)) (= -W^2/Delta for small p, the direct form); the coupling W_c is
+        # set by the direct-form pair kernel, W_c^2 = -e_c0 Delta_c0, and the gap Delta_c = Delta_c0 + g_c dphi_c(x)
+        # - Stark_c carries the environment's potential difference (permanent + induced + external) over the frontier
+        # shapes, in place of the exponential gap factor. Joint minimum over the induced moments x and the
+        # populations: A x + L + sum_c g_c p_c d(dphi_c)/dx = 0 -- the populations, as holes in the donor and
+        # electrons in the acceptor frontier shapes, drive the induction through the frontier operators -- and
+        # p_c from Delta_c(x). ALMO bookkeeping: E_pol is the CT-free solve, E_CT = E_total - E_pol (the CT-induced
+        # repolarization is CT).
+        self.ct_sc = int(ct_sc)
+        if self.ct_sc and not hasattr(self, "A_fixed"):
+            unbound = torch.isnan(tab.A_acceptor)
+            self.register_buffer("A_fixed", torch.nan_to_num(tab.A_acceptor))
+            self.register_buffer("A_unbound", unbound)
+            self.A_free = nn.Parameter(torch.full((S,), A_UNBOUND_INIT, dtype=torch.float64))
+            self.sc_gD = nn.Parameter(torch.zeros(S, dtype=torch.float64))     # log of the gap's response to dphi
+            self.sc_gA = nn.Parameter(torch.zeros(S, dtype=torch.float64))
         self.pauli_ii = pauli_ii
         if pauli_ii:
             self.pp_kappa = nn.Parameter(torch.full((S,), 0.1, dtype=torch.float64))
@@ -386,6 +410,52 @@ class CompleteModel(IonCTModel):
         uA = nn.functional.softplus(self.stark_A[sp[j]]) * (EA[j] * EA[j]).sum(-1) / self.stark_sA ** 2
         return uD + uA
 
+    def ct_pair_gap(self, bt, sp):
+        """(C,) Delta_c0 = I_D - A_A + phi_D^pair - phi_A^pair (Hartree) of every channel i -> j, floored smoothly."""
+        fr, loc = self._local(bt)
+        i, j = bt["ch_index"]
+        f, li, lj = fr[i], loc[i], loc[j]
+        gap = (self.tab.I_donor[sp[i]] - self.acceptor_affinity()[sp[j]] + bt["VD"][f, li, lj] - bt["VA"][f, lj, li])
+        return _gap_floor(gap)
+
+    def ct_drive(self, w, bt, sp):
+        """(B, nmax, 8) induction drive of the channel populations: w_c = g_c p_c as a hole in the donor frontier
+        shape of i and an electron in the acceptor shape of j, acting on every atom but the channel's own two
+        (dphi excludes the partner), through the frontier operators (potential of l's induced moments over k's
+        frontier shape = the drive on l of a unit charge in that shape)."""
+        B, nmax = bt["B"], bt["nmax"]
+        fr, loc = self._local(bt)
+        i, j = bt["ch_index"]
+        f, li, lj = fr[i], loc[i], loc[j]
+        KD, KA = bt["KD"], bt["KA"]
+        QD = w.new_zeros(B, nmax).index_put((f, li), w, accumulate=True)
+        QA = w.new_zeros(B, nmax).index_put((f, lj), w, accumulate=True)
+        L = torch.einsum("bk,bkld->bld", QD, KD) - torch.einsum("bk,bkld->bld", QA, KA)
+        # remove the partner terms channel by channel
+        L = L.index_put((f, lj), -w[:, None] * KD[f, li, lj], accumulate=True)
+        L = L.index_put((f, li), w[:, None] * KA[f, lj, li], accumulate=True)
+        return L
+
+    def ct_two_state(self, q, bt, sp, x, phi_ext, Fa):
+        """Per channel at the induced moments x: E_c (Hartree), population p_c, gap Delta_c, coupling W_c, weight
+        g_c p_c for the drive, and dphi_c."""
+        i, j = bt["ch_index"]
+        bD, bA = self.ct_exponents()
+        rb = bt["ch_r"] / K.BOHR_ANG
+        f = slater_two_center_damp_unequal(bD[sp[i]], bA[sp[j]], rb, 0)[0]
+        e0 = -q[i, 0] * q[j, 1] * f / rb * torch.exp(bt["ch_ltaper"])          # the pair kernel, <= 0
+        D0 = self.ct_pair_gap(bt, sp)
+        W = torch.sqrt((-e0 * D0).clamp(min=1e-300))
+        dphi = self.dphi_pairs(bt, x, phi_ext)
+        g = torch.exp(self.sc_gD[sp[i]] + self.sc_gA[sp[j]])
+        if self.ct_stark:       # the Stark lowering as a factor on the pair gap: bounded, never closes the gap
+            D0 = D0 * torch.exp(-self.stark_gap(bt, sp, Fa if Fa is not None else e0.new_zeros(sp.shape[0], 3)))
+        D = _gap_floor(D0 + g * dphi)
+        root = torch.sqrt(D * D + 4 * W * W)
+        e = 0.5 * (D - root)
+        p = 0.5 * (1 - D / root)
+        return e, p, D, W, g * p, dphi
+
     def direct_ct_env(self, q, bt, sp, x, phi_ext, Fa=None):
         B = bt["B"]
         i, j = bt["ch_index"]
@@ -503,20 +573,37 @@ class CompleteModel(IonCTModel):
             e_pol = e_pol + I.new_zeros(B).index_add(0, bt["frame"], e_breath_atom)
         q = self.ct_charges_from(I, sp)
         nC = bt["ch_index"].shape[1]
+        x_sc, dq, e_ct_post, sc_iters, Dc, Wc = x0, I.new_zeros(nC), None, 0, I.new_zeros(nC), I.new_zeros(nC)
         if nC:
             e_ct, e_type, e_ch, dphi = self.direct_ct_env(q, bt, sp, x0, phi_ext, Fa)
+            if self.ct_sc:
+                x = x0
+                e_ch, dq, Dc, Wc, w, dphi = self.ct_two_state(q, bt, sp, x, phi_ext, Fa)
+                for sc_iters in range(1, self.ct_sc + 1):
+                    L_ct = self.ct_drive(w, bt, sp)
+                    x = solve_induction_blocks(L + L_ct, A_off, ainv_pad, Cq, quadrupoles)
+                    e_ch, dq, Dc, Wc, w, dphi = self.ct_two_state(q, bt, sp, x, phi_ext, Fa)
+                e_ct_sc = e_ch.new_zeros(B).index_add(0, bt["ch_frame"], e_ch)
+                e_type = e_ch.new_zeros(B * self.nT).index_add(0, bt["ch_frame"] * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT)
+                # E_total = 1/2 x A x + L x + sum_c E_c with A x = -(L + L_ct); E_CT = E_total - E_pol(x0)
+                e_pol_sc = 0.5 * (L * x).sum((1, 2)) - 0.5 * (L_ct * x).sum((1, 2))
+                e_ct_post = e_ct_sc + e_pol_sc - 0.5 * (L * x0).sum((1, 2))
+                x_sc = x
         else:
             e_ct, e_type, e_ch, dphi = I.new_zeros(B), I.new_zeros(B, self.nT), I.new_zeros(0), I.new_zeros(0)
+        if e_ct_post is None:
+            e_ct_post = e_ct
         z = I.new_zeros(nC)
         e_pauli, e_disp, frz = I.new_zeros(B), I.new_zeros(B), None
         if self.frozen:
             e_pauli, e_disp, frz = self.frozen_terms(I, bt, sp)
         e_elst = permanent_electrostatics(bt["pos"], sp, bt["frame"], self.tab) if self.frozen else I.new_zeros(B)
-        return {"e_pol": e_pol, "e_ct": e_ct, "e_ct_post": e_ct, "e_type": e_type, "c": c, "dov": z, "A_ps": A_ps,
-                "W": z, "Delta": z, "delta": z, "p": z, "dq": I.new_zeros(n), "x": x0, "x_pol": x0,
-                "joint_iters": 0, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": e_pauli, "e_disp": e_disp,
-                "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv, "e_breath_atom": e_breath_atom,
-                "e_elst": e_elst, "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct}
+        return {"e_pol": e_pol, "e_ct": e_ct_post, "e_ct_post": e_ct_post, "e_ct_0": e_ct, "e_type": e_type, "c": c,
+                "dov": z, "A_ps": A_ps, "W": Wc, "Delta": Dc, "delta": z, "p": dq, "dq": I.new_zeros(n), "x": x_sc,
+                "x_pol": x0, "joint_iters": sc_iters, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": e_pauli,
+                "e_disp": e_disp, "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv,
+                "e_breath_atom": e_breath_atom, "e_elst": e_elst,
+                "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct_post}
 
     def smoothness_penalty(self, bt, sigma=0.05):
         """Feature-noise penalty on the heads' log outputs (log c, log q) and the pseudo-potential strengths."""
@@ -546,6 +633,10 @@ class CompleteModel(IonCTModel):
         if self.ct_gap:
             out["lam_D"] = {x: round(float(self.gap_lamD[k]), 4) for k, x in enumerate(sym)}
             out["lam_A"] = {x: round(float(self.gap_lamA[k]), 4) for k, x in enumerate(sym)}
+        if self.ct_sc:
+            out["ct_sc gap response exp(gD/gA)"] = {x: [round(float(self.sc_gD[k].exp()), 4), round(float(self.sc_gA[k].exp()), 4)]
+                                                   for k, x in enumerate(sym)}
+            out["ct_sc A_free (unbound acceptors)"] = {x: round(float(self.A_free[k]), 4) for k, x in enumerate(sym) if bool(self.A_unbound[k])}
         if self.ct_stark:
             out["ct stark softplus(eta_D/eta_A)"] = {x: [round(float(nn.functional.softplus(self.stark_D[k])), 4),
                                                         round(float(nn.functional.softplus(self.stark_A[k])), 4)] for k, x in enumerate(sym)}

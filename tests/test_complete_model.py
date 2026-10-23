@@ -252,3 +252,46 @@ def test_induced_pauli_and_sq_forces(setup):
             pp[a, b] += h
             pm[a, b] -= h
             assert abs((E(pp) - E(pm)) / (2 * h) - g[a, b]) < 1e-7
+
+
+def test_self_consistent_ct(setup):
+    tab, chan, feat, c, m = setup
+    kw = dict(feature_names=feat.feature_names, feat_scale=m.feat_scale, pseudo=True, frozen=True, pauli_form="shells")
+    m0 = CompleteModel(tab, chan, c.feats.shape[1], **kw)
+    m2 = CompleteModel(tab, chan, c.feats.shape[1], ct_sc=2, **kw)
+    m2.load_state_dict(m0.state_dict(), strict=False)
+    with torch.no_grad():
+        for mm in (m0, m2):
+            mm.gap_lamD.fill_(0.3)
+            mm.gap_lamA.fill_(0.2)
+    iso = precompute(["Cl"], [[0, 0, 0]], tab, chan, feat, lean=True, frontier=True)
+    bt = collate([c, iso])
+    o0, o2 = m0(bt), m2(bt)
+    assert torch.allclose(o0["e_pol"], o2["e_pol"])                      # ALMO bookkeeping: E_pol is CT-free
+    assert torch.allclose(o0["e_ct"], o2["e_ct_0"])
+    assert o2["e_ct"][1] == 0 and o2["e_ct"][0] != o0["e_ct"][0]
+    assert (o2["p"] > 0).all() and o2["p"].max() < 0.1                   # populations: small, positive
+    assert o2["joint_iters"] == 2
+
+
+def test_self_consistent_ct_forces(setup):
+    tab, chan, feat, c, m = setup
+    ms = CompleteModel(tab, chan, c.feats.shape[1], feature_names=feat.feature_names, feat_scale=m.feat_scale,
+                       pseudo=True, frozen=True, pauli_form="shells", ct_sc=2)
+    with torch.no_grad():
+        ms.gap_lamD.fill_(0.3)
+
+    def E(p):
+        cc = precompute(SYM, p, tab, chan, feat, lean=True, frontier=True, differentiable=True)
+        o = ms(collate([cc]))
+        return o["e_pol"][0] + o["e_ct"][0]
+
+    pos = torch.tensor(X, dtype=torch.float64, requires_grad=True)
+    g = torch.autograd.grad(E(pos), pos)[0]
+    h = 1e-4
+    with torch.no_grad():
+        for a, b in ((1, 2), (3, 0)):
+            pp, pm = pos.detach().clone(), pos.detach().clone()
+            pp[a, b] += h
+            pm[a, b] -= h
+            assert abs((E(pp) - E(pm)) / (2 * h) - g[a, b]) < 1e-6      # the gradient is ~3 Eh/A here

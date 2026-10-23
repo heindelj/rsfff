@@ -466,7 +466,8 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              conf_form=g("conf_form", "tanh"),
                              hyper=g("hyper", False), pauli_moments=g("pauli_moments", False),
                              pauli_form=g("pauli_form", "slater"), ct_stark=g("ct_stark", False),
-                             pauli_ii=g("pauli_ii", False), conf_head=not g("conf_nohead", False))
+                             pauli_ii=g("pauli_ii", False), conf_head=not g("conf_nohead", False),
+                             ct_sc=g("ct_sc", 0))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -634,6 +635,8 @@ def main():
                     help="complete: induced-induced Pauli kernel in the induction solve (kappa_i kappa_j A_pp)")
     ap.add_argument("--conf-nohead", action="store_true",
                     help="complete: stiffening rate = the per-species constant only (no environment head on it)")
+    ap.add_argument("--ct-sc", type=int, default=0,
+                    help="complete: self-consistent CT, N fixed-point iterations of (CT charges -> induction -> CT)")
     ap.add_argument("--hyper", action="store_true",
                     help="complete: field-induced polarizability enhancement alpha (1 + g |V[dip]^(1)|^2) (hyperpolarizability)")
     ap.add_argument("--conf-form", default="tanh", choices=("tanh", "mono", "sq"),
