@@ -37,6 +37,8 @@ from ..ionct.model import PSEUDO_CUTOFF, channel_types, pseudo_type_names
 from ..ionct.params import IonTable
 from ..multipole import shaped_one_center_multi, shaped_two_center_damp
 from .environment import INVARIANT_NAMES, PROBE_NAMES, shaped_overlap_derivs
+from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
+                       recip_apply, smooth_switch)
 
 __all__ = ["RadialTable", "batched_precompute"]
 
@@ -282,7 +284,8 @@ def _luts(tab, chan):
 
 
 def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table: RadialTable, chan: CT.ChannelTable,
-                       labels: dict | None = None) -> dict:
+                       labels: dict | None = None, cell=None, cutoff: float = 9.0, switch_width: float = 1.0,
+                       ewald_tol: float = 1e-10, dispersion_tail: bool = False) -> dict:
     """The collated batch of the complete model straight from positions (N, 3) Angstrom (autograd flows through),
     atomic numbers (N,), frame index (N,) sorted by frame. ``labels``: a dict of per-frame tensors (B,) to attach.
     Runs on the device of ``pos_ang``; ``tab`` and ``table`` must live there too (``IonTable.to``, ``RadialTable.to``).
@@ -290,7 +293,18 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     Produces the keys ``collate`` makes that :class:`CompleteModel` reads: L, A_off, VD/KD/VA/KA (padded), mask,
     species, feats, frame, pos, channels (index, type, r, frame, ltaper), pseudo drive (index, type, r, basis), env.
     The damped tensors of every pair are built once as the five pure-order basis tensors and every term is a single
-    contraction of table rows against them."""
+    contraction of table rows against them.
+
+    ``cell`` (3, 3) or (B, 3, 3) Angstrom, rows the lattice vectors, makes the frames periodic (autograd flows
+    through it too: the stress is the derivative under a strain of positions and cell). The pairs are then every
+    pair and lattice image within ``cutoff`` (Angstrom), the table's short-range complements are switched off over
+    the last ``switch_width``, and the bare Coulomb part of every long-range quantity is the Ewald sum
+    (:mod:`rsfff.ff.complete.periodic`, splitting from ``cutoff`` and ``ewald_tol``): the net charge q_j of each
+    pair term is screened by g_n(r), and the reciprocal part is added per atom. The induction operator is not
+    assembled (``A_off`` and ``A_pp`` are None): its real-space pair blocks and the Ewald frames go into
+    ``bt["pbc"]`` for the matrix-free solve, and the frontier potentials come as per-atom sums plus per-pair
+    couplings instead of the dense (B, n, n) blocks. Dispersion is switched off over the same last
+    ``switch_width``; ``dispersion_tail`` adds the uniform-density correction for the pairs beyond."""
     X = pos_ang / BOHR
     dev, dt = X.device, X.dtype
     N = X.shape[0]
@@ -301,15 +315,39 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     loc = torch.arange(N, device=dev) - (torch.cumsum(counts, 0) - counts)[b_idx]
     nmax = int(counts.max()) if N else 0
     P = K._poly_map(dt, dev)
-    pairs = K.all_pairs(b_idx)
+    periodic = cell is not None
+    if periodic:
+        cell_ang = torch.as_tensor(cell, dtype=dt, device=dev)
+        cell_ang = cell_ang.expand(B, 3, 3) if cell_ang.dim() == 2 else cell_ang
+        rc = float(cutoff)
+        if rc - switch_width < max(chan.cutoff, table.pseudo_cutoff):
+            raise ValueError(f"cutoff - switch_width = {rc - switch_width} A is inside the CT / pseudo-drive range")
+        pairs, shifts = periodic_pairs(pos_ang, cell_ang, b_idx, rc)
+        Cb = cell_ang / BOHR
+        dr_u = X[pairs[1]] - X[pairs[0]] + torch.einsum("pk,pkl->pl", shifts, Cb[b_idx[pairs[0]]])
+    else:
+        pairs = K.all_pairs(b_idx)
+        dr_u = X[pairs[1]] - X[pairs[0]]
     dp = torch.cat([pairs, pairs.flip(0)], dim=1)                  # directed (i <- j)
     i, j = dp
-    dr = X[j] - X[i]
+    dr = torch.cat([dr_u, -dr_u])
     r = dr.norm(dim=-1)
     r_ang = r * BOHR
     rhat = dr / r[:, None]
     y = table(s[i], s[j], r_ang)                                     # (Pd, F)
     qj = tab.charge[s[j]]
+    if periodic:
+        y = y * smooth_switch(r_ang, rc - switch_width, rc)[:, None]
+        alpha = ewald_alpha(rc / BOHR, ewald_tol)
+        g = erfc_screening(r, alpha)                                 # (NORD, Pd): the real-space Ewald screening
+        frames = make_ewald_frames(X, Cb, b_idx, alpha, 2.2 * alpha * math.sqrt(-math.log(ewald_tol)))
+        Mq = X.new_zeros(N, 10)
+        Mq[:, 0] = tab.charge[s]
+        out_q = recip_apply(frames, Mq)                              # (N, 10): reciprocal + self + background
+        rq = out_q @ P                                               # its drive on the site variables
+    else:
+        g = torch.ones(1, r.shape[0], dtype=dt, device=dev)          # bare tensors
+    qg = qj[None] * g                                                # (NORD or 1, Pd)
     Tb = _basis_tensors(dr)                                          # (NORD, Pd, 10, 10)
     T0 = Tb[:, :, 0, :]                                              # (NORD, Pd, 10): row 0, the source as a charge
     Tc = Tb[:, :, :, 0]                                              # column 0: the probe as a unit charge
@@ -320,58 +358,70 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
                   + [f"ps{t}:{p}" for t in range(T_sh) for p in ("dip", "quad")])
     rows = table.rows(y, drive_keys)                                 # (K, NORD, Pd)
     nq = 2 + len(probes)
-    lam = torch.cat([qj[None, None] - rows[:nq], rows[nq:]], 0)
+    lam = torch.cat([qg[None] - rows[:nq], rows[nq:]], 0)
     R0 = torch.einsum("knp,npb->kpb", lam, T0)                       # (K, Pd, 10)
     Rp = R0 @ P                                                      # (K, Pd, 8)
     # -- induction drive ------------------------------------------------------------------------------------------
     Lpair = torch.cat([Rp[0, :, :3], Rp[1, :, 3:]], 1)
     Lflat = X.new_zeros(N, 8).index_add(0, i, Lpair)
+    if periodic:
+        Lflat = Lflat + rq
     L = X.new_zeros(B, nmax, 8).index_put((b_idx, loc), Lflat)
     # -- induced-induced coupling (undirected pairs: the first half of dp) --------------------------------------
     nP = pairs.shape[0] and pairs.shape[1]
     ii, jj = pairs
     PTP = torch.einsum("ab,npbc,cd->npad", P.T, Tb[:, :nP], P)       # (NORD, nP, 8, 8) basis blocks
     arows = table.rows(y[:nP], ["aoff:dd", "aoff:dq", "aoff:qd", "aoff:qq"])     # (4, NORD, nP)
-    blocks = torch.einsum("knp,npab->kpab", 1 - arows, PTP)          # (4, nP, 8, 8): [a c] = dd, dq, qd, qq
+    blocks = torch.einsum("knp,npab->kpab", g[:, :nP] - arows, PTP)  # (4, nP, 8, 8): [a c] = dd, dq, qd, qq
     sl = {"d": slice(0, 3), "q": slice(3, 8)}
     Bij = X.new_zeros(nP, 8, 8)
     for k_, (a, c) in enumerate((("d", "d"), ("d", "q"), ("q", "d"), ("q", "q"))):
         Bij[:, sl[c], sl[a]] = blocks[k_][:, sl[c], sl[a]]
-    ar = torch.arange(8, device=dev)
-    A = X.new_zeros(B, nmax, 8, nmax, 8)
-    fb = b_idx[ii][:, None, None]
-    A = A.index_put((fb, loc[jj][:, None, None], ar[None, :, None], loc[ii][:, None, None], ar[None, None, :]), Bij, accumulate=True)
-    A = A.index_put((fb, loc[ii][:, None, None], ar[None, :, None], loc[jj][:, None, None], ar[None, None, :]),
-                    Bij.transpose(1, 2), accumulate=True)
-    A_off = A.reshape(B, 8 * nmax, 8 * nmax)
     # the penetration part of the same coupling (f rows): the induced-induced Pauli kernel before its constants
     blocks_f = torch.einsum("knp,npab->kpab", arows, PTP)
     Bf = X.new_zeros(nP, 8, 8)
     for k_, (a, c) in enumerate((("d", "d"), ("d", "q"), ("q", "d"), ("q", "q"))):
         Bf[:, sl[c], sl[a]] = blocks_f[k_][:, sl[c], sl[a]]
-    Ap = X.new_zeros(B, nmax, 8, nmax, 8)
-    Ap = Ap.index_put((fb, loc[jj][:, None, None], ar[None, :, None], loc[ii][:, None, None], ar[None, None, :]), Bf, accumulate=True)
-    Ap = Ap.index_put((fb, loc[ii][:, None, None], ar[None, :, None], loc[jj][:, None, None], ar[None, None, :]),
-                      Bf.transpose(1, 2), accumulate=True)
-    A_pp = Ap.reshape(B, 8 * nmax, 8 * nmax)
+    if periodic:                      # not assembled: the pair blocks go to the matrix-free solve
+        A_off = A_pp = None
+    else:
+        ar = torch.arange(8, device=dev)
+        A = X.new_zeros(B, nmax, 8, nmax, 8)
+        fb = b_idx[ii][:, None, None]
+        A = A.index_put((fb, loc[jj][:, None, None], ar[None, :, None], loc[ii][:, None, None], ar[None, None, :]), Bij, accumulate=True)
+        A = A.index_put((fb, loc[ii][:, None, None], ar[None, :, None], loc[jj][:, None, None], ar[None, None, :]),
+                        Bij.transpose(1, 2), accumulate=True)
+        A_off = A.reshape(B, 8 * nmax, 8 * nmax)
+        Ap = X.new_zeros(B, nmax, 8, nmax, 8)
+        Ap = Ap.index_put((fb, loc[jj][:, None, None], ar[None, :, None], loc[ii][:, None, None], ar[None, None, :]), Bf, accumulate=True)
+        Ap = Ap.index_put((fb, loc[ii][:, None, None], ar[None, :, None], loc[jj][:, None, None], ar[None, None, :]),
+                          Bf.transpose(1, 2), accumulate=True)
+        A_pp = Ap.reshape(B, 8 * nmax, 8 * nmax)
     # -- frontier potentials --------------------------------------------------------------------------------------
     fkeys = ["front:donor:dip", "front:donor:quad", "front:acceptor:dip", "front:acceptor:quad"]
     frows = table.rows(y, fkeys)                                      # (4, NORD, Pd)
-    KC = torch.einsum("knp,npa->kpa", 1 - frows, Tc) @ P             # (4, Pd, 8)
+    KC = torch.einsum("knp,npa->kpa", g - frows, Tc) @ P             # (4, Pd, 8)
     front = {}
     for q_, (role, key) in enumerate((("donor", "D"), ("acceptor", "A"))):
-        v = (qj - y[:, table.index[f"front:{role}:v"]]) / r
+        v = (qg[0] - y[:, table.index[f"front:{role}:v"]]) / r
         kv = torch.cat([KC[2 * q_][:, :3], KC[2 * q_ + 1][:, 3:]], 1)
-        front[f"V{key}"] = X.new_zeros(B, nmax, nmax).index_put((b_idx[i], loc[i], loc[j]), v)
-        front[f"K{key}"] = X.new_zeros(B, nmax, nmax, 8).index_put((b_idx[i], loc[i], loc[j]), kv)
+        if periodic:                  # per-atom permanent part (real + reciprocal) and the per-pair induced coupling
+            front[f"phi{key}0"] = X.new_zeros(N).index_add(0, i, v) + out_q[:, 0]
+            front[f"k{key}"] = kv
+        else:
+            front[f"V{key}"] = X.new_zeros(B, nmax, nmax).index_put((b_idx[i], loc[i], loc[j]), v)
+            front[f"K{key}"] = X.new_zeros(B, nmax, nmax, 8).index_put((b_idx[i], loc[i], loc[j]), kv)
     # -- environment features (all probes at once) ---------------------------------------------------------------
     nprobe = len(probes)
     D0 = R0[2:2 + nprobe]                                             # (nprobe, Pd, 10)
     Dp = Rp[2:2 + nprobe]
-    v0 = (D0[:, :, 0] - (qj / r)[None]).T                             # (Pd, nprobe)
+    v0 = (D0[:, :, 0] - (qg[0] / r)[None]).T                          # (Pd, nprobe)
     V0 = X.new_zeros(N, nprobe).index_add(0, i, v0)
     V1 = X.new_zeros(N, nprobe, 3).index_add(0, i, -Dp[:, :, :3].permute(1, 0, 2))
     V2 = X.new_zeros(N, nprobe, 5).index_add(0, i, Dp[:, :, 3:].permute(1, 0, 2))
+    if periodic:                                                      # the reciprocal part of the point-charge field
+        V1 = V1 - rq[:, None, :3]
+        V2 = V2 + rq[:, None, 3:]
     sidx = table.cols(tuple(f"envS:{p_}:{k}" for p_ in probes for k in range(3)), dev).reshape(nprobe, 3)
     Sy = y[:, sidx]                                                 # (Pd, nprobe, 3)
     S0p, S1p, S2p = Sy[..., 0], Sy[..., 1], Sy[..., 2]
@@ -407,6 +457,21 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     ch_index = dp[:, ck]
     ch_r = r_ang[ck]
     ch_ltaper = torch.log(CT._taper(ch_r, chan.cutoff, chan.taper).clamp(min=1e-300))
+    pbc = None
+    if periodic:
+        # the frontier potentials of each channel's own partner (that image only, bare), removed by dphi_pairs
+        pD = ck.nonzero().squeeze(1)
+        pA = torch.where(pD < nP, pD + nP, pD - nP)                   # the reverse pair (j <- i)
+        cb = {}
+        for q_, (role, key, pp) in enumerate((("donor", "D", pD), ("acceptor", "A", pA))):
+            kb = torch.einsum("knp,npa->kpa", 1 - frows[2 * q_:2 * q_ + 2][:, :, pp], Tc[:, pp]) @ P
+            cb[f"ch_v{key}"] = (qj[pp] - y[pp, table.index[f"front:{role}:v"]]) / r[pp]
+            cb[f"ch_k{key}"] = torch.cat([kb[0][:, :3], kb[1][:, 3:]], 1)
+        pbc = {"cell": cell_ang, "volume": torch.linalg.det(Cb).abs(), "cutoff": rc, "switch_width": switch_width,
+               "alpha": alpha, "frames": frames, "A_pairs": pairs, "A_blocks": Bij, "App_blocks": Bf, "dp": dp,
+               "e_elst_recip": 0.5 * X.new_zeros(B).index_add(0, b_idx, Mq[:, 0] * out_q[:, 0]),
+               "g0_pairs": g[0, :nP],
+               "disp_tail": dispersion_tail_integral(rc, switch_width) if dispersion_tail else None, **front, **cb}
     mask = torch.zeros(B, nmax, dtype=torch.bool, device=dev).index_put((b_idx, loc), torch.ones(N, dtype=torch.bool, device=dev))
     lab = dict(labels or {})
     lab.setdefault("n", counts.to(dt))
@@ -415,8 +480,8 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     lab.setdefault("chan", torch.full((B, nT), float("nan"), dtype=dt, device=dev))
     for key in ("pol", "ct", "pauli", "disp", "elec", "int"):
         lab.setdefault(key, torch.full((B,), float("nan"), dtype=dt, device=dev))
-    return {"B": B, "nmax": nmax, "L": L, "A_off": A_off, "A_pp": A_pp, "VD": front["VD"], "KD": front["KD"], "VA": front["VA"],
-            "KA": front["KA"], "mask": mask, "species": s, "feats": feats, "frame": b_idx, "pos": pos_ang,
+    return {"B": B, "nmax": nmax, "L": L, "A_off": A_off, "A_pp": A_pp, "VD": front.get("VD"), "KD": front.get("KD"),
+            "VA": front.get("VA"), "KA": front.get("KA"), "pbc": pbc, "pairs": pairs, "pair_dr": dr_u * BOHR, "mask": mask, "species": s, "feats": feats, "frame": b_idx, "pos": pos_ang,
             "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]],
             "ch_ltaper": ch_ltaper, "ps_index": dp[:, keep], "ps_type": ps_type, "ps_r": r_ang[keep],
             "ps_basis": ps_basis, "ps_basis_sh": ps_basis_sh, "env": env, "labels": lab}

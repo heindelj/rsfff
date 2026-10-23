@@ -17,13 +17,18 @@ from ..multipole import slater_one_center_damp, slater_two_center_damp_unequal
 __all__ = ["permanent_electrostatics"]
 
 
-def permanent_electrostatics(pos_ang, species, batch_idx, tab: IonTable):
-    """Per-frame energies (B,) Hartree; differentiable in the positions (Angstrom)."""
+def permanent_electrostatics(pos_ang, species, batch_idx, tab: IonTable, pairs=None, pair_dr=None, pbc=None):
+    """Per-frame energies (B,) Hartree; differentiable in the positions (Angstrom). ``pairs`` (2, P) with their
+    separations ``pair_dr`` (P, 3) Angstrom replace the all-pairs list (lattice images included); with ``pbc`` (the
+    periodic dict of :func:`rsfff.ff.complete.batched_precompute`) the net-charge Coulomb q_i q_j / r of each pair is
+    erfc-screened and the reciprocal-space energy is added (the Ewald sum of the point charges)."""
     X = pos_ang / K.BOHR_ANG
     B = int(batch_idx.max()) + 1 if batch_idx.numel() else 0
-    pairs = K.all_pairs(batch_idx)
+    if pairs is None:
+        pairs = K.all_pairs(batch_idx)
+        pair_dr = pos_ang[pairs[1]] - pos_ang[pairs[0]]
     i, j = pairs
-    r = (X[j] - X[i]).norm(dim=-1)
+    r = pair_dr.norm(dim=-1) / K.BOHR_ANG
     si, sj = species[i], species[j]
     ni, bi, nj, bj = tab.shell_n[si], tab.shell_b[si], tab.shell_n[sj], tab.shell_b[sj]      # (P, M)
     P_, M = ni.shape
@@ -34,4 +39,7 @@ def permanent_electrostatics(pos_ang, species, batch_idx, tab: IonTable):
                                         r[:, None].expand(-1, M * M).reshape(-1), 0)[0].reshape(P_, M, M)
     e = e + (ni[:, :, None] * nj[:, None, :] * (1 - f2)).sum((1, 2))
     e = e / r
+    if pbc is not None:
+        e = e - tab.charge[si] * tab.charge[sj] * (1 - pbc["g0_pairs"]) / r
+        return X.new_zeros(B).index_add(0, batch_idx[i], e) + pbc["e_elst_recip"]
     return X.new_zeros(B).index_add(0, batch_idx[i], e)
