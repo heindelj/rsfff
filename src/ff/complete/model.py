@@ -105,11 +105,12 @@ class CompleteModel(IonCTModel):
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
                  species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
-                 hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False):
+                 hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False, pauli_ii=False, conf_head=True):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
                          pol_form="confine")
         self.pseudo = pseudo
+        self._s0sq = None
         del self.conf, self.ctq, self.gap                  # replaced by the environment heads / not used (direct CT)
         S = len(tab.symbols)
         ns = S if species_emb else 0
@@ -126,9 +127,24 @@ class CompleteModel(IonCTModel):
             self.hyper_col = names_.index("dip:|V1|")
             self.hyper_g = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
         self.conf_form = conf_form
+        self.conf_head = conf_head          # False: the stiffening rate is the per-species constant alone (no head)
         if conf_form == "mono":
             self.conf_a = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
             self.conf_s0_col = list(feature_names or []).index("shell:S0")
+        if conf_form == "sq":
+            # overlap-squared stiffening, no head: alpha_i^-1 -> alpha_i^-1 (1 + sp(h[s]) sum_j S_ij^2 / s^2), S_ij the
+            # overlap of i's dipole parent with j's density -- the second-order (orbital-overlap, (dS)^2) Pauli
+            # energy of the induced density, in the solve; exactly 1 for an isolated atom
+            self.conf_h = nn.Parameter(torch.full((S,), -1.0, dtype=torch.float64))
+            names_ = list(feature_names or [])
+            ssq = float(feat_scale[names_.index("dip:S0")]) ** 2 if ("dip:S0" in names_ and feat_scale is not None) else 1.0
+            self.register_buffer("conf_ssq", torch.tensor(ssq, dtype=torch.float64))
+        # pauli_ii: the induced-induced Pauli kernel in the solve, A -> A + kappa_i kappa_j A_pp (the penetration part
+        # of the parent-parent coupling, cached); kappa per species, free sign, small nonzero start (the gradient of
+        # a product vanishes at zero)
+        self.pauli_ii = pauli_ii
+        if pauli_ii:
+            self.pp_kappa = nn.Parameter(torch.full((S,), 0.1, dtype=torch.float64))
         self.head_ctq = EnvironmentHead(n_feat, 2, hidden, depth, ns)      # log qD / qD0, log qA / qA0
         self.ct_lnq0 = nn.Parameter(torch.zeros(S, 2, dtype=torch.float64))
         self.aniso, self.ct_gap, self.dphi_scale = aniso, ct_gap, dphi_scale
@@ -241,7 +257,13 @@ class CompleteModel(IonCTModel):
     def confinement_from(self, I, sp):
         """(N, 2) scales on alpha0 and C0 (c_range, tanh-saturated like the ion CT model), 1 for an isolated atom."""
         u = self.head_conf(I, sp) * self.confine_mask[sp][:, None]
-        if self.conf_form == "mono":
+        if not self.conf_head:
+            u = u * 0.0
+        if self.conf_form == "sq":
+            ssq = self._s0sq if (self._s0sq is not None and self._s0sq.shape[0] == sp.shape[0]) else I.new_zeros(sp.shape[0])
+            rate = nn.functional.softplus(self.conf_h[sp]) * self.confine_mask[sp]
+            logc = -torch.log1p(rate * ssq / self.conf_ssq)[:, None].expand(-1, 2)
+        elif self.conf_form == "mono":
             rate = nn.functional.softplus(self.conf_a[sp][:, None] + u)          # (N, 2) >= 0
             logc = -rate * I[:, self.conf_s0_col:self.conf_s0_col + 1].clamp(min=0) * self.confine_mask[sp][:, None]
         else:
@@ -265,6 +287,23 @@ class CompleteModel(IonCTModel):
 
     def ct_charges(self, h):
         raise NotImplementedError("CompleteModel: use ct_charges_from(I, species)")
+
+    def parent_overlap_sq(self, bt, sp):
+        """(N,) sum_j S_ij^2, S_ij the overlap (bohr^-3) of i's dipole parent with j's shells, over the pseudo pairs."""
+        n = sp.shape[0]
+        idx, r_ang = bt["ps_index"], bt["ps_r"]
+        if idx.shape[1] == 0:
+            return bt["feats"].new_zeros(n)
+        i, j = idx
+        rb = r_ang / K.BOHR_ANG
+        one = K._onehot0(rb.shape[0], rb)
+        tab = self.tab
+        S = rb.new_zeros(rb.shape[0])
+        for t in range(tab.shell_n.shape[1]):
+            nt = tab.shell_n[sp[j], t]
+            if bool((nt > 0).any()):
+                S = S + nt * K.shaped_overlap(tab.b_dip[sp[i]], tab.w_dip[sp[i]], tab.shell_b[sp[j], t], one, rb)
+        return rb.new_zeros(n).index_add(0, i, S * S)
 
     def pseudo_gamma(self, I, sp):
         """(N,) gamma_i >= 0: the response sensitivity of each atom to its neighbours' exclusion potentials."""
@@ -427,6 +466,7 @@ class CompleteModel(IonCTModel):
         I = self.scaled(bt["feats"])
         B, nmax, mask = bt["B"], bt["nmax"], bt["mask"]
         n = sp.shape[0]
+        self._s0sq = self.parent_overlap_sq(bt, sp) if self.conf_form == "sq" else None
         c = self.confinement(I, None, sp)
         alpha_flat = self.tab.alpha[sp] * c[:, 0]
         Cq = torch.ones(B, nmax, dtype=I.dtype, device=I.device).masked_scatter(mask, self.tab.C[sp] * c[:, 1])
@@ -448,7 +488,12 @@ class CompleteModel(IonCTModel):
         ainv = self.alpha_inverse(alpha_flat, sp, bt.get("env"))
         ainv_pad = torch.eye(3, dtype=I.dtype, device=I.device).expand(B, nmax, 3, 3).clone()
         ainv_pad = ainv_pad.masked_scatter(mask[..., None, None].expand(B, nmax, 3, 3), ainv)
-        x0 = solve_induction_blocks(L, bt["A_off"], ainv_pad, Cq, quadrupoles)
+        A_off = bt["A_off"]
+        if self.pauli_ii:
+            kk = torch.zeros(B, nmax, dtype=I.dtype, device=I.device).masked_scatter(mask, self.pp_kappa[sp])
+            kk = kk.repeat_interleave(8, dim=1)
+            A_off = A_off + bt["A_pp"] * kk[:, :, None] * kk[:, None, :]
+        x0 = solve_induction_blocks(L, A_off, ainv_pad, Cq, quadrupoles)
         e_pol = 0.5 * (L * x0).sum((1, 2))
         e_breath_atom = I.new_zeros(n)
         if self.breath:
@@ -480,6 +525,8 @@ class CompleteModel(IonCTModel):
         nz = (f.abs().sum(1, keepdim=True) > 0).to(f.dtype)
         noise = sigma * self.feat_scale * torch.randn_like(f) * nz
         I1, I2 = self.scaled(f), self.scaled(f + noise)
+        if self.conf_form == "sq":
+            self._s0sq = self.parent_overlap_sq(bt, sp)
         pen = ((torch.log(self.confinement_from(I2, sp)) - torch.log(self.confinement_from(I1, sp))) ** 2).mean()
         pen = pen + ((self.head_ctq(I2, sp) - self.head_ctq(I1, sp)) ** 2).mean()
         if self.frozen or self.pseudo:
@@ -504,6 +551,10 @@ class CompleteModel(IonCTModel):
                                                         round(float(nn.functional.softplus(self.stark_A[k])), 4)] for k, x in enumerate(sym)}
         if self.hyper:
             out["hyper softplus(g)"] = {x: round(float(nn.functional.softplus(self.hyper_g[k])), 4) for k, x in enumerate(sym)}
+        if self.conf_form == "sq":
+            out["conf sq softplus(h)"] = {x: round(float(nn.functional.softplus(self.conf_h[k])), 4) for k, x in enumerate(sym)}
+        if self.pauli_ii:
+            out["pauli_ii kappa"] = {x: round(float(self.pp_kappa[k]), 4) for k, x in enumerate(sym)}
         if self.conf_form == "mono":
             out["conf rate softplus(a)"] = {x: round(float(nn.functional.softplus(self.conf_a[k])), 4) for k, x in enumerate(sym)}
         if self.breath:

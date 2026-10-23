@@ -275,7 +275,7 @@ def _pp_one(item):
     return k, buf.getvalue()
 
 
-CACHE_VERSION = 3     # 2: equivariant environment blocks on the frame caches; 3: per-shell pseudo basis
+CACHE_VERSION = 4     # 2: equivariant environment blocks; 3: per-shell pseudo basis; 4: induced Pauli block A_pp
 
 
 def cache_key(params_path, env, lean, frames, frontier=False):
@@ -465,7 +465,8 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False),
                              conf_form=g("conf_form", "tanh"),
                              hyper=g("hyper", False), pauli_moments=g("pauli_moments", False),
-                             pauli_form=g("pauli_form", "slater"), ct_stark=g("ct_stark", False))
+                             pauli_form=g("pauli_form", "slater"), ct_stark=g("ct_stark", False),
+                             pauli_ii=g("pauli_ii", False), conf_head=not g("conf_nohead", False))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -629,9 +630,13 @@ def main():
     ap.add_argument("--ct-stark", action="store_true",
                     help="complete: second-order Stark lowering of the CT gap by the fields at donor and acceptor "
                          "(the CT state's extra polarizability; gives alpha_CT perpendicular to a pair)")
+    ap.add_argument("--pauli-ii", action="store_true",
+                    help="complete: induced-induced Pauli kernel in the induction solve (kappa_i kappa_j A_pp)")
+    ap.add_argument("--conf-nohead", action="store_true",
+                    help="complete: stiffening rate = the per-species constant only (no environment head on it)")
     ap.add_argument("--hyper", action="store_true",
                     help="complete: field-induced polarizability enhancement alpha (1 + g |V[dip]^(1)|^2) (hyperpolarizability)")
-    ap.add_argument("--conf-form", default="tanh", choices=("tanh", "mono"),
+    ap.add_argument("--conf-form", default="tanh", choices=("tanh", "mono", "sq"),
                     help="complete: confinement form -- tanh (c_range-bounded, either sign) or mono (stiffening only, "
                          "c <= 1, overlap-gated)")
     ap.add_argument("--force-data", nargs="*", default=None,

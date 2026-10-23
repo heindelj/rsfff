@@ -106,6 +106,7 @@ class FrameCache:
     ps_r: torch.Tensor = None       # (P,) A
     ps_basis: torch.Tensor = None   # (P, 8) drive on i per unit pseudo-potential strength on j
     ps_basis_sh: torch.Tensor = None   # (P, T, 8) the same per permanent shell of j (complete model, shells form)
+    A_pp: torch.Tensor = None       # (8N, 8N) penetration part of the induced-induced coupling (induced Pauli kernel)
     EVD: torch.Tensor = None        # (N, N, 3) field of j's permanent density over i's donor frontier
     EKD: torch.Tensor = None        # (N, N, 3, 8) ... of j's induced moments
     EVA: torch.Tensor = None        # acceptor-frontier versions
@@ -166,6 +167,7 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
                         labels=dict(labels or {}), meta=dict(meta or {}), env=env)
         fc.ch_ltaper = ch_ltaper
         fc.ps_basis_sh = ps_basis_sh
+        fc.A_pp = K.pauli_induced_operator(pos, s, b, tab)
         fc.n_types = len(ctypes)
         fc.meta["lean"] = True
         fc.meta["frontier"] = bool(frontier)
@@ -180,8 +182,11 @@ def _precompute(symbols, pos_ang, tab, chan, featurizer, labels, meta, lean=Fals
     ch_mid = 0.5 * (pos[i] + pos[j])
     ch_Vmid, ch_Kmid = K.point_potential_operator(pos, s, tab, ch_mid, i)
     fc = FrameCache(s, pos, L, A_off, VD, KD, VA, KA, geom["index"], ch_type, geom["r"], geom["g"], geom["lnW"],
-                    geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis, ps_basis_sh, EVD, EKD, EVA, EKA, ch_EP,
-                    ch_J, ch_ltaper, ch_mid, ch_Vmid, ch_Kmid, dict(labels or {}), dict(meta or {}), env, len(ctypes))
+                    geom["dphi_pair"], feats, ps_index, ps_type, ps_r, ps_basis, ps_basis_sh,
+                    EVD=EVD, EKD=EKD, EVA=EVA, EKA=EKA, ch_EP=ch_EP, ch_J=ch_J, ch_ltaper=ch_ltaper, ch_mid=ch_mid,
+                    ch_Vmid=ch_Vmid, ch_Kmid=ch_Kmid, labels=dict(labels or {}), meta=dict(meta or {}), env=env,
+                    n_types=len(ctypes))
+    fc.A_pp = K.pauli_induced_operator(pos, s, b, tab)
     return fc
 
 
@@ -207,6 +212,8 @@ def collate(frames: list[FrameCache]) -> dict:
     species, feats, frame_of, idx, ty, r, g, lnW, dpp, ch_frame = [], [], [], [], [], [], [], [], [], []
     pos, ps_idx, ps_ty, ps_r, ps_basis, ps_basis_sh = [], [], [], [], [], []
     has_sh = all(f.ps_basis_sh is not None for f in frames)
+    has_pp = all(f.A_pp is not None for f in frames)
+    App = torch.zeros(B, 8 * nmax, 8 * nmax, dtype=dt) if has_pp else None
     has_E = all(f.EVD is not None for f in frames)
     EVD = torch.zeros(B, nmax, nmax, 3, dtype=dt) if has_E else None
     EVA = torch.zeros(B, nmax, nmax, 3, dtype=dt) if has_E else None
@@ -221,6 +228,8 @@ def collate(frames: list[FrameCache]) -> dict:
         n = f.species.shape[0]
         L[k, :n] = f.L
         A[k, :8 * n, :8 * n] = f.A_off
+        if has_pp:
+            App[k, :8 * n, :8 * n] = f.A_pp
         VD[k, :n, :n], VA[k, :n, :n], KD[k, :n, :n], KA[k, :n, :n] = f.VD, f.VA, f.KD, f.KA
         mask[k, :n] = True
         species.append(f.species)
@@ -272,6 +281,7 @@ def collate(frames: list[FrameCache]) -> dict:
             "ps_r": torch.cat(ps_r) if ps_r else torch.zeros(0, dtype=dt),
             "ps_basis": torch.cat(ps_basis) if ps_basis else torch.zeros(0, 8, dtype=dt),
             "ps_basis_sh": (torch.cat(ps_basis_sh) if ps_basis_sh else None) if has_sh else None,
+            "A_pp": App,
             "EVD": EVD, "EVA": EVA, "EKD": EKD, "EKA": EKA,
             "ch_EP": torch.cat(ch_EP) if has_E else None,
             "ch_J": torch.cat(cJ) if has_D else None, "ch_ltaper": torch.cat(cT) if has_T else None,

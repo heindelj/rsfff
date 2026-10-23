@@ -40,16 +40,17 @@ def test_batched_matches_per_frame(setup):
     tab, chan, table, feat, frames = setup
     ref = collate([precompute(sym, X, tab, chan, feat, lean=True, frontier=True) for sym, X in frames])
     bt = batched_precompute(*_flat(frames), tab, table, chan)
-    for k in ("L", "A_off", "VD", "KD", "VA", "KA"):
+    for k in ("L", "A_off", "A_pp", "VD", "KD", "VA", "KA"):      # (the pseudo pairs are ordered differently)
         assert torch.allclose(ref[k], bt[k], atol=1e-7), k
     assert torch.allclose(ref["feats"], bt["feats"], atol=1e-6)
     assert torch.allclose(ref["env"]["dip:S2"], bt["env"]["dip:S2"], atol=1e-7)
     assert set(map(tuple, ref["ch_index"].T.tolist())) == set(map(tuple, bt["ch_index"].T.tolist()))
     assert set(map(tuple, ref["ps_index"].T.tolist())) == set(map(tuple, bt["ps_index"].T.tolist()))
     m = CompleteModel(tab, chan, ref["feats"].shape[1], feature_names=feat.feature_names,
-                      feat_scale=ref["feats"].std(0).clamp(min=1e-6), pseudo=True, frozen=True)
+                      feat_scale=ref["feats"].std(0).clamp(min=1e-6), pseudo=True, frozen=True,
+                      pauli_form="shells", pauli_ii=True, conf_form="sq", ct_stark=True)
     with torch.no_grad():
-        for p in (m.kappa_aniso, m.gap_lamD, m.gap_lamA, m.breath_lam):
+        for p in (m.kappa_aniso, m.gap_lamD, m.gap_lamA, m.breath_lam, m.pp_kappa, m.conf_h, m.stark_D):
             p.fill_(0.3)
     o1, o2 = m(ref), m(bt)
     for k in ("e_pol", "e_ct", "e_pauli", "e_disp"):

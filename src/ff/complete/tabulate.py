@@ -344,6 +344,16 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     A = A.index_put((fb, loc[ii][:, None, None], ar[None, :, None], loc[jj][:, None, None], ar[None, None, :]),
                     Bij.transpose(1, 2), accumulate=True)
     A_off = A.reshape(B, 8 * nmax, 8 * nmax)
+    # the penetration part of the same coupling (f rows): the induced-induced Pauli kernel before its constants
+    blocks_f = torch.einsum("knp,npab->kpab", arows, PTP)
+    Bf = X.new_zeros(nP, 8, 8)
+    for k_, (a, c) in enumerate((("d", "d"), ("d", "q"), ("q", "d"), ("q", "q"))):
+        Bf[:, sl[c], sl[a]] = blocks_f[k_][:, sl[c], sl[a]]
+    Ap = X.new_zeros(B, nmax, 8, nmax, 8)
+    Ap = Ap.index_put((fb, loc[jj][:, None, None], ar[None, :, None], loc[ii][:, None, None], ar[None, None, :]), Bf, accumulate=True)
+    Ap = Ap.index_put((fb, loc[ii][:, None, None], ar[None, :, None], loc[jj][:, None, None], ar[None, None, :]),
+                      Bf.transpose(1, 2), accumulate=True)
+    A_pp = Ap.reshape(B, 8 * nmax, 8 * nmax)
     # -- frontier potentials --------------------------------------------------------------------------------------
     fkeys = ["front:donor:dip", "front:donor:quad", "front:acceptor:dip", "front:acceptor:quad"]
     frows = table.rows(y, fkeys)                                      # (4, NORD, Pd)
@@ -405,7 +415,7 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     lab.setdefault("chan", torch.full((B, nT), float("nan"), dtype=dt, device=dev))
     for key in ("pol", "ct", "pauli", "disp", "elec", "int"):
         lab.setdefault(key, torch.full((B,), float("nan"), dtype=dt, device=dev))
-    return {"B": B, "nmax": nmax, "L": L, "A_off": A_off, "VD": front["VD"], "KD": front["KD"], "VA": front["VA"],
+    return {"B": B, "nmax": nmax, "L": L, "A_off": A_off, "A_pp": A_pp, "VD": front["VD"], "KD": front["KD"], "VA": front["VA"],
             "KA": front["KA"], "mask": mask, "species": s, "feats": feats, "frame": b_idx, "pos": pos_ang,
             "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]],
             "ch_ltaper": ch_ltaper, "ps_index": dp[:, keep], "ps_type": ps_type, "ps_r": r_ang[keep],

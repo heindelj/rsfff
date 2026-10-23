@@ -329,6 +329,39 @@ def induction_operator(pos_ang, species, batch_idx, tab: IonTable, *, field=None
     return L, A.reshape(N * D_SITE, N * D_SITE)
 
 
+def pauli_induced_operator(pos_ang, species, batch_idx, tab: IonTable):
+    """The penetration (overlap-complement) part of the induced-induced coupling, (8N, 8N): the same blocks as
+    :func:`induction_operator`'s A_off with the damping complements f_n in place of 1 - f_n -- the kernel of the
+    Pauli energy between two induced densities on the parents, before the per-atom coupling constants."""
+    X = pos_ang / BOHR_ANG
+    N = X.shape[0]
+    dt, dev = X.dtype, X.device
+    P = _poly_map(dt, dev)
+    pairs = all_pairs(batch_idx)
+    s = species
+    bd, wd = tab.b_dip[s], tab.w_dip[s]
+    bq, wq = tab.b_quad[s], tab.w_quad[s]
+    i, j = pairs
+    dr = X[j] - X[i]
+    r = _r(dr)
+    blocks = {}
+    for a, (bi_, wi_) in (("d", (bd, wd)), ("q", (bq, wq))):
+        for c, (bj_, wj_) in (("d", (bd, wd)), ("q", (bq, wq))):
+            f = shaped_two_center_damp(bi_[i], bj_[j], wi_[i], wj_[j], r, 2)
+            blocks[a + c] = P.T @ _tensor(dr, f) @ P
+    Bij = X.new_zeros(r.shape[0], D_SITE, D_SITE)
+    sl = {"d": slice(0, 3), "q": slice(3, 8)}
+    for a in "dq":
+        for c in "dq":
+            Bij[:, sl[c], sl[a]] = blocks[a + c][:, sl[c], sl[a]]
+    ar = torch.arange(D_SITE, device=dev)
+    A = X.new_zeros(N, D_SITE, N, D_SITE)
+    A = A.index_put((j[:, None, None], ar[None, :, None], i[:, None, None], ar[None, None, :]), Bij, accumulate=True)
+    A = A.index_put((i[:, None, None], ar[None, :, None], j[:, None, None], ar[None, None, :]),
+                    Bij.transpose(1, 2), accumulate=True)
+    return A.reshape(N * D_SITE, N * D_SITE)
+
+
 def induction_matrix(A_off, alpha, C):
     """The full induction Hessian A = A_off + diag(alpha^-1 (x3), C^-1 (x5)) for a padded batch (B, 8N, 8N)."""
     B, N = alpha.shape
