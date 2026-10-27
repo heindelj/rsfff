@@ -89,3 +89,25 @@ def test_continuum_bookkeeping(solv):
 def test_continuum_screens_every_interaction(vac, solv):
     assert abs(solv["terms"]["frz"]) < abs(vac["terms"]["frz"])
     assert abs(solv["terms"]["ct"]) < abs(vac["terms"]["ct"])
+
+
+def test_ferf_space_and_polarization():
+    from rsfff.qcgen.almo import ferf_virtuals, multipole_operators
+    from rsfff.qcgen.backend import make_mol, make_mf
+    mol = make_mol(["O", "H", "H"], [[0, 0, 0.12], [0, 0.76, -0.47], [0, -0.76, -0.47]], basis=BASIS)
+    mf = make_mf(mol, XC)
+    mf.kernel()
+    assert multipole_operators(mol, "MDQ").shape == (9, mol.nao, mol.nao)
+    V = ferf_virtuals(mf, "DQ")
+    nocc = int((mf.mo_occ > 0).sum())
+    assert V.shape[1] <= 8 * nocc
+    S = mol.intor("int1e_ovlp")
+    assert abs(V.T @ S @ V - np.eye(V.shape[1])).max() < 1e-10            # orthonormal
+    assert abs(V.T @ S @ mf.mo_coeff[:, mf.mo_occ > 0]).max() < 1e-10    # virtual
+    Vc = ferf_virtuals(mf, "D", coupled=True)
+    assert Vc.shape[1] <= 3 * nocc
+    # the FERF polarization is a constrained version of the ALMO one: between it and zero
+    f = almo_eda(nacl(), xc=XC, basis=BASIS, with_ct=False, pol_model="ferf", frozen_decomp="classical")
+    a = almo_eda(nacl(), xc=XC, basis=BASIS, with_ct=False, pol_model="almo", frozen_decomp="classical")
+    assert a["terms"]["pol"] <= f["terms"]["pol"] + 1e-5 < 0
+    assert f["info"]["ferf"]["orders"] == "MDQ"

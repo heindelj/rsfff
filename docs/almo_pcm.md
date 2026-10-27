@@ -62,12 +62,36 @@ same convention as `qcgen.pol_ref.Environment`, which can be passed as `env=` in
 | H₃O⁺(H₂O)₂, ωB97M-V/def2-TZVPD | frz / cls_elec / int | −78.727 / −238.340 / −227.208 | −78.733 / −238.343 / −227.213 |
 | H₃O⁺(H₂O)₂ | pol / ct | −76.39 / −72.09 | −72.76 / −75.72 |
 
-Fragment energies agree to 1e-7 Hartree. The pol/ct split differs for molecules because Q-Chem's EDA2 option set
-1 uses **FERF (nMDQ uFERF) polarization** — each fragment's relaxation restricted to its field-response functions
-— whereas this code does the full SCF-MI in the fragment AO space; the remainder (3.6 kJ/mol here, 0.6 for the
-water dimer, 0.006 for NaCl) moves from ct to pol. For atoms the two are the same to 0.01 kJ/mol; for molecular
-labels a FERF option would be needed. The terms close (`frz + pol + ct = E_full − ΣE_frag`) to 1e-9 in vacuum, with
-a field, and in C-PCM; the EDA terms are translation invariant in a field; Gauss's law holds on the surface charges.
+Fragment energies agree to 1e-7 Hartree. The terms close (`frz + pol + ct = E_full − ΣE_frag`) to 1e-9 in vacuum,
+with a field, and in C-PCM; the EDA terms are translation invariant in a field; Gauss's law holds on the surface
+charges.
+
+### Polarization: FERF vs ALMO (`pol_model`)
+
+Q-Chem's EDA2 option set 1 (Joe's labels) restricts each fragment's relaxation to its **fragment electric-field
+response functions** (Horn & Head-Gordon 2015; "nMDQ uFERF" in Q-Chem 6: uncoupled responses to the monopole =
+scaled nuclear charges, the dipole and the five traceless quadrupole operators, one SVD per operator, the left
+singular vectors as virtuals, non-orthogonal between fragments), which gives pol a basis-set limit; the rest is CT.
+`pol_model="ferf"` (default; `ferf_orders`, `ferf_coupled`, `ferf_svd_tol`) implements that, `pol_model="almo"` the
+AO-block ALMO (option set 2). For atoms the two coincide (NaCl: 0.01 kJ/mol); for molecules the FERF space is the
+smaller one. H₃O⁺(H₂O)₂ ωB97M-V/def2-TZVPD (kJ/mol):
+
+| model | virtuals per water | pol |
+|---|---|---|
+| almo (full AO space) | all | −76.39 |
+| ferf MDQ uncoupled (null vectors dropped only) | 45 = 9 × 5 | −75.20 |
+| ferf DQ uncoupled | 40 | −73.71 |
+| ferf MDQ uncoupled, relative singular values < 1e-2 dropped (the O 1s responses) | 37 | −71.25 |
+| ferf DQ uncoupled, same | 32 | −68.98 |
+| ferf D uncoupled | 15 | −60.12 |
+| **Q-Chem 6.4 nMDQ uFERF** | ? | **−72.76** |
+
+So Q-Chem's response space is evidently truncated further than "excluding the null vectors" (its value sits between
+the 37- and 45-vector spaces; the core-orbital responses have relative singular values of 1e-3); the criterion is
+not in the manual or the abstract of the uFERF paper. The remaining 2.4 kJ/mol here (0.6 for the water dimer) is
+the uncertainty in the pol/ct split of molecular labels generated here vs Q-Chem; the sum pol + ct and every
+other term agree. A Q-Chem run with `EDA2 = 2` on one frame would pin `pol_model="almo"` exactly, and
+`eda_uferf = false, child_mp_orders = 232` the coupled DQ variant.
 
 ## The continuum (both sides)
 
@@ -122,7 +146,7 @@ behaviour the Stage D labels need.
 
 ## Open items
 
-* FERF (nMDQ) polarization for molecular fragments, to match Q-Chem's pol/ct split (atoms are fine).
+* Q-Chem's FERF truncation criterion (the last 2.4 kJ/mol of the H₃O⁺(H₂O)₂ pol/ct split); atoms are unaffected.
 * Open-shell fragments (UKS SCF-MI).
 * A solvated-fragment reference for the anion shells if the 2 kJ/mol frozen-level mismatch matters (or accept it:
   it is common-mode between e_cav and e_scr).

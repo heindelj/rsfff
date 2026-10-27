@@ -65,7 +65,7 @@ from .backend import make_mf, make_mol, to_numpy
 BOHR = 0.52917721092
 KJ = 2625.4996394799  # Hartree -> kJ/mol
 __all__ = ["Fragment", "UniformField", "Continuum", "almo_eda", "scf_mi", "frozen_density", "surface_potential",
-           "pcm_energy", "BOHR", "KJ"]
+           "pcm_energy", "ferf_virtuals", "multipole_operators", "orthogonal_decomposition", "BOHR", "KJ"]
 
 
 # ---------------------------------------------------------------------------
@@ -285,15 +285,18 @@ class _System:
 # ---------------------------------------------------------------------------
 # SCF-MI
 # ---------------------------------------------------------------------------
-def scf_mi(system: _System, C0, slices, relax=None, max_cycle=100, tol=1e-9, gtol=2e-5, diis_space=12,
+def scf_mi(system: _System, C0, bases, relax=None, max_cycle=100, tol=1e-9, gtol=2e-5, diis_space=12,
            verbose=False, log=None):
     """Absolutely localized SCF: minimize system.energy over determinants whose fragment-k occupied orbitals are
-    expanded in fragment k's AOs (``slices[k]``), starting from the frozen orbitals ``C0`` (list of (nao, no_k)
-    blocks). ``relax``: the fragments allowed to relax (default all). Returns (C, E, info)."""
+    expanded in fragment k's own space -- ``bases[k]``, a slice of the supermolecule AOs (the AO-block ALMO) or an
+    (nao, m_k) matrix of basis vectors (occupied + FERF virtuals), starting from the frozen orbitals ``C0``
+    (list of (nao, no_k) blocks, each inside its space). ``relax``: the fragments allowed to relax (default all).
+    Returns (C, E, info)."""
     S, nao = system.S, system.mol.nao
     n = len(C0)
     relax = list(range(n)) if relax is None else list(relax)
     eye = np.eye(nao)
+    bases = [eye[:, b] if isinstance(b, slice) else np.asarray(b) for b in bases]
     Cs = [c.copy() for c in C0]
     no = [c.shape[1] for c in Cs]
     e, F, _ = system.energy_fock(density(Cs, S))
@@ -303,7 +306,7 @@ def scf_mi(system: _System, C0, slices, relax=None, max_cycle=100, tol=1e-9, gto
         out = {}
         for k in relax:
             Coth = orth(np.hstack([Cs[j] for j in range(n) if j != k]) if n > 1 else np.zeros((nao, 0)), S)
-            out[k] = proj_space(eye[:, slices[k]], Coth, S)
+            out[k] = proj_space(bases[k], Coth, S)
         return out
 
     def grad(F, Cs, Xs):
@@ -333,13 +336,84 @@ def scf_mi(system: _System, C0, slices, relax=None, max_cycle=100, tol=1e-9, gto
         for k in relax:
             X, M = Xs[k]
             w, U = np.linalg.eigh(X.T @ Fd @ X)
-            newC[k] = eye[:, slices[k]] @ (M @ U[:, :no[k]])     # own-AO coefficients: the ALMO form
+            newC[k] = bases[k] @ (M @ U[:, :no[k]])              # own-space coefficients: the ALMO form
         Cs = newC
         e_prev = e
         e, F, _ = system.energy_fock(density(Cs, S))
     else:
         raise RuntimeError(f"SCF-MI did not converge in {max_cycle} iterations (|g| {gmax:.1e})")
     return Cs, e, {"iters": it + 1, "gmax": gmax, "e_frz": e_frz}
+
+
+# ---------------------------------------------------------------------------
+# fragment electric-field response functions (FERF)
+# ---------------------------------------------------------------------------
+def multipole_operators(mol, orders="MDQ", origin=None):
+    """The perturbation operators of the FERFs in mol's AO basis, (n, nao, nao): "M" the monopole (the fragment's
+    nuclear attraction: response to scaled nuclear charges), "D" the dipole x, y, z, "Q" the five traceless
+    (real spherical, l = 2) second moments about ``origin`` (default: the centre of nuclear charge)."""
+    ops = []
+    if origin is None:
+        Z = mol.atom_charges()
+        origin = (Z @ mol.atom_coords()) / Z.sum()
+    for o in orders.upper():
+        if o == "M":
+            v = np.zeros((mol.nao, mol.nao))
+            for a in range(mol.natm):
+                with mol.with_rinv_origin(mol.atom_coord(a)):
+                    v -= mol.atom_charge(a) * mol.intor("int1e_rinv")
+            ops.append(v)
+        elif o == "D":
+            with mol.with_common_orig(origin):
+                ops.extend(mol.intor("int1e_r", comp=3))
+        elif o == "Q":
+            with mol.with_common_orig(origin):
+                rr = mol.intor("int1e_rr", comp=9).reshape(3, 3, mol.nao, mol.nao)
+            xx, yy, zz, xy, xz, yz = rr[0, 0], rr[1, 1], rr[2, 2], rr[0, 1], rr[0, 2], rr[1, 2]
+            ops.extend([2 * zz - xx - yy, xz, yz, xx - yy, xy])
+        else:
+            raise ValueError(f"multipole order {o!r} (M | D | Q)")
+    return np.array(ops)
+
+
+def ferf_virtuals(mf, orders="MDQ", coupled=False, svd_tol=1e-8, origin=None):
+    """The FERF virtual space of a closed-shell fragment (Horn & Head-Gordon, JCP 143, 114111 (2015); the uncoupled
+    variant of Shen et al., CPL 862, 141825 (2025) -- Q-Chem's EDA2 option set 1, "nMDQ uFERF"): for every
+    perturbation operator the occupied-virtual response amplitudes Delta_ai -- uncoupled, M_ai / (e_i - e_a), or
+    coupled-perturbed KS -- are SVD'd and the left singular vectors (one per occupied orbital, null vectors dropped)
+    define virtuals V = C_vir L; the union over operators, orthonormalized, is the fragment's polarization space
+    beyond its occupied orbitals. Returns (nao, m) AO coefficients, m <= (number of operators) x n_occ."""
+    mol = mf.mol
+    C, e, occ = to_numpy(mf.mo_coeff), to_numpy(mf.mo_energy), to_numpy(mf.mo_occ)
+    Co, Cv = C[:, occ > 0], C[:, occ == 0]
+    eo, ev = e[occ > 0], e[occ == 0]
+    ops = multipole_operators(mol, orders, origin)
+    h1 = np.einsum("pa,xpq,qi->xai", Cv, ops, Co)                 # (n, nvir, nocc)
+    if coupled:
+        from pyscf.scf import cphf
+        vind = mf.gen_response(singlet=None, hermi=1)
+
+        def fvind(mo1):
+            mo1 = mo1.reshape(-1, Cv.shape[1], Co.shape[1])
+            dm1 = np.einsum("pa,xai,qi->xpq", Cv, mo1, Co) * 2
+            dm1 = dm1 + dm1.transpose(0, 2, 1)
+            v1 = vind(dm1)
+            return np.einsum("pa,xpq,qi->xai", Cv, v1, Co).reshape(mo1.shape[0], -1)
+
+        mo_energy = np.concatenate([eo, ev])
+        mo_occ = np.concatenate([np.full(len(eo), 2.0), np.zeros(len(ev))])
+        delta = cphf.solve(fvind, mo_energy, mo_occ, h1, max_cycle=60, tol=1e-9)[0]
+    else:
+        delta = h1 / (eo[None, None, :] - ev[None, :, None])
+    vecs = []
+    for d in delta:
+        L, sv, _ = np.linalg.svd(d, full_matrices=False)
+        vecs.append(L[:, sv > svd_tol * max(sv.max(), 1e-300)])
+    Lall = np.hstack(vecs)
+    # orthonormalize the union (the virtuals are orthonormal, so plain SVD of the coefficient block does it)
+    U, sv, _ = np.linalg.svd(Lall, full_matrices=False)
+    U = U[:, sv > 1e-8]
+    return Cv @ U
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +539,8 @@ def _disp_part(system: _System, dm, disp_free):
 def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, pcm: Continuum | None = None,
              shared_grid=True, conv_tol=1e-10, scfmi_tol=1e-9, scfmi_gtol=2e-5, verbose=0, with_ct=True,
              return_states=True, frag_dm0=None, disp_free="hf", grid_level=None, with_pol=True,
-             frozen_decomp="orthogonal", ortho_tol=1e-5):
+             frozen_decomp="orthogonal", ortho_tol=1e-5, pol_model="ferf", ferf_orders="MDQ", ferf_coupled=False,
+             ferf_svd_tol=1e-8):
     """ALMO-EDA of ``fragments`` (list of :class:`Fragment`, closed shell). ``field``: uniform field (3,) au, or
     ``env``: any object with ``h1(mol)`` / ``nuclear(mol)``; ``pcm``: a :class:`Continuum` (None: vacuum);
     ``frag_dm0``: initial fragment densities (e.g. the converged ones of a neighbouring geometry in a scan).
@@ -477,6 +552,14 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
     Hartree-Fock exchange) or "nlc" (the functional without its VV10). Reproduces Q-Chem's E_disp (water dimer
     wB97X-V -8.64 vs -8.67 kJ/mol across basis sets; the classical variant is ~1.5 kJ/mol short).
     ``grid_level``: (xc, nlc) pyscf grid levels (default pyscf's 3 and 1).
+    ``pol_model``: "ferf" (Q-Chem's EDA2 option set 1: each fragment relaxes within its occupied orbitals plus its
+    fragment electric-field response functions, :func:`ferf_virtuals`, orders ``ferf_orders`` ("MDQ" = monopole +
+    dipole + quadrupole, Q-Chem 6's nMDQ; "DQ" the original nDQ), uncoupled or coupled (``ferf_coupled``) responses;
+    the polarization then has a basis-set limit and the rest is charge transfer; ``ferf_svd_tol`` drops response
+    vectors with relative singular values below it) or "almo" (the AO-block ALMO: each fragment relaxes in its
+    whole AO space, EDA2 option set 2). For atoms the two agree to 0.01 kJ/mol; for molecules the FERF space is
+    the smaller one (H3O+(H2O)2 wB97M-V/def2-TZVPD: almo -76.39, ferf MDQ -75.20, Q-Chem's nMDQ uFERF -72.76
+    kJ/mol -- Q-Chem evidently truncates the response space further than "null vectors only"; see docs/almo_pcm.md).
 
     Returns a dict: ``terms`` (kJ/mol: cav, cls_elec, disp, mod_pauli, frz, pol, ct, int), ``energies`` (Hartree:
     fragments, frz, scfmi, full), ``solvent`` (per state: the surface potential V, charges q and G = 1/2 q.V on the
@@ -509,7 +592,7 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
             nlcgrids.build()
 
     # --- fragments, each in the field and in its own cavity
-    frag_sys, frag_mf, C0, D_blocks, e_frag, e_frag_pcm, e_nlc_frag = [], [], [], [], [], [], []
+    frag_sys, frag_mf, C0, D_blocks, e_frag, e_frag_pcm, e_nlc_frag, bases = [], [], [], [], [], [], [], []
     for k, f in enumerate(fragments):
         mol_k = make_mol(f.symbols, f.coords, charge=f.charge, spin=0, basis=basis)
         sys_k = _System(mol_k, xc, env=env, pcm=pcm, grids=grids, nlcgrids=nlcgrids)
@@ -519,6 +602,15 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
         Cb[ao_slices[k]] = C
         Dk = np.zeros((mol.nao, mol.nao))
         Dk[ao_slices[k], ao_slices[k]] = to_numpy(mf_k.make_rdm1())
+        if pol_model == "ferf":
+            Vk = ferf_virtuals(mf_k, ferf_orders, ferf_coupled, svd_tol=ferf_svd_tol)
+            Bk = np.zeros((mol.nao, C.shape[1] + Vk.shape[1]))
+            Bk[ao_slices[k]] = np.hstack([C, Vk])
+            bases.append(Bk)
+        elif pol_model == "almo":
+            bases.append(ao_slices[k])
+        else:
+            raise ValueError(f"pol_model {pol_model!r} (ferf | almo)")
         frag_sys.append(sys_k)
         frag_mf.append(mf_k)
         C0.append(Cb)
@@ -578,7 +670,7 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
                              "D_frz": D_frz, "ao_slices": ao_slices, "atom_slices": atom_slices,
                              "D_frag_own": [to_numpy(m.make_rdm1()) for m in frag_mf]}
         return out
-    C_pol, e_pol_tot, info_mi = scf_mi(sup, C0, ao_slices, tol=scfmi_tol, gtol=scfmi_gtol, verbose=verbose > 1, log=log)
+    C_pol, e_pol_tot, info_mi = scf_mi(sup, C0, bases, tol=scfmi_tol, gtol=scfmi_gtol, verbose=verbose > 1, log=log)
     D_pol = density(C_pol, sup.S)
     e_pol = e_pol_tot - e_frz
     if verbose:
@@ -614,6 +706,9 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
         "solvent": solvent,
         "info": {"xc": xc, "basis": basis, "field": None if field is None else list(map(float, field)),
                  "pcm": None if pcm is None else pcm.spec(), "scfmi_iters": info_mi["iters"],
+                 "pol_model": pol_model, "ferf": {"orders": ferf_orders, "coupled": ferf_coupled,
+                                                  "nvirt": [b.shape[1] - c.shape[1] for b, c in zip(bases, C0)]}
+                 if pol_model == "ferf" else None,
                  "scfmi_gmax": info_mi["gmax"], "scfmi_log": log, "time": time.time() - t0, "ortho": ortho,
                  "fragments": [{"symbols": list(f.symbols), "coords": np.asarray(f.coords, float).tolist(),
                                 "charge": f.charge} for f in fragments]},
