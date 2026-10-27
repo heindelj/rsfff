@@ -56,6 +56,7 @@ same convention as `qcgen.pol_ref.Environment`, which can be passed as `env=` in
 |---|---|---|---|
 | NaCl 2.6 Å, ωB97M-V/def2-TZVPD | pol | −46.766 | −46.760 |
 | NaCl 2.8 / 3.2 Å | pol | −41.52 / −31.27 | −41.53 / −31.26 |
+| NaCl 2.6 / 2.8 Å | mod_pauli | 61.45 / 34.89 | 61.45 / 34.89 |
 | water dimer, ωB97X-V/def2-QZVPPD | frz / cls_elec / int | 0.731 / −32.926 / −13.405 | 0.730 / −32.926 / −13.405 |
 | water dimer (def2-TZVPD) | disp | −8.64 | −8.67 (QZVPPD) |
 | H₃O⁺(H₂O)₂, ωB97M-V/def2-TZVPD | frz / cls_elec / int | −78.727 / −238.340 / −227.208 | −78.733 / −238.343 / −227.213 |
