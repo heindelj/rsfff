@@ -19,7 +19,12 @@ exactly zero for an isolated atom. The invariants handed to a network are, per p
 
     [V^(0)_pen,  |V^(1)|,  |V^(2)|,  S^(0),  |S^(1)|,  |S^(2)|,  V^(1).S^(1)]
 
-(the last one: whether the field and the overlap push are aligned). The equivariant blocks are kept on the result
+(the last one: whether the field and the overlap push are aligned). With ``inv_form="sq"`` (the default) the four
+magnitudes are replaced by the squared norms -- the self-contractions |V^(1)|^2, |V^(2)|^2, |S^(1)|^2, |S^(2)|^2 --
+which are smooth where the vector / tensor passes through zero: a centrosymmetric lattice site has V^(1) = S^(1) = 0
+and a cubic one also V^(2) = S^(2) = 0, and the magnitude has a cone there (|x| is not differentiable at x = 0), so
+the gradient of anything built on it jumps across the site and the forces are discontinuous. ``"norm"`` keeps the
+magnitudes (checkpoints trained before 2026-10-23). The equivariant blocks are kept on the result
 for equivariant heads (anisotropic alpha, Pauli dipoles / quadrupoles). Units: atomic (bohr, e, Hartree); positions
 are taken in Angstrom like the rest of rsfff.
 """
@@ -33,10 +38,48 @@ from ..ionct import kernels as K
 from ..ionct.params import IonTable
 from ..units import BOHR_ANG
 
-__all__ = ["DensityEnvironment", "EnvFeatures", "shaped_overlap_derivs", "PROBE_NAMES"]
+__all__ = ["DensityEnvironment", "EnvFeatures", "shaped_overlap_derivs", "PROBE_NAMES", "INV_FORMS",
+           "invariant_names", "invariants", "env_invariants", "inv_form_of"]
 
 PROBE_NAMES = ("shell", "dip", "quad", "donor", "acceptor", "breath")
-INVARIANT_NAMES = ("V0_pen", "|V1|", "|V2|", "S0", "|S1|", "|S2|", "V1.S1")
+#: invariant names per probe, by form: "norm" = the magnitudes (old), "sq" = the squared norms (smooth at zero)
+INV_FORMS = {"norm": ("V0_pen", "|V1|", "|V2|", "S0", "|S1|", "|S2|", "V1.S1"),
+             "sq": ("V0_pen", "|V1|^2", "|V2|^2", "S0", "|S1|^2", "|S2|^2", "V1.S1")}
+INVARIANT_NAMES = INV_FORMS["norm"]
+
+
+def invariant_names(form="sq"):
+    if form not in INV_FORMS:
+        raise ValueError(f"inv_form {form!r}: one of {sorted(INV_FORMS)}")
+    return INV_FORMS[form]
+
+
+def inv_form_of(feature_names, default="sq"):
+    """The invariant form a list of feature names was built with ("sq" if any name is a squared norm)."""
+    if not feature_names:
+        return default
+    return "sq" if any(str(n).endswith("^2") for n in feature_names) else "norm"
+
+
+def _mag(x, dims, form):
+    """|x| ("norm") or |x|^2 ("sq") over the trailing ``dims`` dimensions."""
+    x = x.flatten(-dims)
+    return (x * x).sum(-1) if form == "sq" else x.norm(dim=-1)
+
+
+def invariants(V0, V1, V2, S0, S1, S2, form="sq"):
+    """(..., 7) invariants of one probe from its blocks V0 (...), V1 (..., 3), V2 (..., 5), S0 (...), S1 (..., 3),
+    S2 (..., 3, 3), in the order of :func:`invariant_names`."""
+    invariant_names(form)
+    return torch.stack([V0, _mag(V1, 1, form), _mag(V2, 1, form), S0, _mag(S1, 1, form), _mag(S2, 2, form),
+                        (V1 * S1).sum(-1)], -1)
+
+
+def env_invariants(env: dict, probes, form="sq"):
+    """(N, len(probes) * 7) features, probe-major, from the equivariant blocks ``env["<probe>:<V0|...|S2>"]`` a
+    cache carries (lets a cache built under one form serve the other)."""
+    return torch.cat([invariants(*(env[f"{p}:{k}"] for k in ("V0", "V1", "V2", "S0", "S1", "S2")), form=form)
+                      for p in probes], -1)
 
 
 @dataclass
@@ -74,12 +117,14 @@ class DensityEnvironment:
     the two kinds on or off; ``cutoff`` (Angstrom) restricts the overlap sums (the Coulomb projections are summed over
     every other atom of the frame -- they are fields)."""
 
-    def __init__(self, tab: IonTable, probes=PROBE_NAMES, coulomb=True, overlap=True, cutoff=None):
+    def __init__(self, tab: IonTable, probes=PROBE_NAMES, coulomb=True, overlap=True, cutoff=None, inv_form="sq"):
         self.tab = tab
         self.probes = tuple(probes)
         self.coulomb, self.overlap, self.cutoff = coulomb, overlap, cutoff
-        self.n_feat = len(self.probes) * len(INVARIANT_NAMES)
-        self.feature_names = [f"{p}:{q}" for p in self.probes for q in INVARIANT_NAMES]
+        self.inv_form = inv_form
+        names = invariant_names(inv_form)
+        self.n_feat = len(self.probes) * len(names)
+        self.feature_names = [f"{p}:{q}" for p in self.probes for q in names]
         S = len(tab.symbols)
         # the outermost (smallest-exponent) permanent shell with electrons, per species
         b_outer = torch.where(tab.shell_n > 0, tab.shell_b, torch.full_like(tab.shell_b, float("inf"))).min(1).values
@@ -152,8 +197,6 @@ class DensityEnvironment:
             if name == "breath":            # species without the l = 0 shape: no such projections
                 has = (tab.a0[s] > 0).to(X.dtype)
                 blk = {k: v * has.reshape(-1, *([1] * (v.dim() - 1))) for k, v in blk.items()}
-            cols = [blk["V0"], blk["V1"].norm(dim=-1), blk["V2"].norm(dim=-1), blk["S0"], blk["S1"].norm(dim=-1),
-                    blk["S2"].flatten(1).norm(dim=-1), (blk["V1"] * blk["S1"]).sum(-1)]
-            inv.append(torch.stack(cols, 1))
+            inv.append(invariants(blk["V0"], blk["V1"], blk["V2"], blk["S0"], blk["S1"], blk["S2"], self.inv_form))
             blocks[name] = blk
         return EnvFeatures(torch.cat(inv, 1), blocks)

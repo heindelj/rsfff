@@ -116,7 +116,7 @@ def test_frozen_terms_signs_and_isolated_limit(setup):
     assert torch.allclose(qP[-1], mf.pauli_lnq0[c.species.new_tensor(tab.symbols.index("Cl"))].exp())
     # the frozen heads only see overlaps
     names = [feat.feature_names[k] for k in mf.frozen_cols.tolist()]
-    assert all(n.split(":")[-1] in ("S0", "|S1|", "|S2|") for n in names)
+    assert all(n.split(":")[-1] in ("S0", "|S1|^2", "|S2|^2") for n in names)
 
 
 def test_pauli_moments_reduce_to_monopole_at_zero(setup):
@@ -161,6 +161,33 @@ def test_pauli_shells_form(setup):
     ms.head_ps.load_state_dict(m1.head_ps.state_dict())
     assert torch.allclose(ms(bt)["e_pauli"], m1(bt)["e_pauli"])
     assert torch.allclose(ms(bt)["e_pol"], m1(bt)["e_pol"])
+
+
+def test_pauli_fit_start_and_prior(setup, tmp_path):
+    """The ion table's frozen-fit (w, s) start the shells form and anchor pauli_prior; species without one are free."""
+    import json
+    tab0, chan, feat, c, m = setup
+    doc = json.load(open(PARAMS))
+    doc["ions"]["Cl"]["pauli"] = {"w": [5.8, 3.1][:len(doc["ions"]["Cl"]["shells"])], "s": 1.11}
+    p = tmp_path / "ions.json"
+    p.write_text(json.dumps(doc))
+    tab = IonTable.load(p)
+    kCl, kNa = tab.symbols.index("Cl"), tab.symbols.index("Na")
+    assert torch.isfinite(tab.pauli_s[kCl]) and torch.isnan(tab.pauli_s[kNa])
+    kw = dict(feature_names=feat.feature_names, feat_scale=m.feat_scale, pseudo=True, frozen=True, pauli_form="shells")
+    ms = CompleteModel(tab, chan, c.feats.shape[1], **kw)
+    nCl = int((tab.shell_n[kCl] > 0).sum())
+    assert torch.allclose(ms.pauli_lnw[kCl, :nCl].exp(), torch.tensor([5.8, 3.1][:nCl], dtype=torch.float64))
+    assert abs(float(ms.pauli_lnbs[kCl].exp()) - 1.11) < 1e-12
+    assert float(ms.pauli_prior()) == 0.0
+    with torch.no_grad():
+        ms.pauli_lnbs[kCl] += 0.1
+        ms.pauli_lnw[kNa] += 1.0              # no fit for Na: not pulled
+    assert abs(float(ms.pauli_prior()) - 0.01) < 1e-12
+    ms.pauli_prior().backward()
+    assert ms.pauli_lnbs.grad[kNa] == 0 and ms.pauli_lnbs.grad[kCl] > 0
+    # a table without fits: the prior is identically zero
+    assert float(CompleteModel(tab0, chan, c.feats.shape[1], **kw).pauli_prior()) == 0.0
 
 
 def test_pauli_shells_forces(setup):

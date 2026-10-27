@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from rsfff.ff.complete import DensityEnvironment, shaped_overlap_derivs
+from rsfff.ff.complete import DensityEnvironment, env_invariants, shaped_overlap_derivs
 from rsfff.ff.ionct import IonTable
 from rsfff.ff.ionct import kernels as K
 
@@ -64,3 +64,48 @@ def test_coulomb_blocks_are_fields(env):
     r = 10.0 / 0.529177210903
     assert float(f.blocks["shell"]["V0"].abs().max()) < 1e-8
     assert torch.allclose(f.blocks["shell"]["V1"].norm(dim=-1), torch.full((2,), 1 / r ** 2, dtype=torch.float64), rtol=1e-3)
+
+
+def _octahedron(d=2.8, shift=0.0):
+    """Na+ at the centre of a Cl- octahedron (O_h: every V^(1), S^(1), V^(2), S^(2) of the centre vanishes),
+    displaced by ``shift`` (Angstrom) along a general direction."""
+    u = torch.tensor([0.6, -0.3, 0.74], dtype=torch.float64)
+    cl = d * torch.cat([torch.eye(3), -torch.eye(3)]).double()
+    pos = torch.cat([shift * u[None] / u.norm(), cl])
+    return pos, torch.tensor([11] + [17] * 6), torch.zeros(7, dtype=torch.long)
+
+
+def test_sq_form_is_squared_norms():
+    tab = IonTable.load(PARAMS)
+    en, es = DensityEnvironment(tab, inv_form="norm"), DensityEnvironment(tab, inv_form="sq")
+    pos = torch.tensor([[0., 0., 0.], [2.8, 0., 0.], [0., 3.5, 0.5]], dtype=torch.float64)
+    Z, b = torch.tensor([11, 17, 17]), torch.zeros(3, dtype=torch.long)
+    fn, fs = en(pos, Z, b), es(pos, Z, b)
+    for k, (a, c) in enumerate(zip(en.feature_names, es.feature_names)):
+        if c.endswith("^2"):
+            assert c == a + "^2"
+            assert torch.allclose(fs.inv_feats[:, k], fn.inv_feats[:, k] ** 2, rtol=1e-12, atol=1e-300)
+        else:
+            assert a == c and torch.equal(fs.inv_feats[:, k], fn.inv_feats[:, k])
+    # the cached equivariant blocks reproduce either form
+    blocks = {f"{p}:{q}": v for p, blk in fs.blocks.items() for q, v in blk.items()}
+    assert torch.allclose(env_invariants(blocks, es.probes, "sq"), fs.inv_feats, rtol=1e-14, atol=0)
+    assert torch.allclose(env_invariants(blocks, en.probes, "norm"), fn.inv_feats, rtol=1e-14, atol=0)
+
+
+def test_sq_form_is_smooth_at_a_lattice_site():
+    """Through the centre of an octahedron the magnitudes have a cone (one-sided slopes of opposite sign); the
+    squared norms are smooth: their slope is continuous (and zero) there."""
+    tab = IonTable.load(PARAMS)
+    h = 1e-4
+    for form, smooth in (("norm", False), ("sq", True)):
+        env = DensityEnvironment(tab, inv_form=form)
+        f = {t: env(*_octahedron(shift=t)).inv_feats[0] for t in (-h, 0.0, h)}
+        assert float(f[0.0][[1, 2, 4, 5]].abs().max()) < 1e-12        # shell probe: |V1|, |V2|, |S1|, |S2| vanish
+        kink = ((f[h] - f[0.0]) / h - (f[0.0] - f[-h]) / h).abs()       # jump of the one-sided slopes
+        scale = env(*_octahedron(shift=0.2)).inv_feats[0].abs() / 0.2 + 1e-12
+        rel = float((kink / scale).max())
+        if smooth:
+            assert rel < 1e-2, rel
+        else:
+            assert rel > 0.5, rel

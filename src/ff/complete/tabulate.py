@@ -36,7 +36,7 @@ from ..ionct import kernels as K
 from ..ionct.model import PSEUDO_CUTOFF, channel_types, pseudo_type_names
 from ..ionct.params import IonTable
 from ..multipole import shaped_one_center_multi, shaped_two_center_damp
-from .environment import INVARIANT_NAMES, PROBE_NAMES, shaped_overlap_derivs
+from .environment import INVARIANT_NAMES, PROBE_NAMES, invariants, shaped_overlap_derivs
 from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
                        recip_apply, smooth_switch)
 
@@ -285,7 +285,7 @@ def _luts(tab, chan):
 
 def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table: RadialTable, chan: CT.ChannelTable,
                        labels: dict | None = None, cell=None, cutoff: float = 9.0, switch_width: float = 1.0,
-                       ewald_tol: float = 1e-10, dispersion_tail: bool = False) -> dict:
+                       ewald_tol: float = 1e-10, dispersion_tail: bool = False, inv_form: str = "sq") -> dict:
     """The collated batch of the complete model straight from positions (N, 3) Angstrom (autograd flows through),
     atomic numbers (N,), frame index (N,) sorted by frame. ``labels``: a dict of per-frame tensors (B,) to attach.
     Runs on the device of ``pos_ang``; ``tab`` and ``table`` must live there too (``IonTable.to``, ``RadialTable.to``).
@@ -304,7 +304,10 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     assembled (``A_off`` and ``A_pp`` are None): its real-space pair blocks and the Ewald frames go into
     ``bt["pbc"]`` for the matrix-free solve, and the frontier potentials come as per-atom sums plus per-pair
     couplings instead of the dense (B, n, n) blocks. Dispersion is switched off over the same last
-    ``switch_width``; ``dispersion_tail`` adds the uniform-density correction for the pairs beyond."""
+    ``switch_width``; ``dispersion_tail`` adds the uniform-density correction for the pairs beyond.
+
+    ``inv_form``: the environment invariants' form ("sq" squared norms, "norm" magnitudes) -- the model's own
+    (``CompleteModel.inv_form``), which callers pass through."""
     X = pos_ang / BOHR
     dev, dt = X.device, X.dtype
     N = X.shape[0]
@@ -435,8 +438,7 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
         V0[:, kb], S0[:, kb] = V0[:, kb] * has, S0[:, kb] * has
         V1[:, kb], V2[:, kb], S1[:, kb] = V1[:, kb] * has[:, None], V2[:, kb] * has[:, None], S1[:, kb] * has[:, None]
         S2[:, kb] = S2[:, kb] * has[:, None, None]
-    inv = torch.stack([V0, V1.norm(dim=-1), V2.norm(dim=-1), S0, S1.norm(dim=-1), S2.flatten(2).norm(dim=-1),
-                       (V1 * S1).sum(-1)], 2)                         # (N, nprobe, 7)
+    inv = invariants(V0, V1, V2, S0, S1, S2, inv_form)               # (N, nprobe, 7)
     feats = inv.reshape(N, -1)                                        # probe-major, like DensityEnvironment
     env = {}
     for k_, name in enumerate(probes):

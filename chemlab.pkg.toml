@@ -2,8 +2,9 @@
 # A project uses it from this checkout (`package use ~/dev/rsfff`, or the Packages section of the Work
 # workspace) or as an installed copy; ChemLab stages chemlab/workers/* and src/ (as `import rsfff`) at
 # home and pushes them to the project's sites, where chemlab-manager runs the stages with PYTHONPATH set
-# to them and to bb's. Third-party dependencies (torch, e3nn, ase, ...) are the site environment's
-# (the allocation template's conda env). A project adds its own job types and contexts to these
+# to them and to bb's. Third-party dependencies (torch, e3nn, ase, ...) are [environment] below: a project
+# environment that names this package (chemlab.toml [env.<name>] packages = ["rsfff"]) gets them, locked
+# with pixi and installed at the sites by the app. A project adds its own job types and contexts to these
 # workers in its workers/<worker>/ (an extension: no worker.toml there).
 [package]
 name = "rsfff"
@@ -18,3 +19,42 @@ import = { rsfff = "src" }   # src/ is the package `rsfff` (pyproject: package-d
 
 [requires]
 packages = ["bb"]
+
+# The third-party half of environment.yml, for a ChemLab project environment (ChemLab docs/packages.md,
+# "Environments"). rsfff and bb themselves are not installed into it: the package stages them (PYTHONPATH).
+# torchff-lib is [build.torchff] below (compiled against the env's torch); torch-cluster (optional) is not here.
+[environment]
+conda = ["python 3.12.*", "pip", "setuptools", "wheel", "packmol"]
+pypi = [
+    "torch >=2.11",                 # PyPI: CPU/MPS on macOS, CUDA 13 on Linux
+    "numpy",
+    "scipy",
+    "pyyaml",
+    "e3nn",
+    "ase",
+    "torch-sim-atomistic",
+    "cuequivariance >=0.10",
+    "cuequivariance-torch >=0.10",
+]
+[environment.target.linux-64]
+pypi = ["cuequivariance-ops-torch-cu13"]   # the fused CUDA ops, matching PyPI torch's CUDA 13
+
+# torchff-lib (external/torchff-lib, the heindelj fork), built at each linux-64 site inside the environment, against
+# its torch -- what scripts/build_torchff_perlmutter.sh does: the CUDA kernels where nvcc is (Perlmutter: the
+# cudatoolkit module matching PyPI torch's CUDA 13.0), the pure-torch reference paths elsewhere. The jobs get it on
+# PYTHONPATH; rsfff.ff.backend picks it up (RSFFF_FF_BACKEND=auto).
+[build.torchff]
+doc = "torchff-lib's force-field kernels (ffterms, slaterelec, nblist)"
+sources = ["external/torchff-lib"]
+exclude = ["tests", "benchmark", "examples", "docs"]
+platforms = ["linux-64"]
+setup = [
+    "module load cudatoolkit/13.0 2> /dev/null || true",
+    "module load gcc-native 2> /dev/null || module load gcc 2> /dev/null || true",
+]
+env = { TORCH_CUDA_ARCH_LIST = "8.0", MAX_JOBS = "8", TORCHFF_EXTENSIONS = "ffterms,slaterelec,nblist" }
+command = [
+    "command -v nvcc > /dev/null || export TORCHFF_NO_CUDA=1",
+    "python -m pip install --no-build-isolation --no-deps --target {prefix}/python ./external/torchff-lib",
+]
+check = "python -c 'import torch, torchff; print(\"torchff\", torchff.__file__)'"

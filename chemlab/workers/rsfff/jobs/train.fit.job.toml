@@ -1,0 +1,45 @@
+[job]
+type        = "train.fit"
+description = "Train the rsfff committee on the walk's dataset (train/train_committee.py through rsfff_al.assemble), warm-started from the committee before."
+tags        = ["train"]
+
+[[inputs]]
+name = "dataset"
+format = "jsonl"
+doc = "the labelled structures so far: one JSON line per label job (xyz, job, the report)"
+[[inputs]]
+name = "candidate"
+format = "tar"
+optional = true
+doc = "the committee of the round before, for the warm start (none: from scratch)"
+[[inputs]]
+name = "settings"
+format = "json"
+generated = true
+
+[[outputs]]
+name = "committee"
+format = "tar"
+doc = "committee.tar.gz: the trained members and committee.json"
+
+[report]
+"train.loss"       = "Float64"
+"train.loss_val"   = { type = "Vector{Float64}", doc = "per member" }
+"train.size"       = { type = "Dict", doc = "frames per set" }
+"train.members"    = "Int"
+"train.warm_start" = "Bool"
+
+[settings]
+text = """
+struct Settings terms "rsfff"
+    model::String = "rsfff_committee" as "train.model"
+    system::String = "water" in {"water", "hf", "nh3", "nacl"}
+    config::String = "train/water_film_al.yaml"     # the fit config, relative to the project dir at the site
+    members::Int = 4 in 1..16
+    warm_start::String = "true" in {"true", "false"}
+    warm_epochs::Int = 40 in 1..10000
+    seed::Int = 0 in 0..1000000
+    set::String = ""                                # extra --set KEY=VALUE pieces for train_committee.py, joined with ;
+    gpus::Int = 4 in 1..4 as "resources.gpus"
+end
+"""

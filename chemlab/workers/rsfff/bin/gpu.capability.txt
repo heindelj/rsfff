@@ -1,0 +1,14 @@
+# what bin/gpu_worker.sh offers (rsfff_al.worker gpu capabilities)
+rsfff.system = *; rsfff.theory = *; resources.gpus in [1, 4]; resources.minutes = *
+profile sample:
+search.select.uncertainty; search.count = *; search.seed = *
+rsfff.sampler in {torchsim, ase}; rsfff.n_per_size = *; rsfff.time_ps = *; rsfff.dt_fs = *; rsfff.every_fs = *
+rsfff.temperature = *; rsfff.replicas = *; rsfff.select_per_size = *; rsfff.eda_fraction = *; rsfff.max_eda = *
+rsfff.max_fragments = *; rsfff.bias_mode = *; rsfff.bias_weight = *; rsfff.max_batch = *; rsfff.minutes = *
+rsfff.n_wigner = *; rsfff.wigner_temperature = *; rsfff.n_dimers = *; rsfff.n_dimer_eda = *; rsfff.contact_min = *; rsfff.contact_max = *
+profile train:
+train.fit; train.model = rsfff_committee; train.epochs = *
+rsfff.config = *; rsfff.members = *; rsfff.warm_start = *; rsfff.warm_epochs = *; rsfff.seed = *; rsfff.set = *
+profile train_ionct:
+train.ionct; train.epochs = *; rsfff.seed = *
+rsfff.ionct.data = *; rsfff.ionct.params = *; rsfff.ionct.env = *; rsfff.ionct.preset = *; rsfff.ionct.args = *; rsfff.ionct.analysis = *

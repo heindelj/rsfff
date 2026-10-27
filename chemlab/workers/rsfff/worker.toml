@@ -1,0 +1,25 @@
+# rsfff's worker (the rsfff package, chemlab.pkg.toml at the repository root): the GPU programs of the
+# active-learning walks and the ion force fields, behind ChemLab's worker protocol. The programs are the
+# project's own -- research/rsfff python/rsfff_al/worker.py (`python -m rsfff_al.worker gpu`): the committee
+# sampler (search.select.uncertainty), the film committee trainer (train.fit) and the ion / complete-model
+# trainer (train.ionct, rsfff.train.train_ionct). The project says where it is at each site
+# (research/rsfff workers/rsfff/context/<site>.toml: `project`, PYTHONPATH); the labels are the qchem
+# package's jobs. Recreated 2026-10-23 (the old chemlab/workers was deleted) in the package layout.
+[worker]
+name = "rsfff"
+description = "The rsfff walks and ion force fields: committee sampling, committee training, ion / complete-model training."
+version = "0.2"
+
+[resources]
+cpus = "1..256"
+gpus = "0..4"
+
+[run."search.select.uncertainty"]
+command = "bash {worker}/bin/gpu_worker.sh run {workdir}"
+timeout_minutes = 1440
+[run."train.fit"]
+command = "bash {worker}/bin/gpu_worker.sh run {workdir}"
+timeout_minutes = 1440
+[run."train.ionct"]
+command = "bash {worker}/bin/gpu_worker.sh run {workdir}"
+timeout_minutes = 2880

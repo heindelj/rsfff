@@ -111,3 +111,33 @@ def test_electrostatics_pair_limit(setup):
     s = tab.species_index(torch.tensor([11, 17]))
     e = permanent_electrostatics(X, s, torch.zeros(2, dtype=torch.long), tab)[0]
     assert abs(e + 1.0 / (20.0 / 0.529177210903)) < 1e-9          # two point charges at 20 A
+
+
+def test_forces_continuous_at_a_lattice_site(setup):
+    """With the squared-norm invariants the force on an ion is continuous through a centrosymmetric site (the
+    magnitudes gave the heads a cone there: a finite force jump at the site, whatever the network). The heads get
+    random weights so that the environment dependence is not trivially zero."""
+    tab, chan, table, feat, frames = setup
+    u = torch.tensor([0.6, -0.3, 0.74], dtype=torch.float64)
+    u = u / u.norm()
+    cl = 2.8 * torch.cat([torch.eye(3), -torch.eye(3)]).double()
+    Z, fr = torch.tensor([11] + [17] * 6), torch.zeros(7, dtype=torch.long)
+    jumps = {}
+    for form in ("norm", "sq"):
+        names = DensityEnvironment(tab, inv_form=form).feature_names
+        m = CompleteModel(tab, chan, len(names), feature_names=names, pseudo=True, frozen=True, pauli_form="shells")
+        torch.manual_seed(0)
+        with torch.no_grad():
+            for hd in (m.head_conf, m.head_ctq, m.head_frozen, m.head_ps, m.head_breath):
+                hd.lin.weight.normal_(0, 0.3)
+                hd.net[-1].weight.normal_(0, 0.3)
+
+        def F0(t):
+            pos = torch.cat([t * u[None], cl]).requires_grad_(True)
+            E = m(batched_precompute(pos, Z, fr, tab, table, chan, inv_form=m.inv_form))["e_int"].sum()
+            return torch.autograd.grad(E, pos)[0][0]
+
+        h = 1e-4
+        jumps[form] = float((F0(h) - F0(-h)).norm() / (F0(0.1) - F0(-0.1)).norm())
+    assert jumps["norm"] > 1e-2, jumps          # a finite jump over a 2e-4 A step (O(1) of the 0.2 A change)
+    assert jumps["sq"] < 1e-2, jumps            # linear in the step: ~1e-3 of the 0.2 A change

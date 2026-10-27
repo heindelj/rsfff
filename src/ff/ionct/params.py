@@ -13,6 +13,8 @@ Every per-ion quantity is indexed by a species index ``s`` (the order of ``IonTa
     front_b[role], front_w[role] (S,), (S, 4)   frontier densities, role in ('donor', 'acceptor')
     I_donor (S,)                electron-removal energy of the free ion as a CT donor (Hartree)
     A_acceptor (S,)             electron-attachment energy as an acceptor (Hartree; NaN where unbound, e.g. Cl-)
+    pauli_w, pauli_s (S, M), (S,)   the frozen fit's Pauli charge per permanent shell and exponent scale (the shells
+                                form of the CP Pauli kernel; ions[s]['pauli'] = {w, s}); NaN where the ion has none
 
 Units: atomic.
 """
@@ -62,6 +64,8 @@ class IonTable:
     front_w: dict
     I_donor: torch.Tensor
     A_acceptor: torch.Tensor
+    pauli_w: torch.Tensor | None = None
+    pauli_s: torch.Tensor | None = None
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_PARAMS, symbols=None, dtype=torch.float64) -> "IonTable":
@@ -93,6 +97,12 @@ class IonTable:
         a0 = t([float(((ions[s].get("parents") or {}).get("a0")) or 0.0) for s in symbols])
         front_b = {r: t([ions[s]["frontier"][r]["b"] for s in symbols]) for r in ROLES}
         front_w = {r: t([_onehot(ions[s]["frontier"][r]["k"]) for s in symbols]) for r in ROLES}
+        nan = float("nan")
+        pw = [list((ions[s].get("pauli") or {}).get("w") or [nan] * len(ions[s]["shells"])) for s in symbols]
+        if any(len(w) != len(ions[s]["shells"]) for w, s in zip(pw, symbols)):
+            raise ValueError("ions[s]['pauli']['w'] needs one charge per permanent shell")
+        pauli_w = t([w + [nan] * (M - len(w)) for w in pw])
+        pauli_s = t([float((ions[s].get("pauli") or {}).get("s", nan)) for s in symbols])
         return cls(
             symbols=symbols, numbers=torch.tensor([ATOMIC_NUMBER[s] for s in symbols]),
             charge=t([ions[s]["charge"] for s in symbols]), Z=t([ions[s]["Z"] for s in symbols]),
@@ -101,6 +111,7 @@ class IonTable:
             b_dip=b_dip, w_dip=w_dip, b_quad=b_quad, w_quad=w_quad, b_breath=b_breath, w_breath=w_breath, a0=a0,
             front_b=front_b, front_w=front_w, I_donor=t([ions[s]["I_donor"] for s in symbols]),
             A_acceptor=t([float("nan") if ions[s]["A_acceptor"] is None else ions[s]["A_acceptor"] for s in symbols]),
+            pauli_w=pauli_w, pauli_s=pauli_s,
         )
 
     def to(self, device) -> "IonTable":

@@ -58,6 +58,26 @@ from ..ionct.ct import ChannelTable
 from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_damp_unequal
 from .elst import permanent_electrostatics
 from .heads import EnvironmentHead
+from .environment import inv_form_of
+
+
+def _mag_col(names, probe, key):
+    """Column of the magnitude invariant ``key`` (V1, V2, S1, S2) of ``probe`` and whether it is squared:
+    "<probe>:|<key>|" (inv_form norm) or "<probe>:|<key>|^2" (inv_form sq); (None, False) if absent."""
+    for nm, sq in ((f"{probe}:|{key}|", False), (f"{probe}:|{key}|^2", True)):
+        if nm in names:
+            return names.index(nm), sq
+    return None, False
+
+
+def _mag_scale(names, feat_scale, probe, key):
+    """The training-set scale of the magnitude |<key>| of ``probe`` (field, gradient, overlap gradient ...) in its
+    own units: the feature scale of |x|, or the square root of that of |x|^2; 1 if unknown."""
+    col, sq = _mag_col(list(names or []), probe, key)
+    if col is None or feat_scale is None:
+        return 1.0
+    v = float(feat_scale[col])
+    return math.sqrt(v) if sq else v
 
 __all__ = ["CompleteModel", "solve_induction_blocks"]
 
@@ -117,6 +137,9 @@ class CompleteModel(IonCTModel):
                          pol_form="confine")
         self.pseudo = pseudo
         self._s0sq = None
+        # the environment invariants' form (squared norms or magnitudes), read off the featurizer's names; callers
+        # of batched_precompute pass it through so the tabulated features match the ones the model was trained on
+        self.inv_form = inv_form_of(feature_names)
         del self.conf, self.ctq, self.gap                  # replaced by the environment heads / not used (direct CT)
         S = len(tab.symbols)
         ns = S if species_emb else 0
@@ -130,7 +153,9 @@ class CompleteModel(IonCTModel):
         self.hyper = hyper
         if hyper:
             names_ = list(feature_names or [])
-            self.hyper_col = names_.index("dip:|V1|")
+            self.hyper_col, self.hyper_sq = _mag_col(names_, "dip", "V1")
+            if self.hyper_col is None:
+                raise ValueError("hyper needs the dip:|V1| (or |V1|^2) invariant")
             self.hyper_g = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
         self.conf_form = conf_form
         self.conf_head = conf_head          # False: the stiffening rate is the per-species constant alone (no head)
@@ -176,8 +201,7 @@ class CompleteModel(IonCTModel):
         s2 = 1.0
         if aniso:
             self.kappa_aniso = nn.Parameter(torch.zeros(S, dtype=torch.float64))
-            if "dip:|S2|" in names and feat_scale is not None:
-                s2 = float(feat_scale[names.index("dip:|S2|")])
+            s2 = _mag_scale(names, feat_scale, "dip", "S2")
         self.register_buffer("s2_scale", torch.tensor(s2, dtype=torch.float64))
         if ct_gap:
             self.gap_lamD = nn.Parameter(torch.zeros(S, dtype=torch.float64))
@@ -191,8 +215,8 @@ class CompleteModel(IonCTModel):
         self.ct_stark = ct_stark
         if ct_stark:
             names_ = list(feature_names or [])
-            self.stark_sD = float(feat_scale[names_.index("donor:|V1|")]) if ("donor:|V1|" in names_ and feat_scale is not None) else 1.0
-            self.stark_sA = float(feat_scale[names_.index("acceptor:|V1|")]) if ("acceptor:|V1|" in names_ and feat_scale is not None) else 1.0
+            self.stark_sD = _mag_scale(names_, feat_scale, "donor", "V1")
+            self.stark_sA = _mag_scale(names_, feat_scale, "acceptor", "V1")
             self.stark_D = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
             self.stark_A = nn.Parameter(torch.full((S,), -3.0, dtype=torch.float64))
         self.breath = bool((tab.a0 > 0).any()) and "breath:V0_pen" in names
@@ -213,8 +237,8 @@ class CompleteModel(IonCTModel):
             if not frozen:
                 raise ValueError("pauli_moments needs frozen=True")
             names_ = list(feature_names or [])
-            s1 = float(feat_scale[names_.index("shell:|S1|")]) if ("shell:|S1|" in names_ and feat_scale is not None) else 1.0
-            s2 = float(feat_scale[names_.index("shell:|S2|")]) if ("shell:|S2|" in names_ and feat_scale is not None) else 1.0
+            s1 = _mag_scale(names_, feat_scale, "shell", "S1")
+            s2 = _mag_scale(names_, feat_scale, "shell", "S2")
             self.register_buffer("pm_scale", torch.tensor([s1, s2], dtype=torch.float64))
             self.pm_a1 = nn.Parameter(torch.zeros(S, dtype=torch.float64))
             self.pm_a2 = nn.Parameter(torch.zeros(S, dtype=torch.float64))
@@ -244,6 +268,19 @@ class CompleteModel(IonCTModel):
                         lnbs[k] = math.log(bs)
                     else:
                         lnw[k, occ[-1]] = math.log(pp[k][0])
+                # the frozen fit's (w, s) from the ion table, where it has them, override the starts and are the
+                # reference values of pauli_prior (the training pulls toward the fit rather than freezing it)
+                fit = torch.zeros(S, dtype=torch.bool)
+                if tab.pauli_s is not None:
+                    for k in range(S):
+                        if math.isfinite(float(tab.pauli_s[k])):
+                            occ = tab.shell_n[k] > 0
+                            lnw[k] = torch.where(occ, torch.log(tab.pauli_w[k].to(lnw)), lnw[k])
+                            lnbs[k] = math.log(float(tab.pauli_s[k]))
+                            fit[k] = True
+                self.register_buffer("pauli_lnw0", lnw.clone())
+                self.register_buffer("pauli_lnbs0", lnbs.clone())
+                self.register_buffer("pauli_fit_mask", fit.to(torch.float64))
                 self.pauli_lnw = nn.Parameter(lnw)
                 self.pauli_lnbs = nn.Parameter(lnbs)
                 self.register_buffer("pauli_shell_mask", (tab.shell_n > 0).to(torch.float64))
@@ -252,7 +289,8 @@ class CompleteModel(IonCTModel):
             self.disp_lnc60 = nn.Parameter(torch.tensor([math.log(c) for c, _ in pri], **f64))
             self.disp_lnb = nn.Parameter(torch.tensor([math.log(b) for _, b in pri], **f64))
             # the frozen heads see the overlap invariants only (no fields at the frozen level)
-            cols = [k for k, nm in enumerate(names) if nm.split(":")[-1] in ("S0", "|S1|", "|S2|")] or list(range(n_feat))
+            cols = [k for k, nm in enumerate(names)
+                    if nm.split(":")[-1] in ("S0", "|S1|", "|S2|", "|S1|^2", "|S2|^2")] or list(range(n_feat))
             self.register_buffer("frozen_cols", torch.tensor(cols, dtype=torch.long))
             self.head_frozen = EnvironmentHead(len(cols), 2, hidden, depth, ns)     # log qP / qP0, log C6 / C60
         if pseudo:
@@ -297,8 +335,9 @@ class CompleteModel(IonCTModel):
             logc = torch.stack([logc[:, 0], logc[:, 0] * 5.0 / 3.0], 1)
         c = logc.exp()
         if self.hyper:
-            v1 = I[:, self.hyper_col]                                         # scaled |V[dip]^(1)|
-            enh = 1 + nn.functional.softplus(self.hyper_g[sp]) * v1 * v1 * self.confine_mask[sp]
+            v = I[:, self.hyper_col]                          # scaled |V[dip]^(1)|^2 (sq) or |V[dip]^(1)| (norm)
+            v2 = v if self.hyper_sq else v * v
+            enh = 1 + nn.functional.softplus(self.hyper_g[sp]) * v2 * self.confine_mask[sp]
             c = c * torch.stack([enh, enh ** (5.0 / 3.0) if self.tie_c else torch.ones_like(enh)], 1)
         return c
 
@@ -623,6 +662,16 @@ class CompleteModel(IonCTModel):
             c_ = self.frozen_cols
             pen = pen + ((self.head_ps(I2[:, c_], sp) - self.head_ps(I1[:, c_], sp)) ** 2).mean()
         return pen / sigma ** 2
+
+    def pauli_prior(self):
+        """Squared log deviation of the shells-form Pauli charges and exponent scales from the frozen fit's values
+        (species the ion table has a fit for; 0 otherwise)."""
+        if not hasattr(self, "pauli_fit_mask"):
+            return next(self.parameters()).new_zeros(())
+        m = self.pauli_fit_mask
+        dw = ((self.pauli_lnw - self.pauli_lnw0) ** 2 * self.pauli_shell_mask).sum(1)
+        ds = (self.pauli_lnbs - self.pauli_lnbs0) ** 2
+        return ((dw + ds) * m).sum()
 
     @torch.no_grad()
     def summary(self):

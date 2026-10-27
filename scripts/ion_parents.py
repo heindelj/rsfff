@@ -89,6 +89,15 @@ def fit_ion(ion, tab, scan, r_min=2.0):
     rel = lambda e, ref: float(np.sqrt(np.mean(((e - ref) / ref).numpy()[sel] ** 2)))
     out, report = {}, {}
     for l, key in ((1, "dip"), (2, "quad")):
+        if not bool((El[:, l].abs().numpy()[sel] > 1e-14).all()):
+            # no response at this l (Li+ 1s^2: the quadrupole response vanishes in the basis, C = 0): nothing to
+            # shape, and log(-E) is not finite -- keep the table's single-exponent parent
+            b_t, w_t = getattr(tab, f"b_{key}")[s], getattr(tab, f"w_{key}")[s]
+            b_t = [float(b_t)] if b_t.dim() == 0 else [float(x) for x in b_t]
+            w_t = w_t.reshape(len(b_t), 4)
+            out[key] = [{"b": b, "w": [round(float(x), 6) for x in row]} for b, row in zip(b_t, w_t.tolist())]
+            report[key] = "no response (kept the table's parent)"
+            continue
         def resid(z):
             w = torch.softmax(torch.tensor(z), 0).reshape(len(bsh), 4)
             e = _energies(bsh, list(w), R, alpha, C)[l - 1]

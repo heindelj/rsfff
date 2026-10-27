@@ -78,7 +78,8 @@ def load_complete_model(checkpoint, params=None, device="cpu", table_cache=None,
     p = _resolve_params(params if params is not None else bundled, args, ck_path)
     tab, chan = IonTable.load(p), CT.ChannelTable.load(p)
     probes = args.get("env_probes") or PROBE_NAMES
-    names = ck.get("feature_names") or DensityEnvironment(tab, probes=probes).feature_names
+    names = ck.get("feature_names") or DensityEnvironment(tab, probes=probes,
+                                                         inv_form=args.get("inv_form") or "norm").feature_names
     model = build_model(args, tab, chan, ck["n_feat"], ck["state"]["feat_scale"], names)
     model.load_state_dict(ck["state"], strict=strict)
     model.eval()
@@ -132,7 +133,7 @@ class CompletePotential:
                 leaves.append(eps)
         else:
             p_in = pos
-        bt = batched_precompute(p_in, Z, fr, self.tab, self.table, self.chan, **kw)
+        bt = batched_precompute(p_in, Z, fr, self.tab, self.table, self.chan, inv_form=self.model.inv_form, **kw)
         key = (tuple(Z.tolist()), B)
         if periodic and self.warm_start and self._x is not None and key == self._key:
             bt["x_guess"] = self._x

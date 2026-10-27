@@ -133,7 +133,8 @@ def featurizer_for(a, tab):
     """The environment featurizer a run was trained with (train_ionct --env)."""
     if a.get("env", "soap") == "density":
         from rsfff.ff.complete import PROBE_NAMES, DensityEnvironment
-        return DensityEnvironment(tab, probes=a.get("env_probes") or PROBE_NAMES)
+        # runs from before --inv-form (2026-10-23) were trained on the magnitudes
+        return DensityEnvironment(tab, probes=a.get("env_probes") or PROBE_NAMES, inv_form=a.get("inv_form") or "norm")
     from bb.features import SOAPFeaturizer
     return SOAPFeaturizer(cutoff=6.0, n_max=6, l_max=3, neighbor_types=(11, 17), selected_lambdas=(0,)).double()
 
@@ -302,9 +303,14 @@ def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0,
         need = ("ps_index",) if lean else ("ps_index", "EVD", "ch_EP", "ch_J")
         complete = all(getattr(caches[0], k, None) is not None for k in need) if caches else False
         if len(caches) == len(frames) and complete:   # geometry is cached; labels and masks always come from the data
+            refeat = getattr(featurizer, "inv_form", None) is not None and all(c.env for c in caches)
+            if refeat:                  # the features in the requested invariant form, from the cached blocks
+                from ..ff.complete import env_invariants
             for c, (sym, X, lab, meta) in zip(caches, frames):
                 assert len(sym) == c.species.shape[0]
                 c.labels, c.meta = dict(lab), dict(meta)
+                if refeat:
+                    c.feats = env_invariants(c.env, featurizer.probes, featurizer.inv_form).to(c.feats.dtype)
             return caches
     t0 = time.time()
     caches = [None] * len(frames)
@@ -413,7 +419,7 @@ def force_terms(model, frames, tab, table, chan):
     pos = torch.tensor(np.concatenate([X for _, X, *_ in frames]), dtype=torch.float64, device=dev, requires_grad=True)
     Z = torch.tensor([Zmap[x] for sym, *_ in frames for x in sym], device=dev)
     fr = torch.cat([torch.full((len(sym),), k, dtype=torch.long) for k, (sym, *_) in enumerate(frames)]).to(dev)
-    bt = batched_precompute(pos, Z, fr, tab, table, chan)
+    bt = batched_precompute(pos, Z, fr, tab, table, chan, inv_form=model.inv_form)
     out = model(bt)
     E = out["e_int"]
     F = -torch.autograd.grad(E.sum(), pos, create_graph=True)[0]
@@ -600,6 +606,9 @@ def main():
                     help="response shaping: learned confinement (+ --pseudo) or the Pauli kernel on induced moments")
     ap.add_argument("--pauli-nn", action="store_true", help="network rescales each ion's Pauli monopole")
     ap.add_argument("--w-pauli", type=float, default=0.0, help="weight of the frozen Pauli energy vs ALMO mod_pauli")
+    ap.add_argument("--w-pauli-prior", type=float, default=0.0,
+                    help="complete + pauli-form shells: pull of the Pauli charges / exponent scales toward the frozen "
+                         "fit's values in the ion table (squared log deviation; 0: free)")
     ap.add_argument("--coupling-resp", default="barrier", choices=("barrier", "frontier"),
                     help="density coupling's environment/field response: 'frontier' = polarizable frontier densities "
                          "(orbital polarizabilities tied to the CT-state Stark shift)")
@@ -616,6 +625,9 @@ def main():
                     help="per-ion environment features: SOAP invariants (bb), or the C0 field/overlap projections onto "
                          "the ion's own densities (rsfff.ff.complete.DensityEnvironment; complete model plan)")
     ap.add_argument("--env-probes", nargs="*", default=None, help="density env: which probes (default all)")
+    ap.add_argument("--inv-form", default="sq", choices=("sq", "norm"),
+                    help="density env: the vector / tensor invariants as squared norms |x|^2 (smooth where x = 0, e.g. "
+                         "at lattice sites) or as magnitudes |x| (the form before 2026-10-23: a cone at x = 0)")
     ap.add_argument("--model", default="ionct", choices=("ionct", "complete"),
                     help="complete: environment heads, anisotropic alpha, CT gap factor (direct CT, density env)")
     ap.add_argument("--species-emb", action="store_true", help="complete: species embedding on the heads' input")
@@ -741,6 +753,8 @@ def main():
                 loss = loss + a.w_pauli * (pauli_term(o, bt) ** 2).mean()
             if a.w_disp > 0:
                 loss = loss + a.w_disp * (disp_term(o, bt) ** 2).mean()
+            if a.w_pauli_prior > 0:
+                loss = loss + a.w_pauli_prior * model.pauli_prior()
             if a.w_int > 0:
                 loss = loss + a.w_int * (int_term(o, bt) ** 2).mean()
             if polar_tr and step % a.alpha_every == 0:      # the stencil batch is the costly part: every k-th step, k x weight
