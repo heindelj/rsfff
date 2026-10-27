@@ -570,7 +570,10 @@ class CompleteModel(IonCTModel):
         return I.new_zeros(B).index_add(0, fr, e_p), I.new_zeros(B).index_add(0, fr, e_d), (qP, bP, C6, b6)
 
     # -- the model --
-    def forward(self, bt: dict, quadrupoles=True, field=None) -> dict:
+    def forward(self, bt: dict, quadrupoles=True, field=None, solvent=None) -> dict:
+        """``solvent``: a :class:`rsfff.ff.complete.solvent.SolventTerms` for this batch (C-PCM; None = gas phase):
+        the induction solve is screened by the equilibrated surface charges, the CT gap sees the reaction potential,
+        and the frozen electrostatics gain the screened cross term (in ``e_elst``) and the desolvation ``e_cav``."""
         sp = bt["species"]
         I = self.scaled(bt["feats"])
         B, nmax, mask = bt["B"], bt["nmax"], bt["mask"]
@@ -594,10 +597,14 @@ class CompleteModel(IonCTModel):
             Lflat = Lflat - torch.cat([Fa, I.new_zeros(n, 5)], 1)
             phi_ext = -(Fa * bt["pos"] / K.BOHR_ANG).sum(-1)
         L = bt["L"] + I.new_zeros(B, nmax, 8).masked_scatter(mask[..., None].expand(B, nmax, 8), Lflat)
+        if solvent is not None:
+            L = L + solvent.dL
         ainv = self.alpha_inverse(alpha_flat, sp, bt.get("env"))
         ainv_pad = torch.eye(3, dtype=I.dtype, device=I.device).expand(B, nmax, 3, 3).clone()
         ainv_pad = ainv_pad.masked_scatter(mask[..., None, None].expand(B, nmax, 3, 3), ainv)
         A_off = bt["A_off"]
+        if solvent is not None:
+            A_off = A_off + solvent.dA
         if self.pauli_ii:
             kk = torch.zeros(B, nmax, dtype=I.dtype, device=I.device).masked_scatter(mask, self.pp_kappa[sp])
             kk = kk.repeat_interleave(8, dim=1)
@@ -613,15 +620,16 @@ class CompleteModel(IonCTModel):
         q = self.ct_charges_from(I, sp)
         nC = bt["ch_index"].shape[1]
         x_sc, dq, e_ct_post, sc_iters, Dc, Wc = x0, I.new_zeros(nC), None, 0, I.new_zeros(nC), I.new_zeros(nC)
+        phi_rf = (lambda x: solvent.phi_rf(bt, x)) if solvent is not None else (lambda x: 0.0)
         if nC:
-            e_ct, e_type, e_ch, dphi = self.direct_ct_env(q, bt, sp, x0, phi_ext, Fa)
+            e_ct, e_type, e_ch, dphi = self.direct_ct_env(q, bt, sp, x0, phi_ext + phi_rf(x0), Fa)
             if self.ct_sc:
                 x = x0
-                e_ch, dq, Dc, Wc, w, dphi = self.ct_two_state(q, bt, sp, x, phi_ext, Fa)
+                e_ch, dq, Dc, Wc, w, dphi = self.ct_two_state(q, bt, sp, x, phi_ext + phi_rf(x), Fa)
                 for sc_iters in range(1, self.ct_sc + 1):
                     L_ct = self.ct_drive(w, bt, sp)
                     x = solve_induction_blocks(L + L_ct, A_off, ainv_pad, Cq, quadrupoles)
-                    e_ch, dq, Dc, Wc, w, dphi = self.ct_two_state(q, bt, sp, x, phi_ext, Fa)
+                    e_ch, dq, Dc, Wc, w, dphi = self.ct_two_state(q, bt, sp, x, phi_ext + phi_rf(x), Fa)
                 e_ct_sc = e_ch.new_zeros(B).index_add(0, bt["ch_frame"], e_ch)
                 e_type = e_ch.new_zeros(B * self.nT).index_add(0, bt["ch_frame"] * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT)
                 # E_total = 1/2 x A x + L x + sum_c E_c with A x = -(L + L_ct); E_CT = E_total - E_pol(x0)
@@ -637,12 +645,17 @@ class CompleteModel(IonCTModel):
         if self.frozen:
             e_pauli, e_disp, frz = self.frozen_terms(I, bt, sp)
         e_elst = permanent_electrostatics(bt["pos"], sp, bt["frame"], self.tab) if self.frozen else I.new_zeros(B)
+        e_cav, e_scr = I.new_zeros(B), I.new_zeros(B)
+        if solvent is not None:
+            e_scr, e_cav = solvent.e_scr, solvent.e_cav
+            e_elst = e_elst + e_scr
         return {"e_pol": e_pol, "e_ct": e_ct_post, "e_ct_post": e_ct_post, "e_ct_0": e_ct, "e_type": e_type, "c": c,
+                "e_cav": e_cav, "e_scr": e_scr, "phi_rf": phi_rf(x_sc) if solvent is not None else I.new_zeros(n),
                 "dov": z, "A_ps": A_ps, "W": Wc, "Delta": Dc, "delta": z, "p": dq, "dq": I.new_zeros(n), "x": x_sc,
                 "x_pol": x0, "joint_iters": sc_iters, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": e_pauli,
                 "e_disp": e_disp, "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv,
                 "e_breath_atom": e_breath_atom, "e_elst": e_elst,
-                "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct_post}
+                "e_int": e_elst + e_cav + e_pauli + e_disp + e_pol + e_ct_post}
 
     def smoothness_penalty(self, bt, sigma=0.05):
         """Feature-noise penalty on the heads' log outputs (log c, log q) and the pseudo-potential strengths."""

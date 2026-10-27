@@ -8,3 +8,4 @@ from .heads import EnvironmentHead  # noqa: F401
 from .model import CompleteModel, solve_induction_blocks  # noqa: F401
 from .elst import permanent_electrostatics  # noqa: F401
 from .tabulate import RadialTable, batched_precompute  # noqa: F401
+from .solvent import SolventTerms, solvent_terms  # noqa: F401
