@@ -39,7 +39,7 @@ import math
 import torch
 import torch.nn as nn
 
-from ...mlip.heads import exempt_from_weight_decay
+from bb.nn import exempt_from_weight_decay
 from ..multipole import spherical_to_cartesian_quadrupole
 
 __all__ = ["FieldFeatureShift"]

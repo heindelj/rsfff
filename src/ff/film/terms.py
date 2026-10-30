@@ -50,7 +50,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ...mlip.heads import mlp, zero_init_readout
+from bb.nn import mlp, zero_init_readout
 
 __all__ = ["TermParameterHead", "TermParameters", "term_energies", "chebyshev_series"]
 
