@@ -65,7 +65,8 @@ from .backend import make_mf, make_mol, to_numpy
 BOHR = 0.52917721092
 KJ = 2625.4996394799  # Hartree -> kJ/mol
 __all__ = ["Fragment", "UniformField", "Continuum", "almo_eda", "scf_mi", "frozen_density", "surface_potential",
-           "pcm_energy", "ferf_virtuals", "multipole_operators", "orthogonal_decomposition", "BOHR", "KJ"]
+           "pcm_energy", "ferf_virtuals", "multipole_operators", "orthogonal_decomposition", "HartreeProduct",
+           "hartree_pol", "BOHR", "KJ"]
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +502,116 @@ def orthogonal_decomposition(system: _System, C_blocks, atom_slices, D_blocks, t
 
 
 # ---------------------------------------------------------------------------
+# the Hartree product: electrical polarization without interfragment antisymmetry
+# ---------------------------------------------------------------------------
+class HartreeProduct:
+    """H(x) = sum_A E_A[P_A] + sum_{A<B} Coulomb(A, B): each fragment's own functional (its xc intrafragment only,
+    with the exact-exchange share and the VV10 of the parent functional) plus the full Coulomb coupling of the
+    fragment nuclei and densities -- the energy of the *non-antisymmetrized* product of fragment determinants.
+    H(x_0) - sum_A E_A[P_A^0] is the classical electrostatics (cls_elec_vac); minimizing H over the fragments'
+    polarization spaces gives the pure electrical induction I_H, with no Pauli counter-force."""
+
+    def __init__(self, system: _System, atom_slices):
+        self.system, self.atom_slices = system, atom_slices
+        mol = system.mol
+        self.hA = _fragment_hcore(system, atom_slices)
+        self.Vn = []                                   # +sum_{a in A} Z_a / |r - R_a| per fragment
+        for a0, a1 in atom_slices:
+            v = np.zeros((mol.nao, mol.nao))
+            for a in range(a0, a1):
+                with mol.with_rinv_origin(mol.atom_coord(a)):
+                    v += mol.atom_charge(a) * mol.intor("int1e_rinv")
+            self.Vn.append(v)
+        Z, R = mol.atom_charges(), mol.atom_coords()
+        self.e_nn = 0.0
+        for A in range(len(atom_slices)):
+            for B in range(A + 1, len(atom_slices)):
+                for a in range(*atom_slices[A]):
+                    for b in range(*atom_slices[B]):
+                        self.e_nn += Z[a] * Z[b] / np.linalg.norm(R[a] - R[b])
+        self.e_nn += system.enuc - mol.energy_nuc()    # the field's nuclear term, if any
+
+    def fragment(self, k, P):
+        """E_A[P] (electrons of A in A's own nuclei + field) and its Fock matrix."""
+        mf, mol = self.system.mf, self.system.mol
+        vhf = mf.get_veff(mol, P)
+        e = float(np.einsum("ij,ji->", self.hA[k], P)) + float(vhf.ecoul) + float(vhf.exc)
+        return e, self.hA[k] + to_numpy(vhf)
+
+    def energy_fock(self, Ps):
+        """H and the per-fragment Fock matrices F_A = f_A[P_A] + sum_{B != A} (-Vn_B + J[P_B])."""
+        mf, mol = self.system.mf, self.system.mol
+        n = len(Ps)
+        eA, fA, J = [], [], []
+        for k, P in enumerate(Ps):
+            e, f = self.fragment(k, P)
+            eA.append(e)
+            fA.append(f)
+            J.append(to_numpy(mf.get_j(mol, P)))
+        e = sum(eA) + self.e_nn
+        F = []
+        for A in range(n):
+            v = np.zeros_like(fA[A])
+            for B in range(n):
+                if B != A:
+                    v += J[B] - self.Vn[B]
+            F.append(fA[A] + v)
+            for B in range(A + 1, n):
+                e += float(np.einsum("ij,ji->", J[A], Ps[B])) - float(np.einsum("ij,ji->", self.Vn[B], Ps[A])) \
+                     - float(np.einsum("ij,ji->", self.Vn[A], Ps[B]))
+        return e, F, eA
+
+    def densities(self, C_blocks):
+        """Per-fragment densities 2 C (C^T S C)^-1 C^T (the blocks need not be orthonormal: SCF-MI stores the own-space
+        representatives, whose span is what matters)."""
+        S = self.system.S
+        return [2 * c @ np.linalg.solve(c.T @ S @ c, c.T) for c in C_blocks]
+
+    def energy(self, C_blocks):
+        return self.energy_fock(self.densities(C_blocks))[0]
+
+
+def hartree_pol(hp: HartreeProduct, C0, bases, max_cycle=100, tol=1e-9, gtol=1e-6, diis_space=10, verbose=False):
+    """Minimize the Hartree-product energy over the fragments' polarization spaces (``bases[k]``: (nao, m_k)
+    orthonormal columns spanning occ_k + FERF_k; ``C0`` the starting occupied blocks inside them): freeze-thaw,
+    each fragment diagonalizing its own Fock matrix projected into its space, DIIS on the stacked [F, P]
+    commutators. Returns (C_blocks, H, info)."""
+    S = hp.system.S
+    eye = np.eye(S.shape[0])
+    bases = [eye[:, b] if isinstance(b, slice) else np.asarray(b) for b in bases]
+    no = [c.shape[1] for c in C0]
+    # own-space coordinates: C_k = B_k U_k, U_k (m_k, no_k) with orthonormal columns
+    Us = [b.T @ S @ c for b, c in zip(bases, C0)]
+    Us = [u @ np.linalg.inv(sla.sqrtm(u.T @ u)).real for u in Us]
+    diis = lib.diis.DIIS()
+    diis.space = diis_space
+    e_prev, it, gmax = np.inf, 0, np.inf
+    for it in range(max_cycle):
+        Cs = [b @ u for b, u in zip(bases, Us)]
+        Ps = [2 * c @ c.T for c in Cs]
+        e, F, _ = hp.energy_fock(Ps)
+        Ft = [b.T @ f @ b for b, f in zip(bases, F)]                     # projected Fock (m_k, m_k)
+        Pt = [u @ u.T for u in Us]                                       # projected density / 2
+        errs = [f @ p - p @ f for f, p in zip(Ft, Pt)]
+        gmax = max(float(np.abs(x).max()) for x in errs)
+        if verbose:
+            print(f"  hartree it {it:3d} H {e:.10f} dE {e - e_prev:+.2e} |[F,P]| {gmax:.2e}", flush=True)
+        if it > 0 and abs(e - e_prev) < tol and gmax < gtol:
+            break
+        Fd = diis.update(sla.block_diag(*Ft), sla.block_diag(*errs)) if it > 0 else sla.block_diag(*Ft)
+        off = np.cumsum([0] + [f.shape[0] for f in Ft])
+        Us = []
+        for k in range(len(no)):
+            w, U = np.linalg.eigh(Fd[off[k]:off[k + 1], off[k]:off[k + 1]])
+            Us.append(U[:, :no[k]])
+        e_prev = e
+    else:
+        raise RuntimeError(f"Hartree-product polarization did not converge in {max_cycle} iterations (|[F,P]| {gmax:.1e})")
+    Cs = [b @ u for b, u in zip(bases, Us)]
+    return Cs, e, {"iters": it + 1, "gmax": gmax}
+
+
+# ---------------------------------------------------------------------------
 # the decomposition
 # ---------------------------------------------------------------------------
 def _cross_coulomb(system: _System, D_blocks, atom_slices):
@@ -540,7 +651,7 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
              shared_grid=True, conv_tol=1e-10, scfmi_tol=1e-9, scfmi_gtol=2e-5, verbose=0, with_ct=True,
              return_states=True, frag_dm0=None, disp_free="hf", grid_level=None, with_pol=True,
              frozen_decomp="orthogonal", ortho_tol=1e-5, pol_model="ferf", ferf_orders="MDQ", ferf_coupled=False,
-             ferf_svd_tol=1e-8):
+             ferf_svd_tol=1e-8, hartree=False, hartree_disp=False):
     """ALMO-EDA of ``fragments`` (list of :class:`Fragment`, closed shell). ``field``: uniform field (3,) au, or
     ``env``: any object with ``h1(mol)`` / ``nuclear(mol)``; ``pcm``: a :class:`Continuum` (None: vacuum);
     ``frag_dm0``: initial fragment densities (e.g. the converged ones of a neighbouring geometry in a scan).
@@ -560,6 +671,14 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
     whole AO space, EDA2 option set 2). For atoms the two agree to 0.01 kJ/mol; for molecules the FERF space is
     the smaller one (H3O+(H2O)2 wB97M-V/def2-TZVPD: almo -76.39, ferf MDQ -75.20, Q-Chem's nMDQ uFERF -72.76
     kJ/mol -- Q-Chem evidently truncates the response space further than "null vectors only"; see docs/almo_pcm.md).
+    ``hartree``: also minimize the Hartree-product functional H (:class:`HartreeProduct`: no interfragment
+    antisymmetry, same polarization spaces) and split pol = pol_elec + pol_exch -- pol_elec = I_H = H(x_H) - H(x_0)
+    the pure electrical induction, pol_exch = X_POL the exchange polarization (either sign), resolved into
+    ``dP_onH`` = P(x_H) - P(x_0) (P = A - H: antisymmetrizing the electrically polarized orbitals) and ``R_AS`` =
+    A(x_P) - A(x_H) <= 0 (the further relaxation under the antisymmetrized functional); the endpoint convention
+    ``pol_elec_act`` = H(x_P) - H(x_0), ``pol_exch_act`` = pol - pol_elec_act is reported too. ``hartree_disp``:
+    the orthogonal-decomposition dispersion estimate at the frozen, AS(x_H) and ALMO states (``disp_H``,
+    ``disp_P``: D(x) - D(x_0)), the part of pol_exch that is interfragment xc beyond exchange. Vacuum only.
 
     Returns a dict: ``terms`` (kJ/mol: cav, cls_elec, disp, mod_pauli, frz, pol, ct, int), ``energies`` (Hartree:
     fragments, frz, scfmi, full), ``solvent`` (per state: the surface potential V, charges q and G = 1/2 q.V on the
@@ -681,6 +800,40 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
         V_pol = surface_potential(sup.pcm, D_pol)
         solvent.update({"V_pol": V_pol, "q_pol": pcm_charges(sup.pcm, V_pol), "G_pol": g_pol})
 
+    # --- the Hartree product: pure electrical polarization
+    hartree_terms, hartree_states = {}, {}
+    if hartree:
+        if pcm is not None:
+            raise NotImplementedError("the Hartree-product split is implemented in vacuum only")
+        hp = HartreeProduct(sup, atom_slices)
+        Ps0 = hp.densities(C0)
+        H0 = hp.energy_fock(Ps0)[0]
+        C_H, H_H, info_h = hartree_pol(hp, C0, bases, verbose=verbose > 1)
+        D_H = density(C_H, sup.S)
+        A_H = sup.energy(D_H)
+        H_P = hp.energy(C_pol)
+        A0, A_P = e_frz, e_pol_tot
+        I_H = H_H - H0
+        hartree_terms = {"pol_elec": I_H, "pol_exch": e_pol - I_H, "dP_onH": (A_H - H_H) - (A0 - H0), "R_AS": A_P - A_H,
+                         "pol_elec_act": H_P - H0, "pol_exch_act": e_pol - (H_P - H0), "H_cost": H_P - H_H}
+        # the fragments' induced dipoles in the two states, about the centre of nuclear charge (au)
+        with mol.with_common_orig(tuple((mol.atom_charges() @ mol.atom_coords()) / mol.atom_charges().sum())):
+            rint = mol.intor("int1e_r", comp=3)
+        mu = lambda P: -np.einsum("xij,ji->x", rint, P)
+        dmu_H = [mu(Pk) - mu(P) for Pk, P in zip(hp.densities(C_H), Ps0)]
+        dmu_P = [mu(Pk) - mu(P) for Pk, P in zip(hp.densities(C_pol), Ps0)]
+        hartree_states = {"C_H": C_H, "D_H": D_H, "energies": {"H0": H0, "H_H": H_H, "H_P": H_P, "A_H": A_H},
+                          "dmu_H": dmu_H, "dmu_P": dmu_P, "iters": info_h["iters"], "gmax": info_h["gmax"]}
+        if hartree_disp:
+            D0_ = e_disp
+            for tag, Cx in (("disp_H", C_H), ("disp_P", C_pol)):
+                Px, _, _ = orthogonal_decomposition(sup, Cx, atom_slices, D_blocks, tol=ortho_tol)
+                Dx = _disp_part(sup, density(Cx, sup.S), disp_free) - sum(_disp_part(sup, P, disp_free) for P in Px)
+                hartree_terms[tag] = Dx - D0_
+        if verbose:
+            print(f"hartree: H {H_H:.10f}  pol_elec {I_H * KJ:.3f}  pol_exch {(e_pol - I_H) * KJ:.3f} kJ/mol "
+                  f"({info_h['iters']} it, {time.time() - t0:.0f}s)", flush=True)
+
     # --- full SCF
     e_full, D_full, mf_full, e_ct = None, None, None, None
     if with_ct:
@@ -699,6 +852,7 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
              "disp": e_disp, "mod_pauli": e_pauli, "frz": e_frz_int, "pol": e_pol}
     if e_ct is not None:
         terms["ct"] = e_ct
+    terms.update(hartree_terms)
     terms["int"] = e_frz_int + e_pol + (e_ct or 0.0)
     out = {
         "terms": {k: v * KJ for k, v in terms.items()},
@@ -710,6 +864,7 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
                                                   "nvirt": [b.shape[1] - c.shape[1] for b, c in zip(bases, C0)]}
                  if pol_model == "ferf" else None,
                  "scfmi_gmax": info_mi["gmax"], "scfmi_log": log, "time": time.time() - t0, "ortho": ortho,
+                 "hartree": {k: hartree_states[k] for k in ("iters", "gmax", "energies")} if hartree else None,
                  "fragments": [{"symbols": list(f.symbols), "coords": np.asarray(f.coords, float).tolist(),
                                 "charge": f.charge} for f in fragments]},
     }
@@ -717,5 +872,5 @@ def almo_eda(fragments, xc="wb97m-v", basis="def2-tzvpd", field=None, env=None, 
         out["states"] = {"mol": mol, "system": sup, "fragment_mf": frag_mf, "C_frz": C0, "C_pol": C_pol,
                          "D_frag": D_blocks, "D_frz": D_frz, "D_pol": D_pol, "D_full": D_full, "mf_full": mf_full,
                          "ao_slices": ao_slices, "atom_slices": atom_slices,
-                         "D_frag_own": [to_numpy(m.make_rdm1()) for m in frag_mf]}
+                         "D_frag_own": [to_numpy(m.make_rdm1()) for m in frag_mf], "bases": bases, **hartree_states}
     return out

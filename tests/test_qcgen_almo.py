@@ -111,3 +111,65 @@ def test_ferf_space_and_polarization():
     a = almo_eda(nacl(), xc=XC, basis=BASIS, with_ct=False, pol_model="almo", frozen_decomp="classical")
     assert a["terms"]["pol"] <= f["terms"]["pol"] + 1e-5 < 0
     assert f["info"]["ferf"]["orders"] == "MDQ"
+
+
+@pytest.fixture(scope="module")
+def hartree():
+    return almo_eda(nacl(), xc=XC, basis=BASIS, with_ct=False, frozen_decomp="classical", hartree=True)
+
+
+def test_hartree_split_closes_and_has_the_right_signs(hartree):
+    t = hartree["terms"]
+    assert t["pol"] == pytest.approx(t["pol_elec"] + t["pol_exch"], abs=1e-9)
+    assert t["pol_exch"] == pytest.approx(t["dP_onH"] + t["R_AS"], abs=1e-9)
+    assert t["pol"] == pytest.approx(t["pol_elec_act"] + t["pol_exch_act"], abs=1e-9)
+    assert t["pol_elec"] < 0 and t["R_AS"] <= 1e-9 and t["H_cost"] >= -1e-9
+    assert t["pol_elec_act"] >= t["pol_elec"] - 1e-9          # x_H is the minimum of H
+    assert hartree["info"]["hartree"]["gmax"] < 1e-6
+
+
+def test_hartree_state_is_a_minimum_of_H_in_the_domain(hartree):
+    import scipy.linalg as sla
+    from rsfff.qcgen.almo import HartreeProduct
+    st = hartree["states"]
+    hp = HartreeProduct(st["system"], st["atom_slices"])
+    C_H, bases = st["C_H"], st["bases"]
+    S = st["system"].S
+    H_H = hp.energy(C_H)
+    rng = np.random.default_rng(0)
+    for _ in range(3):
+        Cs = []
+        for c, b in zip(C_H, bases):
+            u = b.T @ S @ c                                   # own-space coordinates (m, no)
+            m, no = u.shape
+            K = np.zeros((m, m))
+            K[:no, no:] = 0.02 * rng.standard_normal((no, m - no))
+            K = K - K.T
+            # rotate in the basis in which u's columns come first
+            Q, _ = np.linalg.qr(np.hstack([u, rng.standard_normal((m, m - no))]))
+            Cs.append(b @ (Q @ sla.expm(K) @ Q.T @ u))
+        assert hp.energy(Cs) > H_H
+
+
+def test_hartree_long_range_limit_is_classical_induction():
+    far = almo_eda(nacl(R=8.0), xc=XC, basis=BASIS, with_ct=False, frozen_decomp="classical", hartree=True)
+    t = far["terms"]
+    assert abs(t["pol_exch"]) < 0.02                           # no overlap: antisymmetry is irrelevant
+    # -1/2 alpha E^2 of each ion in the other's field (E = 1/R^2, au), alpha of the isolated ions by finite field
+    from rsfff.qcgen.backend import make_mol, make_mf
+    R = 8.0 / 0.52917721092
+    e_cls, F = 0.0, 1e-3
+    for sym, q in (("Na", 1), ("Cl", -1)):
+        mol = make_mol([sym], [[0, 0, 0]], charge=q, basis=BASIS)
+        e = []
+        for sgn in (1, -1):
+            mf = make_mf(mol, XC)
+            h = mf.get_hcore() + sgn * F * mol.intor("int1e_r", comp=3)[2]
+            mf.get_hcore = lambda *a, h=h, **k: h
+            mf.conv_tol = 1e-11
+            e.append(mf.kernel())
+        mf0 = make_mf(mol, XC)
+        e0 = mf0.kernel()
+        alpha = -(e[0] + e[1] - 2 * e0) / F ** 2
+        e_cls -= 0.5 * alpha / R ** 4
+    assert t["pol_elec"] == pytest.approx(e_cls * KJ, rel=0.15)
