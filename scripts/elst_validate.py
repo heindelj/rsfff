@@ -22,7 +22,8 @@ from rsfff.qcgen import elst_ref as E
 
 KJ = 2625.4996
 ANG = 1.0 / 0.529177210903
-ION = {("Na", 1): "Nap", ("Cl", -1): "Clm", ("Li", 1): "Lip", ("K", 1): "Kp", ("F", -1): "Fm", ("Br", -1): "Brm"}
+ION = {("Na", 1): "Nap", ("Cl", -1): "Clm", ("Li", 1): "Lip", ("K", 1): "Kp", ("F", -1): "Fm", ("Br", -1): "Brm",
+       ("Rb", 1): "Rbp", ("Cs", 1): "Csp", ("I", -1): "Im"}
 
 
 def frames_jsonl(path):

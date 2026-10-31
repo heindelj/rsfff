@@ -22,7 +22,7 @@ ordinary shared network.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn as nn
@@ -130,6 +130,8 @@ class ConditionedParameterNetwork(nn.Module):
         gate_a0: float = 0.5,
         term_head: nn.Module | None = None,
         field_features: nn.Module | None = None,
+        bond_features: nn.Module | None = None,
+        electrical_heads: nn.Module | None = None,
     ) -> None:
         super().__init__()
         # Registered only when present, so models built without them keep their exact
@@ -138,6 +140,17 @@ class ConditionedParameterNetwork(nn.Module):
             self.term_head = term_head
         if field_features is not None:
             self.field_features = field_features
+        # per-bond ECE features of the covalent graph (rsfff.ff.film.ece) for the bonded and
+        # term heads; isolated by construction, so shared by theta_0 and theta
+        if bond_features is not None:
+            self.bond_features = bond_features
+        # ECE electrical heads (rsfff.ff.film.electrical): replace the latent permanent
+        # multipoles, alpha and compliance with bond-built ones that have exact dissociation
+        # limits; they read the same ECE edge features as the bonded heads
+        if electrical_heads is not None:
+            if bond_features is None:
+                raise ValueError("electrical_heads need bond_features (the ECE)")
+            self.electrical_heads = electrical_heads
         self.embed_in = nn.Linear(int(p_in), int(block_dim))
         self.embed_env = nn.Linear(int(p_in), int(block_dim), bias=False)
         self.embed_cross = nn.Linear(int(p_cross), int(block_dim), bias=False)
@@ -200,6 +213,7 @@ class ConditionedParameterNetwork(nn.Module):
         positions: torch.Tensor,
         bond_index: torch.Tensor,
         fields: tuple | None = None,
+        diabat: tuple | None = None,
     ) -> FilmParameters:
         species_idx = pf.x_in.species_idx
         x_iso = self.embed_in(pf.x_in.inv_feats)
@@ -225,18 +239,27 @@ class ConditionedParameterNetwork(nn.Module):
             shift = self.field_features(
                 fields, state.fragment_idx, state.n_fragments, pf.x_in
             )
+        bond_feat = ef = None
+        bond_features = getattr(self, "bond_features", None)
+        if bond_features is not None:
+            ef = bond_features.edge_features(positions, species_idx, topo)
+            bond_feat = bond_features.embed_features(ef, positions)
         bonded = self.bonded_head(
-            z_iso["bonded"], z_joined["bonded"], gate, species_idx, topo, z_shift=shift
+            z_iso["bonded"], z_joined["bonded"], gate, species_idx, topo, z_shift=shift,
+            bond_feat=bond_feat,
         )
-        bonded0 = self.bonded_head(z_iso["bonded"], None, None, species_idx, topo)
+        bonded0 = self.bonded_head(
+            z_iso["bonded"], None, None, species_idx, topo, bond_feat=bond_feat
+        )
         terms = terms0 = None
         term_head = getattr(self, "term_head", None)
         if term_head is not None and term_head.active:
             type_idx = self.bonded_head.type_index(species_idx, topo)
             terms = term_head(
-                z_iso["bonded"], z_joined["bonded"], gate, type_idx, topo, z_shift=shift
+                z_iso["bonded"], z_joined["bonded"], gate, type_idx, topo, z_shift=shift,
+                bond_feat=bond_feat,
             )
-            terms0 = term_head(z_iso["bonded"], None, None, type_idx, topo)
+            terms0 = term_head(z_iso["bonded"], None, None, type_idx, topo, bond_feat=bond_feat)
 
         q_perm, mu_perm, quad_perm = self.permanent_heads(
             z_iso["permanent"], pf.x_in, state
@@ -257,6 +280,24 @@ class ConditionedParameterNetwork(nn.Module):
         )
         disp = self.disp_heads(z_joined["disp"], species_idx)
         disp0 = self.disp_heads(z_iso["disp"], species_idx)
+
+        elec = getattr(self, "electrical_heads", None)
+        if elec is not None:
+            if diabat is None:
+                raise ValueError("the ECE electrical heads need the diabatic state "
+                                 "(Batch.diabat_charge / diabat_flow / diabat_group)")
+            q_inf, chan_flow, chan_group = diabat
+            eo = elec(
+                ef, positions, species_idx, self.bonded_head.type_index(species_idx, topo),
+                topo.bond_index, q_inf, bond_index, chan_flow=chan_flow, chan_group=chan_group,
+                z_perm=z_iso["permanent"] if elec.latent_dim else None,
+                z_resp=z_joined["response"], gate=gate,
+            )
+            q_perm = eo.q
+            mu_perm = None if mu_perm is None else eo.mu
+            quad_perm = None if quad_perm is None else eo.quad_s
+            response = replace(response, alpha=eo.alpha, compliance=eo.compliance)
+            response0 = replace(response0, alpha=eo.alpha0, compliance=eo.compliance0)
 
         return FilmParameters(
             bonded=bonded, bonded0=bonded0,

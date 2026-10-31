@@ -27,6 +27,8 @@ from ..ff.film import (
     FragmentProjector,
     PermanentMultipoleHeads,
 )
+from ..ff.film.ece import ECEBondFeatures
+from ..ff.film.electrical import ECEElectricalHeads
 from ..ff.film.fields import FieldFeatureShift
 from ..ff.film.terms import TermParameterHead
 from ..ff.fragment_state import FragmentStateEmbedding
@@ -101,6 +103,34 @@ def build_film_model(
     p2 = featurizer.feature_dims.get(2)
     to_spherical = irrep2_to_spherical(featurizer.backend.irrep6_to_voigt())
 
+    # Per-bond ECE features (rsfff.ff.film.ece) for the bonded/term heads, opt-in.
+    bond_features = None
+    mode = str(_get(film_cfg, "bond_features", "none")).lower()
+    if mode not in ("none", "ece"):
+        raise ValueError(f"film.bond_features must be 'none' or 'ece', got {mode!r}")
+    use_latents = True
+    if mode == "ece":
+        bond_features = ECEBondFeatures(
+            neighbor_types,
+            n_max=int(_get(film_cfg, "ece_n_max", 4)),
+            l_max=int(_get(film_cfg, "ece_l_max", 3)),
+            channels=int(_get(film_cfg, "ece_channels", 8)),
+            species_dim=int(_get(film_cfg, "ece_species_dim", 4)),
+            morse_a=float(_get(film_cfg, "ece_morse_a", 2.0)),
+            own_bond=bool(_get(film_cfg, "ece_own_bond", True)),
+            dim=int(_get(film_cfg, "ece_dim", 16)),
+            hidden=int(_get(film_cfg, "ece_hidden", 32)),
+            depth=int(_get(film_cfg, "ece_depth", 1)),
+            backend=_get(features_cfg, "backend", "e3nn"),
+            neighbour_decay=bool(_get(film_cfg, "ece_neighbour_decay", True)),
+        )
+        use_latents = bool(_get(film_cfg, "ece_latents", True))
+        if not use_latents and _get(film_cfg, "field_features", False):
+            raise ValueError("film.field_features shifts the bonded latents, which "
+                             "film.ece_latents: false removes; keep the latents or drop the "
+                             "field features")
+    bond_feat_dim = 0 if bond_features is None else bond_features.dim
+
     bonded_head = BondedParameterHead(
         hidden, neighbor_types,
         hidden=int(_get(film_cfg, "bonded_hidden", 64)),
@@ -108,6 +138,8 @@ def build_film_model(
         emb_dim=int(_get(film_cfg, "bonded_emb_dim", 8)),
         impropers=bool(_get(film_cfg, "impropers", False)),
         atom_typing=str(_get(film_cfg, "atom_typing", "element")),
+        bond_feat_dim=bond_feat_dim,
+        use_latents=use_latents,
     )
 
     # Torsions / couplings (rsfff.ff.film.terms) and the O(F^2) field features
@@ -127,6 +159,8 @@ def build_film_model(
             depth=int(_get(film_cfg, "term_depth", 1)),
             emb_dim=int(_get(film_cfg, "bonded_emb_dim", 8)),
             torsion_scale=float(_get(film_cfg, "torsion_scale", 1.0e-3)),
+            bond_feat_dim=bond_feat_dim,
+            use_latents=use_latents,
         )
     field_features = None
     if _get(film_cfg, "field_features", False):
@@ -156,12 +190,35 @@ def build_film_model(
         equiv_channels=equiv_channels,
     )
 
+    elec_mode = str(_get(film_cfg, "electrical_features", "none")).lower()
+    if elec_mode not in ("none", "ece"):
+        raise ValueError(f"film.electrical_features must be 'none' or 'ece', got {elec_mode!r}")
+    if elec_mode == "ece" and bond_features is None:
+        raise ValueError("film.electrical_features: ece needs film.bond_features: ece")
+    electrical_heads = None
+    if elec_mode == "ece":
+        electrical_heads = ECEElectricalHeads(
+            bond_features, neighbor_types, [z for z, _ in bonded_head.types],
+            bonded_head.bond_table.detach(),
+            latent_dim=hidden if bool(_get(film_cfg, "elec_latents", True)) else 0,
+            emb_dim=int(_get(film_cfg, "elec_emb_dim", 8)),
+            hidden=int(_get(film_cfg, "elec_hidden", 64)),
+            depth=int(_get(film_cfg, "elec_depth", 2)),
+            s_init=float(_get(film_cfg, "s_init", 0.5)),
+            flow_kappa=float(_get(film_cfg, "elec_flow_kappa", 0.15)),
+            resp_latent_dim=hidden,
+            channels=bool(_get(film_cfg, "elec_channels", True)),
+            channel_onset=float(_get(film_cfg, "elec_channel_onset", 0.5)),
+            channel_width=float(_get(film_cfg, "elec_channel_width", 0.3)),
+        )
+
     response_heads = FilmResponseHeads(
         hidden, p2, n_species,
         log_z_prior=log_z, log_b_prior=log_b_elec,
         irrep6_to_voigt=featurizer.backend.irrep6_to_voigt(),
         emb_dim=emb_dim, hidden=head_hidden, depth=head_depth,
         equiv_channels=equiv_channels,
+        learn_alpha=electrical_heads is None,
         eta_init=float(_get(film_cfg, "eta_init", 0.5)),
         eta_floor=float(_get(film_cfg, "eta_floor", 0.05)),
         psd_floor=float(_get(film_cfg, "psd_floor", 1e-4)),
@@ -218,6 +275,8 @@ def build_film_model(
         gate_a0=float(_get(film_cfg, "gate_a0", 0.5)),
         term_head=term_head,
         field_features=field_features,
+        bond_features=bond_features,
+        electrical_heads=electrical_heads,
     )
 
     # `film.nonbonded`: "range_separated" (Fermi-switched; the default, so configs pickled

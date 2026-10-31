@@ -621,6 +621,18 @@ class BondedParameterHead(nn.Module):
     feeding them the coordinate a parameter multiplies would make the "parameter" a disguised
     pair energy and the physical form a fiction.
 
+    **Per-bond ECE features (``bond_feat_dim > 0``).** The forward then takes ``bond_feat``
+    ``(Nb, bond_feat_dim)`` from :class:`rsfff.ff.film.ece.ECEBondFeatures` -- bond-frame
+    invariants of the covalent graph -- and appends them to every input (the bond's own row;
+    both legs of an angle, symmetrized; an improper's leg and its partner pair). They are
+    features *of the geometry*, like the latents, so the rule above stands: no raw ``r`` or
+    ``theta`` reaches a head. (With ``own_bond`` the ECE includes a Morse basis of the bond's
+    own length; see :mod:`rsfff.ff.film.ece` for why that is a choice and what disciplines
+    it.) ``use_latents=False`` drops the atom latents from the inputs entirely, so the bonded
+    parameters are a function of the ECE features and the atom types alone -- the clean
+    "option 3" comparison. ``bond_feat_dim = 0`` (the default) builds exactly the
+    latent-only head every existing checkpoint has.
+
     Inputs are symmetric functions of the endpoint latents (``z_i + z_j``, ``(z_i - z_j)^2``
     -- squared, not ``| |``, so the symmetric-geometry point is smooth), which makes the
     parameters invariant under within-fragment permutation of identical atoms by
@@ -640,9 +652,17 @@ class BondedParameterHead(nn.Module):
         impropers: bool = False,
         improper_prior: dict[int, tuple[float, float]] | None = None,
         atom_typing: str = "element",
+        bond_feat_dim: int = 0,
+        use_latents: bool = True,
     ) -> None:
         super().__init__()
         self.species = [int(z) for z in species]
+        self.bond_feat_dim = int(bond_feat_dim)
+        self.use_latents = bool(use_latents)
+        if not self.use_latents and self.bond_feat_dim == 0:
+            raise ValueError("use_latents=False needs bond features (bond_feat_dim > 0)")
+        latent_dim = int(latent_dim) if self.use_latents else 0
+        nbf = self.bond_feat_dim
         if atom_typing not in ("element", "degree"):
             raise ValueError(f"atom_typing must be 'element' or 'degree', got {atom_typing!r}")
         self.atom_typing = atom_typing
@@ -699,8 +719,8 @@ class BondedParameterHead(nn.Module):
         self.angle_table = nn.Parameter(atable)
 
         self.species_emb = nn.Embedding(n_species, emb_dim)
-        bond_in = 2 * latent_dim + 2 * emb_dim
-        angle_in = 3 * latent_dim + 3 * emb_dim
+        bond_in = 2 * latent_dim + 2 * emb_dim + nbf
+        angle_in = 3 * latent_dim + 3 * emb_dim + 2 * nbf
         self.bond_base = zero_init_readout(mlp(bond_in, hidden, depth, 3))
         self.bond_delta = zero_init_readout(mlp(bond_in, hidden, depth, 3))
         self.angle_base = zero_init_readout(mlp(angle_in, hidden, depth, 2))
@@ -721,7 +741,7 @@ class BondedParameterHead(nn.Module):
                 itable[ia, 0] = torch.atanh(torch.tensor(c_chi))
                 itable[ia, 1] = torch.tensor(max(float(k_chi), 1e-8)).log()
             self.improper_table = nn.Parameter(itable)
-            improper_in = 4 * latent_dim + 4 * emb_dim
+            improper_in = 4 * latent_dim + 4 * emb_dim + 3 * nbf
             self.improper_base = zero_init_readout(mlp(improper_in, hidden, depth, 2))
             self.improper_delta = zero_init_readout(mlp(improper_in, hidden, depth, 2))
 
@@ -733,38 +753,52 @@ class BondedParameterHead(nn.Module):
             raise ValueError("atom_typing='degree' needs BondedTopology.degree")
         return species_idx * (MAX_DEGREE + 1) + topo.degree.clamp(max=MAX_DEGREE)
 
-    def _bond_input(self, z: torch.Tensor, species_idx: torch.Tensor, topo) -> torch.Tensor:
+    def _z(self, z: torch.Tensor) -> torch.Tensor:
+        return z if self.use_latents else z[:, :0]
+
+    def _bond_input(self, z, species_idx, topo, bond_feat=None) -> torch.Tensor:
         i, j = topo.bond_index[0], topo.bond_index[1]
         emb = self.species_emb(species_idx)
+        z = self._z(z)
         zi, zj = z[i], z[j]
-        return torch.cat(
-            ((zi + zj), (zi - zj) ** 2, emb[i] + emb[j], (emb[i] - emb[j]) ** 2), dim=-1
-        )
+        parts = [(zi + zj), (zi - zj) ** 2, emb[i] + emb[j], (emb[i] - emb[j]) ** 2]
+        if self.bond_feat_dim:
+            parts.append(bond_feat)
+        return torch.cat(parts, dim=-1)
 
-    def _angle_input(self, z: torch.Tensor, species_idx: torch.Tensor, topo) -> torch.Tensor:
+    def _angle_input(self, z, species_idx, topo, bond_feat=None) -> torch.Tensor:
         a, apex, c = topo.angle_index[0], topo.angle_index[1], topo.angle_index[2]
         emb = self.species_emb(species_idx)
+        z = self._z(z)
         za, zc = z[a], z[c]
-        return torch.cat(
-            (
-                z[apex], (za + zc), (za - zc) ** 2,
-                emb[apex], emb[a] + emb[c], (emb[a] - emb[c]) ** 2,
-            ),
-            dim=-1,
-        )
+        parts = [
+            z[apex], (za + zc), (za - zc) ** 2,
+            emb[apex], emb[a] + emb[c], (emb[a] - emb[c]) ** 2,
+        ]
+        if self.bond_feat_dim:
+            b0, b1 = bond_feat[topo.angle_bonds[0]], bond_feat[topo.angle_bonds[1]]
+            parts += [b0 + b1, (b0 - b1) ** 2]
+        return torch.cat(parts, dim=-1)
 
-    def _improper_input(self, z: torch.Tensor, species_idx: torch.Tensor, topo) -> torch.Tensor:
+    def _improper_input(self, z, species_idx, topo, bond_feat=None) -> torch.Tensor:
         """Center, leg, and the symmetric pair of in-plane partners -- invariant to ``j <-> k``."""
         c, leg, j, k = (topo.improper_index[n] for n in range(4))
         emb = self.species_emb(species_idx)
+        z = self._z(z)
         zj, zk = z[j], z[k]
-        return torch.cat(
-            (
-                z[c], z[leg], (zj + zk), (zj - zk) ** 2,
-                emb[c], emb[leg], emb[j] + emb[k], (emb[j] - emb[k]) ** 2,
-            ),
-            dim=-1,
-        )
+        parts = [
+            z[c], z[leg], (zj + zk), (zj - zk) ** 2,
+            emb[c], emb[leg], emb[j] + emb[k], (emb[j] - emb[k]) ** 2,
+        ]
+        if self.bond_feat_dim:
+            from .topology import lookup_bonds
+
+            n = int(species_idx.shape[0])
+            bl = bond_feat[lookup_bonds(topo.bond_index, n, c, leg)]
+            bj = bond_feat[lookup_bonds(topo.bond_index, n, c, j)]
+            bk = bond_feat[lookup_bonds(topo.bond_index, n, c, k)]
+            parts += [bl, bj + bk, (bj - bk) ** 2]
+        return torch.cat(parts, dim=-1)
 
     def forward(
         self,
@@ -774,6 +808,7 @@ class BondedParameterHead(nn.Module):
         species_idx: torch.Tensor,    # (N,)
         topo: BondedTopology,
         z_shift: torch.Tensor | None = None,  # (N, latent) field shift, dressed eval only
+        bond_feat: torch.Tensor | None = None,  # (Nb, bond_feat_dim) ECE bond features
     ) -> BondedParameters:
         """Parameters at one evaluation. ``z_joined=None`` gives ``theta_0`` exactly.
 
@@ -781,17 +816,19 @@ class BondedParameterHead(nn.Module):
         gate*, so on an isolated fragment ``theta == theta_0`` bitwise regardless of weights.
         """
         species_idx = self.type_index(species_idx, topo)
+        if self.bond_feat_dim and bond_feat is None:
+            raise ValueError("this head was built with bond features; pass bond_feat")
         if z_shift is not None and z_joined is not None:
             # the field-dressed evaluation: the isolated branch reads the shifted latent
             # (rsfff.ff.film.fields; the shift is O(F^2) by construction and None in vacuum)
             z_iso = z_iso + z_shift
-        bond_x_iso = self._bond_input(z_iso, species_idx, topo)
-        angle_x_iso = self._angle_input(z_iso, species_idx, topo)
+        bond_x_iso = self._bond_input(z_iso, species_idx, topo, bond_feat)
+        angle_x_iso = self._angle_input(z_iso, species_idx, topo, bond_feat)
         d_bond = self.bond_base(bond_x_iso)                        # (Nb, 3)
         d_angle = self.angle_base(angle_x_iso)                     # (Na, 2)
         with_improper = self.impropers and topo.n_impropers > 0
         if with_improper:
-            d_imp = self.improper_base(self._improper_input(z_iso, species_idx, topo))
+            d_imp = self.improper_base(self._improper_input(z_iso, species_idx, topo, bond_feat))
             delta_iso = torch.cat(
                 (d_bond.reshape(-1), d_angle.reshape(-1), d_imp.reshape(-1))
             )
@@ -806,15 +843,15 @@ class BondedParameterHead(nn.Module):
             a, apex, c = topo.angle_index[0], topo.angle_index[1], topo.angle_index[2]
             g_angle = (gate[a] + gate[apex] + gate[c]) / 3.0
             d_bond = d_bond + g_bond.unsqueeze(-1) * self.bond_delta(
-                self._bond_input(z_joined, species_idx, topo)
+                self._bond_input(z_joined, species_idx, topo, bond_feat)
             )
             d_angle = d_angle + g_angle.unsqueeze(-1) * self.angle_delta(
-                self._angle_input(z_joined, species_idx, topo)
+                self._angle_input(z_joined, species_idx, topo, bond_feat)
             )
             if with_improper:
                 g_imp = sum(gate[topo.improper_index[n]] for n in range(4)) / 4.0
                 d_imp = d_imp + g_imp.unsqueeze(-1) * self.improper_delta(
-                    self._improper_input(z_joined, species_idx, topo)
+                    self._improper_input(z_joined, species_idx, topo, bond_feat)
                 )
 
         si = species_idx[topo.bond_index[0]]

@@ -107,7 +107,7 @@ def solve_induction_blocks(L, A_off, alpha_inv, C, quadrupoles=True):
     """Like :func:`rsfff.ff.ionct.kernels.solve_induction` with a 3x3 inverse polarizability per site:
     L (B, N, 8), A_off (B, 8N, 8N), alpha_inv (B, N, 3, 3) symmetric positive definite, C (B, N)."""
     B, N, _ = L.shape
-    cinv = (1.0 / C) if quadrupoles else torch.full_like(C, 1e12)
+    cinv = torch.where(C > 0, 1.0 / C.clamp(min=1e-30), torch.full_like(C, 1e12)) if quadrupoles else torch.full_like(C, 1e12)    # C = 0: no quadrupole response (Li+)
     D = L.new_zeros(B, N, 8, 8)
     D[:, :, :3, :3] = alpha_inv
     D[:, :, 3:, 3:] = torch.diag_embed(cinv[..., None].expand(B, N, 5))

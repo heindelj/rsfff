@@ -76,11 +76,97 @@ validation loss. The ChemLab project `~/research/fff_bonding/cl` exports a set
 (`python/scripts/export_dataset.py`) as `vacuum.xyz` (main), `vacuum_pol.xyz` (`pol`),
 `probe.xyz` and `field.xyz`. `bonding.probe_path` still works (a stream named `probe`).
 
+**ECE-fed bonded heads** (`film.bond_features: ece`; `src/ff/film/ece.py`): per-bond
+features of the covalent graph from bb's edge cluster expansion (`bb.features.EdgeClusterExpansion`,
+bb `docs/ece.md`): the bonded neighbours of each end expanded in the bond frame and combined up to
+correlation order 2 (four-body: bond + one neighbour per end), i.e. the angles on each side, the
+dihedral harmonics `cos m omega` between the ends, and the same-end angle-angle and out-of-plane
+invariants. Both bond directions are merged symmetrically (`g+ + g-`, `(g+ - g-)^2`;
+pseudoscalars only as `o+^2 + o-^2`, `o+ o-`), `asinh`-compressed, and embedded by a small MLP
+(`ece_dim`). Every head then reads the embedding next to the latents: bond `b[ij]`; angle
+`b[ia] + b[ak]`, `(b[ia] - b[ak])^2`; improper leg + symmetric partner pair; torsion
+`[b[ab], b[bc], b[cd]]`, couplings their legs, angle pairs their three bonds, all inside the
+existing orbit sums (reversal permutes the bond slots too), so the symmetry is still exact.
+
+- *Isolated by construction*: the ECE is intramolecular and cutoff-free, so it is the same for
+  `theta_0` and `theta`; the env deviation stays the gated joined-latent branch (zero in
+  isolation, booked in induction). Nothing in the ECE path can double-count the environment.
+- *Own coordinates*: `ece_own_bond: true` adds a Morse basis of the bond's own length, and an
+  angle's legs carry the angle itself, so the parameters see their own coordinate (what makes the
+  bounded forms exact for 1-4 monomers, and what can turn a parameter into a disguised energy).
+  `bonding.bond_var_weight` (the `train_film` regularizer on `delta_iso`) and a stretch-scan
+  hold-out are the guard.
+- `ece_latents: false` removes the SOAP latents from the bonded/term heads: parameters are then a
+  function of the ECE features and the atom types alone (cannot be combined with
+  `field_features`, which shifts the latents).
+- Off by default; a model without it has exactly its old parameter set.
+
+**ECE electrical heads** (`film.electrical_features: ece`, needs `bond_features: ece`;
+`src/ff/film/electrical.py`): the permanent charges, dipoles and quadrupoles, the atomic
+polarizabilities and the SQE compliances built on the covalent bonds instead of the atom latents,
+each as *free-atom value on the diabat + bond terms x an envelope that vanishes as the bond
+dissociates*:
+
+- charges `q_i = q_inf,i + sum_b sigma_ib e_b g_b` (antisymmetric bond flows; a Pauling
+  `kappa (chi_a - chi_b)` start): the fragment charge is conserved exactly, every atom ends on its
+  diabatic charge;
+- dipoles / quadrupoles: sums over the atom's outgoing bonds of `e_b x` an equivariant bond-frame
+  readout (`bb.heads.EdgeReadout`, axial and off-axis), zero for a free atom;
+- polarizability `alpha_i = alpha0(Z, q_inf) exp(sum e_b s) expm(-sum e_b K)` (`K` traceless): positive
+  definite always, the free atom / ion value at dissociation (`FREE_ATOM_ALPHA`, b3lyp/def2-svpd
+  finite field, `scripts/free_atom_alpha.py`; linear in charge for a resonance-averaged `q_inf`);
+- charge flows only along covalent bonds, with compliance `e_b softplus(...)`: the channel closes
+  as the bond breaks (no fractional charge between separated atoms);
+- envelope `e_b = exp(-gamma (r - r_ref))`, `r_ref` and `gamma = beta = sqrt(k/2D)` from the bond
+  type's Morse prior times a learnable log-scale per quantity: a geometric electrical bond order;
+- the response parameters keep a gated environment factor `exp(gate NN(z_joined))`, exactly 1
+  isolated: the environment modifies the physical parameters rather than replacing them.
+
+The limits hold by construction on a fixed diabatic topology (tests pull an atom to 40 A, and a
+whole molecule apart). For the remaining fragment to become exactly the isolated fragment the ECE
+neighbours are weighted by the Morse variable of the bond reaching them (`ece_neighbour_decay`,
+default on); with `elec_latents: false` the electrical heads see only the covalent graph and the
+partial-dissociation limit is exact too (the SOAP latents feel the departing atom out to their
+cutoff, and the fragment conditioning keeps the diabat's composition).
+
+**Diabatic state** (`src/ff/film/diabats.py`; `Batch.diabat_charge`, `diabat_flow`,
+`diabat_group`): per-atom asymptotic charges plus a **dissociation channel per bond**.
+
+- Atom charges (all bonds broken homolytically): a Lewis guess from the graph -- over-valent N/O
+  carry `+(deg - valence)`; the remaining charge sits on the free valences left unpaired by a
+  maximal pi pairing, averaged over every atom that can be left unpaired (acetate: -1/2 on each O;
+  HPO4-: -1/3 on the three terminal O).
+- Channels: the asymptotic flow `f_b` of each bond (charge moved along its stored orientation once
+  that bond alone is broken, relative to the atom charges). Guess: dative bonds of an over-valent
+  centre are heterolytic with the centre keeping the pair (NH4+ -> NH3 + H+, CH3NH3+ -> CH3+ + NH3);
+  a bond that would split a resonance charge gives all of it to the smaller side (acetate C-O ->
+  CH3CO + O-); everything else homolytic (and ring bonds, which separate nothing).
+- Bonds drawing on one source (a cation centre, a resonance group) share an exclusive `group`.
+- The heads use `q_asym = q_inf + sum_b sigma t_b f_b` with the channel progress
+  `p_b = 1 - exp(-gamma ramp(r - r_ref - onset))` (exactly 0 in a bond's normal range, C2; `elec_channel_onset` 0.5 A and `elec_channel_width` 0.3 A by default, rates learnable per bond type) and
+  `t_b = p_b prod_{b' in group, b' != b} (1 - p_b')`; charges are `q_asym` + enveloped flows and
+  `alpha0 = alpha0(Z, q_asym)` (H+ has alpha 0). A proton leaving NH4+ ends as H+, CH3NH3+ separates
+  into exactly CH3+ and NH3, two protons pulled from NH4+ leave NH2+ (tests).
+- Headers `diabat_charges` (per atom), `diabat_flows` and `diabat_groups` (per bond, in the `bonds`
+  order; groups are atom indices or -1) override the guess; the guess is a placeholder for a table
+  of diabats.
+- The bonded Morse terms are still referenced to neutral atoms, so a heterolytic channel's energy
+  asymptote is not yet consistent with its electrical one.
+
+**Hessian loss** (`bonding.hessian_weight`, `hessian_scale` [Ha/Ang^2], `hessian_probes`): the
+loader reads a `hessian` header (`(3n, 3n)`, Ha/bohr^2, file atom order; permuted with the atoms,
+stored in Ha/Ang^2) into `Batch.hessian`; the loss compares `H v = -d(F.v)/dx` for a few Gaussian
+probes per step (one extra backward pass each, fixed seed at evaluation) and logs `h_rel`, the
+relative error of `H v`. `scripts/eval_bonding.py` evaluates a checkpoint per molecule/kind
+(optionally on the trainer's `--split val`): energies, forces, full Hessians, dipole / quadrupole /
+polarizability as energy derivatives, and for probe frames (`--vacuum`) the interaction energy
+and force change against the vacuum frame at the same geometry.
+
 ## Next
 
 - Data (ChemLab `fff_bonding/cl`): `monomer-pilot` -- Wigner/rotor, scans, probe and field
   frames for the seven pilot molecules; Hessians at distorted geometries later.
 - Train the four variants (B0 constant-parameter baseline first: heads off, tables only).
-- Hessian-vector-product loss; per-family `bond_var` weights; relative-energy target.
+- Per-family `bond_var` weights; relative-energy target.
 - Typed nonbonded priors (q0 for covalent Cl); inter-fragment permanent sources for the field
   features; external sources in the fixed-K solve; quadrupole polarizability in the film (R2).

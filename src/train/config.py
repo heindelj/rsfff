@@ -1059,6 +1059,42 @@ class FilmConfig:
     field_products: int = 16
     field_hidden: int = 32
     field_scales: list = field(default_factory=lambda: [0.05, 0.02, 0.01])
+    #: Per-bond features of the covalent graph for the bonded and term heads
+    #: (rsfff.ff.film.ece): "none" (latents only, every existing checkpoint) or "ece" (the
+    #: edge cluster expansion, bond-frame invariants up to four-body, from bb).
+    bond_features: str = "none"
+    #: With bond_features "ece": False drops the atom latents from the bonded/term heads, so
+    #: their parameters depend on the ECE features and atom types alone.
+    ece_latents: bool = True
+    ece_n_max: int = 4
+    ece_l_max: int = 3
+    ece_channels: int = 8
+    ece_species_dim: int = 4
+    ece_morse_a: float = 2.0
+    #: include a Morse basis of the bond's own length (the parameter sees its own coordinate)
+    ece_own_bond: bool = True
+    ece_dim: int = 16
+    ece_hidden: int = 32
+    ece_depth: int = 1
+    #: weight each ECE neighbour by the Morse variable of the bond that reaches it, so the
+    #: features of a dissociated fragment become its own (rsfff.ff.film.ece)
+    ece_neighbour_decay: bool = True
+    #: "none" (latent permanent multipoles / alpha / compliance) or "ece": bond-built charges
+    #: (diabatic charge + bond flows), dipoles, quadrupoles, polarizabilities (free atom x bond
+    #: factors) and bond compliances with exact dissociation limits (rsfff.ff.film.electrical).
+    #: Needs bond_features: ece and the diabatic charges (Batch.diabat_charge, or a guess).
+    electrical_features: str = "none"
+    elec_latents: bool = True
+    elec_emb_dim: int = 8
+    elec_hidden: int = 64
+    elec_depth: int = 2
+    elec_flow_kappa: float = 0.15
+    #: per-bond dissociation channels (Batch.diabat_flow); false = every bond homolytic
+    elec_channels: bool = True
+    #: where (Ang beyond the bond's reference length) and over what width a channel's transfer
+    #: turns on (rsfff.ff.film.electrical; exactly zero before the onset)
+    elec_channel_onset: float = 0.5
+    elec_channel_width: float = 0.3
     #: Reserved hook (decision: strict physical form). Setting it raises in the builder.
     bonded_nn_residual: bool = False
     eta_init: float = 0.5

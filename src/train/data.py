@@ -20,6 +20,7 @@ total charge         e               e                  none
 dipole               e*a0            e*Angstrom         * Bohr
 dipole derivatives   e (a0/a0)       e (Angstrom/Ang.)  none (dimensionless)
 polarizability       a0^3            e^2*Ang^2/Ha       * Bohr^2  (a0^3 = e^2 a0^2/Ha)
+hessian              Ha/Bohr^2       Ha/Angstrom^2      / Bohr^2
 ===================  ==============  =================  ==========================
 
 Dipoles/response labels are in the *stored* coordinate frame (psi4 ran with
@@ -125,6 +126,25 @@ class Batch:
     covalent_bonds: torch.Tensor | None = None
     #: :class:`rsfff.ff.external.ExternalSources` (probe charges / uniform fields), or None.
     external: object | None = None
+    #: flat Cartesian Hessians (Ha/Angstrom^2): frame ``f``'s ``(3 n_f, 3 n_f)`` block,
+    #: atom-major (``3 i + a``), row-major, frames concatenated in batch order. ``None``
+    #: unless the file has a ``hessian`` header on every frame. See :meth:`hessian_blocks`.
+    hessian: torch.Tensor | None = None
+    #: (Ntot,) asymptotic (diabatic) atomic charges, e: what each atom carries once all its bonds
+    #: are broken (``diabat_charges`` header, else rsfff.ff.film.diabats' Lewis guess). Set
+    #: whenever the file has ``bonds``.
+    diabat_charge: torch.Tensor | None = None
+    #: (Nc,) the dissociation channel of each covalent bond (rows of ``covalent_bonds``): the
+    #: asymptotic charge flow along its stored orientation, and (Nc,) long its exclusive group
+    #: (a global atom index, -1 for none). See rsfff.ff.film.diabats.
+    diabat_flow: torch.Tensor | None = None
+    diabat_group: torch.Tensor | None = None
+
+    def hessian_blocks(self) -> list[torch.Tensor]:
+        """The per-frame ``(3 n_f, 3 n_f)`` views of :attr:`hessian`."""
+        n = torch.bincount(self.batch_idx, minlength=int(self.n_systems)).tolist()
+        sizes = [(3 * k) ** 2 for k in n]
+        return [h.view(3 * k, 3 * k) for h, k in zip(torch.split(self.hessian, sizes), n)]
 
     def to(self, device) -> "Batch":
         opt = lambda t: t.to(device) if t is not None else None  # noqa: E731
@@ -157,6 +177,10 @@ class Batch:
             group_id=opt(self.group_id),
             covalent_bonds=opt(self.covalent_bonds),
             external=None if self.external is None else self.external.to(device),
+            hessian=opt(self.hessian),
+            diabat_charge=opt(self.diabat_charge),
+            diabat_flow=opt(self.diabat_flow),
+            diabat_group=opt(self.diabat_group),
         )
 
 
@@ -196,6 +220,10 @@ class MoleculeDataset:
         ext_charges: torch.Tensor | None = None,         # (M_all, 4) x, y, z [Ang], q [e]
         ext_counts: torch.Tensor | None = None,          # (n_frames,) probes per frame
         ext_field: torch.Tensor | None = None,           # (n_frames, 3) a.u.
+        hessian: torch.Tensor | None = None,             # flat, (3 n_f)^2 per frame, Ha/Ang^2
+        diabat_charge: torch.Tensor | None = None,       # (Ntot_all,) asymptotic charges, e
+        diabat_flow: torch.Tensor | None = None,         # (Nc_all,) channel flow per bond
+        diabat_group: torch.Tensor | None = None,        # (Nc_all,) frame-local atom or -1
     ) -> None:
         self._pos = positions
         self._num = atomic_numbers.long()
@@ -240,6 +268,20 @@ class MoleculeDataset:
                 (torch.zeros(1, dtype=torch.long), torch.cumsum(self._ext_counts, 0))
             )
         self._ext_field = ext_field
+        self._hessian = hessian
+        self._diabat_charge = diabat_charge
+        self._diabat_flow = diabat_flow
+        self._diabat_group = diabat_group
+        if hessian is not None:
+            sizes = (3 * self._counts) ** 2
+            self._hessian_offsets = torch.cat(
+                (torch.zeros(1, dtype=torch.long), torch.cumsum(sizes, 0))
+            )
+            if int(self._hessian_offsets[-1]) != hessian.numel():
+                raise ValueError(
+                    f"hessian has {hessian.numel()} entries but the frames need "
+                    f"{int(self._hessian_offsets[-1])}"
+                )
         if self._fragment_counts is not None:
             self._frag_offsets = torch.cat(
                 (torch.zeros(1, dtype=torch.long), torch.cumsum(self._fragment_counts, 0))
@@ -353,6 +395,11 @@ class MoleculeDataset:
             extra["covalent_bonds"] = (
                 self._covalent_bonds[:, c_rows] + torch.repeat_interleave(atom_offsets, c_counts)
             )
+            if self._diabat_flow is not None:
+                extra["diabat_flow"] = self._diabat_flow[c_rows]
+                g_ = self._diabat_group[c_rows]
+                extra["diabat_group"] = torch.where(
+                    g_ >= 0, g_ + torch.repeat_interleave(atom_offsets, c_counts), g_)
         if self._ext_counts is not None or self._ext_field is not None:
             from ..ff.external import ExternalSources
 
@@ -370,6 +417,13 @@ class MoleculeDataset:
             if self._ext_field is not None:
                 ext.field = self._ext_field[idx].clone()
             extra["external"] = ext
+        if self._hessian is not None:
+            extra["hessian"] = torch.cat(
+                [self._hessian[self._hessian_offsets[i]:self._hessian_offsets[i + 1]]
+                 for i in idx.tolist()]
+            ) if idx.numel() else self._hessian[:0]
+        if self._diabat_charge is not None:
+            extra["diabat_charge"] = self._diabat_charge[rows]
 
         return Batch(
             **extra,
@@ -495,6 +549,15 @@ def fragment_view(dataset: MoleculeDataset, indices=None) -> MoleculeDataset:
             covalent_bonds=nb - new_offsets[new_frame],
             covalent_counts=torch.bincount(new_frame, minlength=n_frag),
         )
+        if dataset._diabat_flow is not None:
+            # the bonds' channels follow them; a group atom maps like a bond end
+            rows_ = torch.arange(gb.shape[1])[ok][same][sort]
+            g_ = dataset._diabat_group[rows_]
+            gg = torch.where(g_ >= 0, new_pos[(g_ + dataset._offsets[frame_of_bond[rows_]]).clamp(min=0)], g_)
+            covalent.update(
+                diabat_flow=dataset._diabat_flow[rows_].clone(),
+                diabat_group=torch.where(gg >= 0, gg - new_offsets[new_frame], -torch.ones_like(gg)),
+            )
     energy = dataset._fragment_energy[frag_keep].clone()
     return MoleculeDataset(
         positions=dataset._pos[order].clone(),
@@ -515,6 +578,9 @@ def fragment_view(dataset: MoleculeDataset, indices=None) -> MoleculeDataset:
         fragment_dipole=pick(dataset._fragment_dipole),
         fragment_second_moment=pick(dataset._fragment_second_moment),
         fragment_counts=torch.ones(n_frag, dtype=torch.long),
+        diabat_charge=(
+            None if dataset._diabat_charge is None else dataset._diabat_charge[order].clone()
+        ),
         **covalent,
     )
 
@@ -712,6 +778,9 @@ def load_extxyz(
     frag_e_list, frag_dip_list, frag_m2_list = [], [], []
     bond_list, bond_counts = [], []
     cov_list, cov_counts, ext_list, ext_counts, ext_field_list = [], [], [], [], []
+    hess_list, dq_list, dfl_list, dgr_list = [], [], [], []
+    dq_cache: dict = {}
+    dq_unplaced = 0
     for atoms in iread(str(path), index=":"):
         # track the reorder of _select_fragmentation / _sort_by_fragment so that the
         # covalent graph (given in the file's atom order) can follow the atoms
@@ -739,6 +808,10 @@ def load_extxyz(
             probes = np.asarray(info["ext_charges"], dtype=np.float64).reshape(-1, 4)
             ext_list.append(probes)
             ext_counts.append(probes.shape[0])
+        if "hessian" in info:       # (3n, 3n) Ha/bohr^2, file atom order -> Ha/Ang^2, ours
+            h = np.asarray(info["hessian"], dtype=np.float64).reshape(3 * n, 3 * n)
+            dof = (orig[:, None] * 3 + np.arange(3)[None, :]).reshape(-1)
+            hess_list.append((h[np.ix_(dof, dof)] / bohr**2).reshape(-1))
         if "ext_field" in info:     # uniform field, a.u.
             ext_field_list.append(np.asarray(info["ext_field"], dtype=np.float64).reshape(3))
         charge_list.append(float(info.get("charge", 0.0)))
@@ -816,10 +889,40 @@ def load_extxyz(
                     np.asarray(info["fragment_second_moments"], dtype=np.float64), nf
                 )
             )
+        # The diabatic state, wherever the covalent graph is known: per-atom asymptotic
+        # charges and a dissociation channel per bond (rsfff.ff.film.diabats). The file's
+        # `diabat_charges` (per atom), `diabat_flows` and `diabat_groups` (per bond, in the
+        # `bonds` header's order; groups are file atom indices or -1) override the Lewis guess.
+        if "bonds" in info:
+            from ..ff.film.diabats import fragment_diabats
+
+            fi_ = frag_idx_list[-1] if frag_counts else np.zeros(n, dtype=np.int64)
+            fq_ = (frag_q_list[-1] if frag_counts
+                   else np.array([float(info.get("charge", 0.0))]))
+            key = (tuple(int(v) for v in atoms.numbers), cov_list[-1].tobytes(),
+                   tuple(int(v) for v in fi_), tuple(float(v) for v in fq_))
+            if key not in dq_cache:
+                dq_cache[key] = fragment_diabats(atoms.numbers, cov_list[-1].T, fi_, fq_)
+            guess = dq_cache[key]
+            nbond = cov_list[-1].shape[1]
+            given = [k for k in ("diabat_charges", "diabat_flows", "diabat_groups") if k in info]
+            dq = (np.asarray(info["diabat_charges"], dtype=np.float64).reshape(n)[orig]
+                  if "diabat_charges" in info else guess.q)
+            dfl = (np.asarray(info["diabat_flows"], dtype=np.float64).reshape(nbond)
+                   if "diabat_flows" in info else (guess.flow if not given else np.zeros(nbond)))
+            if "diabat_groups" in info:
+                g_ = np.asarray(info["diabat_groups"], dtype=np.int64).reshape(nbond)
+                dgr = np.where(g_ >= 0, new_of_orig[np.clip(g_, 0, None)], -1)
+            else:
+                dgr = guess.group if not given else -np.ones(nbond, dtype=np.int64)
+            dq_unplaced += int(not given and not guess.ok)
+            dq_list.append(dq)
+            dfl_list.append(dfl)
+            dgr_list.append(dgr)
 
     n_frames = len(counts)
     for name, lst in (("bonds", cov_counts), ("ext_charges", ext_counts),
-                      ("ext_field", ext_field_list)):
+                      ("ext_field", ext_field_list), ("hessian", hess_list)):
         if len(lst) not in (0, n_frames):
             raise ValueError(f"{path}: `{name}` present on {len(lst)} of {n_frames} frames; "
                              f"it must be all-or-nothing")
@@ -901,6 +1004,17 @@ def load_extxyz(
         )
     if ext_field_list:
         partition["ext_field"] = torch.tensor(np.stack(ext_field_list), dtype=dtype)
+    if hess_list:
+        partition["hessian"] = torch.tensor(np.concatenate(hess_list), dtype=dtype)
+    if dq_list:
+        if dq_unplaced:
+            import warnings
+
+            warnings.warn(f"{path}: the Lewis guess could not place the charge of {dq_unplaced} "
+                          f"frame(s); spread over heavy atoms (give `diabat_charges` to fix)")
+        partition["diabat_charge"] = torch.tensor(np.concatenate(dq_list), dtype=dtype)
+        partition["diabat_flow"] = torch.tensor(np.concatenate(dfl_list), dtype=dtype)
+        partition["diabat_group"] = torch.tensor(np.concatenate(dgr_list), dtype=torch.long)
 
     return MoleculeDataset(
         positions, atomic_numbers, forces, energy, counts_t,
@@ -981,6 +1095,10 @@ def concatenate_datasets(datasets: "list[MoleculeDataset]") -> MoleculeDataset:
         ext_charges=_cat_optional("_ext_charges"),
         ext_counts=_cat_optional("_ext_counts"),
         ext_field=_cat_optional("_ext_field"),
+        hessian=_cat_optional("_hessian"),
+        diabat_charge=_cat_optional("_diabat_charge"),
+        diabat_flow=_cat_optional("_diabat_flow"),
+        diabat_group=_cat_optional("_diabat_group"),
     )
 
 

@@ -54,23 +54,27 @@ POLAR_TEST = ("pair_Na-Cl_r2.250", "pair_Na-Cl_r2.750", "pair_Na-Cl_r3.250", "pa
 POLAR_CT_MAX_PAIR = 3.6
 
 
-def polar_targets(ct_sets):
+def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",)):
     """[(polar_id, symbols, coords A, target (3, 2) [alpha_MI, alpha_CT] per axis bohr^3 (nan: axis not computed),
     ct_ok)] from the
-    ct-polar finite-field EDAs: alpha = -d2E/dF2 by central differences at F_SET; MI = full - ct."""
+    ct-polar finite-field EDAs: alpha = -d2E/dF2 by central differences at F_SET; MI = full - ct.
+    ``files``: the polar sets to read (ct-polar, seed-<salt>-polar); a seed set's ids carry its salt,
+    "<salt>:<polar_id>" (its shell ids name no species)."""
     import collections
     g = collections.defaultdict(dict)
-    p = Path(ct_sets) / "ct-polar.jsonl"
-    if not p.exists():
-        return []
-    for line in open(p):
-        r = json.loads(line)
-        t = r.get("tags") or {}
-        if r.get("stage") != "label" or "polar_id" not in t or "eda" not in r:
+    for name in files:
+        p = Path(ct_sets) / f"{name}.jsonl"
+        if not p.exists():
             continue
-        f = t.get("field") or ""
-        key = ("", 0.0) if not f else (f.split(":")[0], round(float(f.split(":")[1]), 6))
-        g[t["polar_id"]][key] = r
+        prefix = f"{name.split('-')[1]}:" if name.startswith("seed-") else ""
+        for line in open(p):
+            r = json.loads(line)
+            t = r.get("tags") or {}
+            if r.get("stage") != "label" or "polar_id" not in t or "eda" not in r:
+                continue
+            f = t.get("field") or ""
+            key = ("", 0.0) if not f else (f.split(":")[0], round(float(f.split(":")[1]), 6))
+            g[prefix + t["polar_id"]][key] = r
     out = []
     for pid, d in sorted(g.items()):
         if ("", 0.0) not in d:
@@ -88,7 +92,11 @@ def polar_targets(ct_sets):
             ac = -(ct(rp) + ct(rm) - 2 * ct(r0)) / F_SET ** 2
             tgt.append([af - ac, ac])
         X = np.asarray(r0["coords"], float)
-        ct_ok = not (pid.startswith("pair_Na-Cl") and float(pid.split("_r")[1]) > POLAR_CT_MAX_PAIR)
+        base = pid.split(":")[-1]
+        if not ct_dimers:                   # no alpha_CT target on any pair (dimer CT needs a dielectric)
+            ct_ok = len(r0["symbols"]) > 2
+        else:
+            ct_ok = not (base.startswith("pair_Na-Cl") and float(base.split("_r")[1]) > POLAR_CT_MAX_PAIR)
         out.append((pid, r0["symbols"], X, torch.tensor(tgt, dtype=torch.float64), ct_ok))
     return out
 
@@ -179,7 +187,7 @@ def _channel_sums(r, ratio, types=None):
 
 
 def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 3.6, max_ho_ratio: float = 1.4,
-                species=("Na", "Cl"), types=None):
+                species=("Na", "Cl"), types=None, ct_dimers=True, extra_sets=()):
     """[(symbols, coords A, labels, meta)], deduplicated.
 
     The ct label is kept only where ALMO's E_CT is a channel quantity: Na-Cl pairs within ``ct_max_pair`` and, for
@@ -188,7 +196,12 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
     triple without its environment) show and whole clusters do not (E_CT / sum PCT = 1.1-1.2 for every walk
     cluster; up to 4-10 for long-range Na-Cl pairs and Na2Cl+ triples). Whole clusters of 4 or more ions keep their
     label whatever the ratio (1.11-1.30, one at 1.51); above ~1.4 the fragments' CT per ion jumps from ~-3 to
-    -5..-6 kJ/mol (e.g. a Cl- 5.5 A from a Na2 2+ pair, E_CT -70 kJ/mol at ratio 1.58)."""
+    -5..-6 kJ/mol (e.g. a Cl- 5.5 A from a Na2 2+ pair, E_CT -70 kJ/mol at ratio 1.58).
+
+    ``ct_dimers=False`` drops the ct label of every two-ion frame instead of cutting unlike pairs at ``ct_max_pair``:
+    in vacuum the dimer's ionic configuration is not the ground state at long range, so dimer CT needs a dielectric
+    (out of scope); cluster CT keeps its label. ``extra_sets``: more ct_model sets of the same kinds
+    (seed-<salt>-scan / -mbe / -sat), read like the ct-* ones."""
     out, seen = [], set()
 
     def add(symbols, coords, pol, ct, meta, ho=float("nan"), chan=None, pauli=float("nan"), extra=None):
@@ -198,7 +211,9 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
         seen.add(key)
         n = len(symbols)
         ct_mask = True
-        if n == 2 and sorted(symbols) == ["Cl", "Na"]:
+        if n == 2 and not ct_dimers:
+            ct_mask = False
+        elif n == 2 and sorted(symbols) == ["Cl", "Na"]:
             ct_mask = float(np.linalg.norm(np.subtract(coords[0], coords[1]))) <= ct_max_pair
         whole = bool(meta.get("full")) and n >= 4
         if (np.isfinite(ho) or ho == float("inf")) and not whole:
@@ -208,7 +223,7 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
                      "pauli": pauli / KJ, **{k: v / KJ for k, v in (extra or {}).items()}},
                     {**meta, "n": n, "ho_ratio": ho}))
 
-    for wf in ("ct-walk", "ct-mbe", "ct-sat", "ct-scan"):
+    for wf in ("ct-walk", "ct-mbe", "ct-sat", "ct-scan", *extra_sets):
         p = Path(ct_sets) / f"{wf}.jsonl"
         if not p.exists():
             continue
@@ -588,6 +603,11 @@ def main():
     ap.add_argument("--wkb", default="smooth+floor", help="two_sided | none | smooth[:a_-,a_+], each optionally +floor")
     ap.add_argument("--ct-max-pair", type=float, default=3.6)
     ap.add_argument("--max-ho-ratio", type=float, default=1.4, help="E_CT / sum PCT above which ct is not a label")
+    ap.add_argument("--salts", nargs="*", default=[],
+                    help="ct_model seed sets to add, by salt (lif lii kbr csi ...): seed-<salt>-{scan,mbe,sat,polar}; "
+                         "each salt's <salt>6_03, <salt>8_07, <salt>9_09 clusters and tet4 shells go to the test split")
+    ap.add_argument("--ct-no-dimers", action="store_true",
+                    help="no ct (or alpha_CT) label on any two-ion frame, in place of the --ct-max-pair cut")
     ap.add_argument("--w-pol", type=float, default=1.0)
     ap.add_argument("--w-ct", type=float, default=1.0)
     ap.add_argument("--w-chan", type=float, default=0.0, help="weight of the per-type ALMO-CTA channel sums (0: E_CT only)")
@@ -679,12 +699,14 @@ def main():
         print(f"environment: density projections, {feat.n_feat} invariants", flush=True)
     from ..ff.ionct.model import channel_types
     frames = load_frames(a.ct_sets, a.walk_eda, a.ct_max_pair, a.max_ho_ratio, species=tab.symbols,
-                         types=channel_types(tab.symbols))
+                         types=channel_types(tab.symbols), ct_dimers=not a.ct_no_dimers,
+                         extra_sets=[f"seed-{x}-{k}" for x in a.salts for k in ("scan", "mbe", "sat")])
+    a.test = list(a.test) + [f"{x}{n}" for x in a.salts for n in ("6_03", "8_07", "9_09")]
     print(f"ct label kept for {sum(f[2]['ct_mask'] for f in frames)} of {len(frames)} frames", flush=True)
     tags = split(frames, a.test, seed=a.seed)
     if a.holdout_scans:
-        tags = ["test" if (m["workflow"] == "ct-scan" and m["n"] == 2) else t for t, (*_, m) in zip(tags, frames)]
-        print(f"held out {sum(m['workflow'] == 'ct-scan' and m['n'] == 2 for *_, m in frames)} pair-scan frames", flush=True)
+        tags = ["test" if (m["workflow"].endswith("scan") and m["n"] == 2) else t for t, (*_, m) in zip(tags, frames)]
+        print(f"held out {sum(m['workflow'].endswith('scan') and m['n'] == 2 for *_, m in frames)} pair-scan frames", flush=True)
     print(f"{len(frames)} frames: " + ", ".join(f"{t} {tags.count(t)}" for t in ("train", "val", "test")), flush=True)
     if a.model == "complete":
         if a.ct_form != "direct" or a.env != "density":
@@ -712,10 +734,13 @@ def main():
         print(f"device: {dev} ({torch.cuda.get_device_name(dev) if dev.type == 'cuda' else ''})", flush=True)
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
-        for pid, sym, X, tgt, ok in polar_targets(a.ct_sets):
+        for pid, sym, X, tgt, ok in polar_targets(a.ct_sets, ct_dimers=not a.ct_no_dimers,
+                                                  files=("ct-polar", *[f"seed-{x}-polar" for x in a.salts])):
             c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
                            frontier=frontier)
-            held = pid in set(a.polar_test) or (a.holdout_scans and pid.startswith("pair_"))
+            base = pid.split(":")[-1]
+            held = (pid in set(a.polar_test) or (a.holdout_scans and base.startswith("pair_"))
+                    or (":" in pid and base.startswith("shell_tet4")))
             (polar_te if held else polar_tr).append(c)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)
         pb_tr, pb_all = to_device(polar_batch(polar_tr), dev), to_device(polar_batch(polar_tr + polar_te), dev)

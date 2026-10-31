@@ -299,7 +299,7 @@ def solve_induction_periodic(L, ainv, C, pairs, Bij, frames, quadrupoles=True, r
     dof = L.new_ones(8)
     if not quadrupoles:
         dof[3:] = 0
-    cinv = 1.0 / C
+    cinv = torch.where(C > 0, 1.0 / C.clamp(min=1e-30), torch.full_like(C, 1e12))    # C = 0: no quadrupole response (Li+)
     with torch.no_grad():
         d_ainv, d_cinv, d_B = ainv.detach(), cinv.detach(), Bij.detach()
         d_frames = [f.detach() for f in frames]

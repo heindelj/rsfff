@@ -26,6 +26,7 @@ from .bonded import (
     cosine_angle_energy,
     morse_energy,
 )
+from .ece import ECEBondFeatures
 from .heads import FilmResponseHeads, ResponseFamily
 from .permanent import PermanentMultipoleHeads
 from .network import ConditionedParameterNetwork, FilmParameters
@@ -43,6 +44,7 @@ __all__ = [
     "BondedTopology",
     "cosine_angle_energy",
     "morse_energy",
+    "ECEBondFeatures",
     "FilmResponseHeads",
     "ResponseFamily",
     "PermanentMultipoleHeads",

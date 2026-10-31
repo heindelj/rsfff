@@ -63,7 +63,7 @@ from .train_eem import resolve_device
 
 __all__ = ["BondingWeights", "Stream", "Streams", "monomer_loss", "train"]
 
-_METRICS = ["e_mae", "f_mae", "mu_mae", "theta_mae", "alpha_mae"]
+_METRICS = ["e_mae", "f_mae", "h_rel", "mu_mae", "theta_mae", "alpha_mae", "bond_var"]
 _LOG_KEYS = ["loss", *_METRICS, "cg_fail"]
 
 
@@ -79,6 +79,16 @@ class BondingWeights:
     dipole_scale: float = 0.05           # e*bohr
     quadrupole_scale: float = 0.2        # e*bohr^2
     polarizability_scale: float = 0.5    # bohr^3
+    #: Hessian-vector products against the ``hessian`` labels: ``hessian_probes`` random
+    #: Gaussian directions per step, ``-d(F.v)/dx = H v`` by one more backward pass, error in
+    #: units of ``hessian_scale`` (Ha/Ang^2 per unit-variance probe component). 0 = off.
+    hessian_weight: float = 0.0
+    hessian_scale: float = 0.02          # Ha/Ang^2
+    hessian_probes: int = 4
+    #: the geometry-independence regularizer of rsfff.train.train_film (``bond_var``): mean
+    #: squared feature-dependent deviation of the bonded/term parameters from their tables.
+    #: Matters most with ``film.bond_features: ece`` and ``ece_own_bond``. 0 = off.
+    bond_var_weight: float = 0.0
     probe_weight: float = 1.0
     probe_batch_size: int = 32
     probe_path: list | None = None
@@ -148,11 +158,26 @@ def monomer_loss(model, out, batch, w: BondingWeights, *, training: bool, prefix
     e_err = (out.energy - batch.energy) / n_atoms.to(out.energy.dtype)
     metrics[f"{prefix}e_mae"] = float(e_err.detach().abs().mean()) * KJMOL_PER_HARTREE
     loss = loss + w.energy_weight * (e_err / w.energy_scale).pow(2).mean()
-    if w.force_weight > 0.0 and batch.forces is not None and batch.positions.requires_grad:
-        forces = compute_forces(out.energy, batch.positions, create_graph=training)
-        f_err = forces - batch.forces
-        loss = loss + w.force_weight * (f_err / w.force_scale).pow(2).sum(-1).mean()
-        metrics[f"{prefix}f_mae"] = float(f_err.detach().abs().mean())
+    want_h = (w.hessian_weight > 0.0 and getattr(batch, "hessian", None) is not None
+              and batch.positions.requires_grad)
+    if (w.force_weight > 0.0 or want_h) and batch.positions.requires_grad and (
+        batch.forces is not None or want_h
+    ):
+        forces = compute_forces(out.energy, batch.positions, create_graph=training or want_h)
+        if w.force_weight > 0.0 and batch.forces is not None:
+            f_err = forces - batch.forces
+            loss = loss + w.force_weight * (f_err / w.force_scale).pow(2).sum(-1).mean()
+            metrics[f"{prefix}f_mae"] = float(f_err.detach().abs().mean())
+        if want_h:
+            h_loss, h_rel = hessian_vector_loss(forces, batch, w, training=training)
+            loss = loss + w.hessian_weight * h_loss
+            metrics[f"{prefix}h_rel"] = h_rel
+    if w.bond_var_weight > 0.0:
+        from .train_film import _bonded_variance
+
+        var = _bonded_variance(out)
+        loss = loss + w.bond_var_weight * var
+        metrics[f"{prefix}bond_var"] = float(var.detach())
 
     center, dip, theta = _labels_about_center(batch)
     want_mu = w.dipole_weight > 0.0 and dip is not None
@@ -181,6 +206,35 @@ def monomer_loss(model, out, batch, w: BondingWeights, *, training: bool, prefix
         _n, converged, pd_fail = out.solver["ind"]
         metrics["cg_fail"] = float((~converged).sum() + pd_fail.sum())
     return loss, metrics
+
+
+def hessian_vector_loss(forces, batch, w: BondingWeights, *, training: bool):
+    """``(loss, relative error)`` of ``H v`` for ``w.hessian_probes`` Gaussian probes ``v``.
+
+    ``forces`` must carry a graph to the positions. The model's ``H v = -d(F . v)/dx`` costs
+    one backward pass per probe (plus one more for the parameter gradient when training),
+    against ``3 n`` passes for the full Hessian. Evaluation draws its probes from a fixed
+    seed, so validation numbers are comparable between epochs.
+    """
+    pos = batch.positions
+    blocks = batch.hessian_blocks()
+    n = torch.bincount(batch.batch_idx, minlength=int(batch.n_systems)).tolist()
+    gen = None if training else torch.Generator(device="cpu").manual_seed(1234)
+    loss = forces.new_zeros(())
+    num = den = 0.0
+    k = max(int(w.hessian_probes), 1)
+    for p in range(k):
+        v = torch.randn(pos.shape, generator=gen, dtype=pos.dtype).to(pos.device)
+        (g,) = torch.autograd.grad((forces * v).sum(), pos, create_graph=training,
+                                   retain_graph=True)
+        hv_model = -g
+        hv_label = torch.cat([h @ vf.reshape(-1) for h, vf in
+                              zip(blocks, torch.split(v, n))]).reshape(-1, 3)
+        err = hv_model - hv_label
+        loss = loss + (err / w.hessian_scale).pow(2).sum(-1).mean() / k
+        num += float(err.detach().pow(2).sum())
+        den += float(hv_label.pow(2).sum())
+    return loss, (num / max(den, 1e-300)) ** 0.5
 
 
 class Stream:

@@ -82,31 +82,44 @@ class TermParameters:
 
 
 class _OrbitMLP(nn.Module):
-    """``f(members) + P f(reversed members)``: base + gated environment branch, zero-init."""
+    """``f(members) + P f(reversed members)``: base + gated environment branch, zero-init.
+
+    With ``n_bond_members > 0`` each instance also carries that many per-bond feature rows
+    (``bonds``, with their own reversal ``bond_reverse``), appended to the input; see
+    :mod:`rsfff.ff.film.ece`.
+    """
 
     def __init__(self, n_members: int, latent_dim: int, emb_dim: int, hidden: int,
-                 depth: int, out_dim: int, perm: list[int]) -> None:
+                 depth: int, out_dim: int, perm: list[int], *,
+                 n_bond_members: int = 0, bond_feat_dim: int = 0) -> None:
         super().__init__()
-        d_in = n_members * (latent_dim + emb_dim)
+        d_in = n_members * (latent_dim + emb_dim) + n_bond_members * bond_feat_dim
+        self.use_bonds = n_bond_members > 0 and bond_feat_dim > 0
         self.base = zero_init_readout(mlp(d_in, hidden, depth, out_dim))
         self.delta = zero_init_readout(mlp(d_in, hidden, depth, out_dim))
         self.register_buffer("perm", torch.tensor(perm, dtype=torch.long), persistent=False)
 
-    @staticmethod
-    def _x(z, emb, members):
-        return torch.cat([z[m] for m in members] + [emb[m] for m in members], dim=-1)
+    def _x(self, z, emb, members, bfeat=None, bonds=None):
+        parts = [z[m] for m in members] + [emb[m] for m in members]
+        if self.use_bonds:
+            parts += [bfeat[b] for b in bonds]
+        return torch.cat(parts, dim=-1)
 
-    def _orbit(self, net, z, emb, members, reverse):
-        a = net(self._x(z, emb, members))
-        b = net(self._x(z, emb, [members[k] for k in reverse]))
+    def _orbit(self, net, z, emb, members, reverse, bfeat=None, bonds=None, bond_reverse=None):
+        a = net(self._x(z, emb, members, bfeat, bonds))
+        rb = [bonds[k] for k in bond_reverse] if self.use_bonds else None
+        b = net(self._x(z, emb, [members[k] for k in reverse], bfeat, rb))
         return a + b[:, self.perm]
 
-    def forward(self, z_iso, z_joined, gate, emb, members, reverse):
-        raw = self._orbit(self.base, z_iso, emb, members, reverse)
+    def forward(self, z_iso, z_joined, gate, emb, members, reverse,
+                bfeat=None, bonds=None, bond_reverse=None):
+        raw = self._orbit(self.base, z_iso, emb, members, reverse, bfeat, bonds, bond_reverse)
         delta_iso = raw
         if z_joined is not None:
             g = sum(gate[m] for m in members) / len(members)
-            raw = raw + g.unsqueeze(-1) * self._orbit(self.delta, z_joined, emb, members, reverse)
+            raw = raw + g.unsqueeze(-1) * self._orbit(
+                self.delta, z_joined, emb, members, reverse, bfeat, bonds, bond_reverse
+            )
         return raw, delta_iso
 
 
@@ -130,8 +143,16 @@ class TermParameterHead(nn.Module):
         depth: int = 1,
         emb_dim: int = 8,
         torsion_scale: float = 1.0e-3,
+        bond_feat_dim: int = 0,
+        use_latents: bool = True,
     ) -> None:
         super().__init__()
+        self.bond_feat_dim = int(bond_feat_dim)
+        self.use_latents = bool(use_latents)
+        if not self.use_latents and self.bond_feat_dim == 0:
+            raise ValueError("use_latents=False needs bond features (bond_feat_dim > 0)")
+        latent_dim = int(latent_dim) if self.use_latents else 0
+        nbf = self.bond_feat_dim
         self.torsions = bool(torsions)
         self.couplings = bool(couplings)
         self.n_max = int(n_max)
@@ -146,30 +167,41 @@ class TermParameterHead(nn.Module):
                 tb = [N + s * N + n for s in (2, 1, 0) for n in range(N)]     # ab <-> cd
                 ta = [4 * N + s * N + n for s in (1, 0) for n in range(N)]    # abc <-> bcd
                 perm += tb + ta + [6 * N]
-            self.torsion_mlp = _OrbitMLP(4, latent_dim, emb_dim, hidden, depth, n_out, perm)
+            self.torsion_mlp = _OrbitMLP(4, latent_dim, emb_dim, hidden, depth, n_out, perm,
+                                         n_bond_members=3, bond_feat_dim=nbf)
             self.torsion_table = nn.Parameter(torch.zeros(int(n_types), int(n_types), n_out))
         if self.couplings:
             # per angle: [bb, ba_leg0, ba_leg1]; reversal swaps the legs
-            self.angle_mlp = _OrbitMLP(3, latent_dim, emb_dim, hidden, depth, 3, [0, 2, 1])
+            self.angle_mlp = _OrbitMLP(3, latent_dim, emb_dim, hidden, depth, 3, [0, 2, 1],
+                                       n_bond_members=2, bond_feat_dim=nbf)
             self.angle_table = nn.Parameter(torch.zeros(int(n_types), 3))
             # per angle pair [apex, s, x, y]: x <-> y
-            self.pair_mlp = _OrbitMLP(4, latent_dim, emb_dim, hidden, depth, 1, [0])
+            self.pair_mlp = _OrbitMLP(4, latent_dim, emb_dim, hidden, depth, 1, [0],
+                                      n_bond_members=3, bond_feat_dim=nbf)
             self.pair_table = nn.Parameter(torch.zeros(int(n_types), 1))
 
     @property
     def active(self) -> bool:
         return self.torsions or self.couplings
 
-    def forward(self, z_iso, z_joined, gate, type_idx, topo, z_shift=None) -> TermParameters:
+    def forward(self, z_iso, z_joined, gate, type_idx, topo, z_shift=None,
+                bond_feat=None) -> TermParameters:
+        if self.bond_feat_dim and bond_feat is None:
+            raise ValueError("this head was built with bond features; pass bond_feat")
         if z_shift is not None and z_joined is not None:
             z_iso = z_iso + z_shift
+        if not self.use_latents:
+            z_iso = z_iso[:, :0]
+            z_joined = None if z_joined is None else z_joined[:, :0]
         emb = self.type_emb(type_idx)
         out = TermParameters()
         deltas = []
         N = self.n_max
         if self.torsions and topo.n_torsions:
             a, b, c, d = (topo.torsion_index[r] for r in range(4))
-            raw, d_iso = self.torsion_mlp(z_iso, z_joined, gate, emb, [a, b, c, d], [3, 2, 1, 0])
+            tbonds = [topo.torsion_bonds[r] for r in range(3)] if bond_feat is not None else None
+            raw, d_iso = self.torsion_mlp(z_iso, z_joined, gate, emb, [a, b, c, d], [3, 2, 1, 0],
+                                          bond_feat, tbonds, [2, 1, 0])
             tb_, tc_ = type_idx[b], type_idx[c]
             table = 0.5 * (self.torsion_table[tb_, tc_] + self.torsion_table[tc_, tb_])
             if self.couplings:  # the table must respect the reversal too
@@ -184,7 +216,9 @@ class TermParameterHead(nn.Module):
             deltas.append(d_iso.reshape(-1))
         if self.couplings and topo.angle_index.shape[1]:
             i, apex, kk = (topo.angle_index[r] for r in range(3))
-            raw, d_iso = self.angle_mlp(z_iso, z_joined, gate, emb, [i, apex, kk], [2, 1, 0])
+            abonds = [topo.angle_bonds[0], topo.angle_bonds[1]] if bond_feat is not None else None
+            raw, d_iso = self.angle_mlp(z_iso, z_joined, gate, emb, [i, apex, kk], [2, 1, 0],
+                                        bond_feat, abonds, [1, 0])
             t = self.angle_table[type_idx[apex]]
             t = torch.stack((t[:, 0], 0.5 * (t[:, 1] + t[:, 2]), 0.5 * (t[:, 1] + t[:, 2])), -1)
             rho = RHO_MAX * torch.tanh(t + raw)
@@ -192,7 +226,14 @@ class TermParameterHead(nn.Module):
             deltas.append(d_iso.reshape(-1))
         if self.couplings and topo.n_angle_pairs:
             pa, ps, px, py = (topo.angle_pair_index[r] for r in range(4))
-            raw, d_iso = self.pair_mlp(z_iso, z_joined, gate, emb, [pa, ps, px, py], [0, 1, 3, 2])
+            pbonds = None
+            if bond_feat is not None:
+                from .topology import lookup_bonds
+
+                n = int(type_idx.shape[0])
+                pbonds = [lookup_bonds(topo.bond_index, n, pa, q) for q in (ps, px, py)]
+            raw, d_iso = self.pair_mlp(z_iso, z_joined, gate, emb, [pa, ps, px, py], [0, 1, 3, 2],
+                                       bond_feat, pbonds, [0, 2, 1])
             out.aa_rho = RHO_MAX * torch.tanh(self.pair_table[type_idx[pa]] + raw).squeeze(-1)
             deltas.append(d_iso.reshape(-1))
         if deltas:

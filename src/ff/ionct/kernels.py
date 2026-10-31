@@ -365,7 +365,7 @@ def pauli_induced_operator(pos_ang, species, batch_idx, tab: IonTable):
 def induction_matrix(A_off, alpha, C):
     """The full induction Hessian A = A_off + diag(alpha^-1 (x3), C^-1 (x5)) for a padded batch (B, 8N, 8N)."""
     B, N = alpha.shape
-    diag = torch.cat([(1.0 / alpha)[..., None].expand(B, N, 3), (1.0 / C)[..., None].expand(B, N, 5)], dim=-1)
+    diag = torch.cat([(1.0 / alpha)[..., None].expand(B, N, 3), (torch.where(C > 0, 1.0 / C.clamp(min=1e-30), torch.full_like(C, 1e12)))[..., None].expand(B, N, 5)], dim=-1)
     return A_off + torch.diag_embed(diag.reshape(B, -1))
 
 
@@ -376,7 +376,7 @@ def solve_induction(L, A_off, alpha, C, quadrupoles=True):
     if not batched:
         L, A_off, alpha, C = L[None], A_off[None], alpha[None], C[None]
     B, N, _ = L.shape
-    cinv = (1.0 / C) if quadrupoles else torch.full_like(C, 1e12)
+    cinv = torch.where(C > 0, 1.0 / C.clamp(min=1e-30), torch.full_like(C, 1e12)) if quadrupoles else torch.full_like(C, 1e12)    # C = 0: no quadrupole response (Li+)
     diag = torch.cat([(1.0 / alpha)[..., None].expand(B, N, 3), cinv[..., None].expand(B, N, 5)], dim=-1)
     A = A_off + torch.diag_embed(diag.reshape(B, -1))
     if quadrupoles:

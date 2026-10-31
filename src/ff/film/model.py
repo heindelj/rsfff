@@ -342,6 +342,35 @@ class FilmModel(nn.Module):
         solver["ind"] = (level.n_iter, level.converged, level.pd_fail)
         return level
 
+    @staticmethod
+    def _diabat(batch, state, topo):
+        """``(q_inf (N,), flow (Nb,), group (Nb,))`` on ``topo.bond_index``: the batch's diabatic
+        state (``diabat_charge`` / ``diabat_flow`` / ``diabat_group`` on the rows of
+        ``covalent_bonds``, re-oriented to the topology's bonds), or the Lewis guess of
+        :func:`rsfff.ff.film.diabats.fragment_diabats` when it has none."""
+        dev, dt = batch.positions.device, batch.positions.dtype
+        bonds = topo.bond_index
+        q = getattr(batch, "diabat_charge", None)
+        flow = getattr(batch, "diabat_flow", None)
+        cov = getattr(batch, "covalent_bonds", None)
+        if q is not None and flow is not None and cov is not None and bonds.shape[1]:
+            from .topology import lookup_bonds
+
+            n = int(batch.positions.shape[0])
+            row = lookup_bonds(cov.to(dev), n, bonds[0], bonds[1])
+            sign = torch.where(cov[0, row] == bonds[0], 1.0, -1.0).to(dt)
+            return q.to(dt), sign * flow.to(dt)[row], batch.diabat_group.to(dev)[row]
+        from .diabats import fragment_diabats
+
+        d = fragment_diabats(
+            batch.atomic_numbers.cpu().numpy(), bonds.t().cpu().numpy(),
+            state.fragment_idx.cpu().numpy(), state.fragment_charge.detach().cpu().numpy(),
+        )
+        if q is None:
+            q = torch.as_tensor(d.q, dtype=dt, device=dev)
+        return (q.to(dt), torch.as_tensor(d.flow, dtype=dt, device=dev),
+                torch.as_tensor(d.group, dtype=torch.long, device=dev))
+
     # -- forward -------------------------------------------------------------------------
 
     def forward(
@@ -379,7 +408,11 @@ class FilmModel(nn.Module):
         fields = None
         if ext is not None and getattr(self.network, "field_features", None) is not None:
             fields = point_fields(ext, positions, batch.batch_idx)
-        params = self.network(pf, c, state, topo, positions, ch_ind, fields=fields)
+        diabat = None
+        if getattr(self.network, "electrical_heads", None) is not None:
+            diabat = self._diabat(batch, state, topo)
+        params = self.network(pf, c, state, topo, positions, ch_ind, fields=fields,
+                              diabat=diabat)
 
         # --- one pair list ----------------------------------------------------------------
         pair_index, r, is_intra, pair_frag = union_pairs(
