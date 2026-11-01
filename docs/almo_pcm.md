@@ -176,7 +176,12 @@ collapses toward the partner nuclei (the cage script's XP probe).
 | Cl–Cl 3.2 | −29.6 | −33.8 | +4.2 | +26 | −22 | −18.7 | −10.9 |
 | Cl–Cl 4.0 | −17.0 | −18.8 | +1.8 | | | −18.4 | +1.3 |
 | Na–Na 2.8 | −3.3 | −3.4 | +0.04 | | | | |
+| Cl⁻ in Na⁺₂ a90 2.6 | −89.5 | −256.8 | +167.4 | +309 | −141 | −148.9 | +59.4 |
+| Cl⁻ in Na⁺₂ a180 2.6 | −19.7 | −55.5 | +35.8 | +75 | −39 | −22.6 | +2.9 |
+| Cl⁻ in Na⁺₄ sq4 2.6 | −38.9 | −46.3 | +7.4 | +44 | −36 | −12.9 | −26.0 |
+| Cl⁻ in Na⁺₄ tet4 2.6 | −34.1 | −125.0 | +90.9 | +241 | −150 | −16.4 | −17.8 |
 | Cl⁻ in Na⁺₆ oct6 2.6 | −63.4 | −24.8 | **−38.6** | −8.7 | −30.0 | **+3.8** | **−67.2** |
+| Cl⁻ in Na⁺₆ oct6 3.2 | −14.6 | −3.6 | −10.9 | −3.9 | −7.0 | +2.6 | −17.1 |
 
 What it says. For Na⁺–Cl⁻ the pure electrical induction at contact is three to four times the ALMO polarization
 (−174 vs −47 at 2.6 Å): the anion's density is pulled into the cation's attraction and the Pauli wall gives most of
@@ -189,7 +194,10 @@ Beyond ~3.6 Å both ions show a small positive X_POL (1–7 kJ/mol) and the conv
 no exchange polarization. In the octahedral cage (the case the breathing term was built for) the sign flips in
 *both* conventions: the electrical induction is small (the fields cancel at the centre, I_H −25) and the ALMO
 polarization of −63 is exchange-driven (X_POL −39, X_act −67, I_act +4): the Pauli pressure of six neighbours
-contracts the anion, an l = 0 response no field can drive. For the force field: I_H (or I_act, see below) is the label for the dipole/quadrupole/
+contracts the anion, an l = 0 response no field can drive (still −11 of −15 at 3.2 Å). The other cages interpolate:
+with the fields partly cancelling (a180, sq4, tet4) the electrical part shrinks and the Pauli part grows, and in
+the endpoint convention sq4 and tet4 are already exchange-dominated (X_act −26 / −18 vs I_act −13 / −16) while
+the open a90 shell is field-driven like the pair. For the force field: I_H (or I_act, see below) is the label for the dipole/quadrupole/
 breathing response, X for the exclusion drive + stiffening — but at contact the counterfactual split asks the
 stiffening to cancel hundreds of kJ/mol, so the endpoint convention, whose two pieces are the energies of one
 deformation, is the better-conditioned fitting target; the counterfactual one is the cleaner statement that
