@@ -58,6 +58,7 @@ from ..ionct.ct import ChannelTable
 from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_damp_unequal
 from .elst import permanent_electrostatics
 from .heads import EnvironmentHead
+from .periodic import dispersion_switch, recip_apply, solve_induction_periodic
 from .environment import inv_form_of
 
 
@@ -131,11 +132,49 @@ class CompleteModel(IonCTModel):
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
                  species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
-                 hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False, pauli_ii=False, conf_head=True, ct_sc=0):
+                 hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False, pauli_ii=False, conf_head=True, ct_sc=0,
+                 env_cap=0.0, env_log=0.0, ct_sat=False, ct_q_cap=0.0, gap_cap=GAP_EXP_MAX, ct_sat_ion=False,
+                 ct_w_fixed=False):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
                          pol_form="confine")
         self.pseudo = pseudo
+        # env_cap > 0: the log environment factors of the CT charges, Pauli weights, C6, exclusion strengths and the
+        # breathing response are cap * tanh(h / cap), so each parameter stays within e^+-cap of its isolated value
+        # however far the invariants extrapolate (an unbounded exp(h) took the NaCl dimer CT to -1e8 kJ/mol at 1.8 A)
+        self.env_cap = float(env_cap)
+        self.env_log = float(env_log)          # > 0: the heads read the signed log of the invariants (heads.py)
+        # ct_sat: each direct CT channel is a two-state problem, E_c = (D_c - sqrt(D_c^2 + 4 W_c^2)) / 2, with the
+        # coupling W_c^2 = -e_c D_c0 from the pair kernel e_c and the pair gap D_c0, and the environment (gap, Stark)
+        # lowering the gap, D_c = D_c0 exp(-u), in place of scaling the energy by exp(u). The same -W^2/D_c = e_c e^u
+        # while 2 W << D; but |E_c| <= W_c whatever the gap does, and W_c is finite at r -> 0 (the Slater kernel
+        # is), so the channel saturates at short range instead of running away with the environment.
+        self.ct_sat = bool(ct_sat)
+        # ct_sat_ion: saturate per ion, not per channel. A donor has one frontier pair to give and an acceptor one
+        # hole; each channel bounded on its own still lets ~2400 of them sum without limit in a compressed crystal.
+        # Every donor (and every acceptor) is a two-state problem coupled to all of its channels at once,
+        # E_g = (D_g - sqrt(D_g^2 + 4 S_g)) / 2 with S_g = sum_c W_c^2 and the effective gap D_g = S_g / sum_c W_c^2 / D_c
+        # (so E_g = sum_c -W_c^2 / D_c while 2 W << D): |E_g| <= sqrt(S_g), the square root of the channel count.
+        # Each channel keeps its perturbative energy times the smooth minimum of its donor's and acceptor's
+        # saturation factors E_g / sum_c (-W_c^2 / D_c); a lone channel is exactly the per-channel two-state form.
+        self.ct_sat_ion = bool(ct_sat_ion)
+        if self.ct_sat_ion and not self.ct_sat:
+            raise ValueError("ct_sat_ion needs ct_sat (the two-state channels)")
+        # ct_w_fixed: the coupling W_c from the isolated ions' CT charges only (W_c^2 = -e_c0 D_c0, e_c0 the pair
+        # kernel at q0), and the environment heads' charge factors lower the gap instead, D_c = D_c0 exp(-(u + g_c)),
+        # g_c = ln(qD_i / qD0_i) + ln(qA_j / qA0_j). The same -W^2/D = e_c0 e^(u + g) while 2 W << D, but every bound
+        # (|E_c| <= W_c, per ion sqrt(sum W_c^2)) is now fixed by the pair geometry, whatever the environment does
+        self.ct_w_fixed = bool(ct_w_fixed)
+        if self.ct_w_fixed and not self.ct_sat:
+            raise ValueError("ct_w_fixed needs ct_sat (the two-state channels)")
+        # output bounds from the training range: the CT charges' log factors within +-ct_q_cap (0: env_cap), the
+        # gap / Stark exponent within +-gap_cap. Inside the data the heads stay near |h| ~ 1; an MD that is free to
+        # look for the heads' maxima found them at the caps (Cl- qD x 24, Na+ qA x 13 at ordinary 2.7 A contacts)
+        self.ct_q_cap, self.gap_cap = float(ct_q_cap), float(gap_cap)
+        # feat_sat > 0 (per invariant, set by the trainer from the training range): the heads read
+        # m tanh(I / m) of the scaled invariants, so past the data every parameter tends to a constant and each term
+        # keeps its functional form's own short-range limit (the overlap and penetration invariants grow as e^(-bR))
+        self.register_buffer("feat_sat", torch.zeros(n_feat, dtype=torch.float64))
         self._s0sq = None
         # the environment invariants' form (squared norms or magnitudes), read off the featurizer's names; callers
         # of batched_precompute pass it through so the tabulated features match the ones the model was trained on
@@ -184,11 +223,12 @@ class CompleteModel(IonCTModel):
         # p_c from Delta_c(x). ALMO bookkeeping: E_pol is the CT-free solve, E_CT = E_total - E_pol (the CT-induced
         # repolarization is CT).
         self.ct_sc = int(ct_sc)
-        if self.ct_sc and not hasattr(self, "A_fixed"):
+        if (self.ct_sc or self.ct_sat) and not hasattr(self, "A_fixed"):     # both need the pair gap
             unbound = torch.isnan(tab.A_acceptor)
             self.register_buffer("A_fixed", torch.nan_to_num(tab.A_acceptor))
             self.register_buffer("A_unbound", unbound)
             self.A_free = nn.Parameter(torch.full((S,), A_UNBOUND_INIT, dtype=torch.float64))
+        if self.ct_sc:
             self.sc_gD = nn.Parameter(torch.zeros(S, dtype=torch.float64))     # log of the gap's response to dphi
             self.sc_gA = nn.Parameter(torch.zeros(S, dtype=torch.float64))
         self.pauli_ii = pauli_ii
@@ -310,11 +350,24 @@ class CompleteModel(IonCTModel):
             # and Na+ at 0.1 (A[Na<Cl] = 0.7, pair-head runs near 1.5)
             self.ps_lng0 = nn.Parameter(torch.log(PSEUDO_GAMMA_PER_ALPHA * tab.alpha.clamp(min=1e-3)).double())
             self.head_ps = EnvironmentHead(len(cols), 1, hidden, depth, ns)
+        for h in self.modules():
+            if isinstance(h, EnvironmentHead):
+                h.log_k = self.env_log
         self.double()
 
     # -- heads --
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kw):
+        # checkpoints from before feat_sat existed: no saturation (zeros), as they were trained
+        state_dict.setdefault(prefix + "feat_sat", torch.zeros_like(self.feat_sat))
+        super()._load_from_state_dict(state_dict, prefix, *args, **kw)
+
     def scaled(self, feats):
-        return feats / self.feat_scale
+        I = feats / self.feat_scale
+        m = self.feat_sat
+        if bool((m > 0).any()):
+            mm = torch.where(m > 0, m, torch.ones_like(m))
+            I = torch.where(m > 0, mm * torch.tanh(I / mm), I)
+        return I
 
     def confinement_from(self, I, sp):
         """(N, 2) scales on alpha0 and C0 (c_range, tanh-saturated like the ion CT model), 1 for an isolated atom."""
@@ -341,8 +394,14 @@ class CompleteModel(IonCTModel):
             c = c * torch.stack([enh, enh ** (5.0 / 3.0) if self.tie_c else torch.ones_like(enh)], 1)
         return c
 
+    def capped(self, u):
+        """A log environment factor, bounded to +-env_cap (unchanged when env_cap = 0)."""
+        return self.env_cap * torch.tanh(u / self.env_cap) if self.env_cap > 0 else u
+
     def ct_charges_from(self, I, sp):
-        return torch.exp(self.ct_lnq0[sp] + self.head_ctq(I, sp))
+        h = self.head_ctq(I, sp)
+        c = self.ct_q_cap
+        return torch.exp(self.ct_lnq0[sp] + (c * torch.tanh(h / c) if c > 0 else self.capped(h)))
 
     def confinement(self, I, h0=None, species=None):
         """Same entry point as the ion CT model (the pair-scan attribution overrides it), on the scaled invariants."""
@@ -370,7 +429,7 @@ class CompleteModel(IonCTModel):
 
     def pseudo_gamma(self, I, sp):
         """(N,) gamma_i >= 0: the response sensitivity of each atom to its neighbours' exclusion potentials."""
-        return torch.exp(self.ps_lng0[sp] + self.head_ps(I[:, self.frozen_cols], sp)[:, 0])
+        return torch.exp(self.ps_lng0[sp] + self.capped(self.head_ps(I[:, self.frozen_cols], sp)[:, 0]))
 
     def pair_overlap(self, idx, r_ang, sp):
         """Overlap (bohr^-3) of i's outermost permanent shell with j's shells for directed pairs (i <- j)."""
@@ -428,8 +487,21 @@ class CompleteModel(IonCTModel):
 
     def dphi_pairs(self, bt, x, phi_ext):
         """(C,) donor-minus-acceptor environment potential (Eh/e) of each channel i -> j, every atom but i and j."""
-        fr, loc = self._local(bt)
         i, j = bt["ch_index"]
+        pbc = bt.get("pbc")
+        if pbc is not None:
+            # per-atom sums over every pair and image (real space, screened) plus the induced moments' reciprocal
+            # part; the channel's own partner is removed bare (ch_v / ch_k, that image only)
+            xf = x[bt["mask"]]
+            phi_x = recip_apply(pbc["frames"], xf @ K._poly_map(xf.dtype, xf.device).T)[:, 0]
+            a_, b_ = pbc["dp"]
+            n = xf.shape[0]
+            phiD = pbc["phiD0"] + phi_x + xf.new_zeros(n).index_add(0, a_, (pbc["kD"] * xf[b_]).sum(-1))
+            phiA = pbc["phiA0"] + phi_x + xf.new_zeros(n).index_add(0, a_, (pbc["kA"] * xf[b_]).sum(-1))
+            dD = phiD[i] - pbc["ch_vD"] - (pbc["ch_kD"] * xf[j]).sum(-1)
+            dA = phiA[j] - pbc["ch_vA"] - (pbc["ch_kA"] * xf[i]).sum(-1)
+            return dD - dA + phi_ext[i] - phi_ext[j]
+        fr, loc = self._local(bt)
         VD, KD, VA, KA = bt["VD"], bt["KD"], bt["VA"], bt["KA"]
         phiD = VD.sum(-1) + torch.einsum("bikd,bkd->bi", KD, x)
         phiA = VA.sum(-1) + torch.einsum("bikd,bkd->bi", KA, x)
@@ -451,10 +523,14 @@ class CompleteModel(IonCTModel):
 
     def ct_pair_gap(self, bt, sp):
         """(C,) Delta_c0 = I_D - A_A + phi_D^pair - phi_A^pair (Hartree) of every channel i -> j, floored smoothly."""
-        fr, loc = self._local(bt)
         i, j = bt["ch_index"]
-        f, li, lj = fr[i], loc[i], loc[j]
-        gap = (self.tab.I_donor[sp[i]] - self.acceptor_affinity()[sp[j]] + bt["VD"][f, li, lj] - bt["VA"][f, lj, li])
+        if bt.get("pbc") is not None:
+            vD, vA = bt["pbc"]["ch_vD"], bt["pbc"]["ch_vA"]
+        else:
+            fr, loc = self._local(bt)
+            f, li, lj = fr[i], loc[i], loc[j]
+            vD, vA = bt["VD"][f, li, lj], bt["VA"][f, lj, li]
+        gap = self.tab.I_donor[sp[i]] - self.acceptor_affinity()[sp[j]] + vD - vA
         return _gap_floor(gap)
 
     def ct_drive(self, w, bt, sp):
@@ -495,6 +571,18 @@ class CompleteModel(IonCTModel):
         p = 0.5 * (1 - D / root)
         return e, p, D, W, g * p, dphi
 
+    @staticmethod
+    def ion_saturation(W2, D, i, j, n, k=4.0):
+        """(C,) in (0, 1]: each channel's factor on its perturbative energy -W_c^2 / D_c, the power-mean (exponent
+        -k, a smooth minimum equal to both when they agree) of the saturation of its donor i and its acceptor j.
+        Per ion g: S = sum W^2, P = sum W^2 / D, effective gap S / P, and f = 2 / (1 + sqrt(1 + 4 P^2 / S))."""
+        def group(g):
+            S = W2.new_zeros(n).index_add(0, g, W2)
+            P = W2.new_zeros(n).index_add(0, g, W2 / D)
+            return (2 / (1 + torch.sqrt(1 + 4 * P * P / (S + 1e-30))))[g]
+        fD, fA = group(i), group(j)
+        return ((fD ** -k + fA ** -k) / 2) ** (-1 / k)
+
     def direct_ct_env(self, q, bt, sp, x, phi_ext, Fa=None):
         B = bt["B"]
         i, j = bt["ch_index"]
@@ -510,8 +598,20 @@ class CompleteModel(IonCTModel):
             u = u - lam * dphi / self.dphi_scale
         if self.ct_stark:
             u = u + self.stark_gap(bt, sp, Fa if Fa is not None else e_ch.new_zeros(sp.shape[0], 3))
-        if self.ct_gap or self.ct_stark:
-            e_ch = e_ch * torch.exp(GAP_EXP_MAX * torch.tanh(u / GAP_EXP_MAX))     # bounded: at most e^+-GAP_EXP_MAX
+        if self.ct_sat:
+            D0 = self.ct_pair_gap(bt, sp)
+            if self.ct_w_fixed:
+                q0 = torch.exp(self.ct_lnq0[sp])
+                u = u + torch.log(q[i, 0] / q0[i, 0]) + torch.log(q[j, 1] / q0[j, 1])
+                e_ch = -q0[i, 0] * q0[j, 1] * f / rb * torch.exp(bt["ch_ltaper"])
+            D = _gap_floor(D0 * torch.exp(-self.gap_cap * torch.tanh(u / self.gap_cap)))
+            if self.ct_sat_ion:
+                W2 = (-e_ch * D0).clamp(min=0)
+                e_ch = -W2 / D * self.ion_saturation(W2, D, i, j, sp.shape[0])
+            else:
+                e_ch = 0.5 * (D - torch.sqrt(D * D - 4 * e_ch * D0))                 # -e_ch D0 = W^2 >= 0
+        elif self.ct_gap or self.ct_stark:
+            e_ch = e_ch * torch.exp(self.gap_cap * torch.tanh(u / self.gap_cap))     # bounded: at most e^+-gap_cap
         e = e_ch.new_zeros(B).index_add(0, bt["ch_frame"], e_ch)
         nT = self.nT
         e_type = e_ch.new_zeros(B * nT).index_add(0, bt["ch_frame"] * nT + bt["ch_type"], e_ch).reshape(B, nT)
@@ -520,7 +620,7 @@ class CompleteModel(IonCTModel):
     def frozen_params(self, I, sp):
         """Per atom: Pauli charge qP, exponent bP, C6, dispersion exponent (each (N,)); with the shells form qP and
         bP are (N, T) per permanent shell (weight 0 where the shell is absent)."""
-        u = self.head_frozen(I[:, self.frozen_cols], sp)
+        u = self.capped(self.head_frozen(I[:, self.frozen_cols], sp))
         C6 = torch.exp(self.disp_lnc60[sp] + u[:, 1])
         if self.pauli_form == "shells":
             w = torch.exp(self.pauli_lnw[sp] + u[:, 0:1]) * self.pauli_shell_mask[sp]
@@ -533,9 +633,14 @@ class CompleteModel(IonCTModel):
         """Frozen Pauli and dispersion energies per frame (B,), (B,) and the parameters."""
         B = bt["B"]
         qP, bP, C6, b6 = self.frozen_params(I, sp)
-        pairs = K.all_pairs(bt["frame"])
+        pbc = bt.get("pbc")
+        if pbc is not None:                 # every pair and lattice image within the cutoff
+            pairs, dr_ang = bt["pairs"], bt["pair_dr"]
+        else:
+            pairs = K.all_pairs(bt["frame"])
+            dr_ang = bt["pos"][pairs[1]] - bt["pos"][pairs[0]]
         i, j = pairs
-        r_ang = (bt["pos"][j] - bt["pos"][i]).norm(dim=-1)
+        r_ang = dr_ang.norm(dim=-1)
         rb = r_ang / K.BOHR_ANG
         shells = self.pauli_form == "shells"
         qPs = qP if shells else qP[:, None]                                       # (N, T)
@@ -547,7 +652,7 @@ class CompleteModel(IonCTModel):
             th = self.pm_a2[sp][:, None] * cartesian_to_spherical_quadrupole(env["shell:S2"]) / self.pm_scale[1]
             P = K._poly_map(I.dtype, I.device)
             polym = (torch.cat([mu, th], 1) @ P.T)[:, 1:]                        # (N, 9) induced Pauli moments
-            dr = (bt["pos"][j] - bt["pos"][i]) / K.BOHR_ANG
+            dr = dr_ang / K.BOHR_ANG
             # the induced moments sit on the outermost shell (the overlap-gradient probe)
             outer = self.pauli_outer[sp] if shells else torch.zeros_like(sp)
             e_p = rb.new_zeros(rb.shape[0])
@@ -567,7 +672,14 @@ class CompleteModel(IonCTModel):
                     e_p = e_p + qPs[i, t] * qPs[j, u] * f / rb
         e_d = tt_damped_c6_energy(r_ang, torch.sqrt(C6[i] * C6[j]), torch.sqrt(b6[i] * b6[j]))
         fr = bt["frame"][i]
-        return I.new_zeros(B).index_add(0, fr, e_p), I.new_zeros(B).index_add(0, fr, e_d), (qP, bP, C6, b6)
+        e_disp = I.new_zeros(B)
+        if pbc is not None:                 # switched off over the last switch_width; the tail only if asked for
+            e_d = e_d * dispersion_switch(r_ang, pbc["cutoff"], pbc["switch_width"])
+            if pbc["disp_tail"] is not None:
+                sc = I.new_zeros(B).index_add(0, bt["frame"], torch.sqrt(C6))
+                e_disp = e_disp - 2 * math.pi / pbc["volume"] * sc * sc * pbc["disp_tail"]
+        e_disp = e_disp.index_add(0, fr, e_d)
+        return I.new_zeros(B).index_add(0, fr, e_p), e_disp, (qP, bP, C6, b6)
 
     # -- the model --
     def forward(self, bt: dict, quadrupoles=True, field=None, solvent=None) -> dict:
@@ -602,19 +714,34 @@ class CompleteModel(IonCTModel):
         ainv = self.alpha_inverse(alpha_flat, sp, bt.get("env"))
         ainv_pad = torch.eye(3, dtype=I.dtype, device=I.device).expand(B, nmax, 3, 3).clone()
         ainv_pad = ainv_pad.masked_scatter(mask[..., None, None].expand(B, nmax, 3, 3), ainv)
-        A_off = bt["A_off"]
-        if solvent is not None:
-            A_off = A_off + solvent.dA
-        if self.pauli_ii:
-            kk = torch.zeros(B, nmax, dtype=I.dtype, device=I.device).masked_scatter(mask, self.pp_kappa[sp])
-            kk = kk.repeat_interleave(8, dim=1)
-            A_off = A_off + bt["A_pp"] * kk[:, :, None] * kk[:, None, :]
-        x0 = solve_induction_blocks(L, A_off, ainv_pad, Cq, quadrupoles)
+        pbc = bt.get("pbc")
+        cg = {}
+        if pbc is not None:
+            # matrix-free CG on the real-space pair blocks + the Ewald frames (periodic.py)
+            if solvent is not None or self.ct_sc:
+                raise NotImplementedError("periodic frames: no solvent, no self-consistent CT")
+            Bij = pbc["A_blocks"]
+            if self.pauli_ii:
+                a_, b_ = pbc["A_pairs"]
+                Bij = Bij + (self.pp_kappa[sp[a_]] * self.pp_kappa[sp[b_]])[:, None, None] * pbc["App_blocks"]
+            xg = bt.get("x_guess")
+            xf = solve_induction_periodic(L[mask], ainv, self.tab.C[sp] * c[:, 1], pbc["A_pairs"], Bij, pbc["frames"],
+                                          quadrupoles, x0=xg if xg is not None and xg.shape[0] == n else None, info=cg)
+            x0 = I.new_zeros(B, nmax, 8).masked_scatter(mask[..., None].expand(B, nmax, 8), xf)
+        else:
+            A_off = bt["A_off"]
+            if solvent is not None:
+                A_off = A_off + solvent.dA
+            if self.pauli_ii:
+                kk = torch.zeros(B, nmax, dtype=I.dtype, device=I.device).masked_scatter(mask, self.pp_kappa[sp])
+                kk = kk.repeat_interleave(8, dim=1)
+                A_off = A_off + bt["A_pp"] * kk[:, :, None] * kk[:, None, :]
+            x0 = solve_induction_blocks(L, A_off, ainv_pad, Cq, quadrupoles)
         e_pol = 0.5 * (L * x0).sum((1, 2))
         e_breath_atom = I.new_zeros(n)
         if self.breath:
             v0 = bt["feats"][:, self.breath_col] + self.breath_lam[sp] * self.breath_s0_scale * bt["feats"][:, self.breath_s0_col]
-            a = self.tab.a0[sp] * torch.exp(self.breath_lna[sp] + self.head_breath(I, sp)[:, 0])
+            a = self.tab.a0[sp] * torch.exp(self.breath_lna[sp] + self.capped(self.head_breath(I, sp)[:, 0]))
             e_breath_atom = -0.5 * a * v0 * v0
             e_pol = e_pol + I.new_zeros(B).index_add(0, bt["frame"], e_breath_atom)
         q = self.ct_charges_from(I, sp)
@@ -644,7 +771,12 @@ class CompleteModel(IonCTModel):
         e_pauli, e_disp, frz = I.new_zeros(B), I.new_zeros(B), None
         if self.frozen:
             e_pauli, e_disp, frz = self.frozen_terms(I, bt, sp)
-        e_elst = permanent_electrostatics(bt["pos"], sp, bt["frame"], self.tab) if self.frozen else I.new_zeros(B)
+        if not self.frozen:
+            e_elst = I.new_zeros(B)
+        elif pbc is not None:
+            e_elst = permanent_electrostatics(bt["pos"], sp, bt["frame"], self.tab, bt["pairs"], bt["pair_dr"], pbc)
+        else:
+            e_elst = permanent_electrostatics(bt["pos"], sp, bt["frame"], self.tab)
         e_cav, e_scr = I.new_zeros(B), I.new_zeros(B)
         if solvent is not None:
             e_scr, e_cav = solvent.e_scr, solvent.e_cav
@@ -654,7 +786,7 @@ class CompleteModel(IonCTModel):
                 "dov": z, "A_ps": A_ps, "W": Wc, "Delta": Dc, "delta": z, "p": dq, "dq": I.new_zeros(n), "x": x_sc,
                 "x_pol": x0, "joint_iters": sc_iters, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": e_pauli,
                 "e_disp": e_disp, "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv,
-                "e_breath_atom": e_breath_atom, "e_elst": e_elst,
+                "e_breath_atom": e_breath_atom, "e_elst": e_elst, "cg_iters": cg.get("cg_iters", 0),
                 "e_int": e_elst + e_cav + e_pauli + e_disp + e_pol + e_ct_post}
 
     def smoothness_penalty(self, bt, sigma=0.05):

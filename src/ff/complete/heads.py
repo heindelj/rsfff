@@ -6,7 +6,11 @@ that is exactly 1 when the environment vanishes,
 with I_i the scaled environment invariants of atom i. The linear term and the network are shared by all species
 (the species enters only through theta0, the centre atom's own parameters); an optional species embedding can be
 concatenated to the network input, in which case NN(0) is evaluated with the same embedding so the isolated limit
-still holds. Both last layers start at zero, so training starts from the isolated-atom force field."""
+still holds. Both last layers start at zero, so training starts from the isolated-atom force field.
+
+With ``log_k > 0`` the head reads slog(I) = sign(I) log(1 + |I| / k) / log(1 + 1 / k) in place of I (0 at 0, linear
+below k, logarithmic above): the overlap and penetration invariants decay as e^(-bR), so in the log they are close to
+linear in R, and the linear term a . slog(I) makes theta a power of the overlap instead of exp(a e^(-bR))."""
 from __future__ import annotations
 
 import torch
@@ -35,8 +39,12 @@ class EnvironmentHead(nn.Module):
         self.net = _mlp(n_feat + (emb if n_species else 0), hidden, n_out, depth)
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
+        self.log_k = 0.0
 
     def forward(self, I: torch.Tensor, species: torch.Tensor | None = None) -> torch.Tensor:
+        if self.log_k > 0:
+            k = self.log_k
+            I = torch.sign(I) * torch.log1p(I.abs() / k) / torch.log1p(torch.tensor(1.0 / k, dtype=I.dtype))
         z0 = torch.zeros_like(I)
         if self.emb is not None:
             e = self.emb(species)

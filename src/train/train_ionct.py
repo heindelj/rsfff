@@ -54,12 +54,26 @@ POLAR_TEST = ("pair_Na-Cl_r2.250", "pair_Na-Cl_r2.750", "pair_Na-Cl_r3.250", "pa
 POLAR_CT_MAX_PAIR = 3.6
 
 
-def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",)):
+# Shannon ionic radii (A, 6-coordinate): scale the Na-Cl dimer CT cut to the other salts
+IONIC_RADIUS = {"Li": 0.76, "Na": 1.02, "K": 1.38, "Rb": 1.52, "Cs": 1.67, "F": 1.33, "Cl": 1.81, "Br": 1.96, "I": 2.20}
+
+
+def dimer_ct_cut(symbols, na_cl_cut):
+    """The distance below which an unlike ion pair's ALMO E_CT is a label: ``na_cl_cut`` for Na-Cl (3.6 A by
+    default), scaled by the sum of the two ionic radii for the other salts (KBr 4.24, CsI 4.89, LiF 2.67 A at 3.6).
+    Beyond it the vacuum dimer's ionic and covalent configurations mix and E_CT is not a channel quantity."""
+    a, b = symbols
+    return na_cl_cut * (IONIC_RADIUS[a] + IONIC_RADIUS[b]) / (IONIC_RADIUS["Na"] + IONIC_RADIUS["Cl"])
+
+
+def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",), min_ct=None):
     """[(polar_id, symbols, coords A, target (3, 2) [alpha_MI, alpha_CT] per axis bohr^3 (nan: axis not computed),
     ct_ok)] from the
     ct-polar finite-field EDAs: alpha = -d2E/dF2 by central differences at F_SET; MI = full - ct.
     ``files``: the polar sets to read (ct-polar, seed-<salt>-polar); a seed set's ids carry its salt,
-    "<salt>:<polar_id>" (its shell ids name no species)."""
+    "<salt>:<polar_id>" (its shell ids name no species).
+    ``min_ct``: drop a geometry whose alpha_CT per ion falls below it on any axis (bohr^3): a negative alpha_CT means
+    the field switched the EDA's CT partition (LiF near contact: CT -157, MI +163 per ion, full ~5), so MI is wrong too."""
     import collections
     g = collections.defaultdict(dict)
     for name in files:
@@ -92,11 +106,15 @@ def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",)):
             ac = -(ct(rp) + ct(rm) - 2 * ct(r0)) / F_SET ** 2
             tgt.append([af - ac, ac])
         X = np.asarray(r0["coords"], float)
+        if min_ct is not None and min((c for _, c in tgt if c == c), default=0.0) / len(r0["symbols"]) < min_ct:
+            continue
         base = pid.split(":")[-1]
         if not ct_dimers:                   # no alpha_CT target on any pair (dimer CT needs a dielectric)
             ct_ok = len(r0["symbols"]) > 2
         else:
-            ct_ok = not (base.startswith("pair_Na-Cl") and float(base.split("_r")[1]) > POLAR_CT_MAX_PAIR)
+            ab = base.split("_")[1].split("-") if base.startswith("pair_") else []
+            ct_ok = not (len(ab) == 2 and ab[0] != ab[1]
+                         and float(base.split("_r")[1]) > dimer_ct_cut(ab, POLAR_CT_MAX_PAIR))
         out.append((pid, r0["symbols"], X, torch.tensor(tgt, dtype=torch.float64), ct_ok))
     return out
 
@@ -187,10 +205,10 @@ def _channel_sums(r, ratio, types=None):
 
 
 def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 3.6, max_ho_ratio: float = 1.4,
-                species=("Na", "Cl"), types=None, ct_dimers=True, extra_sets=()):
+                species=("Na", "Cl"), types=None, ct_dimers=True, extra_sets=(), extra_files=()):
     """[(symbols, coords A, labels, meta)], deduplicated.
 
-    The ct label is kept only where ALMO's E_CT is a channel quantity: Na-Cl pairs within ``ct_max_pair`` and, for
+    The ct label is kept only where ALMO's E_CT is a channel quantity: unlike pairs within ``dimer_ct_cut`` (``ct_max_pair`` for Na-Cl) and, for
     every frame with CTA, E_CT / sum PCT <= ``max_ho_ratio``. Above that the higher-order relaxation dominates --
     the ionic-covalent state mixing of a Cl- far from its Na+ partners, which cluster *fragments* (an MBE pair or
     triple without its environment) show and whole clusters do not (E_CT / sum PCT = 1.1-1.2 for every walk
@@ -201,7 +219,9 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
     ``ct_dimers=False`` drops the ct label of every two-ion frame instead of cutting unlike pairs at ``ct_max_pair``:
     in vacuum the dimer's ionic configuration is not the ground state at long range, so dimer CT needs a dielectric
     (out of scope); cluster CT keeps its label. ``extra_sets``: more ct_model sets of the same kinds
-    (seed-<salt>-scan / -mbe / -sat), read like the ct-* ones."""
+    (seed-<salt>-scan / -mbe / -sat), read like the ct-* ones. ``extra_files``: labelled sets anywhere (a ct_model
+    data/ct_sets/<instance>.jsonl, e.g. nacl-compressed), every frame its own parent (by its name tag), so the
+    train / val split takes them one by one."""
     out, seen = [], set()
 
     def add(symbols, coords, pol, ct, meta, ho=float("nan"), chan=None, pauli=float("nan"), extra=None):
@@ -213,8 +233,8 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
         ct_mask = True
         if n == 2 and not ct_dimers:
             ct_mask = False
-        elif n == 2 and sorted(symbols) == ["Cl", "Na"]:
-            ct_mask = float(np.linalg.norm(np.subtract(coords[0], coords[1]))) <= ct_max_pair
+        elif n == 2 and symbols[0] != symbols[1]:
+            ct_mask = float(np.linalg.norm(np.subtract(coords[0], coords[1]))) <= dimer_ct_cut(symbols, ct_max_pair)
         whole = bool(meta.get("full")) and n >= 4
         if (np.isfinite(ho) or ho == float("inf")) and not whole:
             ct_mask = ct_mask and ho <= max_ho_ratio
@@ -223,9 +243,12 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
                      "pauli": pauli / KJ, **{k: v / KJ for k, v in (extra or {}).items()}},
                     {**meta, "n": n, "ho_ratio": ho}))
 
-    for wf in ("ct-walk", "ct-mbe", "ct-sat", "ct-scan", *extra_sets):
-        p = Path(ct_sets) / f"{wf}.jsonl"
+    sets_ = [(wf, Path(ct_sets) / f"{wf}.jsonl", False) for wf in ("ct-walk", "ct-mbe", "ct-sat", "ct-scan", *extra_sets)]
+    sets_ += [(Path(f).stem, Path(f), True) for f in extra_files]
+    for wf, p, per_frame in sets_:
         if not p.exists():
+            if per_frame:
+                raise FileNotFoundError(p)
             continue
         for line in open(p):
             r = json.loads(line)
@@ -236,6 +259,8 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
             t = r.get("tags") or {}
             if "mbe_set" in t:
                 parent = t["mbe_set"]
+            elif per_frame:
+                parent = f"{wf}_{t.get('name') or len(out)}"
             elif t.get("scan") == "pair":
                 parent = f"scan_{t.get('scan_pair')}"
             else:
@@ -488,7 +513,9 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              hyper=g("hyper", False), pauli_moments=g("pauli_moments", False),
                              pauli_form=g("pauli_form", "slater"), ct_stark=g("ct_stark", False),
                              pauli_ii=g("pauli_ii", False), conf_head=not g("conf_nohead", False),
-                             ct_sc=g("ct_sc", 0))
+                             ct_sc=g("ct_sc", 0), env_cap=g("env_cap", 0.0), env_log=g("env_log", 0.0),
+                             ct_sat=g("ct_sat", False), ct_q_cap=g("ct_q_cap", 0.0), gap_cap=g("gap_cap", 4.0),
+                             ct_sat_ion=g("ct_sat_ion", False), ct_w_fixed=g("ct_w_fixed", False))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -608,6 +635,25 @@ def main():
                          "each salt's <salt>6_03, <salt>8_07, <salt>9_09 clusters and tet4 shells go to the test split")
     ap.add_argument("--ct-no-dimers", action="store_true",
                     help="no ct (or alpha_CT) label on any two-ion frame, in place of the --ct-max-pair cut")
+    ap.add_argument("--extra-sets", nargs="*", default=[],
+                    help="more labelled sets (jsonl paths, e.g. ct_model data/ct_sets/nacl-compressed.jsonl), per-frame parents")
+    ap.add_argument("--env-cap", type=float, default=0.0,
+                    help="bound the log environment factors (CT charges, Pauli, C6, exclusion, breathing) to +-cap")
+    ap.add_argument("--env-sat", type=float, default=0.0,
+                    help="heads read m tanh(I / m), m = this x max |I| over the training atoms (per invariant)")
+    ap.add_argument("--ct-q-cap", type=float, default=0.0,
+                    help="bound on the CT charges' log environment factors (0: --env-cap)")
+    ap.add_argument("--gap-cap", type=float, default=4.0, help="bound on the CT gap / Stark exponent")
+    ap.add_argument("--ct-sat", action="store_true",
+                    help="two-state CT channels: the environment lowers the gap, |E_c| <= the coupling W_c")
+    ap.add_argument("--ct-w-fixed", action="store_true",
+                    help="with --ct-sat: the CT coupling from the isolated ions only; the environment acts through the gap")
+    ap.add_argument("--ct-sat-ion", action="store_true",
+                    help="with --ct-sat: saturate per donor and per acceptor (all of an ion's channels at once)")
+    ap.add_argument("--env-log", type=float, default=0.0,
+                    help="heads read sign(I) log(1 + |I| / k) of the scaled invariants (k = this; 0 = linear)")
+    ap.add_argument("--polar-min-ct", type=float, default=None,
+                    help="drop alpha targets whose alpha_CT per ion is below this on any axis (bohr^3; e.g. -1)")
     ap.add_argument("--w-pol", type=float, default=1.0)
     ap.add_argument("--w-ct", type=float, default=1.0)
     ap.add_argument("--w-chan", type=float, default=0.0, help="weight of the per-type ALMO-CTA channel sums (0: E_CT only)")
@@ -700,7 +746,8 @@ def main():
     from ..ff.ionct.model import channel_types
     frames = load_frames(a.ct_sets, a.walk_eda, a.ct_max_pair, a.max_ho_ratio, species=tab.symbols,
                          types=channel_types(tab.symbols), ct_dimers=not a.ct_no_dimers,
-                         extra_sets=[f"seed-{x}-{k}" for x in a.salts for k in ("scan", "mbe", "sat")])
+                         extra_sets=[f"seed-{x}-{k}" for x in a.salts for k in ("scan", "mbe", "sat")],
+                         extra_files=a.extra_sets)
     a.test = list(a.test) + [f"{x}{n}" for x in a.salts for n in ("6_03", "8_07", "9_09")]
     print(f"ct label kept for {sum(f[2]['ct_mask'] for f in frames)} of {len(frames)} frames", flush=True)
     tags = split(frames, a.test, seed=a.seed)
@@ -735,7 +782,8 @@ def main():
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
         for pid, sym, X, tgt, ok in polar_targets(a.ct_sets, ct_dimers=not a.ct_no_dimers,
-                                                  files=("ct-polar", *[f"seed-{x}-polar" for x in a.salts])):
+                                                  files=("ct-polar", *[f"seed-{x}-polar" for x in a.salts]),
+                                                  min_ct=a.polar_min_ct):
             c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
                            frontier=frontier)
             base = pid.split(":")[-1]
@@ -748,6 +796,11 @@ def main():
         ck = torch.load(a.init_from, weights_only=False)
         missing, unexpected = model.load_state_dict(ck["state"], strict=False)
         print(f"init from {a.init_from}: {len(missing)} new parameters, {len(unexpected)} dropped", flush=True)
+    if a.env_sat > 0 and hasattr(model, "feat_sat"):    # this run's training range, after any init
+        m = a.env_sat * (F[nz] / scale).abs().max(0).values
+        model.feat_sat.copy_(m.to(model.feat_sat))
+        print(f"env-sat: heads saturate at {a.env_sat} x the training range (median m {float(m.median()):.2f})",
+              flush=True)
     force_tr, force_te, table = [], [], None
     if a.force_data:
         if not (a.model == "complete" and a.frozen):
