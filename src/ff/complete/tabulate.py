@@ -40,7 +40,7 @@ from .environment import INVARIANT_NAMES, PROBE_NAMES, invariants, shaped_overla
 from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
                        recip_apply, smooth_switch)
 
-__all__ = ["RadialTable", "batched_precompute"]
+__all__ = ["RadialTable", "XpolTable", "batched_precompute", "xpol_overlap_map"]
 
 NORD = 5          # damping orders of the rank-2 tensor
 BOHR = K.BOHR_ANG
@@ -203,6 +203,110 @@ class RadialTable:
         if key not in memo:
             memo[key] = torch.tensor([self.index[n] for n in names], device=device)
         return memo[key]
+
+
+def _sph_y(n, x):
+    """y_n(x) = j_n(x) / x^n, the spherical Bessel function over x^n (n <= 6), smooth at x -> 0: the series below
+    x = 4, the upward recurrence from j0, j1 above (unstable only for x < n)."""
+    small = x < 4.0
+    xs = torch.where(small, torch.full_like(x, 4.0), x)
+    s, c = torch.sin(xs), torch.cos(xs)
+    jm, j = s / xs, (s / xs - c) / xs
+    for m in range(1, n):
+        jm, j = j, (2 * m + 1) / xs * j - jm
+    big = (jm if n == 0 else j) / xs ** n
+    xz = torch.where(small, x, torch.zeros_like(x))
+    t = -0.5 * xz * xz
+    term = torch.ones_like(x) / math.prod(range(1, 2 * n + 2, 2))
+    ser = term
+    for m in range(1, 40):
+        term = term * t / (m * (2 * n + 2 * m + 1))
+        ser = ser + term
+    return torch.where(small, ser, big)
+
+
+class XpolTable(RadialTable):
+    """Radial table of the quadratic exchange-polarization functional (``CompleteModel(xpol=True)``). Per ordered
+    species pair (i <- j), with rho_i i's electron density (its permanent shells, sum_t n_t 1s_t):
+
+        xp:{dip,quad}:{n}   lam_n(r) = r^(2n+1) / (2n-1)!! (1 / 2 pi^2) int p(k) g_q(k) k^(2n+2) j_n(kr) / (kr)^n dk
+                            -- the damping rows of O_q(r) = <rho_i | g_q,j(. - r)>, so that sum_n lam_n T_n is its
+                            derivative tensor; contracted with j's induced moments (row 0) it is the overlap of rho_i
+                            with j's induced density (:func:`xpol_overlap_map`)
+        xp:breath           <rho_i | g_breath,j>: the overlap per unit l = 0 (breathing) amplitude of j
+        xp:ovl              <rho_i | rho_j>: the frozen density-density overlap of the two ions
+
+    All on the k grid and density transforms of the environment overlaps, so the ratios are on one scale."""
+
+    SHAPES = ("dip", "quad")
+
+    def __init__(self, tab, r_max=10.0, **kw):
+        super().__init__(tab, probes=("shell",), r_max=r_max, **kw)
+
+    @torch.no_grad()
+    def _functions(self, si, sj):
+        tab = self.tab
+        rb = self.r / BOHR
+        k, wk = K._ovl_grid(rb.dtype, rb.device)
+        one_s = torch.zeros(4, dtype=rb.dtype)
+        one_s[0] = 1.0
+
+        def ft(b, w):                       # (K,); a shape with no weight is zero
+            f = K.shaped_density_ft(b.reshape(1, *b.shape), w.reshape(1, *w.shape), k)
+            return f[0] if torch.is_tensor(f) else torch.zeros_like(k)
+
+        def rho(s):                         # the ion's electron density, sum_t n_t (normalized 1s of shell t)
+            out = torch.zeros_like(k)
+            for t in range(tab.shell_n.shape[1]):
+                if tab.shell_n[s, t] > 0:
+                    out = out + tab.shell_n[s, t] * ft(tab.shell_b[s, t], one_s)
+            return out
+
+        fp = rho(si)
+        x = k[None, :] * rb[:, None]
+        ys = torch.stack([_sph_y(n, x) for n in range(NORD + 2)])                 # (NORD + 2, G, K)
+        kp = torch.stack([k ** (2 * n + 2) for n in range(NORD + 2)])            # (NORD + 2, K)
+        pre = torch.stack([rb ** (2 * n + 1) / math.prod(range(1, 2 * n, 2)) for n in range(NORD + 2)])
+        n_ = torch.arange(NORD + 1, dtype=rb.dtype)[:, None]
+        out = {}
+        for q, (bq, wq) in {"dip": (tab.b_dip[sj], tab.w_dip[sj]), "quad": (tab.b_quad[sj], tab.w_quad[sj])}.items():
+            F = fp * ft(bq, wq) * wk / (2 * math.pi ** 2)
+            lam = pre * torch.einsum("ngk,nk->ng", ys, kp * F[None])                # (NORD + 2, G)
+            # lam_n' = (2n+1)(lam_n - lam_n+1) / r (from g_n+1 = g_n' / r), lam_n'' from the same twice
+            d1 = (2 * n_ + 1) * (lam[:-1] - lam[1:]) / rb
+            d2 = (2 * n_[:-1] + 1) * ((d1[:-1] - d1[1:]) / rb - (lam[:-2] - lam[1:-1]) / rb ** 2)
+            for n in range(NORD):           # derivatives in r (Angstrom), like the rest of the table
+                out[f"xp:{q}:{n}"] = torch.stack([lam[n], d1[n] / BOHR, d2[n] / BOHR ** 2], -1)
+
+        def scalar(F):                      # O(r) = int F k^2 j0(kr) and its r-derivatives (Angstrom)
+            O = (ys[0] * (k * k * F)[None]).sum(-1)
+            O1 = -rb * (ys[1] * (k ** 4 * F)[None]).sum(-1)
+            O2 = ((2 * ys[1] - ys[0]) * (k ** 4 * F)[None]).sum(-1)
+            return torch.stack([O, O1 / BOHR, O2 / BOHR ** 2], -1)
+
+        out["xp:breath"] = scalar(fp * ft(tab.b_breath[sj], tab.w_breath[sj]) * wk / (2 * math.pi ** 2))
+        out["xp:ovl"] = scalar(fp * rho(sj) * wk / (2 * math.pi ** 2))
+        if not self.names:
+            self.names = list(out)
+            self.index = {kk: m for m, kk in enumerate(self.names)}
+        return [out[kk] for kk in self.names]
+
+
+def xpol_overlap_map(table: XpolTable, s, dp, dr):
+    """For directed pairs (i <- j), dr = X_j - X_i (bohr, autograd flows): the frozen overlap O_ij = <rho_i | rho_j>
+    (P,), the linear map d_ij (P, 8) from j's induced moments [dipole, spherical quadrupole] to the change of that
+    overlap (of the electron density: x is a charge-density moment, so the sign flips), and e_ij (P,) the change
+    per unit breathing amplitude of j (an electron-density amplitude)."""
+    i, j = dp
+    r = dr.norm(dim=-1)
+    y = table(s[i], s[j], r * BOHR)
+    Tb = _basis_tensors(dr)                                                   # (NORD, P, 10, 10) [j, i]
+    P = K._poly_map(dr.dtype, dr.device)
+    lam = table.rows(y, ["xp:dip", "xp:quad"])                                # (2, NORD, P)
+    Td = torch.einsum("np,npa->pa", lam[0], Tb[:, :, 1:4, 0])                 # (P, 3)
+    Tq = torch.einsum("np,npa->pa", lam[1], Tb[:, :, 4:10, 0]) @ P[4:10, 3:8]  # (P, 5)
+    cols = table.cols(("xp:ovl", "xp:breath"), y.device)
+    return y[:, cols[0]], -torch.cat([Td, Tq], -1), y[:, cols[1]]
 
 
 def _basis_tensors_ref(dr):

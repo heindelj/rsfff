@@ -515,7 +515,7 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              pauli_ii=g("pauli_ii", False), conf_head=not g("conf_nohead", False),
                              ct_sc=g("ct_sc", 0), env_cap=g("env_cap", 0.0), env_log=g("env_log", 0.0),
                              ct_sat=g("ct_sat", False), ct_q_cap=g("ct_q_cap", 0.0), gap_cap=g("gap_cap", 4.0),
-                             ct_sat_ion=g("ct_sat_ion", False), ct_w_fixed=g("ct_w_fixed", False))
+                             ct_sat_ion=g("ct_sat_ion", False), ct_w_fixed=g("ct_w_fixed", False), xpol=g("xpol", False))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -728,6 +728,10 @@ def main():
     ap.add_argument("--force-every", type=int, default=1, help="force step every k-th energy step (weight x k)")
     ap.add_argument("--force-batch", type=int, default=16)
     ap.add_argument("--force-test", nargs="*", default=list(FORCE_TEST), help="force files (stems) held out")
+    ap.add_argument("--xpol", action="store_true",
+                    help="complete + frozen: quadratic exchange polarization -- the pair Pauli energies as a PSD quadratic "
+                         "in the induced moments and breathing amplitudes, minimized with the induction in one solve "
+                         "(in place of --pseudo, the confinement head and the separate breathing term; clusters only)")
     ap.add_argument("--init-from", default=None, help="model.pt of a previous run to start from (same architecture)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda | cuda:N (complete model; batches are moved per step)")
     ap.add_argument("--w-disp", type=float, default=0.0, help="weight of the dispersion energy vs ALMO disp")
