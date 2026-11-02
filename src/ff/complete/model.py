@@ -40,8 +40,9 @@ exclusion potential whose moment is j's own Pauli charge qP_j (the one of E_P ab
 shell, times the overlap S_ij of i's outermost shell with j's density (fixed geometry), times i's sensitivity
 gamma_i from its overlap invariants. No pair head, no pair types (the CT-only model's pair form is gone).
 
-Quadratic exchange polarization (``xpol=True``, with ``frozen``; in place of the pseudo-potential drive, the
-confinement head and the separate breathing term): the frozen Pauli energy of every pair, E_ij^0 (the penetration
+Quadratic exchange polarization (``xpol=True``, with ``frozen``; the default of ``train_ionct --model complete
+--frozen``, in place of the pseudo-potential drive and the separate breathing term, with the confinement head kept
+for the many-body stiffening -- NaCl m29_xpol): the frozen Pauli energy of every pair, E_ij^0 (the penetration
 kernel of mod_pauli), is made a function of the induced moments x and breathing amplitudes b through one overlap
 amplitude per pair, the relative change of the two density overlaps,
 
@@ -61,7 +62,8 @@ functional stays quadratic and its minimum is one linear solve,
     (A + H) z = -(L + g),   z = (x, b),   E_pol = 1/2 z A z + L z + [g z + 1/2 z H z]
 
 with the breathing amplitude's own stiffness 1 / (a0 e^lna) and Coulomb drive V[breath]^(0) in A and L. E_P(z) - E_P(0)
-is exchange polarization and is booked in e_pol (``e_xpol``); e_pauli stays E_P(0). Clusters only.
+is exchange polarization and is booked in e_pol (``e_xpol``); e_pauli stays E_P(0). Periodic frames: the same
+functional over every pair and image of the Pauli pair list, solved by matrix-free CG with the Ewald frames.
 
 Species enter only through the isolated-atom parameters (alpha0, C0, the CT charges qD0 / qA0 and exponents, kappa,
 lam, gamma0); the heads are shared (``species_emb`` adds an embedding to their input).
@@ -81,7 +83,7 @@ from ..ionct.ct import ChannelTable
 from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_damp_unequal
 from .elst import permanent_electrostatics
 from .heads import EnvironmentHead
-from .periodic import dispersion_switch, recip_apply, solve_induction_periodic
+from .periodic import _matvec, dispersion_switch, recip_apply, solve_induction_periodic, solve_xpol_periodic
 from .tabulate import XpolTable, xpol_overlap_map
 from .environment import inv_form_of
 
@@ -765,7 +767,10 @@ class CompleteModel(IonCTModel):
         if tbl.device != bt["pos"].device:
             tbl.to(bt["pos"].device)
         (i, j), e0 = self._pauli_pairs
-        dr = (bt["pos"][j] - bt["pos"][i]) / K.BOHR_ANG
+        if bt.get("pbc") is not None:       # every pair and image of the Pauli pair list
+            dr = bt["pair_dr"] / K.BOHR_ANG
+        else:
+            dr = (bt["pos"][j] - bt["pos"][i]) / K.BOHR_ANG
         keep = dr.norm(dim=-1) * K.BOHR_ANG < XPOL_R_MAX
         i, j, dr, e0 = i[keep], j[keep], dr[keep], e0[keep]
         P = i.shape[0]
@@ -834,6 +839,49 @@ class CompleteModel(IonCTModel):
             e_b = torch.where(has, 0.5 * bz * bz * ainv_b - V0 * bz, torch.zeros_like(bz))
         return z, e_el, e_x, e_b
 
+    def xpol_solve_periodic(self, bt, sp, I, Lf, ainv, Cs, quadrupoles=True, info=None):
+        """The periodic counterpart of :meth:`xpol_solve` (matrix-free CG with the Ewald frames, the exchange pairs
+        over every image of the Pauli pair list). Lf (n, 8) the flat drive, ainv (n, 3, 3), Cs (n,). Returns z (n, D),
+        the electrical part (B,), the exchange part (B,) and the breathing atoms' own energy (n,)."""
+        pbc, fr = bt["pbc"], bt["frame"]
+        B, n = bt["B"], sp.shape[0]
+        i, j, e0, lam, vi, vj = self.xpol_pairs(bt, sp, I)
+        if not quadrupoles:
+            vi, vj = vi.clone(), vj.clone()
+            vi[:, 3:8], vj[:, 3:8] = 0.0, 0.0
+        D = vi.shape[1]
+        Lz, ainv_b, V0 = Lf, Lf.new_zeros(n), None
+        if D == 9:
+            a_b = self.tab.a0[sp] * torch.exp(self.breath_lna[sp])
+            has = a_b > 0
+            ainv_b = torch.where(has, 1.0 / a_b.clamp(min=1e-30), torch.ones_like(a_b))
+            V0 = bt["feats"][:, self.breath_col] * has.to(a_b.dtype)
+            Lz = torch.cat([Lf, -V0[:, None]], 1)
+        g = Lf.new_zeros(n, D).index_add(0, i, 2 * e0[:, None] * vi).index_add(0, j, 2 * e0[:, None] * vj)
+        w = 2 * lam * e0
+        xg = bt.get("x_guess")
+        if xg is not None and xg.shape[0] == n:
+            xg = torch.cat([xg, xg.new_zeros(n, D - xg.shape[1])], 1) if xg.shape[1] < D else xg[:, :D]
+        else:
+            xg = None
+        z = solve_xpol_periodic(Lz + g, ainv, Cs, ainv_b, pbc["A_pairs"], pbc["A_blocks"], pbc["frames"],
+                                (i, j, w, vi, vj), quadrupoles, x0=xg, info=info)
+        P = K._poly_map(Lf.dtype, Lf.device)
+        cinv = torch.where(Cs > 0, 1.0 / Cs.clamp(min=1e-30), torch.full_like(Cs, 1e12))
+        dof = Lf.new_ones(8)
+        if not quadrupoles:
+            dof[3:] = 0
+        Az = _matvec(z[:, :8], ainv, cinv, pbc["A_pairs"], pbc["A_blocks"], pbc["frames"], P, dof)
+        e_el = Lf.new_zeros(B).index_add(0, fr, 0.5 * (z[:, :8] * Az).sum(1) + (Lf * z[:, :8]).sum(1))
+        e_b = Lf.new_zeros(n)
+        if D == 9:
+            bz = z[:, 8]
+            e_b = torch.where(has, 0.5 * bz * bz * ainv_b - V0 * bz, torch.zeros_like(bz))
+            e_el = e_el + Lf.new_zeros(B).index_add(0, fr, e_b)
+        u = (vi * z[i]).sum(1) + (vj * z[j]).sum(1)
+        e_x = Lf.new_zeros(B).index_add(0, fr, (g * z).sum(1)).index_add(0, fr[i], 0.5 * w * u * u)
+        return z, e_el, e_x, e_b
+
     # -- the model --
     def forward(self, bt: dict, quadrupoles=True, field=None, solvent=None) -> dict:
         """``solvent``: a :class:`rsfff.ff.complete.solvent.SolventTerms` for this batch (C-PCM; None = gas phase):
@@ -873,9 +921,14 @@ class CompleteModel(IonCTModel):
         if self.frozen:
             e_pauli, e_disp, frz = self.frozen_terms(I, bt, sp)
         e_xpol, z_x = I.new_zeros(B), None
-        if self.xpol:
-            if pbc is not None:
-                raise NotImplementedError("xpol: clusters only")
+        if self.xpol and pbc is not None:
+            if solvent is not None:
+                raise NotImplementedError("periodic frames: no solvent")
+            zf, e_pol, e_xpol, e_breath_atom = self.xpol_solve_periodic(bt, sp, I, L[mask], ainv,
+                                                                        self.tab.C[sp] * c[:, 1], quadrupoles, cg)
+            z_x = I.new_zeros(B, nmax, zf.shape[1]).masked_scatter(mask[..., None].expand(B, nmax, zf.shape[1]), zf)
+            x0 = z_x[..., :8]
+        elif self.xpol:
             A_off = bt["A_off"] if solvent is None else bt["A_off"] + solvent.dA
             z_x, e_pol, e_xpol, e_breath_atom = self.xpol_solve(bt, sp, I, L, A_off, ainv_pad, Cq, quadrupoles)
             x0 = z_x[..., :8]

@@ -141,7 +141,8 @@ class CompletePotential:
         E = out["e_int"]
         grads = torch.autograd.grad(E.sum(), leaves)
         if periodic:
-            self._x, self._key = out["x"][bt["mask"]].detach(), key
+            z = out.get("z_xpol")            # the exchange-polarization solve's variables (with breathing)
+            self._x, self._key = (z if z is not None else out["x"])[bt["mask"]].detach(), key
         self.last = {"cg_iters": out.get("cg_iters", 0), "terms": {k: out[k].detach().cpu().numpy() for k in
                      ("e_elst", "e_pauli", "e_disp", "e_pol", "e_ct")}}
         forces = (-grads[0]).detach().cpu().numpy()

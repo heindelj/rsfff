@@ -324,6 +324,60 @@ def solve_induction_periodic(L, ainv, C, pairs, Bij, frames, quadrupoles=True, r
     return x_star - _ImplicitZero.apply(r, solve)
 
 
+def _xpol_matvec(z, ainv, cinv, ainv_b, pairs, Bij, frames, hp, P, dof):
+    """(A + H) z for z = (x, b) (N, D): the induction operator on x (``_matvec``), the breathing stiffness on b
+    (D = 9), and H = sum_p w_p v_p v_p^T over the exchange pairs ``hp`` = (i, j, w, v_i, v_j) (rank one per pair)."""
+    out = _matvec(z[:, :8], ainv, cinv, pairs, Bij, frames, P, dof[:8])
+    if z.shape[1] == 9:
+        out = torch.cat([out, (ainv_b * z[:, 8])[:, None]], 1)
+    i, j, w, vi, vj = hp
+    s = w * ((vi * z[i]).sum(1) + (vj * z[j]).sum(1))
+    out = out.index_add(0, i, s[:, None] * vi).index_add(0, j, s[:, None] * vj)
+    return out * dof
+
+
+def solve_xpol_periodic(L, ainv, C, ainv_b, pairs, Bij, frames, hp, quadrupoles=True, rtol=1e-10, maxiter=500,
+                        x0=None, info=None):
+    """The exchange-polarization minimum under PBC (``CompleteModel(xpol=True)``): z (N, D) minimizing
+    L.z + 1/2 z.(A + H) z, A as in :func:`solve_induction_periodic` plus the breathing stiffness ``ainv_b`` (N,) on
+    column 8 when D = 9, H the positive semi-definite exchange term of the pairs and images ``hp`` = (i, j, w, v_i,
+    v_j). Matrix-free CG, preconditioned with the on-site response; differentiable to first order through the
+    implicit function theorem (like the induction solve)."""
+    D = L.shape[1]
+    P = K._poly_map(L.dtype, L.device)
+    dof = L.new_ones(D)
+    if not quadrupoles:
+        dof[3:8] = 0
+    cinv = torch.where(C > 0, 1.0 / C.clamp(min=1e-30), torch.full_like(C, 1e12))
+    with torch.no_grad():
+        d_hp = tuple(t.detach() for t in hp)
+        d_args = (ainv.detach(), cinv.detach(), ainv_b.detach(), pairs, Bij.detach(), [f.detach() for f in frames],
+                  d_hp, P, dof)
+        alpha = torch.linalg.inv(d_args[0])
+        cq = C.detach()
+        a_b = torch.where(ainv_b > 0, 1.0 / ainv_b.clamp(min=1e-30), torch.zeros_like(ainv_b)).detach()
+
+        def mv(v):
+            return _xpol_matvec(v, *d_args)
+
+        def pre(v):
+            parts = [torch.einsum("nab,nb->na", alpha, v[:, :3]), cq[:, None] * v[:, 3:8]]
+            if D == 9:
+                parts.append(a_b[:, None] * v[:, 8:])
+            return torch.cat(parts, 1) * dof
+
+        def solve(g):
+            return _cg(mv, g * dof, pre, None, rtol, maxiter)[0]
+
+        z_star, n_iter = _cg(mv, -L.detach() * dof, pre, None if x0 is None else x0.detach() * dof, rtol, maxiter)
+    if info is not None:
+        info["cg_iters"] = n_iter
+    if not torch.is_grad_enabled():
+        return z_star
+    r = _xpol_matvec(z_star, ainv, cinv, ainv_b, pairs, Bij, frames, hp, P, dof) + L * dof
+    return z_star - _ImplicitZero.apply(r, solve)
+
+
 # ---- short-range switches and the dispersion tail ----------------------------------------------------------------
 
 def smooth_switch(r, r_on, r_off):

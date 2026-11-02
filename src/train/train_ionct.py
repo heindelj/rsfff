@@ -498,6 +498,22 @@ def force_metrics(model, frames, tab, table, chan, bs=16):
     return out
 
 
+def resolve_exchange(a):
+    """Fix ``a.exchange`` (and the ``pseudo`` / ``xpol`` flags build_model reads) from the arguments: an explicit
+    --exchange wins, then --pseudo / --xpol; auto is xpol for the complete model with the frozen terms."""
+    if a.exchange == "auto":
+        if a.pseudo and a.xpol:
+            raise SystemExit("--pseudo and --xpol exclude each other")
+        a.exchange = ("pseudo" if a.pseudo else "xpol" if (a.xpol or (a.model == "complete" and a.frozen))
+                      else "none")
+    elif (a.pseudo and a.exchange != "pseudo") or (a.xpol and a.exchange != "xpol"):
+        raise SystemExit(f"--exchange {a.exchange} contradicts --pseudo / --xpol")
+    if a.exchange == "xpol" and not (a.model == "complete" and a.frozen):
+        raise SystemExit("--exchange xpol needs --model complete --frozen (the pair Pauli energies)")
+    a.pseudo, a.xpol = a.exchange == "pseudo", a.exchange == "xpol"
+    print(f"exchange polarization: {a.exchange}", flush=True)
+
+
 def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None):
     """The model of a run from its arguments (train_ionct's, as saved in model.pt): the ion CT model or, with
     ``model == "complete"``, the complete model on the environment heads."""
@@ -728,10 +744,13 @@ def main():
     ap.add_argument("--force-every", type=int, default=1, help="force step every k-th energy step (weight x k)")
     ap.add_argument("--force-batch", type=int, default=16)
     ap.add_argument("--force-test", nargs="*", default=list(FORCE_TEST), help="force files (stems) held out")
-    ap.add_argument("--xpol", action="store_true",
-                    help="complete + frozen: quadratic exchange polarization -- the pair Pauli energies as a PSD quadratic "
-                         "in the induced moments and breathing amplitudes, minimized with the induction in one solve "
-                         "(in place of --pseudo, the confinement head and the separate breathing term; clusters only)")
+    ap.add_argument("--exchange", default="auto", choices=("auto", "xpol", "pseudo", "none"),
+                    help="the exchange-polarization drive: xpol = the quadratic functional (pair Pauli energies as a PSD "
+                         "quadratic in the induced moments and breathing amplitudes, one solve with the induction; the "
+                         "breathing amplitude joins the solve), pseudo = the learned pseudo-potential drive + separate "
+                         "breathing term, none. auto: xpol for --model complete --frozen, else pseudo with --pseudo, "
+                         "else none. The confinement head (--confine, --conf-form) is independent of it")
+    ap.add_argument("--xpol", action="store_true", help="same as --exchange xpol")
     ap.add_argument("--init-from", default=None, help="model.pt of a previous run to start from (same architecture)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda | cuda:N (complete model; batches are moved per step)")
     ap.add_argument("--w-disp", type=float, default=0.0, help="weight of the dispersion energy vs ALMO disp")
@@ -740,6 +759,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=10)
     a = ap.parse_args()
+    resolve_exchange(a)
     torch.manual_seed(a.seed)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)

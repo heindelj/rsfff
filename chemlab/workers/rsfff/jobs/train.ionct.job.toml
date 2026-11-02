@@ -28,7 +28,7 @@ text = """
 struct IonCT terms "rsfff.ionct"
     env::String = "density" in {"soap", "density"}
     params::String = "train/nacl/ionct/params/ions_wb97mv_tzvpd_pf2p.json"   # relative to the project dir at the site
-    preset::String = "v13_complete_shells" in {"v13", "none", "v13_freec", "v13_complete", "v13_complete_frozen", "v13_complete_mono", "v13_complete_pm", "v13_complete_shells", "v13_complete_sc", "v13_complete_force"}
+    preset::String = "complete" in {"complete", "v13", "none", "v13_freec", "v13_complete", "v13_complete_frozen", "v13_complete_mono", "v13_complete_pm", "v13_complete_shells", "v13_complete_sc", "v13_complete_force"}
     args::String = ""                                    # extra train_ionct arguments, appended to the preset's
     data::String = "train/nacl/ionct/data"               # ct_sets/ (+ walk_eda/), relative to the project dir
     analysis::String = "pairscan" in {"pairscan", "none"}
