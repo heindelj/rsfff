@@ -541,7 +541,7 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              ct_sat_ion=g("ct_sat_ion", False), ct_w_fixed=g("ct_w_fixed", False), xpol=g("xpol", False),
                              ct_model=g("ct_model", "direct"), head_frontier=g("head_frontier", None),
                              gap_shift=g("gap_shift", "acceptor"),
-                             xpol_perp=g("xpol_perp", False),
+                             xpol_perp=bool(g("xpol_perp", False)) and bool(g("xpol", False)),   # absent: before it was the default
                              xpol_kperp_init=_species_floats(g("xpol_kperp_init", None)),
                              xpol_kappa_head=not g("xpol_kappa_const", False),
                              xpol_perp_weight=g("xpol_perp_weight", "pauli"), xpol_kappa_env=g("xpol_kappa_env", "overlap"))   # absent: a checkpoint from before scalefree
@@ -775,7 +775,7 @@ def main():
                     help="complete: the donor / acceptor probe blocks as head inputs (default: yes for --ct-model "
                          "direct, no for gap)")
     ap.add_argument("--xpol-kperp-init", default=None,
-                    help="--xpol-perp: starting p per species, e.g. 'Na=6,Cl=0.1' (k_perp,ij = (p_i + p_j)/2; default 0.1). "
+                    help="--xpol-perp: starting p per species, e.g. 'Na=6,Cl=0.1' (k_perp,ij = (p_i + p_j)/2; default Na 6, Cl 0.1, others 0.1). "
                          "Pair E_pol does not see k_perp (no field across a bond), so it is learned from alpha and "
                          "asymmetric clusters only and moves slowly from a small start")
     ap.add_argument("--xpol-perp-weight", default="pauli", choices=("pauli", "sqrt_overlap"),
@@ -788,8 +788,8 @@ def main():
     ap.add_argument("--xpol-kappa-const", action="store_true",
                     help="xpol: kappa = kappa0 per species and component, no environment head (the exchange term's R "
                          "dependence is then the Pauli energy and the tabulated overlap derivatives alone)")
-    ap.add_argument("--xpol-perp", action="store_true",
-                    help="xpol: add the perpendicular exchange stiffening E0 k_perp (|v_i|^2 |z_i|^2 - (v_i.z_i)^2) per "
+    ap.add_argument("--xpol-perp", default=True, action=argparse.BooleanOptionalAction,
+                    help="xpol (default on; --no-xpol-perp for the k_par term alone): the perpendicular exchange stiffening E0 k_perp (|v_i|^2 |z_i|^2 - (v_i.z_i)^2) per "
                          "pair side and component block (k_perp >= 0 per species): confinement across the overlap "
                          "direction, in place of a confinement head")
     ap.add_argument("--init-from", default=None, help="model.pt of a previous run to start from (same architecture)")

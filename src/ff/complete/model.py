@@ -85,7 +85,7 @@ overlap (``gap_shift="acceptor"``, the default: delta_D = 0). The Stark term (``
 acceptor probe blocks are left out of every head's input (``head_frontier=False``): the frontier shapes are operators
 of the gap, not features.
 
-Perpendicular exchange stiffening (``xpol_perp=True``, ``train_ionct --xpol-perp``; NaCl m30_xperp): lam u^2 is rank
+Perpendicular exchange stiffening (``xpol_perp``, on by default with xpol; ``--no-xpol-perp``; NaCl m30_xperp): lam u^2 is rank
 one per pair -- it stiffens only the deformation that changes O_ij (for two spherical ions: the dipole along the bond,
 the m = 0 quadrupole, breathing), so a pair's polarizability across the bond feels no exchange at all. The term
 
@@ -169,8 +169,11 @@ XPOL_KAPPA_INIT = {"Na": (0.07, 0.013, 0.1), "Cl": (0.28, 0.25, 0.34)}
 XPOL_KAPPA_FALLBACK = (0.3, 0.3, 0.3)
 XPOL_LAM_INIT = {"Na": 1.8, "Cl": 3.2}     # lam - 1 at start
 XPOL_LAM_FALLBACK = 2.0
-#: xpol_perp: k_perp at start (softplus of one parameter per species; small against k_par = 1 + l ~ 3-5)
-XPOL_KPERP_INIT = 0.1
+#: xpol_perp: p (k_perp,ij = (p_i + p_j)/2) at start, softplus of one parameter per species. Pair E_pol does not see
+#: k_perp, so it is learned from alpha and asymmetric clusters only and moves slowly: start near the NaCl m30 values
+#: (xperp_sf: Na 5.67, Cl 0.079) rather than small
+XPOL_KPERP_INIT = {"Na": 6.0, "Cl": 0.1}
+XPOL_KPERP_FALLBACK = 0.1
 #: the component blocks the perpendicular stiffening acts in (dipole, quadrupole); breathing is a scalar
 XPOL_PERP_BLOCKS = ((0, 3), (3, 8))
 #: xpol_perp_weight="sqrt_overlap": W_ij = XPOL_PERP_E_S sqrt(O_ij / XPOL_PERP_O_S) in place of E0_ij -- half the decay
@@ -225,7 +228,7 @@ class CompleteModel(IonCTModel):
                  hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False, pauli_ii=False, conf_head=True, ct_sc=0,
                  env_cap=0.0, env_log=0.0, ct_sat=False, ct_q_cap=0.0, gap_cap=GAP_EXP_MAX, ct_sat_ion=False,
                  ct_w_fixed=False, xpol=False, ct_model="direct", head_frontier=None, gap_shift="acceptor",
-                 xpol_perp=False, xpol_kperp_init=None, xpol_kappa_head=True,
+                 xpol_perp=None, xpol_kperp_init=None, xpol_kappa_head=True,
                  xpol_perp_weight="pauli", xpol_kappa_env="scalefree"):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
@@ -451,6 +454,8 @@ class CompleteModel(IonCTModel):
         self.xpol = bool(xpol)
         self.xpol_perp = False
         self.xpol_kappa_env, self.xpol_perp_weight = "overlap", "pauli"
+        if xpol_perp is None:           # default: the perpendicular stiffening comes with xpol
+            xpol_perp = bool(xpol)
         if xpol_perp and not xpol:
             raise ValueError("xpol_perp needs xpol=True")
         if self.xpol:
@@ -475,7 +480,7 @@ class CompleteModel(IonCTModel):
             self.head_xpol = EnvironmentHead(n_in, 1, hidden, depth, ns) if xpol_kappa_head else None
             self.xpol_perp = bool(xpol_perp)
             if self.xpol_perp:
-                kp0 = [(xpol_kperp_init or {}).get(x, XPOL_KPERP_INIT) for x in tab.symbols]
+                kp0 = [{**XPOL_KPERP_INIT, **(xpol_kperp_init or {})}.get(x, XPOL_KPERP_FALLBACK) for x in tab.symbols]
                 self.xpol_kperp = nn.Parameter(torch.tensor([math.log(math.expm1(max(v, 1e-6))) for v in kp0],
                                                             dtype=torch.float64))   # p_s: k_perp,ij = (p_i + p_j)/2
             self.register_buffer("xpol_breath_mask", (tab.a0 > 0).to(torch.float64))

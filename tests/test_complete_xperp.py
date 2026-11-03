@@ -65,7 +65,7 @@ def _pair_alpha(m, tab, chan, table, R):
 def test_zero_kperp_is_xpol(setup):
     tab, chan, table, make = setup
     X, Z = _cluster()
-    m0, m1 = make(), make(kperp=1e-30, xpol_perp=True)
+    m0, m1 = make(xpol_perp=False), make(kperp=1e-30, xpol_perp=True)
     m1.load_state_dict(m0.state_dict(), strict=False)
     with torch.no_grad():
         m1.xpol_kperp.fill_(-80.0)
@@ -290,3 +290,22 @@ def test_defaults_and_legacy_breathing_head(setup):
     X, Z = _cluster()
     with torch.no_grad():
         assert abs(float(m(_batch(table, tab, chan, X, Z, m))["e_pol"] - m2(_batch(table, tab, chan, X, Z, m2))["e_pol"])) < 1e-12
+
+
+def test_perp_is_the_default(setup):
+    """xpol brings the perpendicular stiffening unless switched off, starting from the per-species defaults; the
+    training CLI agrees, and a checkpoint without the key (before the default) builds without it."""
+    from rsfff.ff.complete.model import XPOL_KPERP_INIT
+    from rsfff.train.train_ionct import build_model
+    tab, chan, table, make = setup
+    m = make()
+    assert m.xpol_perp
+    p = torch.nn.functional.softplus(m.xpol_kperp)
+    for k, x in enumerate(tab.symbols):
+        if x in XPOL_KPERP_INIT:
+            assert abs(float(p[k]) - XPOL_KPERP_INIT[x]) < 1e-9
+    assert not make(xpol_perp=False).xpol_perp
+    feat = DensityEnvironment(tab)
+    old = build_model({"model": "complete", "frozen": True, "xpol": True, "pauli_form": "shells"}, tab, chan,
+                      feat.n_feat, feature_names=feat.feature_names)
+    assert old.xpol and not old.xpol_perp and old.xpol_kappa_env == "overlap"

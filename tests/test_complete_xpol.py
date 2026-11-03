@@ -118,7 +118,7 @@ def test_positivity_and_stationarity(setup):
     the reported e_xpol is E_P(z*) - E_P(0) from the pairs, the solution is stationary and below z = 0."""
     tab, chan, table, make = setup
     X, Z = _cluster(a=2.2)
-    m = make(xpol=True)
+    m = make(xpol=True, xpol_perp=False)     # the k_par kernel alone (k_perp: test_complete_xperp)
     bt = _batch(table, tab, chan, X, Z, m.inv_form)
     with torch.no_grad():
         o = m(bt)
