@@ -128,7 +128,7 @@ def test_forces_continuous_at_a_lattice_site(setup):
         m = CompleteModel(tab, chan, len(names), feature_names=names, pseudo=True, frozen=True, pauli_form="shells")
         torch.manual_seed(0)
         with torch.no_grad():
-            for hd in (m.head_conf, m.head_ctq, m.head_frozen, m.head_ps, m.head_breath):
+            for hd in (m.head_conf, m.head_ctq, m.head_frozen, m.head_ps):
                 hd.lin.weight.normal_(0, 0.3)
                 hd.net[-1].weight.normal_(0, 0.3)
 

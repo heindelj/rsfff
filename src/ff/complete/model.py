@@ -16,13 +16,15 @@ and two equivariant pieces that the invariant-only model cannot express:
 
 Breathing (l = 0) response, when the table carries it (``a0 > 0``, from ``scripts/ion_parents.py``):
 
-    E_0,i = -1/2 a0[s] exp(head_0(I_i)) (V[breath]_i^(0) + lam0[s] S[breath]_i^(0))^2
+    E_0,i = -1/2 a0[s] e^lna[s] (V[breath]_i^(0) + lam0[s] S[breath]_i^(0))^2
 
 with V[breath]^(0) the penetration potential of all the other frozen densities over the ion's l = 0 response shape
 (the ``breath`` probe of the environment) and S[breath]^(0) their overlap with it: the Coulomb drive (fitted to the
 CPKS point-charge response) and the Pauli-pressure drive (exchange polarization at l = 0 -- the density contracts
 to relieve overlap; lam0 learned, 0 at start). The drive is a scalar, so it adds coherently over neighbours -- the
-polarization of an ion in a symmetric cage that no dipole / quadrupole response can give.
+polarization of an ion in a symmetric cage that no dipole / quadrupole response can give. The breathing
+polarizability a0 e^lna is a per-species constant (no environment head): with xpol its environment dependence
+is the drive and the exchange coupling below.
 
 Frozen-level terms (``frozen=True``), labels ``mod_pauli`` and ``disp``, heads on the overlap invariants only
 (the EDA hierarchy: no fields at the frozen level):
@@ -56,7 +58,11 @@ polarization needs). The linear term is the exclusion drive (pseudo-potential)
 with the pair's own Pauli energy as its strength; the quadratic term is positive semi-definite by construction and holds
 the on-site stiffening (confinement, along the bond) and the inter-site coupling of the same amplitude; lam >= 1 keeps
 every pair's E_P >= 0 for any x (lam = 1: the linearised overlap-squared limit). kappa_i = kappa0[s, l]
-exp(head(S_i)) per component (dipole, quadrupole, breathing), the head on the frozen overlap invariants only, so the
+exp(head(S_i)) per component (dipole, quadrupole, breathing). The head's inputs (default ``xpol_kappa_env =
+"scalefree"``) are three scale-free coordination descriptors of i's frozen pair overlaps (``xpol_scalefree``:
+n_eff - 1, eta1, eta2), all exactly 0 for a single neighbour at any distance, so kappa = kappa0 on every pair and the
+exchange term's R dependence is E0_ij and the tabulated d / O alone; ``"overlap"`` uses the frozen overlap invariants
+(R dependent, as in checkpoints from before the scale-free inputs). Either way the inputs are frozen, so the
 functional stays quadratic and its minimum is one linear solve,
 
     (A + H) z = -(L + g),   z = (x, b),   E_pol = 1/2 z A z + L z + [g z + 1/2 z H z]
@@ -79,6 +85,17 @@ overlap (``gap_shift="acceptor"``, the default: delta_D = 0). The Stark term (``
 acceptor probe blocks are left out of every head's input (``head_frontier=False``): the frontier shapes are operators
 of the gap, not features.
 
+Perpendicular exchange stiffening (``xpol_perp=True``, ``train_ionct --xpol-perp``; NaCl m30_xperp): lam u^2 is rank
+one per pair -- it stiffens only the deformation that changes O_ij (for two spherical ions: the dipole along the bond,
+the m = 0 quadrupole, breathing), so a pair's polarizability across the bond feels no exchange at all. The term
+
+    E0_ij k_perp,ij sum_blocks ( |v_i,b|^2 |z_i,b|^2 - (v_i,b . z_i,b)^2 ) + (i <-> j),   k_perp = (p_i + p_j)/2 >= 0
+
+(blocks: dipole, quadrupole) adds the missing on-site stiffness across the overlap direction with the same Pauli weight
+and the same sensitivity (Lagrange identity: |v|^2|z|^2 = (v.z)^2 + |v x z|^2). It is non-negative and on-site only,
+so positivity and the single linear solve are unchanged; with lam it gives each ion the exchange stiffness
+2 E0 [lam v v^T + k_perp (|v|^2 1 - v v^T)] per pair: parallel and perpendicular rates, in place of a confinement head.
+
 Species enter only through the isolated-atom parameters (alpha0, C0, the CT charges qD0 / qA0 and exponents, kappa,
 lam, gamma0); the heads are shared (``species_emb`` adds an embedding to their input).
 """
@@ -97,7 +114,7 @@ from ..ionct.ct import ChannelTable
 from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_damp_unequal
 from .elst import permanent_electrostatics
 from .heads import EnvironmentHead
-from .periodic import _matvec, dispersion_switch, recip_apply, solve_induction_periodic, solve_xpol_periodic
+from .periodic import _matvec, _perp_quad, dispersion_switch, recip_apply, solve_induction_periodic, solve_xpol_periodic
 from .tabulate import XpolTable, xpol_overlap_map
 from .environment import inv_form_of
 
@@ -152,6 +169,16 @@ XPOL_KAPPA_INIT = {"Na": (0.07, 0.013, 0.1), "Cl": (0.28, 0.25, 0.34)}
 XPOL_KAPPA_FALLBACK = (0.3, 0.3, 0.3)
 XPOL_LAM_INIT = {"Na": 1.8, "Cl": 3.2}     # lam - 1 at start
 XPOL_LAM_FALLBACK = 2.0
+#: xpol_perp: k_perp at start (softplus of one parameter per species; small against k_par = 1 + l ~ 3-5)
+XPOL_KPERP_INIT = 0.1
+#: the component blocks the perpendicular stiffening acts in (dipole, quadrupole); breathing is a scalar
+XPOL_PERP_BLOCKS = ((0, 3), (3, 8))
+#: xpol_perp_weight="sqrt_overlap": W_ij = XPOL_PERP_E_S sqrt(O_ij / XPOL_PERP_O_S) in place of E0_ij -- half the decay
+#: rate (E0_ij is ~5 O_ij for these shells, so O_ij itself would decay like E0); equal to E0 at Na-Cl 2.6 A
+XPOL_PERP_O_S = 4.0e-3
+XPOL_PERP_E_S = 0.023
+#: xpol_kappa_env="scalefree": the kappa head's inputs, exactly constant along any pair (see xpol_scalefree)
+XPOL_SCALEFREE_NAMES = ("n_eff - 1", "eta1", "eta2")
 
 
 def induction_matrix_blocks(A_off, alpha_inv, C, quadrupoles=True):
@@ -197,13 +224,15 @@ class CompleteModel(IonCTModel):
                  species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
                  hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False, pauli_ii=False, conf_head=True, ct_sc=0,
                  env_cap=0.0, env_log=0.0, ct_sat=False, ct_q_cap=0.0, gap_cap=GAP_EXP_MAX, ct_sat_ion=False,
-                 ct_w_fixed=False, xpol=False, ct_model="direct", head_frontier=None, gap_shift="acceptor"):
+                 ct_w_fixed=False, xpol=False, ct_model="direct", head_frontier=None, gap_shift="acceptor",
+                 xpol_perp=False, xpol_kperp_init=None, xpol_kappa_head=True,
+                 xpol_perp_weight="pauli", xpol_kappa_env="scalefree"):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
                          pol_form="confine")
         self.pseudo = pseudo
-        # env_cap > 0: the log environment factors of the CT charges, Pauli weights, C6, exclusion strengths and the
-        # breathing response are cap * tanh(h / cap), so each parameter stays within e^+-cap of its isolated value
+        # env_cap > 0: the log environment factors of the CT charges, Pauli weights, C6 and exclusion strengths
+        # are cap * tanh(h / cap), so each parameter stays within e^+-cap of its isolated value
         # however far the invariants extrapolate (an unbounded exp(h) took the NaCl dimer CT to -1e8 kJ/mol at 1.8 A)
         self.env_cap = float(env_cap)
         self.env_log = float(env_log)          # > 0: the heads read the signed log of the invariants (heads.py)
@@ -331,7 +360,8 @@ class CompleteModel(IonCTModel):
         if self.breath:
             self.breath_col = names.index("breath:V0_pen")
             self.breath_s0_col = names.index("breath:S0")
-            self.head_breath = EnvironmentHead(n_feat, 1, hidden, depth, ns)
+            # a_b = a0 exp(breath_lna): a per-species constant. Its environment dependence is physical: the drive V0
+            # and, with xpol, the exchange coupling (E0, k_par, the breathing kappa) -- no environment head
             self.breath_lna = nn.Parameter(torch.zeros(S, dtype=torch.float64))     # scale on the fitted a0
             self.breath_lam = nn.Parameter(torch.zeros(S, dtype=torch.float64))     # Pauli-pressure drive per overlap
             sv = float(feat_scale[self.breath_col] / feat_scale[self.breath_s0_col]) if feat_scale is not None else 1.0
@@ -419,6 +449,10 @@ class CompleteModel(IonCTModel):
             self.ps_lng0 = nn.Parameter(torch.log(PSEUDO_GAMMA_PER_ALPHA * tab.alpha.clamp(min=1e-3)).double())
             self.head_ps = EnvironmentHead(len(cols), 1, hidden, depth, ns)
         self.xpol = bool(xpol)
+        self.xpol_perp = False
+        self.xpol_kappa_env, self.xpol_perp_weight = "overlap", "pauli"
+        if xpol_perp and not xpol:
+            raise ValueError("xpol_perp needs xpol=True")
         if self.xpol:
             if not frozen:
                 raise ValueError("xpol needs frozen=True (the pair Pauli energies)")
@@ -430,7 +464,20 @@ class CompleteModel(IonCTModel):
             self.xpol_lnk = nn.Parameter(torch.log(torch.tensor(ka, dtype=torch.float64)))         # (S, 3)
             self.xpol_lam = nn.Parameter(torch.tensor([math.log(math.expm1(XPOL_LAM_INIT.get(x, XPOL_LAM_FALLBACK)))
                                                        for x in tab.symbols], dtype=torch.float64))
-            self.head_xpol = EnvironmentHead(len(self.frozen_cols), 1, hidden, depth, ns)
+            # xpol_kappa_head=False: kappa = kappa0[s, l] only (per species and component, no environment head); the
+            # R dependence of the exchange term is then E0_ij and the tabulated d_ij / O_ij alone
+            if xpol_kappa_env not in ("overlap", "scalefree"):
+                raise ValueError(f"xpol_kappa_env {xpol_kappa_env!r}: overlap or scalefree")
+            if xpol_perp_weight not in ("pauli", "sqrt_overlap"):
+                raise ValueError(f"xpol_perp_weight {xpol_perp_weight!r}: pauli or sqrt_overlap")
+            self.xpol_kappa_env, self.xpol_perp_weight = xpol_kappa_env, xpol_perp_weight
+            n_in = len(XPOL_SCALEFREE_NAMES) if xpol_kappa_env == "scalefree" else len(self.frozen_cols)
+            self.head_xpol = EnvironmentHead(n_in, 1, hidden, depth, ns) if xpol_kappa_head else None
+            self.xpol_perp = bool(xpol_perp)
+            if self.xpol_perp:
+                kp0 = [(xpol_kperp_init or {}).get(x, XPOL_KPERP_INIT) for x in tab.symbols]
+                self.xpol_kperp = nn.Parameter(torch.tensor([math.log(math.expm1(max(v, 1e-6))) for v in kp0],
+                                                            dtype=torch.float64))   # p_s: k_perp,ij = (p_i + p_j)/2
             self.register_buffer("xpol_breath_mask", (tab.a0 > 0).to(torch.float64))
             self._xpol_table = None
         if self.ct_model == "gap":
@@ -469,6 +516,9 @@ class CompleteModel(IonCTModel):
         # which species may be confined is this model's argument (``confine``), not the checkpoint's
         if prefix + "confine_mask" in state_dict:
             state_dict[prefix + "confine_mask"] = self.confine_mask.clone()
+        # checkpoints from before the breathing environment head was removed (it was unused with xpol)
+        for k in [k for k in state_dict if k.startswith(prefix + "head_breath.")]:
+            del state_dict[k]
         super()._load_from_state_dict(state_dict, prefix, *args, **kw)
 
     def scaled(self, feats):
@@ -849,10 +899,44 @@ class CompleteModel(IonCTModel):
         return I.new_zeros(B).index_add(0, fr, e_p), e_disp, (qP, bP, C6, b6)
 
     # -- quadratic exchange polarization --
-    def xpol_kappa(self, I, sp):
+    @staticmethod
+    def xpol_scalefree(n, i, j, dr, O):
+        """(n, 3) scale-free coordination descriptors of every atom from its exchange pairs (overlap O_ij, bond dr):
+        with S = sum_j O_ij, V = sum_j O_ij r_ij^, Q = sum_j O_ij (r^ r^T - 1/3),
+
+            n_eff - 1 = S^2 / sum_j O_ij^2 - 1,   eta1 = 1 - |V|^2 / S^2,   eta2 = 1 - (3/2) |Q|_F^2 / S^2
+
+        all exactly 0 for one neighbour at any distance (a pair scan sees a constant kappa), n_eff = number of equal
+        neighbours, eta1 = 1 when the overlap pull cancels (a180, sq4, Td, Oh), eta2 = 1 when its rank-2 part does
+        (Td, Oh). Squared norms: smooth at the symmetric points. An atom without pairs gets 0."""
+        rh = dr / dr.norm(dim=-1, keepdim=True)
+        idx = torch.cat([i, j])
+        w = torch.cat([O, O])
+        r2 = torch.cat([rh, -rh])
+        S = O.new_zeros(n).index_add(0, idx, w)
+        S2 = O.new_zeros(n).index_add(0, idx, w * w)
+        V = O.new_zeros(n, 3).index_add(0, idx, w[:, None] * r2)
+        Qp = r2[:, :, None] * r2[:, None, :] - torch.eye(3, dtype=O.dtype, device=O.device) / 3
+        Q = O.new_zeros(n, 3, 3).index_add(0, idx, w[:, None, None] * Qp)
+        ok = S2 > 1e-280
+        Ss, S2s = torch.where(ok, S, torch.ones_like(S)), torch.where(ok, S2, torch.ones_like(S2))
+        ne = Ss * Ss / S2s - 1
+        e1 = 1 - (V * V).sum(1) / (Ss * Ss)
+        e2 = 1 - 1.5 * (Q * Q).sum((1, 2)) / (Ss * Ss)
+        out = torch.stack([ne, e1, e2], 1)
+        return torch.where(ok[:, None], out, torch.zeros_like(out))
+
+    def xpol_kappa(self, I, sp, pairs=None):
         """(N, D) the per-component scale of each atom's overlap amplitude: kappa0[s] exp(head(S_i)) on the dipole (3),
         quadrupole (5) and, with breathing, the l = 0 amplitude (zero for species without one)."""
-        h = self.capped(self.head_xpol(I[:, self.frozen_cols], sp)[:, 0])
+        if self.head_xpol is None:
+            h = I.new_zeros(I.shape[0])
+        elif self.xpol_kappa_env == "scalefree":
+            if pairs is None:
+                raise ValueError("xpol_kappa_env='scalefree' needs the exchange pairs (i, j, dr, O)")
+            h = self.capped(self.head_xpol(self.xpol_scalefree(I.shape[0], *pairs), sp)[:, 0])
+        else:
+            h = self.capped(self.head_xpol(I[:, self.frozen_cols], sp)[:, 0])
         k = torch.exp(self.xpol_lnk[sp] + h[:, None])                                   # (N, 3)
         parts = [k[:, :1].expand(-1, 3), k[:, 1:2].expand(-1, 5)]
         if self.breath:
@@ -882,13 +966,41 @@ class CompleteModel(IonCTModel):
         t = ((torch.log10(O.abs().clamp(min=1e-300)) + 11.0) / 2.0).clamp(0.0, 1.0)
         sw = t * t * (3 - 2 * t)
         rel = torch.cat([d, e[:, None]], 1) * (sw / O.clamp(min=1e-11))[:, None]   # (2P, 9): d ln O_ab per unit of b's z
-        kap = self.xpol_kappa(I, sp)
+        # the scale-free descriptors see each pair's overlap through the same switch (no quadrature noise)
+        kap = self.xpol_kappa(I, sp, (i, j, dr, sw[:P] * O[:P].clamp(min=0.0)))
+        self._xpol_O = O[:P]                          # O_ij of the kept pairs (the sqrt_overlap perpendicular weight)
         D = kap.shape[1]
         vj = kap[j] * rel[:P, :D]                     # (i <- j): j's deformation changes O_ij
         vi = kap[i] * rel[P:, :D]                     # (j <- i): i's deformation changes O_ji
         sl = nn.functional.softplus(self.xpol_lam)
         lam = 1 + 0.5 * (sl[sp[i]] + sl[sp[j]])
         return i, j, e0, lam, vi, vj
+
+    def xpol_perp_weights(self, sp, i, j, e0):
+        """(P,) w_perp = 2 W_ij k_perp,ij of each exchange pair, W = E0_ij or (sqrt_overlap) E_s sqrt(O_ij / O_s) (None without ``xpol_perp``): the on-site Hessian of the
+        perpendicular stiffening on side i is w_perp (|v_i|^2 1 - v_i v_i^T) within each component block."""
+        if not self.xpol_perp:
+            return None
+        kp = nn.functional.softplus(self.xpol_kperp)
+        if self.xpol_perp_weight == "sqrt_overlap":
+            W = XPOL_PERP_E_S * torch.sqrt(self._xpol_O.clamp(min=0.0) / XPOL_PERP_O_S + 1e-30)
+        else:
+            W = e0
+        return 2 * W * 0.5 * (kp[sp[i]] + kp[sp[j]])
+
+    @staticmethod
+    def xpol_perp_blocks(v):
+        """(P, D, D) the per-pair on-site matrix sum_blocks (|v_b|^2 1_b - v_b v_b^T) of the perpendicular stiffening."""
+        P_, D = v.shape
+        M = v.new_zeros(P_, D, D)
+        for a, b in XPOL_PERP_BLOCKS:
+            if b > D:
+                continue
+            vb = v[:, a:b]
+            n2 = (vb * vb).sum(1)
+            eye = torch.eye(b - a, dtype=v.dtype, device=v.device)
+            M[:, a:b, a:b] = n2[:, None, None] * eye - vb[:, :, None] * vb[:, None, :]
+        return M
 
     def xpol_solve(self, bt, sp, I, L, A_off, ainv_pad, Cq, quadrupoles=True):
         """The minimum of 1/2 z A z + L z + E_P(z) - E_P(0) over z = (x, b) for clusters: one dense solve.
@@ -927,6 +1039,10 @@ class CompleteModel(IonCTModel):
         H = H.index_put((f, lj, a_, lj, b_), w * vj[:, :, None] * vj[:, None, :], accumulate=True)
         H = H.index_put((f, li, a_, lj, b_), w * vi[:, :, None] * vj[:, None, :], accumulate=True)
         H = H.index_put((f, lj, a_, li, b_), w * vj[:, :, None] * vi[:, None, :], accumulate=True)
+        wp = self.xpol_perp_weights(sp, i, j, e0)
+        if wp is not None:              # E0 k_perp (|v_i|^2 |z_i|^2 - (v_i.z_i)^2) per block, both sides: on-site only
+            H = H.index_put((f, li, a_, li, b_), wp[:, None, None] * self.xpol_perp_blocks(vi), accumulate=True)
+            H = H.index_put((f, lj, a_, lj, b_), wp[:, None, None] * self.xpol_perp_blocks(vj), accumulate=True)
         N = nmax * D
         Mf, Hf = M.reshape(B, N, N), H.reshape(B, N, N)
         z = -torch.linalg.solve(Mf + Hf, (Lz + gz).reshape(B, N, 1))[..., 0]
@@ -960,13 +1076,15 @@ class CompleteModel(IonCTModel):
             Lz = torch.cat([Lf, -V0[:, None]], 1)
         g = Lf.new_zeros(n, D).index_add(0, i, 2 * e0[:, None] * vi).index_add(0, j, 2 * e0[:, None] * vj)
         w = 2 * lam * e0
+        wp = self.xpol_perp_weights(sp, i, j, e0)
+        hp = (i, j, w, vi, vj) if wp is None else (i, j, w, vi, vj, wp)
         xg = bt.get("x_guess")
         if xg is not None and xg.shape[0] == n:
             xg = torch.cat([xg, xg.new_zeros(n, D - xg.shape[1])], 1) if xg.shape[1] < D else xg[:, :D]
         else:
             xg = None
         z = solve_xpol_periodic(Lz + g, ainv, Cs, ainv_b, pbc["A_pairs"], pbc["A_blocks"], pbc["frames"],
-                                (i, j, w, vi, vj), quadrupoles, x0=xg, info=info)
+                                hp, quadrupoles, x0=xg, info=info)
         P = K._poly_map(Lf.dtype, Lf.device)
         cinv = torch.where(Cs > 0, 1.0 / Cs.clamp(min=1e-30), torch.full_like(Cs, 1e12))
         dof = Lf.new_ones(8)
@@ -981,6 +1099,8 @@ class CompleteModel(IonCTModel):
             e_el = e_el + Lf.new_zeros(B).index_add(0, fr, e_b)
         u = (vi * z[i]).sum(1) + (vj * z[j]).sum(1)
         e_x = Lf.new_zeros(B).index_add(0, fr, (g * z).sum(1)).index_add(0, fr[i], 0.5 * w * u * u)
+        if wp is not None:
+            e_x = e_x.index_add(0, fr[i], 0.5 * wp * (_perp_quad(vi, z[i]) + _perp_quad(vj, z[j])))
         return z, e_el, e_x, e_b
 
     # -- the model --
@@ -1061,7 +1181,7 @@ class CompleteModel(IonCTModel):
             e_breath_atom = I.new_zeros(n)
         if self.breath and not self.xpol:
             v0 = bt["feats"][:, self.breath_col] + self.breath_lam[sp] * self.breath_s0_scale * bt["feats"][:, self.breath_s0_col]
-            a = self.tab.a0[sp] * torch.exp(self.breath_lna[sp] + self.capped(self.head_breath(I, sp)[:, 0]))
+            a = self.tab.a0[sp] * torch.exp(self.breath_lna[sp])
             e_breath_atom = -0.5 * a * v0 * v0
             e_pol = e_pol + I.new_zeros(B).index_add(0, bt["frame"], e_breath_atom)
         q = self.ct_charges_from(I, sp)
@@ -1156,6 +1276,8 @@ class CompleteModel(IonCTModel):
             out["xpol kappa0 (dip, quad, breath)"] = {x: [round(v, 4) for v in self.xpol_lnk[k].exp().tolist()]
                                                       for k, x in enumerate(sym)}
             out["xpol lam"] = {x: round(1 + float(nn.functional.softplus(self.xpol_lam[k])), 4) for k, x in enumerate(sym)}
+            if self.xpol_perp:
+                out["xpol k_perp"] = {x: round(float(nn.functional.softplus(self.xpol_kperp[k])), 4) for k, x in enumerate(sym)}
         if self.aniso:
             out["kappa_aniso"] = {x: round(float(self.kappa_aniso[k].detach()), 4) for k, x in enumerate(sym)}
         if self.ct_gap:

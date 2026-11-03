@@ -231,11 +231,13 @@ def test_periodic_huge_box_is_the_cluster(setup):
         assert abs(float(ref[k] - out[k])) < 1e-7, (k, float(ref[k]), float(out[k]))
 
 
-def test_periodic_forces_and_stress(setup):
+@pytest.mark.parametrize("env,h", [("overlap", 1e-4), ("scalefree", 2e-5)])
+def test_periodic_forces_and_stress(setup, env, h):
     """A small triclinic cell (several images per pair, self images): forces and the strain derivative of the
-    periodic energy against central differences."""
+    periodic energy against central differences. The randomised kappa head on the (unscaled) scale-free descriptors
+    curves the energy more, so its central differences take a smaller step (the error falls as h^2)."""
     tab, chan, table, make = setup
-    m = make(xpol=True)
+    m = make(xpol=True, xpol_kappa_env=env)
     X, Z, cell = _rocksalt(1, a=5.5, jitter=0.2, seed=3)
     cell = cell + torch.tensor([[0, 0, 0], [0.4, 0, 0], [0.2, -0.3, 0]], dtype=torch.float64)
     fr = torch.zeros(len(Z), dtype=torch.long)
@@ -247,7 +249,6 @@ def test_periodic_forces_and_stress(setup):
     pos = X.clone().requires_grad_(True)
     eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True)
     g, ge = torch.autograd.grad(E(pos, eps), (pos, eps))
-    h = 1e-4
     z3 = torch.zeros(3, 3, dtype=torch.float64)
     with torch.no_grad():
         for a, b in ((0, 0), (3, 2), (6, 1)):

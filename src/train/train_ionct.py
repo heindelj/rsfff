@@ -155,6 +155,13 @@ def polar_loss(model, pb):
             torch.where(have & ok, (a[..., 1] - t[..., 1]) / n, z))
 
 
+def _species_floats(spec):
+    """'Na=6,Cl=0.1' -> {'Na': 6.0, 'Cl': 0.1} (None or '' -> None)."""
+    if not spec:
+        return None
+    return {k.strip(): float(v) for k, v in (t.split("=") for t in spec.split(",") if t.strip())}
+
+
 def featurizer_for(a, tab):
     """The environment featurizer a run was trained with (train_ionct --env)."""
     if a.get("env", "soap") == "density":
@@ -533,7 +540,11 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              ct_sat=g("ct_sat", False), ct_q_cap=g("ct_q_cap", 0.0), gap_cap=g("gap_cap", 4.0),
                              ct_sat_ion=g("ct_sat_ion", False), ct_w_fixed=g("ct_w_fixed", False), xpol=g("xpol", False),
                              ct_model=g("ct_model", "direct"), head_frontier=g("head_frontier", None),
-                             gap_shift=g("gap_shift", "acceptor"))
+                             gap_shift=g("gap_shift", "acceptor"),
+                             xpol_perp=g("xpol_perp", False),
+                             xpol_kperp_init=_species_floats(g("xpol_kperp_init", None)),
+                             xpol_kappa_head=not g("xpol_kappa_const", False),
+                             xpol_perp_weight=g("xpol_perp_weight", "pauli"), xpol_kappa_env=g("xpol_kappa_env", "overlap"))   # absent: a checkpoint from before scalefree
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -763,6 +774,24 @@ def main():
     ap.add_argument("--head-frontier", default=None, action=argparse.BooleanOptionalAction,
                     help="complete: the donor / acceptor probe blocks as head inputs (default: yes for --ct-model "
                          "direct, no for gap)")
+    ap.add_argument("--xpol-kperp-init", default=None,
+                    help="--xpol-perp: starting p per species, e.g. 'Na=6,Cl=0.1' (k_perp,ij = (p_i + p_j)/2; default 0.1). "
+                         "Pair E_pol does not see k_perp (no field across a bond), so it is learned from alpha and "
+                         "asymmetric clusters only and moves slowly from a small start")
+    ap.add_argument("--xpol-perp-weight", default="pauli", choices=("pauli", "sqrt_overlap"),
+                    help="--xpol-perp: the pair weight of the perpendicular stiffening: the Pauli energy E0_ij, or "
+                         "E_s sqrt(O_ij / O_s) (half its decay rate; equal at Na-Cl 2.6 A)")
+    ap.add_argument("--xpol-kappa-env", default="scalefree", choices=("scalefree", "overlap"),
+                    help="xpol: the kappa head's inputs: the 3 scale-free coordination descriptors (n_eff - 1, eta1, "
+                         "eta2; exactly constant along any pair, so kappa = kappa0 on every pair; default), or the 18 "
+                         "overlap invariants (R dependent: the head can learn distance switches)")
+    ap.add_argument("--xpol-kappa-const", action="store_true",
+                    help="xpol: kappa = kappa0 per species and component, no environment head (the exchange term's R "
+                         "dependence is then the Pauli energy and the tabulated overlap derivatives alone)")
+    ap.add_argument("--xpol-perp", action="store_true",
+                    help="xpol: add the perpendicular exchange stiffening E0 k_perp (|v_i|^2 |z_i|^2 - (v_i.z_i)^2) per "
+                         "pair side and component block (k_perp >= 0 per species): confinement across the overlap "
+                         "direction, in place of a confinement head")
     ap.add_argument("--init-from", default=None, help="model.pt of a previous run to start from (same architecture)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda | cuda:N (complete model; batches are moved per step)")
     ap.add_argument("--w-disp", type=float, default=0.0, help="weight of the dispersion energy vs ALMO disp")

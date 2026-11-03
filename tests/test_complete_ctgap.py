@@ -90,7 +90,7 @@ def test_gauge_invariance_and_field_response(setup):
 def test_frontier_blocks_are_not_head_inputs(setup):
     """Changing the donor / acceptor invariants changes no head output (only the gap operators use those shapes)."""
     tab, chan, table, feat, make = setup
-    m = make()
+    m = make(xpol_kappa_env="overlap")      # the kappa head on the invariants (scalefree reads only the pair overlaps)
     X, Z = _cluster()
     bt = _batch(table, tab, chan, X, Z, m)
     cols = [k for k, nm in enumerate(feat.feature_names) if nm.split(":")[0] in ("donor", "acceptor")]

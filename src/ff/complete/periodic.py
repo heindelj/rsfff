@@ -324,15 +324,38 @@ def solve_induction_periodic(L, ainv, C, pairs, Bij, frames, quadrupoles=True, r
     return x_star - _ImplicitZero.apply(r, solve)
 
 
+#: the component blocks of the perpendicular exchange stiffening (dipole, quadrupole); see model.XPOL_PERP_BLOCKS
+_PERP_BLOCKS = ((0, 3), (3, 8))
+
+
+def _perp_apply(v, z):
+    """(P, D) sum_blocks (|v_b|^2 z_b - (v_b.z_b) v_b): the on-site perpendicular-stiffening matrix times z."""
+    out = torch.zeros_like(z)
+    for a, b in _PERP_BLOCKS:
+        if b > z.shape[1]:
+            continue
+        vb, zb = v[:, a:b], z[:, a:b]
+        out[:, a:b] = (vb * vb).sum(1, keepdim=True) * zb - (vb * zb).sum(1, keepdim=True) * vb
+    return out
+
+
+def _perp_quad(v, z):
+    """(P,) sum_blocks |v_b|^2 |z_b|^2 - (v_b.z_b)^2 >= 0."""
+    return (z * _perp_apply(v, z)).sum(1)
+
+
 def _xpol_matvec(z, ainv, cinv, ainv_b, pairs, Bij, frames, hp, P, dof):
     """(A + H) z for z = (x, b) (N, D): the induction operator on x (``_matvec``), the breathing stiffness on b
     (D = 9), and H = sum_p w_p v_p v_p^T over the exchange pairs ``hp`` = (i, j, w, v_i, v_j) (rank one per pair)."""
     out = _matvec(z[:, :8], ainv, cinv, pairs, Bij, frames, P, dof[:8])
     if z.shape[1] == 9:
         out = torch.cat([out, (ainv_b * z[:, 8])[:, None]], 1)
-    i, j, w, vi, vj = hp
+    i, j, w, vi, vj = hp[:5]
     s = w * ((vi * z[i]).sum(1) + (vj * z[j]).sum(1))
     out = out.index_add(0, i, s[:, None] * vi).index_add(0, j, s[:, None] * vj)
+    if len(hp) > 5:                     # the perpendicular stiffening: on-site blocks w_perp (|v|^2 1 - v v^T)
+        wp = hp[5][:, None]
+        out = out.index_add(0, i, wp * _perp_apply(vi, z[i])).index_add(0, j, wp * _perp_apply(vj, z[j]))
     return out * dof
 
 
