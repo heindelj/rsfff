@@ -40,7 +40,8 @@ from .environment import INVARIANT_NAMES, PROBE_NAMES, invariants, shaped_overla
 from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
                        recip_apply, smooth_switch)
 
-__all__ = ["RadialTable", "XpolTable", "batched_precompute", "xpol_overlap_map"]
+__all__ = ["FluxTable", "RadialTable", "XpolTable", "batched_precompute", "flux_pair_terms", "shape_self_coulomb",
+           "xpol_overlap_map"]
 
 NORD = 5          # damping orders of the rank-2 tensor
 BOHR = K.BOHR_ANG
@@ -203,6 +204,69 @@ class RadialTable:
         if key not in memo:
             memo[key] = torch.tensor([self.index[n] for n in names], device=device)
         return memo[key]
+
+
+class FluxTable(RadialTable):
+    """The rows the charge-flux CT needs (``CompleteModel(ct_model="flux")``): per ordered species pair (s_i, s_j),
+
+        aoff:dd:{n}   f_n between i's dipole parent and j's dipole parent (the charge slot's shape)
+        aoff:qd:{n}   f_n between i's quadrupole parent and j's dipole parent
+
+    the same functions as the :class:`RadialTable` rows of those names, without the probes and frontier rows."""
+
+    def __init__(self, tab: IonTable, r_max=12.0, **kw):
+        with torch.enable_grad():           # built lazily by the model, possibly under no_grad (the r-derivatives)
+            super().__init__(tab, probes=(), r_max=r_max, **kw)
+
+    def _functions(self, si, sj):
+        tab = self.tab
+        r = self.r.clone().requires_grad_(True)
+        rb = r / BOHR
+        G = self.G
+        bd, wd = _expand(tab.b_dip[sj], tab.w_dip[sj], G)
+        out = {}
+        for a, (ba, wa) in (("d", (tab.b_dip[si], tab.w_dip[si])), ("q", (tab.b_quad[si], tab.w_quad[si]))):
+            bpa, wpa = _expand(ba, wa, G)
+            f = shaped_two_center_damp(bpa, bd, wpa, wd, rb, 2)
+            for n in range(NORD):
+                out[f"aoff:{a}d:{n}"] = f[n]
+        if not self.names:
+            self.names = list(out)
+            self.index = {k: n for n, k in enumerate(self.names)}
+        res = []
+        for k in self.names:
+            f = out[k]
+            d1 = torch.autograd.grad(f.sum(), r, create_graph=True)[0]
+            d2 = torch.autograd.grad(d1.sum(), r, retain_graph=True)[0]
+            res.append(torch.stack([f, d1, d2], -1).detach())
+        return res
+
+
+def shape_self_coulomb(tab: IonTable, r0: float = 1e-3) -> torch.Tensor:
+    """(S,) the Coulomb self-energy (Hartree) of each species' dipole-parent shape (unit charge): the r -> 0 limit
+    of (1 - f_0(r)) / r between two copies of it (converged to ~1e-9 at r0 = 1e-3 bohr)."""
+    out = []
+    rb = torch.tensor([r0], dtype=torch.float64)
+    for s in range(len(tab.symbols)):
+        b, w = _expand(tab.b_dip[s], tab.w_dip[s], 1)
+        f = shaped_two_center_damp(b, b, w, w, rb, 0)[0]
+        out.append(((1 - f) / rb)[0])
+    return torch.stack(out).detach()
+
+
+def flux_pair_terms(table: FluxTable, s, dp, dr):
+    """For directed pairs dp = (i <- j) (2, P), species s (N,) and dr = r_j - r_i (P, 3) bohr: the drive on i's
+    site variables (P, 8) of a unit charge in j's dipole-parent shape (dipole on i's dipole parent, quadrupole on its
+    quadrupole parent: the energy is Q_j K . z_i, as the permanent drive L) and the charge-charge Coulomb (P,) of the
+    two dipole-parent shapes."""
+    i, j = dp
+    r = dr.norm(dim=-1)
+    y = table(s[i], s[j], r * BOHR)
+    lam = 1 - table.rows(y, ["aoff:dd", "aoff:qd"])                     # (2, NORD, P)
+    T0 = _basis_tensors(dr)[:, :, 0, :]                                # (NORD, P, 10): row 0, j as a charge
+    R = torch.einsum("knp,npb->kpb", lam, T0)                          # (2, P, 10)
+    Rp = R @ K._poly_map(dr.dtype, dr.device)                          # (2, P, 8)
+    return torch.cat([Rp[0, :, :3], Rp[1, :, 3:]], 1), R[0, :, 0]
 
 
 def _sph_y(n, x):

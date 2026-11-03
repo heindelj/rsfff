@@ -96,6 +96,35 @@ and the same sensitivity (Lagrange identity: |v|^2|z|^2 = (v.z)^2 + |v x z|^2). 
 so positivity and the single linear solve are unchanged; with lam it gives each ion the exchange stiffness
 2 E0 [lam v v^T + k_perp (|v|^2 1 - v v^T)] per pair: parallel and perpendicular rates, in place of a confinement head.
 
+Charge-flux CT (``ct_model="flux"``, with xpol; NaCl 2026-11): every direct channel c = i -> j moves an explicit
+charge q_c (an electron from i to j: Delta Q_i = +q_c, Delta Q_j = -q_c), placed in each ion's dipole-parent shape (an
+l = 0 charge slot next to the induced dipole, so its couplings are the induced-moment kernels' rank-0 rows; no frontier
+shapes). The direct-CT kernel e_c = -qD_i qA_j f(bD, bA; r) / r <= 0 (environment heads as before, no gap factor, no
+saturation) sets the channel's compliance, SQE style:
+
+    E(z, q) = E_xpol(z) + sum_c [ 1/2 b_c q_c^2 - V_c q_c + q_c (phi_ext(i) - phi_ext(j)) ]
+              + 1/2 Q^T H Q + Q^T C^T z,                 Q = G q (atomic charge changes)
+    b_c = V0_c^2 / (2 |e_c|),   V0_c = v0[s_i] + v0[s_j],   V_c = t_p sqrt(V0_c^2 + 2 |e_c| h_c),   h_c = (G^T H G)_cc
+
+H the Coulomb matrix of the charge slots (shape self-energies on the diagonal) plus a learned on-site hardness
+eta[s] >= 0 (started at max(I - A - J_self, 0.01): the ions' IP / EA hardness), C the coupling of the charges to the
+induced moments (dipole / quadrupole parents). H is positive definite and b_c > 0, so the charge block is PD. The
+drive is tied to h_c: a lone channel (t = 1) at zero field gives exactly E = -V_c^2 / (2 (b_c + h_c)) = e_c, q* =
+2 |e_c| / V_c and alpha_CT,par = 2 |e_c| R^2 / V_c^2 = R^2 / (b_c + h_c). The two directions of a pair have opposite
+charge patterns (coupled by -h: counter-flow cancels the Coulomb cost), so their drives share the factor t_p <= 1 that
+makes the pair's own 2x2 minimum exactly e_c + e_c' (a symmetric pair moves no net charge and gets V = sqrt(2 |e| b)).
+The compliance 1 / b_c vanishes with e_c (no long-range CT).
+Everything else -- the field, other channels (shared atoms through H), the induced moments and through them xpol --
+enters linearly, and the joint minimum is one solve: with A = M + H_xpol and W = A^-1 C (extra right-hand sides of the
+xpol solve), S = diag(b) + G^T H G - C^T W (the Schur complement, solved in q_c / s_c with s_c = sqrt(2|e_c|) / V0_c, which
+keeps vanishing channels at the identity), b~ = -V + dphi_ext + C^T z_pol:
+
+    q* = -S^-1 b~,   E_CT = E_joint - E_pol = 1/2 b~ . q*,   z* = z_pol - W q*
+
+(ALMO bookkeeping: the CT-induced repolarization is CT). Clusters only; no solvent; no permanent third-body potential
+on the charges (the heads see it; the induced moments' potential acts through C, the pair's own included: for Na-Cl it
+takes the dimer E_CT to ~0.65-0.75 of e_c + e_c' at the untrained start).
+
 Species enter only through the isolated-atom parameters (alpha0, C0, the CT charges qD0 / qA0 and exponents, kappa,
 lam, gamma0); the heads are shared (``species_emb`` adds an embedding to their input).
 """
@@ -115,7 +144,7 @@ from ..multipole import cartesian_to_spherical_quadrupole, slater_two_center_dam
 from .elst import permanent_electrostatics
 from .heads import EnvironmentHead
 from .periodic import _matvec, _perp_quad, dispersion_switch, recip_apply, solve_induction_periodic, solve_xpol_periodic
-from .tabulate import XpolTable, xpol_overlap_map
+from .tabulate import FluxTable, XpolTable, flux_pair_terms, shape_self_coulomb, xpol_overlap_map
 from .environment import inv_form_of
 
 
@@ -182,6 +211,9 @@ XPOL_PERP_O_S = 4.0e-3
 XPOL_PERP_E_S = 0.023
 #: xpol_kappa_env="scalefree": the kappa head's inputs, exactly constant along any pair (see xpol_scalefree)
 XPOL_SCALEFREE_NAMES = ("n_eff - 1", "eta1", "eta2")
+# charge-flux CT: start of v0[s] (Hartree), V0_c = v0_i + v0_j. NaCl at 3 A: ALMO alpha_CT,par = 16 bohr^3 means a
+# total stiffness b + h = R^2 / alpha ~ 2 Eh; with h ~ 1.5 (IP hardness, slot Coulomb) b ~ 0.5 and V0^2 = 2 |e_c| b ~ 2e-3
+FLUX_V0_INIT = 0.025
 
 
 def induction_matrix_blocks(A_off, alpha_inv, C, quadrupoles=True):
@@ -229,7 +261,7 @@ class CompleteModel(IonCTModel):
                  env_cap=0.0, env_log=0.0, ct_sat=False, ct_q_cap=0.0, gap_cap=GAP_EXP_MAX, ct_sat_ion=False,
                  ct_w_fixed=False, xpol=False, ct_model="direct", head_frontier=None, gap_shift="acceptor",
                  xpol_perp=None, xpol_kperp_init=None, xpol_kappa_head=True,
-                 xpol_perp_weight="pauli", xpol_kappa_env="scalefree"):
+                 xpol_perp_weight="pauli", xpol_kappa_env="scalefree", flux_v0_init=FLUX_V0_INIT):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
                          pol_form="confine")
@@ -319,8 +351,14 @@ class CompleteModel(IonCTModel):
         # repolarization is CT).
         self.ct_sc = int(ct_sc)
         self.ct_model = str(ct_model)
-        if self.ct_model not in ("direct", "gap"):
+        if self.ct_model not in ("direct", "gap", "flux"):
             raise ValueError(f"ct_model {ct_model!r}")
+        if self.ct_model == "flux":
+            if ct_sc or ct_sat or ct_stark or ct_w_fixed:
+                raise ValueError("ct_model='flux': no ct_sc, ct_sat, ct_stark, ct_w_fixed (the flux solve replaces them)")
+            if not xpol:
+                raise ValueError("ct_model='flux' needs xpol=True (the charges join the xpol solve)")
+            ct_gap = False                  # no multiplicative gap factor: the field acts on the charges directly
         if self.ct_model == "gap" and self.ct_sc:
             raise ValueError("ct_model='gap': no ct_sc (self-consistent CT not implemented for it yet)")
         if (self.ct_sc or self.ct_sat or self.ct_model == "gap") and not hasattr(self, "A_fixed"):     # the pair gap
@@ -485,6 +523,15 @@ class CompleteModel(IonCTModel):
                                                             dtype=torch.float64))   # p_s: k_perp,ij = (p_i + p_j)/2
             self.register_buffer("xpol_breath_mask", (tab.a0 > 0).to(torch.float64))
             self._xpol_table = None
+        if self.ct_model == "flux":
+            f64 = dict(dtype=torch.float64)
+            self.flux_lnv = nn.Parameter(torch.full((S,), math.log(flux_v0_init), **f64))     # v0[s]: V0_c = v0_i + v0_j
+            js = shape_self_coulomb(tab)
+            self.register_buffer("flux_jself", js)
+            eta_ip = tab.I_donor - torch.nan_to_num(tab.A_acceptor, nan=0.0)
+            e0 = (eta_ip - js).clamp(min=0.01)
+            self.flux_eta = nn.Parameter(torch.log(torch.expm1(e0)).to(**f64))              # softplus: on-site hardness
+            self._flux_table = None
         if self.ct_model == "gap":
             if not frozen:
                 raise ValueError("ct_model='gap' needs frozen=True (the overlap invariants' columns)")
@@ -1007,10 +1054,11 @@ class CompleteModel(IonCTModel):
             M[:, a:b, a:b] = n2[:, None, None] * eye - vb[:, :, None] * vb[:, None, :]
         return M
 
-    def xpol_solve(self, bt, sp, I, L, A_off, ainv_pad, Cq, quadrupoles=True):
+    def xpol_solve(self, bt, sp, I, L, A_off, ainv_pad, Cq, quadrupoles=True, rhs_extra=None):
         """The minimum of 1/2 z A z + L z + E_P(z) - E_P(0) over z = (x, b) for clusters: one dense solve.
         Returns z (B, nmax, D), the electrical part 1/2 z A z + L z (B,), the exchange part g z + 1/2 z H z (B,) and
-        the breathing atoms' own energy 1/2 b^2 / a - V0 b (n,)."""
+        the breathing atoms' own energy 1/2 b^2 / a - V0 b (n,). ``rhs_extra`` (B, nmax D, k): more right-hand sides
+        of the same operator, solved with it; then (A + H)^-1 rhs_extra (B, nmax D, k) is returned fifth."""
         B, nmax, mask = bt["B"], bt["nmax"], bt["mask"]
         n = sp.shape[0]
         fr, loc = self._local(bt)
@@ -1050,7 +1098,11 @@ class CompleteModel(IonCTModel):
             H = H.index_put((f, lj, a_, lj, b_), wp[:, None, None] * self.xpol_perp_blocks(vj), accumulate=True)
         N = nmax * D
         Mf, Hf = M.reshape(B, N, N), H.reshape(B, N, N)
-        z = -torch.linalg.solve(Mf + Hf, (Lz + gz).reshape(B, N, 1))[..., 0]
+        rhs = (Lz + gz).reshape(B, N, 1)
+        if rhs_extra is not None:
+            rhs = torch.cat([rhs, rhs_extra], 2)
+        Y = torch.linalg.solve(Mf + Hf, rhs)
+        z = -Y[..., 0]
         Lf = Lz.reshape(B, N)
         e_el = 0.5 * (z * (Mf @ z[..., None])[..., 0]).sum(1) + (Lf * z).sum(1)
         e_x = (gz.reshape(B, N) * z).sum(1) + 0.5 * (z * (Hf @ z[..., None])[..., 0]).sum(1)
@@ -1059,7 +1111,103 @@ class CompleteModel(IonCTModel):
         if D == 9:
             bz = z[fr, loc, 8]
             e_b = torch.where(has, 0.5 * bz * bz * ainv_b - V0 * bz, torch.zeros_like(bz))
+        if rhs_extra is not None:
+            return z, e_el, e_x, e_b, Y[..., 1:]
         return z, e_el, e_x, e_b
+
+    # -- charge-flux CT --
+    def flux_operator(self, bt, sp, q, D, quadrupoles=True):
+        """The charge block of the flux CT for clusters. Returns C (B, nmax D, Cmax) the charges' coupling to the
+        induced moments (energy q^T C^T z), Hq = G^T H G (B, Cmax, Cmax), s (B, Cmax) the variable scales
+        sqrt(2 |e_c|) / V0_c, V (B, Cmax) the drives, G (B, nmax, Cmax) the charge pattern, the channels' (frame,
+        slot) and their kernel energies e_c (C,); padded channel slots have s = 0, V = 0."""
+        B, nmax = bt["B"], bt["nmax"]
+        fr, loc = self._local(bt)
+        if self._flux_table is None:
+            self._flux_table = FluxTable(self.tab)
+        tbl = self._flux_table
+        if tbl.device != bt["pos"].device:
+            tbl.to(bt["pos"].device)
+        X = bt["pos"] / K.BOHR_ANG
+        pairs = K.all_pairs(bt["frame"])
+        dp = torch.cat([pairs, pairs.flip(0)], 1)
+        a_, b_ = dp
+        Kp, Jp = flux_pair_terms(tbl, sp, dp, X[b_] - X[a_])
+        Kd = X.new_zeros(B, nmax, nmax, 8).index_put((fr[a_], loc[a_], loc[b_]), Kp)    # [l, k]: on l of a charge at k
+        eta = self.flux_jself[sp] + nn.functional.softplus(self.flux_eta[sp])
+        Jd = X.new_zeros(B, nmax, nmax).index_put((fr[a_], loc[a_], loc[b_]), Jp).index_put((fr, loc, loc), eta)
+        i, j = bt["ch_index"]
+        cf = bt["ch_frame"]
+        nC = i.shape[0]
+        cnt = torch.bincount(cf, minlength=B)
+        Cmax = int(cnt.max()) if nC else 0
+        order = torch.argsort(cf, stable=True)
+        slot = torch.empty_like(cf)
+        slot[order] = torch.arange(nC, device=cf.device) - (torch.cumsum(cnt, 0) - cnt)[cf[order]]
+        one = X.new_ones(nC)
+        G = X.new_zeros(B, nmax, Cmax).index_put((cf, loc[i], slot), one, accumulate=True)
+        G = G.index_put((cf, loc[j], slot), -one, accumulate=True)
+        Hq = torch.einsum("bkc,bkl,bld->bcd", G, Jd, G)
+        Cq = torch.einsum("blkd,bkc->bldc", Kd, G)                          # (B, nmax, 8, Cmax)
+        if not quadrupoles:
+            Cq = torch.cat([Cq[:, :, :3], torch.zeros_like(Cq[:, :, 3:])], 2)
+        if D > 8:
+            Cq = torch.cat([Cq, Cq.new_zeros(B, nmax, D - 8, Cmax)], 2)
+        bD, bA = self.ct_exponents()
+        rb = bt["ch_r"] / K.BOHR_ANG
+        f = slater_two_center_damp_unequal(bD[sp[i]], bA[sp[j]], rb, 0)[0]
+        e_c = -q[i, 0] * q[j, 1] * f / rb * torch.exp(bt["ch_ltaper"])          # <= 0
+        ae = (-e_c).clamp(min=0.0)
+        v0 = torch.exp(self.flux_lnv)
+        V0 = v0[sp[i]] + v0[sp[j]]
+        h = Hq[cf, slot, slot]
+        # the pair's two directions c = i -> j and c' = j -> i see the same h and are coupled by -h (opposite charge
+        # patterns): their drives V_c = t_p sqrt(V0_c^2 + 2 |e_c| h) with the one factor t_p that makes the pair's own
+        # 2x2 minimum exactly e_c + e_c' (t = 1 without a reverse channel). In the compliances c = 1 / (b + h):
+        #     t^2 = S (1 - h^2 c c') / (S + 2 h sqrt(|e| c |e'| c')),   S = |e| + |e'|
+        Vh2 = V0 * V0 + 2 * ae * h
+        cc = 2 * ae / Vh2
+        rev = self.flux_reverse(i, j, sp.shape[0])
+        has = rev >= 0
+        rv = rev.clamp(min=0)
+        ae2 = torch.where(has, ae[rv], torch.zeros_like(ae))
+        cc2 = torch.where(has, cc[rv], torch.zeros_like(cc))
+        S_ = ae + ae2
+        t2 = S_ * (1 - h * h * cc * cc2) / (S_ + 2 * h * torch.sqrt(ae * cc * ae2 * cc2 + 1e-300) + 1e-300)
+        t2 = torch.where(has, t2, torch.ones_like(t2))
+        Vc = torch.sqrt(t2 * Vh2)
+        sc = torch.sqrt(2 * ae + 1e-30) / V0
+        s_pad = X.new_zeros(B, Cmax).index_put((cf, slot), sc)
+        V_pad = X.new_zeros(B, Cmax).index_put((cf, slot), Vc)
+        return Cq.reshape(B, nmax * D, Cmax), Hq, s_pad, V_pad, G, (cf, slot), e_c
+
+    @staticmethod
+    def flux_reverse(i, j, n):
+        """(C,) the index of each channel's reverse channel j -> i, -1 where there is none."""
+        key, rkey = i * n + j, j * n + i
+        srt, order = torch.sort(key)
+        pos = torch.searchsorted(srt, rkey).clamp(max=max(key.shape[0] - 1, 0))
+        hit = srt[pos] == rkey if key.shape[0] else torch.zeros_like(key, dtype=torch.bool)
+        return torch.where(hit, order[pos], torch.full_like(key, -1))
+
+    def flux_solve(self, bt, Cz, Hq, s, V, G, ch, z_pol, W, phi_ext):
+        """The joint minimum given the xpol solution z_pol (B, nmax D) and W = (A + H)^-1 C: per frame E_CT (B,),
+        per channel its share 1/2 b~_c q_c (C,) and charge q_c (C,), the joint moments z (B, nmax D) and the
+        atomic charge changes (B, nmax)."""
+        cf, slot = ch
+        B, Cmax = s.shape
+        i, j = bt["ch_index"]
+        dphi = phi_ext[i] - phi_ext[j]
+        bq = -V + V.new_zeros(B, Cmax).index_put((cf, slot), dphi)
+        bt_ = bq + torch.einsum("bnc,bn->bc", Cz, z_pol)
+        Sm = torch.eye(Cmax, dtype=s.dtype, device=s.device) + s[:, :, None] * (Hq - Cz.transpose(1, 2) @ W) * s[:, None, :]
+        bp = s * bt_
+        p = -torch.linalg.solve(Sm, bp[..., None])[..., 0]
+        qc = s * p
+        e_slot = 0.5 * bp * p
+        z = z_pol - (W @ qc[..., None])[..., 0]
+        Q = (G @ qc[..., None])[..., 0]
+        return e_slot.sum(1), e_slot[cf, slot], qc[cf, slot], z, Q
 
     def xpol_solve_periodic(self, bt, sp, I, Lf, ainv, Cs, quadrupoles=True, info=None):
         """The periodic counterpart of :meth:`xpol_solve` (matrix-free CG with the Ewald frames, the exchange pairs
@@ -1147,6 +1295,10 @@ class CompleteModel(IonCTModel):
         if self.frozen:
             e_pauli, e_disp, frz = self.frozen_terms(I, bt, sp)
         e_xpol, z_x = I.new_zeros(B), None
+        nC = bt["ch_index"].shape[1]
+        flux = None
+        if self.ct_model == "flux" and (pbc is not None or solvent is not None):
+            raise NotImplementedError("ct_model='flux': clusters in the gas phase only (no periodic frames, no solvent)")
         if self.xpol and pbc is not None:
             if solvent is not None:
                 raise NotImplementedError("periodic frames: no solvent")
@@ -1156,7 +1308,12 @@ class CompleteModel(IonCTModel):
             x0 = z_x[..., :8]
         elif self.xpol:
             A_off = bt["A_off"] if solvent is None else bt["A_off"] + solvent.dA
-            z_x, e_pol, e_xpol, e_breath_atom = self.xpol_solve(bt, sp, I, L, A_off, ainv_pad, Cq, quadrupoles)
+            if self.ct_model == "flux" and nC:
+                flux = self.flux_operator(bt, sp, self.ct_charges_from(I, sp), 9 if self.breath else 8, quadrupoles)
+                z_x, e_pol, e_xpol, e_breath_atom, W_flux = self.xpol_solve(bt, sp, I, L, A_off, ainv_pad, Cq,
+                                                                            quadrupoles, rhs_extra=flux[0])
+            else:
+                z_x, e_pol, e_xpol, e_breath_atom = self.xpol_solve(bt, sp, I, L, A_off, ainv_pad, Cq, quadrupoles)
             x0 = z_x[..., :8]
         elif pbc is not None:
             # matrix-free CG on the real-space pair blocks + the Ewald frames (periodic.py)
@@ -1190,10 +1347,18 @@ class CompleteModel(IonCTModel):
             e_breath_atom = -0.5 * a * v0 * v0
             e_pol = e_pol + I.new_zeros(B).index_add(0, bt["frame"], e_breath_atom)
         q = self.ct_charges_from(I, sp)
-        nC = bt["ch_index"].shape[1]
         x_sc, dq, e_ct_post, sc_iters, Dc, Wc = x0, I.new_zeros(nC), None, 0, I.new_zeros(nC), I.new_zeros(nC)
         phi_rf = (lambda x: solvent.phi_rf(bt, x)) if solvent is not None else (lambda x: 0.0)
-        if nC and self.ct_model == "gap":
+        Q_flux = I.new_zeros(n)
+        if nC and self.ct_model == "flux":
+            Cz, Hq, s_, V_, G_, ch_, e_kern = flux
+            e_ct, e_ch, dq, zj, Qd = self.flux_solve(bt, Cz, Hq, s_, V_, G_, ch_, z_x.reshape(B, -1), W_flux, phi_ext)
+            e_type = e_ch.new_zeros(B * self.nT).index_add(0, bt["ch_frame"] * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT)
+            Wc, dphi = e_kern, I.new_zeros(nC)          # "W": the channels' kernel energies e_c
+            x_sc = zj.reshape(B, nmax, -1)[..., :8]
+            fr_, loc_ = self._local(bt)
+            Q_flux = Qd[fr_, loc_]
+        elif nC and self.ct_model == "gap":
             e_ct, e_type, e_ch, Dc, Wc, dphi = self.gap_ct(bt, sp, I, x0, phi_ext + phi_rf(x0), Fa)
         elif nC:
             e_ct, e_type, e_ch, dphi = self.direct_ct_env(q, bt, sp, x0, phi_ext + phi_rf(x0), Fa)
@@ -1227,7 +1392,7 @@ class CompleteModel(IonCTModel):
             e_elst = e_elst + e_scr
         return {"e_pol": e_pol, "e_ct": e_ct_post, "e_ct_post": e_ct_post, "e_ct_0": e_ct, "e_type": e_type, "c": c,
                 "e_cav": e_cav, "e_scr": e_scr, "phi_rf": phi_rf(x_sc) if solvent is not None else I.new_zeros(n),
-                "dov": z, "A_ps": A_ps, "W": Wc, "Delta": Dc, "delta": z, "p": dq, "dq": I.new_zeros(n), "x": x_sc,
+                "dov": z, "A_ps": A_ps, "W": Wc, "Delta": Dc, "delta": z, "p": dq, "dq": Q_flux, "x": x_sc,
                 "x_pol": x0, "joint_iters": sc_iters, "q_ct": q, "e_ch": e_ch, "stark": z, "e_pauli": e_pauli,
                 "e_disp": e_disp, "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv,
                 "e_breath_atom": e_breath_atom, "e_elst": e_elst, "cg_iters": cg.get("cg_iters", 0),
@@ -1277,6 +1442,10 @@ class CompleteModel(IonCTModel):
         if self.ct_model == "gap":
             out["gap delta amp D/A"] = {x: [round(v, 4) for v in self.gap_lna[k].exp().tolist()] for k, x in enumerate(sym)}
             out["A_acceptor"] = {x: round(float(self.acceptor_affinity()[k]), 4) for k, x in enumerate(sym)}
+        if self.ct_model == "flux":
+            out["flux v0"] = {x: round(float(self.flux_lnv[k].exp()), 4) for k, x in enumerate(sym)}
+            out["flux eta (+ J_self)"] = {x: [round(float(nn.functional.softplus(self.flux_eta[k])), 4),
+                                              round(float(self.flux_jself[k]), 4)] for k, x in enumerate(sym)}
         if self.xpol:
             out["xpol kappa0 (dip, quad, breath)"] = {x: [round(v, 4) for v in self.xpol_lnk[k].exp().tolist()]
                                                       for k, x in enumerate(sym)}

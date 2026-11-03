@@ -527,6 +527,7 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
     g = a.get
     if g("model", "ionct") == "complete":
         from ..ff.complete import CompleteModel
+        flux = g("ct_model", "direct") == "flux"           # the flux solve replaces the gap factor / saturation / Stark
         return CompleteModel(tab, chan, n_feat, feature_names=feature_names, hidden=g("hidden", 64),
                              feat_scale=feat_scale, c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"),
                              pseudo=g("pseudo", False), tie_c=g("tie_c", False), species_emb=g("species_emb", False),
@@ -534,11 +535,11 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False),
                              conf_form=g("conf_form", "tanh"),
                              hyper=g("hyper", False), pauli_moments=g("pauli_moments", False),
-                             pauli_form=g("pauli_form", "slater"), ct_stark=g("ct_stark", False),
+                             pauli_form=g("pauli_form", "slater"), ct_stark=g("ct_stark", False) and not flux,
                              pauli_ii=g("pauli_ii", False), conf_head=not g("conf_nohead", False),
                              ct_sc=g("ct_sc", 0), env_cap=g("env_cap", 0.0), env_log=g("env_log", 0.0),
-                             ct_sat=g("ct_sat", False), ct_q_cap=g("ct_q_cap", 0.0), gap_cap=g("gap_cap", 4.0),
-                             ct_sat_ion=g("ct_sat_ion", False), ct_w_fixed=g("ct_w_fixed", False), xpol=g("xpol", False),
+                             ct_sat=g("ct_sat", False) and not flux, ct_q_cap=g("ct_q_cap", 0.0), gap_cap=g("gap_cap", 4.0),
+                             ct_sat_ion=g("ct_sat_ion", False) and not flux, ct_w_fixed=g("ct_w_fixed", False) and not flux, xpol=g("xpol", False),
                              ct_model=g("ct_model", "direct"), head_frontier=g("head_frontier", None),
                              gap_shift=g("gap_shift", "acceptor"),
                              xpol_perp=bool(g("xpol_perp", False)) and bool(g("xpol", False)),   # absent: before it was the default
@@ -764,10 +765,13 @@ def main():
                          "breathing term, none. auto: xpol for --model complete --frozen, else pseudo with --pseudo, "
                          "else none. The confinement head (--confine, --conf-form) is independent of it")
     ap.add_argument("--xpol", action="store_true", help="same as --exchange xpol")
-    ap.add_argument("--ct-model", default="direct", choices=("direct", "gap"),
+    ap.add_argument("--ct-model", default="direct", choices=("direct", "gap", "flux"),
                     help="complete: direct = environment-dependent donor/acceptor CT charges (+ the multiplicative gap "
                          "factor / two-state saturation); gap = fixed per-species couplings W and the environment only "
-                         "in an additive gap I - A + phiD(i) - phiA(j) + overlap shifts of the frontier levels")
+                         "in an additive gap I - A + phiD(i) - phiA(j) + overlap shifts of the frontier levels; flux = "
+                         "explicit split charges per channel in the xpol solve, compliance from the direct-CT energy "
+                         "(needs xpol; turns off the gap factor, --ct-sat/--ct-sat-ion/--ct-stark/--ct-w-fixed; no "
+                         "frontier potentials in the cache)")
     ap.add_argument("--gap-shift", default="acceptor", choices=("acceptor", "both"),
                     help="--ct-model gap: overlap shift of the acceptor level only (gap opens with overlap) or of both "
                          "frontier levels")
@@ -824,6 +828,13 @@ def main():
         if a.ct_form != "direct" or a.env != "density":
             raise SystemExit("--model complete needs --ct-form direct and --env density")
     lean = (a.ct_form == "direct") and not a.full_precompute
+    if a.ct_model == "flux":
+        if a.model != "complete" or not a.xpol:
+            raise SystemExit("--ct-model flux needs --model complete with xpol")
+        off = [f for f in ("ct_sat", "ct_sat_ion", "ct_stark", "ct_w_fixed") if getattr(a, f, False)]
+        if off:
+            print(f"--ct-model flux: ignoring {', '.join('--' + f.replace('_', '-') for f in off)}", flush=True)
+        a.no_ct_gap = True
     frontier = a.model == "complete" and not a.no_ct_gap
     cache_path = a.cache
     if cache_path is None and a.cache_dir:
