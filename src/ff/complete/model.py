@@ -65,6 +65,20 @@ with the breathing amplitude's own stiffness 1 / (a0 e^lna) and Coulomb drive V[
 is exchange polarization and is booked in e_pol (``e_xpol``); e_pauli stays E_P(0). Periodic frames: the same
 functional over every pair and image of the Pauli pair list, solved by matrix-free CG with the Ewald frames.
 
+Gap-form CT (``ct_model="gap"``, with ``frozen``): fixed couplings, the environment only in an additive gap,
+
+    W_c^2 = qD0[s_i] qA0[s_j] f(bD_i, bA_j; r) / r          (per-species constants, no environment)
+    D_c   = I_D(i) - A_A(j) + phiD(i) - phiA(j) + delta_A(j) - delta_D(i) [- Stark_c]
+    E_c   = (D_c - sqrt(D_c^2 + 4 W_c^2)) / 2              (or the per-ion saturation, ct_sat_ion)
+
+phiD(i) / phiA(j) the full potential of every other atom (permanent shells, induced moments, external field, the
+solvent's reaction potential) averaged over i's donor / j's acceptor frontier density: the orbital-energy gap of a
+perturbative transfer (no electron-hole term). delta_X(k) = a_X[s_k] S_k exp(h_X(I_k)) >= 0, S_k the ion's outer-shell
+overlap invariant and h a head on the overlap invariants only: the overlap raising the frontier levels, zero with the
+overlap (``gap_shift="acceptor"``, the default: delta_D = 0). The Stark term (``ct_stark``) is additive here, 1/2 dalpha_D |E_D|^2 + 1/2 dalpha_A |E_A|^2. The donor /
+acceptor probe blocks are left out of every head's input (``head_frontier=False``): the frontier shapes are operators
+of the gap, not features.
+
 Species enter only through the isolated-atom parameters (alpha0, C0, the CT charges qD0 / qA0 and exponents, kappa,
 lam, gamma0); the heads are shared (``species_emb`` adds an embedding to their input).
 """
@@ -109,6 +123,8 @@ def _mag_scale(names, feat_scale, probe, key):
 __all__ = ["CompleteModel", "induction_matrix_blocks", "solve_induction_blocks"]
 
 GAP_EXP_MAX = 4.0     # bound on the log of the CT gap factor
+GAP_DELTA_INIT = 0.05  # Hartree per unit scaled overlap: start of the gap form's overlap shifts (delta_D, delta_A)
+STARK_DALPHA = 100.0   # bohr^3 per unit softplus(stark_D/A) in the gap form's additive Stark term
 CT_GAP_MIN = 0.05     # Hartree: floor of the CT gap (self-consistent CT), a softplus of width CT_GAP_WIDTH above it
 CT_GAP_WIDTH = 0.02
 
@@ -181,7 +197,7 @@ class CompleteModel(IonCTModel):
                  species_emb=False, aniso=True, ct_gap=True, dphi_scale=0.05, frozen=False, conf_form="tanh",
                  hyper=False, pauli_moments=False, pauli_form="slater", ct_stark=False, pauli_ii=False, conf_head=True, ct_sc=0,
                  env_cap=0.0, env_log=0.0, ct_sat=False, ct_q_cap=0.0, gap_cap=GAP_EXP_MAX, ct_sat_ion=False,
-                 ct_w_fixed=False, xpol=False):
+                 ct_w_fixed=False, xpol=False, ct_model="direct", head_frontier=None, gap_shift="acceptor"):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
                          pol_form="confine")
@@ -270,7 +286,12 @@ class CompleteModel(IonCTModel):
         # p_c from Delta_c(x). ALMO bookkeeping: E_pol is the CT-free solve, E_CT = E_total - E_pol (the CT-induced
         # repolarization is CT).
         self.ct_sc = int(ct_sc)
-        if (self.ct_sc or self.ct_sat) and not hasattr(self, "A_fixed"):     # both need the pair gap
+        self.ct_model = str(ct_model)
+        if self.ct_model not in ("direct", "gap"):
+            raise ValueError(f"ct_model {ct_model!r}")
+        if self.ct_model == "gap" and self.ct_sc:
+            raise ValueError("ct_model='gap': no ct_sc (self-consistent CT not implemented for it yet)")
+        if (self.ct_sc or self.ct_sat or self.ct_model == "gap") and not hasattr(self, "A_fixed"):     # the pair gap
             unbound = torch.isnan(tab.A_acceptor)
             self.register_buffer("A_fixed", torch.nan_to_num(tab.A_acceptor))
             self.register_buffer("A_unbound", unbound)
@@ -412,6 +433,30 @@ class CompleteModel(IonCTModel):
             self.head_xpol = EnvironmentHead(len(self.frozen_cols), 1, hidden, depth, ns)
             self.register_buffer("xpol_breath_mask", (tab.a0 > 0).to(torch.float64))
             self._xpol_table = None
+        if self.ct_model == "gap":
+            if not frozen:
+                raise ValueError("ct_model='gap' needs frozen=True (the overlap invariants' columns)")
+            # delta_D, delta_A: amplitude per species (Hartree per unit scaled overlap), the head's log factor
+            self.gap_lna = nn.Parameter(torch.full((S, 2), math.log(GAP_DELTA_INIT), dtype=torch.float64))
+            self.head_gap = EnvironmentHead(len(self.frozen_cols), 2, hidden, depth, ns)
+            names_ = list(feature_names or [])
+            self.gap_s0_col = names_.index("shell:S0") if "shell:S0" in names_ else 0
+            # which frontier levels the overlap shifts: "acceptor" (delta_A >= 0 only: the gap can only open with
+            # overlap) or "both" (delta_D lowers it; with no label to stop it the donor shift closed the Na-Cl dimer
+            # gap at 2.4-3 A in the first run)
+            if gap_shift not in ("acceptor", "both"):
+                raise ValueError(f"gap_shift {gap_shift!r}")
+            self.register_buffer("gap_shift_mask", torch.tensor([float(gap_shift == "both"), 1.0], dtype=torch.float64),
+                                 persistent=False)
+        # the donor / acceptor probe blocks as head inputs: kept by default for the direct CT (as trained), left out
+        # with the gap form (the frontier shapes are its operators, not features)
+        hf = (self.ct_model != "gap") if head_frontier is None else bool(head_frontier)
+        keep = torch.ones(n_feat, dtype=torch.float64)
+        if not hf:
+            for k, nm in enumerate(feature_names or []):
+                if nm.split(":")[0] in ("donor", "acceptor"):
+                    keep[k] = 0.0
+        self.register_buffer("feat_keep", keep, persistent=False)
         for h in self.modules():
             if isinstance(h, EnvironmentHead):
                 h.log_k = self.env_log
@@ -427,7 +472,7 @@ class CompleteModel(IonCTModel):
         super()._load_from_state_dict(state_dict, prefix, *args, **kw)
 
     def scaled(self, feats):
-        I = feats / self.feat_scale
+        I = feats / self.feat_scale * self.feat_keep
         m = self.feat_sat
         if bool((m > 0).any()):
             mm = torch.where(m > 0, m, torch.ones_like(m))
@@ -574,6 +619,62 @@ class CompleteModel(IonCTModel):
         dD = phiD[f, li] - VD[f, li, lj] - (KD[f, li, lj] * x[f, lj]).sum(-1)
         dA = phiA[f, lj] - VA[f, lj, li] - (KA[f, lj, li] * x[f, li]).sum(-1)
         return dD - dA + phi_ext[i] - phi_ext[j]
+
+    def frontier_potentials(self, bt, x, phi_ext):
+        """(n,), (n,): the full potential (Eh/e) of every other atom -- permanent densities, induced moments x
+        (B, nmax, 8) -- averaged over each atom's donor / acceptor frontier density, plus ``phi_ext`` (n,)."""
+        pbc = bt.get("pbc")
+        if pbc is not None:
+            xf = x[bt["mask"]]
+            phi_x = recip_apply(pbc["frames"], xf @ K._poly_map(xf.dtype, xf.device).T)[:, 0]
+            a_, b_ = pbc["dp"]
+            n = xf.shape[0]
+            phiD = pbc["phiD0"] + phi_x + xf.new_zeros(n).index_add(0, a_, (pbc["kD"] * xf[b_]).sum(-1))
+            phiA = pbc["phiA0"] + phi_x + xf.new_zeros(n).index_add(0, a_, (pbc["kA"] * xf[b_]).sum(-1))
+            return phiD + phi_ext, phiA + phi_ext
+        fr, loc = self._local(bt)
+        phiD = bt["VD"].sum(-1) + torch.einsum("bikd,bkd->bi", bt["KD"], x)
+        phiA = bt["VA"].sum(-1) + torch.einsum("bikd,bkd->bi", bt["KA"], x)
+        return phiD[fr, loc] + phi_ext, phiA[fr, loc] + phi_ext
+
+    def gap_deltas(self, I, sp):
+        """(n, 2) >= 0: the overlap shifts (delta_D, delta_A) of each atom's frontier levels, a[s] S exp(h(I))."""
+        u = self.capped(self.head_gap(I[:, self.frozen_cols], sp))
+        s0 = I[:, self.gap_s0_col].clamp(min=0)[:, None]
+        return torch.exp(self.gap_lna[sp] + u) * s0 * self.gap_shift_mask
+
+    def gap_ct(self, bt, sp, I, x, phi_ext, Fa=None):
+        """Gap-form CT: per-frame E_CT (B,), per-type sums (B, nT), per-channel energies (C,), and the channel gaps
+        D (C,), couplings^2 W2 (C,) and the electrostatic part of the gap phiD(i) - phiA(j) (C,)."""
+        B = bt["B"]
+        i, j = bt["ch_index"]
+        bD, bA = self.ct_exponents()
+        rb = bt["ch_r"] / K.BOHR_ANG
+        f = slater_two_center_damp_unequal(bD[sp[i]], bA[sp[j]], rb, 0)[0]
+        q0 = torch.exp(self.ct_lnq0[sp])
+        W2 = q0[i, 0] * q0[j, 1] * f / rb * torch.exp(bt["ch_ltaper"])
+        phiD, phiA = self.frontier_potentials(bt, x, phi_ext)
+        dphi = phiD[i] - phiA[j]
+        dl = self.gap_deltas(I, sp)
+        D = self.tab.I_donor[sp[i]] - self.acceptor_affinity()[sp[j]] + dphi + dl[j, 1] - dl[i, 0]
+        if self.ct_stark:
+            n = sp.shape[0]
+            env = bt.get("env") or {}
+            Fz = Fa if Fa is not None else I.new_zeros(n, 3)
+            ED = env.get("donor:V1", I.new_zeros(n, 3)) + Fz
+            EA = env.get("acceptor:V1", I.new_zeros(n, 3)) + Fz
+            aD = STARK_DALPHA * nn.functional.softplus(self.stark_D[sp[i]])
+            aA = STARK_DALPHA * nn.functional.softplus(self.stark_A[sp[j]])
+            D = D - 0.5 * aD * (ED[i] * ED[i]).sum(-1) - 0.5 * aA * (EA[j] * EA[j]).sum(-1)
+        D = _gap_floor(D)
+        if self.ct_sat_ion:
+            e_ch = -W2 / D * self.ion_saturation(W2, D, i, j, sp.shape[0])
+        else:
+            e_ch = 0.5 * (D - torch.sqrt(D * D + 4 * W2))
+        e = e_ch.new_zeros(B).index_add(0, bt["ch_frame"], e_ch)
+        nT = self.nT
+        e_type = e_ch.new_zeros(B * nT).index_add(0, bt["ch_frame"] * nT + bt["ch_type"], e_ch).reshape(B, nT)
+        return e, e_type, e_ch, D, W2, dphi
 
     def stark_gap(self, bt, sp, Fa):
         """(C,) >= 0: eta_D |E_D|^2 + eta_A |E_A|^2 of each channel, fields in units of the training scale."""
@@ -967,7 +1068,9 @@ class CompleteModel(IonCTModel):
         nC = bt["ch_index"].shape[1]
         x_sc, dq, e_ct_post, sc_iters, Dc, Wc = x0, I.new_zeros(nC), None, 0, I.new_zeros(nC), I.new_zeros(nC)
         phi_rf = (lambda x: solvent.phi_rf(bt, x)) if solvent is not None else (lambda x: 0.0)
-        if nC:
+        if nC and self.ct_model == "gap":
+            e_ct, e_type, e_ch, Dc, Wc, dphi = self.gap_ct(bt, sp, I, x0, phi_ext + phi_rf(x0), Fa)
+        elif nC:
             e_ct, e_type, e_ch, dphi = self.direct_ct_env(q, bt, sp, x0, phi_ext + phi_rf(x0), Fa)
             if self.ct_sc:
                 x = x0
@@ -1004,6 +1107,7 @@ class CompleteModel(IonCTModel):
                 "e_disp": e_disp, "frozen_params": frz, "dphi": dphi, "alpha_inv": ainv,
                 "e_breath_atom": e_breath_atom, "e_elst": e_elst, "cg_iters": cg.get("cg_iters", 0),
                 "e_xpol": e_xpol, "z_xpol": z_x,
+                "gap_deltas": self.gap_deltas(I, sp) if self.ct_model == "gap" else None,
                 "e_int": e_elst + e_cav + e_pauli + e_disp + e_pol + e_ct_post}
 
     def smoothness_penalty(self, bt, sigma=0.05):
@@ -1016,7 +1120,11 @@ class CompleteModel(IonCTModel):
         if self.conf_form == "sq":
             self._s0sq = self.parent_overlap_sq(bt, sp)
         pen = ((torch.log(self.confinement_from(I2, sp)) - torch.log(self.confinement_from(I1, sp))) ** 2).mean()
-        pen = pen + ((self.head_ctq(I2, sp) - self.head_ctq(I1, sp)) ** 2).mean()
+        if self.ct_model == "gap":
+            c_ = self.frozen_cols
+            pen = pen + ((self.head_gap(I2[:, c_], sp) - self.head_gap(I1[:, c_], sp)) ** 2).mean()
+        else:
+            pen = pen + ((self.head_ctq(I2, sp) - self.head_ctq(I1, sp)) ** 2).mean()
         if self.frozen or self.pseudo:
             c_ = self.frozen_cols
             pen = pen + ((self.head_frozen(I2[:, c_], sp) - self.head_frozen(I1[:, c_], sp)) ** 2).mean()
@@ -1039,6 +1147,11 @@ class CompleteModel(IonCTModel):
     def summary(self):
         sym = self.tab.symbols
         out = {"qD0/qA0": {x: [round(v, 4) for v in self.ct_lnq0[k].exp().tolist()] for k, x in enumerate(sym)}}
+        bD, bA = self.ct_exponents()
+        out["ct bD/bA"] = {x: [round(float(bD[k]), 4), round(float(bA[k]), 4)] for k, x in enumerate(sym)}
+        if self.ct_model == "gap":
+            out["gap delta amp D/A"] = {x: [round(v, 4) for v in self.gap_lna[k].exp().tolist()] for k, x in enumerate(sym)}
+            out["A_acceptor"] = {x: round(float(self.acceptor_affinity()[k]), 4) for k, x in enumerate(sym)}
         if self.xpol:
             out["xpol kappa0 (dip, quad, breath)"] = {x: [round(v, 4) for v in self.xpol_lnk[k].exp().tolist()]
                                                       for k, x in enumerate(sym)}

@@ -531,7 +531,9 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              pauli_ii=g("pauli_ii", False), conf_head=not g("conf_nohead", False),
                              ct_sc=g("ct_sc", 0), env_cap=g("env_cap", 0.0), env_log=g("env_log", 0.0),
                              ct_sat=g("ct_sat", False), ct_q_cap=g("ct_q_cap", 0.0), gap_cap=g("gap_cap", 4.0),
-                             ct_sat_ion=g("ct_sat_ion", False), ct_w_fixed=g("ct_w_fixed", False), xpol=g("xpol", False))
+                             ct_sat_ion=g("ct_sat_ion", False), ct_w_fixed=g("ct_w_fixed", False), xpol=g("xpol", False),
+                             ct_model=g("ct_model", "direct"), head_frontier=g("head_frontier", None),
+                             gap_shift=g("gap_shift", "acceptor"))
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -751,6 +753,16 @@ def main():
                          "breathing term, none. auto: xpol for --model complete --frozen, else pseudo with --pseudo, "
                          "else none. The confinement head (--confine, --conf-form) is independent of it")
     ap.add_argument("--xpol", action="store_true", help="same as --exchange xpol")
+    ap.add_argument("--ct-model", default="direct", choices=("direct", "gap"),
+                    help="complete: direct = environment-dependent donor/acceptor CT charges (+ the multiplicative gap "
+                         "factor / two-state saturation); gap = fixed per-species couplings W and the environment only "
+                         "in an additive gap I - A + phiD(i) - phiA(j) + overlap shifts of the frontier levels")
+    ap.add_argument("--gap-shift", default="acceptor", choices=("acceptor", "both"),
+                    help="--ct-model gap: overlap shift of the acceptor level only (gap opens with overlap) or of both "
+                         "frontier levels")
+    ap.add_argument("--head-frontier", default=None, action=argparse.BooleanOptionalAction,
+                    help="complete: the donor / acceptor probe blocks as head inputs (default: yes for --ct-model "
+                         "direct, no for gap)")
     ap.add_argument("--init-from", default=None, help="model.pt of a previous run to start from (same architecture)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda | cuda:N (complete model; batches are moved per step)")
     ap.add_argument("--w-disp", type=float, default=0.0, help="weight of the dispersion energy vs ALMO disp")
