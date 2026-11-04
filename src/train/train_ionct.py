@@ -66,14 +66,16 @@ def dimer_ct_cut(symbols, na_cl_cut):
     return na_cl_cut * (IONIC_RADIUS[a] + IONIC_RADIUS[b]) / (IONIC_RADIUS["Na"] + IONIC_RADIUS["Cl"])
 
 
-def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",), min_ct=None):
+def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",), min_ct=None, ct_max_pair=POLAR_CT_MAX_PAIR):
     """[(polar_id, symbols, coords A, target (3, 2) [alpha_MI, alpha_CT] per axis bohr^3 (nan: axis not computed),
     ct_ok)] from the
     ct-polar finite-field EDAs: alpha = -d2E/dF2 by central differences at F_SET; MI = full - ct.
     ``files``: the polar sets to read (ct-polar, seed-<salt>-polar); a seed set's ids carry its salt,
     "<salt>:<polar_id>" (its shell ids name no species).
     ``min_ct``: drop a geometry whose alpha_CT per ion falls below it on any axis (bohr^3): a negative alpha_CT means
-    the field switched the EDA's CT partition (LiF near contact: CT -157, MI +163 per ion, full ~5), so MI is wrong too."""
+    the field switched the EDA's CT partition (LiF near contact: CT -157, MI +163 per ion, full ~5), so MI is wrong too.
+    ``ct_max_pair``: an unlike pair's alpha_CT is a target only within ``dimer_ct_cut(pair, ct_max_pair)`` (its alpha_MI
+    always is): beyond it the field mixes the dimer's ionic and covalent configurations (ALMO alpha_CT keeps rising)."""
     import collections
     g = collections.defaultdict(dict)
     for name in files:
@@ -114,7 +116,7 @@ def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",), min_ct=None):
         else:
             ab = base.split("_")[1].split("-") if base.startswith("pair_") else []
             ct_ok = not (len(ab) == 2 and ab[0] != ab[1]
-                         and float(base.split("_r")[1]) > dimer_ct_cut(ab, POLAR_CT_MAX_PAIR))
+                         and float(base.split("_r")[1]) > dimer_ct_cut(ab, ct_max_pair))
         out.append((pid, r0["symbols"], X, torch.tensor(tgt, dtype=torch.float64), ct_ok))
     return out
 
@@ -684,6 +686,9 @@ def main():
                     help="heads read sign(I) log(1 + |I| / k) of the scaled invariants (k = this; 0 = linear)")
     ap.add_argument("--polar-min-ct", type=float, default=None,
                     help="drop alpha targets whose alpha_CT per ion is below this on any axis (bohr^3; e.g. -1)")
+    ap.add_argument("--polar-ct-max-pair", type=float, default=POLAR_CT_MAX_PAIR,
+                    help="Na-Cl distance (A; scaled by the ionic radii for other salts) beyond which an unlike pair's "
+                         "alpha_CT is not a target (its alpha_MI still is); independent of --ct-max-pair for E_CT")
     ap.add_argument("--w-pol", type=float, default=1.0)
     ap.add_argument("--w-ct", type=float, default=1.0)
     ap.add_argument("--w-chan", type=float, default=0.0, help="weight of the per-type ALMO-CTA channel sums (0: E_CT only)")
@@ -859,7 +864,7 @@ def main():
     if a.w_alpha > 0:
         for pid, sym, X, tgt, ok in polar_targets(a.ct_sets, ct_dimers=not a.ct_no_dimers,
                                                   files=("ct-polar", *[f"seed-{x}-polar" for x in a.salts]),
-                                                  min_ct=a.polar_min_ct):
+                                                  min_ct=a.polar_min_ct, ct_max_pair=a.polar_ct_max_pair):
             c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
                            frontier=frontier)
             base = pid.split(":")[-1]
