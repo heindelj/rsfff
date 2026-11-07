@@ -40,8 +40,8 @@ from .environment import INVARIANT_NAMES, PROBE_NAMES, invariants, shaped_overla
 from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
                        recip_apply, smooth_switch)
 
-__all__ = ["FluxTable", "RadialTable", "XpolTable", "batched_precompute", "flux_pair_terms", "shape_self_coulomb",
-           "xpol_overlap_map"]
+__all__ = ["FluxTable", "ProbeOverlapTable", "RadialTable", "XpolTable", "batched_precompute", "flux_pair_terms",
+           "shape_self_coulomb", "xpol_overlap_map"]
 
 NORD = 5          # damping orders of the rank-2 tensor
 BOHR = K.BOHR_ANG
@@ -230,6 +230,49 @@ class FluxTable(RadialTable):
             f = shaped_two_center_damp(bpa, bd, wpa, wd, rb, 2)
             for n in range(NORD):
                 out[f"aoff:{a}d:{n}"] = f[n]
+        if not self.names:
+            self.names = list(out)
+            self.index = {k: n for n, k in enumerate(self.names)}
+        res = []
+        for k in self.names:
+            f = out[k]
+            d1 = torch.autograd.grad(f.sum(), r, create_graph=True)[0]
+            d2 = torch.autograd.grad(d1.sum(), r, retain_graph=True)[0]
+            res.append(torch.stack([f, d1, d2], -1).detach())
+        return res
+
+
+class ProbeOverlapTable(RadialTable):
+    """The gate of the overlap-switched environment fields (``CompleteModel(env_ct_gated=True)``): per ordered species
+    pair (s_i, s_j)
+
+        ov:{probe}    the overlap of i's probe density with j's frozen electron density, sum_t n_t <g_i | 1s_t(j)>
+
+    (the ``envS:{probe}:0`` row of :class:`RadialTable`) for the diffuse probes donor, acceptor and breath."""
+
+    PROBES = ("donor", "acceptor", "breath")
+
+    def __init__(self, tab: IonTable, r_max=12.0, h=0.02, **kw):
+        with torch.enable_grad():           # built lazily by the model, possibly under no_grad (the r-derivatives)
+            super().__init__(tab, probes=(), r_max=r_max, h=h, **kw)
+
+    def _functions(self, si, sj):
+        tab = self.tab
+        r = self.r.clone().requires_grad_(True)
+        rb = r / BOHR
+        G = self.G
+        one = K._onehot0(G, rb)
+        shells = [(tab.shell_b[sj, t], tab.shell_n[sj, t]) for t in range(tab.shell_n.shape[1]) if tab.shell_n[sj, t] > 0]
+        src = {"donor": (tab.front_b["donor"][si], tab.front_w["donor"][si]),
+               "acceptor": (tab.front_b["acceptor"][si], tab.front_w["acceptor"][si]),
+               "breath": (tab.b_breath[si], tab.w_breath[si])}
+        out = {}
+        for name in self.PROBES:
+            bp, wp = _expand(*src[name], G)
+            S0 = 0.0 * rb
+            for bt, nt in shells:
+                S0 = S0 + nt * shaped_overlap_derivs(bp, wp, bt.expand(G), one, rb)[0]
+            out[f"ov:{name}"] = S0
         if not self.names:
             self.names = list(out)
             self.index = {k: n for n, k in enumerate(self.names)}
@@ -590,6 +633,10 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     V0 = X.new_zeros(N, nprobe).index_add(0, i, v0)
     V1 = X.new_zeros(N, nprobe, 3).index_add(0, i, -Dp[:, :, :3].permute(1, 0, 2))
     V2 = X.new_zeros(N, nprobe, 5).index_add(0, i, Dp[:, :, 3:].permute(1, 0, 2))
+    # the penetration part alone (the complements, no point charges): short-ranged, the same in clusters and under PBC
+    Dpen = torch.einsum("knp,npb->kpb", -rows[2:2 + nprobe], T0) @ P                    # (nprobe, Pd, 8)
+    V1pen = X.new_zeros(N, nprobe, 3).index_add(0, i, -Dpen[:, :, :3].permute(1, 0, 2))
+    V2pen = X.new_zeros(N, nprobe, 5).index_add(0, i, Dpen[:, :, 3:].permute(1, 0, 2))
     if periodic:                                                      # the reciprocal part of the point-charge field
         V1 = V1 - rq[:, None, :3]
         V2 = V2 + rq[:, None, 3:]
@@ -605,12 +652,14 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
         has = (tab.a0[s] > 0).to(dt)
         V0[:, kb], S0[:, kb] = V0[:, kb] * has, S0[:, kb] * has
         V1[:, kb], V2[:, kb], S1[:, kb] = V1[:, kb] * has[:, None], V2[:, kb] * has[:, None], S1[:, kb] * has[:, None]
+        V1pen[:, kb], V2pen[:, kb] = V1pen[:, kb] * has[:, None], V2pen[:, kb] * has[:, None]
         S2[:, kb] = S2[:, kb] * has[:, None, None]
     inv = invariants(V0, V1, V2, S0, S1, S2, inv_form)               # (N, nprobe, 7)
     feats = inv.reshape(N, -1)                                        # probe-major, like DensityEnvironment
     env = {}
     for k_, name in enumerate(probes):
-        for key, val in (("V0", V0), ("V1", V1), ("V2", V2), ("S0", S0), ("S1", S1), ("S2", S2)):
+        for key, val in (("V0", V0), ("V1", V1), ("V2", V2), ("S0", S0), ("S1", S1), ("S2", S2), ("V1pen", V1pen),
+                         ("V2pen", V2pen)):
             env[f"{name}:{key}"] = val[:, k_]
     # -- pseudo-potential drive basis -----------------------------------------------------------------------------
     keep = r_ang < table.pseudo_cutoff

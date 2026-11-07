@@ -272,6 +272,8 @@ class CompleteModel(IonCTModel):
 
     PEN_PROBES = ("donor", "acceptor", "breath")
     PEN_NAMES = tuple(f"{p}:{k}" for p in PEN_PROBES for k in ("S0", "V0_pen", "|V1_pen|^2", "|V2_pen|^2", "V1_pen.S1"))
+    #: env_ct_gated: the same probes with the fields switched off with the probe's own overlap (no long range)
+    GATED_NAMES = tuple(f"{p}:{k}" for p in PEN_PROBES for k in ("S0", "V0_pen", "|V1g|^2", "|V2g|^2", "V1g.S1"))
 
     def __init__(self, tab: IonTable, chan: ChannelTable, n_feat: int, *, feature_names=None, hidden=64, depth=2,
                  feat_scale=None, c_range=(0.05, 1.25), confine=None, pseudo=True, ps_init=0.02, tie_c=True,
@@ -285,7 +287,7 @@ class CompleteModel(IonCTModel):
                  env_two_body=("pauli", "disp", "ct"), ct_q_head=True, pin_a0=False, env_extra=(),
                  env_extra_terms=("ct",), env_field=False, ct_legacy_head=False, env_ct_pen=False,
                  env_extra_capacity="full", ct_outer=1, ct_outer_tol=1e-10, ct_gap_min=0.03,
-                 ct_gap_learn=False):
+                 ct_gap_learn=False, env_ct_gated=False, env_gate=(1e-7, 1e-5)):
         super().__init__(tab, chan, n_feat, hidden=hidden, depth=depth, feat_scale=feat_scale, c_range=c_range,
                          confine=confine, pseudo=False, tie_c=tie_c, ct_form="direct", gap_form="pair",
                          pol_form="confine")
@@ -642,7 +644,19 @@ class CompleteModel(IonCTModel):
             self.env_ct_pen = bool(env_ct_pen)
             self.register_buffer("pen_scale", torch.ones(len(self.PEN_NAMES), dtype=torch.float64))
             self.register_buffer("pen_sat", torch.zeros(len(self.PEN_NAMES), dtype=torch.float64))
-            n_extra = len(self.env_extra_names) + (2 if self.env_field else 0) + (len(self.PEN_NAMES) if self.env_ct_pen else 0)
+            # env_ct_gated: the diffuse probes' invariants with the full Coulomb fields switched off smoothly with the
+            # probe's own overlap with each neighbour (smoothstep in log10 of it between env_gate = (on, full)): the
+            # point charges of the neighbours the frontier density reaches, plus the (short-ranged) penetration part --
+            # no lattice sums, no long range in the features (diffuse_gated_invariants)
+            self.env_ct_gated = bool(env_ct_gated)
+            self.env_gate = tuple(float(x) for x in env_gate)
+            if not 0 < self.env_gate[0] < self.env_gate[1]:
+                raise ValueError(f"env_gate {env_gate}: needs 0 < on < full")
+            self._gate_table = None
+            self.register_buffer("gate_scale", torch.ones(len(self.GATED_NAMES), dtype=torch.float64))
+            self.register_buffer("gate_sat", torch.zeros(len(self.GATED_NAMES), dtype=torch.float64))
+            n_extra = (len(self.env_extra_names) + (2 if self.env_field else 0) + (len(self.PEN_NAMES) if self.env_ct_pen else 0)
+                       + (len(self.GATED_NAMES) if self.env_ct_gated else 0))
             et = set(env_extra_terms or ())
             ro = [("pauli", "pauli", "pauli" in tb, "pauli" in et), ("disp", "disp", "disp" in tb, "disp" in et)]
             if self.head_xpol is not None:            # xpol_kappa_head=False: kappa = kappa0 (the ablation)
@@ -666,7 +680,7 @@ class CompleteModel(IonCTModel):
         # checkpoints from before feat_sat existed: no saturation (zeros), as they were trained
         state_dict.setdefault(prefix + "feat_sat", torch.zeros_like(self.feat_sat))
         # m33 checkpoints from before the field / penetration branches: their (unused) scales
-        for k in ("field_scale", "field_sat", "pen_scale", "pen_sat"):
+        for k in ("field_scale", "field_sat", "pen_scale", "pen_sat", "gate_scale", "gate_sat"):
             if hasattr(self, k):
                 state_dict.setdefault(prefix + k, getattr(self, k).clone())
         # which species may be confined is this model's argument (``confine``), not the checkpoint's
@@ -1149,6 +1163,70 @@ class CompleteModel(IonCTModel):
             cols += [env[f"{p}:S0"], env[f"{p}:V0"], (V1 * V1).sum(1), (V2 * V2).sum(1), (V1 * S1).sum(1)]
         return torch.stack(cols, 1)
 
+    def gate_table(self, device):
+        """The probes' overlap table (ProbeOverlapTable, built once, ~seconds) on ``device``."""
+        from .tabulate import ProbeOverlapTable
+        if self._gate_table is None:
+            self._gate_table = ProbeOverlapTable(self.tab)
+        if self._gate_table.device != device:
+            self._gate_table.to(device)
+        return self._gate_table
+
+    def gate_reach(self):
+        """(A) the largest distance at which any probe's overlap with any species is above the gate's on-value."""
+        t = self.gate_table(torch.device("cpu"))
+        on = t.coef[..., 0] > self.env_gate[0]                       # (S, S, F, G)
+        hit = on.any(0).any(0).any(0)
+        return float(t.r[hit].max()) if bool(hit.any()) else 0.0
+
+    def diffuse_gated_invariants(self, bt):
+        """(N, 15) the diffuse probes' (donor, acceptor, breath) invariants S0, V0_pen, |V1g|^2, |V2g|^2, V1g . S1 with
+        overlap-gated fields: V_g = V_pen + sum_j sigma_g(O_g,ij) q_j T_ij (the neighbours' point-charge field and
+        field gradient, each switched off with the probe's overlap O_g,ij with neighbour j; V_pen the penetration
+        part, short-ranged). Clusters: a direct sum over the frame; periodic: the batch's pair list (lattice images
+        within its cutoff, which must exceed the gate's reach) and the penetration blocks of batched_precompute."""
+        env = bt.get("env")
+        if not env:
+            raise ValueError("env_ct_gated needs the equivariant environment blocks in the batch (bt['env'])")
+        sp, X = bt["species"], bt["pos"] / K.BOHR_ANG
+        n = sp.shape[0]
+        pbc = bt.get("pbc")
+        if pbc is not None:
+            if pbc["cutoff"] < self.gate_reach():
+                raise ValueError(f"env_ct_gated: the pair cutoff {pbc['cutoff']} A is inside the gate's reach "
+                                 f"{self.gate_reach():.2f} A")
+            pr = bt["pairs"]
+            du = bt["pair_dr"] / K.BOHR_ANG
+        else:
+            pr = K.all_pairs(bt["frame"])
+            du = X[pr[1]] - X[pr[0]]
+        i, j = torch.cat([pr[0], pr[1]]), torch.cat([pr[1], pr[0]])
+        dr = torch.cat([du, -du])
+        r_ang = dr.norm(dim=-1) * K.BOHR_ANG
+        T0 = K._tensor(dr, torch.ones(5, dr.shape[0], dtype=X.dtype, device=X.device))[:, 0, :]     # (P, 10)
+        Dp = (self.tab.charge[sp[j]].to(X.dtype)[:, None] * T0) @ K._poly_map(X.dtype, X.device)    # (P, 8)
+        tbl = self.gate_table(X.device)
+        ov = tbl(sp[i], sp[j], r_ang)                                                               # (P, 3)
+        lo, hi = math.log10(self.env_gate[0]), math.log10(self.env_gate[1])
+        cols = []
+        for p in self.PEN_PROBES:
+            has = (self.tab.a0[sp] > 0).to(X.dtype) if p == "breath" else torch.ones(n, dtype=X.dtype, device=X.device)
+            o = ov[:, tbl.index[f"ov:{p}"]]
+            t = ((torch.log10(o.clamp(min=1e-300)) - lo) / (hi - lo)).clamp(0.0, 1.0)
+            sig = t * t * (3 - 2 * t)                                                               # smoothstep
+            if f"{p}:V1pen" in env:
+                V1pen, V2pen = env[f"{p}:V1pen"], env[f"{p}:V2pen"]
+            elif pbc is None:                           # caches from the featurizer: subtract the point charges
+                V1pen = env[f"{p}:V1"] - X.new_zeros(n, 3).index_add(0, i, -Dp[:, :3])
+                V2pen = env[f"{p}:V2"] - X.new_zeros(n, 5).index_add(0, i, Dp[:, 3:])
+            else:
+                raise ValueError("env_ct_gated under PBC needs the penetration blocks (batched_precompute)")
+            V1 = (V1pen + X.new_zeros(n, 3).index_add(0, i, -sig[:, None] * Dp[:, :3])) * has[:, None]
+            V2 = (V2pen + X.new_zeros(n, 5).index_add(0, i, sig[:, None] * Dp[:, 3:])) * has[:, None]
+            S1 = env[f"{p}:S1"]
+            cols += [env[f"{p}:S0"], env[f"{p}:V0"], (V1 * V1).sum(1), (V2 * V2).sum(1), (V1 * S1).sum(1)]
+        return torch.stack(cols, 1)
+
     def _env_extra(self, feats, bt=None, I=None):
         parts = []
         if self.env_extra_names:
@@ -1167,6 +1245,13 @@ class CompleteModel(IonCTModel):
                 mm = torch.where(m > 0, m, torch.ones_like(m))
                 Pv = torch.where(m > 0, mm * torch.tanh(Pv / mm), Pv)
             parts.append(Pv)
+        if self.env_ct_gated:
+            Gv = self.diffuse_gated_invariants(bt) / self.gate_scale
+            m = self.gate_sat
+            if bool((m > 0).any()):
+                mm = torch.where(m > 0, m, torch.ones_like(m))
+                Gv = torch.where(m > 0, mm * torch.tanh(Gv / mm), Gv)
+            parts.append(Gv)
         return torch.cat(parts, 1) if parts else None
 
     def _env_out(self, sp):
@@ -1817,7 +1902,9 @@ class CompleteModel(IonCTModel):
             out["env"] = {"mode": self.env.mode, "latent": self.env.latent, "readouts": self.env.names,
                           "two_body": [p for p in self.env.names if self.env.two_body[p]], "pin_a0": self.pin_a0,
                           "extra": self.env_extra_names + (["|E|^2", "|gradE|^2"] if self.env_field else [])
-                                   + (list(self.PEN_NAMES) if self.env_ct_pen else []),
+                                   + (list(self.PEN_NAMES) if self.env_ct_pen else [])
+                                   + ([f"{x} (gate {self.env_gate[0]:g}-{self.env_gate[1]:g})" for x in self.GATED_NAMES]
+                                      if self.env_ct_gated else []),
                           "extra_readouts": [p for p in self.env.names if self.env.extra[p]]}
         bD, bA = self.ct_exponents()
         out["ct bD/bA"] = {x: [round(float(bD[k]), 4), round(float(bA[k]), 4)] for k, x in enumerate(sym)}

@@ -605,6 +605,7 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              env_extra_terms=tuple(g("env_extra_terms", ("ct",)) or ()),
                              env_field=g("env_field", False), ct_legacy_head=g("ct_legacy_head", False),
                              env_ct_pen=g("env_ct_pen", False),
+                             env_ct_gated=g("env_ct_gated", False), env_gate=tuple(g("env_gate", None) or (1e-7, 1e-5)),
                              env_extra_capacity=g("env_extra_capacity", "small"))   # absent: a run from before "full"
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
@@ -913,6 +914,14 @@ def main():
     ap.add_argument("--env-extra-capacity", default="full", choices=("full", "small"),
                     help="--env-channels: size of the extra branch's MLP (full = hidden x depth, as a head; small = "
                          "16 x 1, the first m33 runs)")
+    ap.add_argument("--env-ct-gated", action="store_true",
+                    help="--env-channels: the diffuse probes' (donor, acceptor, breath) invariants up to l = 2 with the "
+                         "full Coulomb fields switched off smoothly with each probe's overlap with the neighbour "
+                         "(--env-gate): no long-range contributions in the features; an extra branch for "
+                         "--env-extra-terms (default ct)")
+    ap.add_argument("--env-gate", type=float, nargs=2, default=None, metavar=("ON", "FULL"),
+                    help="--env-ct-gated: the probe overlap at which a neighbour's field starts to count and counts "
+                         "fully (smoothstep in log10; default 1e-7 1e-5, reach ~9 A for NaCl)")
     ap.add_argument("--env-ct-pen", action="store_true",
                     help="--env-channels: the diffuse probes' (donor, acceptor, breath) invariants up to l = 2 with "
                          "penetration-only Coulomb blocks as an extra branch for --env-extra-terms (default ct)")
@@ -990,6 +999,12 @@ def main():
             Pv = pen_matrix(model, tr)
             nzp = Pv.abs().sum(1) > 0
             model.pen_scale.copy_(Pv[nzp].std(0).clamp(min=1e-12))
+        if model.env_ct_gated:
+            Gv = gate_matrix(model, tr)
+            nzg = Gv.abs().sum(1) > 0
+            model.gate_scale.copy_(Gv[nzg].std(0).clamp(min=1e-12))
+            print(f"gated diffuse-probe fields: gate {model.env_gate[0]:g} -> {model.env_gate[1]:g} (probe overlap), "
+                  f"reach {model.gate_reach():.2f} A", flush=True)
         print(f"env channels: {Xc.shape[1]} ({model.env.mode} trunk, latent {model.env.latent}; two-body for "
               f"{[p for p in model.env.names if model.env.two_body[p]]}), {int(nzc.sum())} training atoms with pairs",
               flush=True)
@@ -1033,6 +1048,9 @@ def main():
             if model.env_ct_pen:
                 Pv = pen_matrix(model, tr)
                 model.pen_sat.copy_((a.env_sat * (Pv / model.pen_scale.cpu()).abs().max(0).values).to(model.pen_sat))
+            if model.env_ct_gated:
+                Gv = gate_matrix(model, tr)
+                model.gate_sat.copy_((a.env_sat * (Gv / model.gate_scale.cpu()).abs().max(0).values).to(model.gate_sat))
         print(f"env-sat: heads saturate at {a.env_sat} x the training range (median m {float(m.median()):.2f})",
               flush=True)
     force_tr, force_te, table = [], [], None
@@ -1205,6 +1223,15 @@ def pen_matrix(model, caches, bs=128):
     with torch.no_grad():
         for k in range(0, len(caches), bs):
             out.append(model.diffuse_pen_invariants(collate(caches[k:k + bs])).cpu())
+    return torch.cat(out)
+
+
+def gate_matrix(model, caches, bs=128):
+    """(N, 15) raw overlap-gated diffuse-probe invariants (``env_ct_gated``) of every atom of the caches."""
+    out = []
+    with torch.no_grad():
+        for k in range(0, len(caches), bs):
+            out.append(model.diffuse_gated_invariants(collate(caches[k:k + bs])).cpu())
     return torch.cat(out)
 
 
