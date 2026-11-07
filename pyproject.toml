@@ -90,10 +90,13 @@ rsfff-train-monomer = "rsfff.train.train_monomer:main"
 package-dir = { "rsfff" = "src" }
 packages = [
     "rsfff",
+    "rsfff.coverage",
     "rsfff.features",
     "rsfff.ff",
     "rsfff.ff.complete",
     "rsfff.ff.film",
+    "rsfff.ff.ionct",
+    "rsfff.ff.nonvariational",
     "rsfff.ff.v1",
     "rsfff.md",
     "rsfff.mlip",

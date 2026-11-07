@@ -207,16 +207,16 @@ def linear_response(mf, V, tol=1e-9, max_cycle=60) -> np.ndarray:
         raise NotImplementedError("linear_response is closed-shell (RKS) only")
     o, v = C[:, occ > 0], C[:, occ == 0]
     nv, no = v.shape[1], o.shape[1]
-    h1 = lib.einsum("pa,xpq,qi->xai", v, V, o)
+    h1 = np.einsum("pa,xpq,qi->xai", v, V, o, optimize=True)
     vresp = mf.gen_response(hermi=1)
 
     def dm_of(x):
         x = x.reshape(-1, nv, no)
-        d = 2.0 * lib.einsum("pa,xai,qi->xpq", v, x, o)
+        d = 2.0 * np.einsum("pa,xai,qi->xpq", v, x, o, optimize=True)
         return d + d.transpose(0, 2, 1)
 
     def fvind(x):
-        return lib.einsum("pa,xpq,qi->xai", v, vresp(dm_of(x)), o).ravel()
+        return np.einsum("pa,xpq,qi->xai", v, vresp(dm_of(x)), o, optimize=True).ravel()
 
     mo1 = cphf.solve(fvind, e, occ, h1, None, max_cycle=max_cycle, tol=tol)[0]
     d = dm_of(mo1)

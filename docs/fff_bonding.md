@@ -162,6 +162,18 @@ relative error of `H v`. `scripts/eval_bonding.py` evaluates a checkpoint per mo
 polarizability as energy derivatives, and for probe frames (`--vacuum`) the interaction energy
 and force change against the vacuum frame at the same geometry.
 
+**Training as a ChemLab job** (`train.bonding`, `chemlab/workers/rsfff/jobs/train.bonding.job.toml`;
+`src/train/bonding_worker.py`): a config (`yaml`), the vacuum and probe extxyz files and the atom references
+(`json`) in; the program holds out the stretch-scan frames beyond `holdout_stretch * r_e`, points the config's
+data paths at the inputs, runs `train_bonding`, evaluates the best checkpoint (validation, held-out, probe
+interaction energies: `rsfff.train.bonding_eval`) and draws the parity figure; outputs `model` (model.tar.gz),
+`eval`, `summary`, `parity`, `parity_data`, `train` (the log), `config`; the report carries
+`rsfff.bonding.<split>.<metric>`. `resources.gpus` (default 1) decides where a manager takes it. The same
+run without ChemLab: `python -m rsfff.train.bonding_worker local --config ... --vacuum ... --probe ...
+--references ... --out DIR`. The fff_bonding project's `train-bonding` workflow and
+`python/scripts/train_local.sh` drive it. `scripts/eval_bonding.py` / `parity_bonding.py` are CLIs over
+`rsfff.train.bonding_eval`.
+
 ## Next
 
 - Data (ChemLab `fff_bonding/cl`): `monomer-pilot` -- Wigner/rotor, scans, probe and field

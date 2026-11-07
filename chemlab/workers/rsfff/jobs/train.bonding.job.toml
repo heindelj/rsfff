@@ -1,0 +1,83 @@
+[job]
+type        = "train.bonding"
+description = "One bonding (1-4) model with its electrical response: rsfff.train.train_bonding on a vacuum set (+ probe-charge frames) with a config, the stretched end of the stretch scans held out; then the evaluation (validation, held-out, probe interaction energies) and the parity figure (rsfff.train.bonding_worker)."
+tags        = ["train"]
+
+[[inputs]]
+name = "config"
+format = "yaml"
+doc = "the train_bonding config; its data paths are replaced by this job's inputs"
+[[inputs]]
+name = "vacuum"
+format = "xyz"
+doc = "the vacuum frames, every frame in one file (fff_bonding's export: energy, forces, Hessians, moments, polarizabilities)"
+[[inputs]]
+name = "probe"
+format = "xyz"
+optional = true
+doc = "the probe-charge frames (ext_charges), trained as the 'probe' stream"
+[[inputs]]
+name = "references"
+format = "json"
+doc = "atom reference energies, {\"energies\": {\"H\": ..., ...}} (Hartree), at the labels' level"
+[[inputs]]
+name = "settings"
+format = "json"
+generated = true
+
+[[outputs]]
+name = "model"
+format = "tar"
+doc = "model.tar.gz: best.pt, config.yaml (as run), train.log"
+[[outputs]]
+name = "eval"
+format = "json"
+doc = "per split (val / heldout / probe_val) and per molecule/kind: E, F, H, mu, Theta, alpha, interaction-energy errors"
+[[outputs]]
+name = "summary"
+format = "txt"
+doc = "the same as tables"
+[[outputs]]
+name = "parity"
+format = "png"
+optional = true
+doc = "parity plots of every quantity: train / val / held-out (and probe train / val)"
+[[outputs]]
+name = "parity_data"
+format = "npz"
+optional = true
+doc = "the parity figure's (prediction, reference) arrays: <set>/<quantity>/<pred|ref>"
+[[outputs]]
+name = "train"
+format = "log"
+doc = "train.log"
+[[outputs]]
+name = "config"
+format = "yaml"
+doc = "the config as run"
+
+[report]
+"train.loss_val"                  = "Float64"
+"train.epochs"                    = "Int"
+"train.size"                      = { type = "Dict", doc = "frames: train / heldout / probe" }
+"rsfff.bonding.val.f_mae"         = { type = "Float64", unit = "kcal/mol/A" }
+"rsfff.bonding.val.mu"            = { type = "Float64", unit = "D" }
+"rsfff.bonding.heldout.f_mae"     = { type = "Float64", unit = "kcal/mol/A" }
+"rsfff.bonding.heldout.mu"        = { type = "Float64", unit = "D" }
+"rsfff.bonding.probe_val.de_int"  = { type = "Float64", unit = "kcal/mol" }
+"rsfff.bonding.wall_s"            = "Float64"
+
+[settings]
+text = """
+struct Settings terms "rsfff.bonding"
+    model::String = "rsfff_bonding" as "train.model"
+    epochs::Int = 0 in 0..100000 as "train.epochs"     # 0: the config's
+    seed::Int = 0 in 0..1000000
+    holdout_stretch::Float64 = 1.3 in 0..10             # hold out scan_stretch frames beyond r / r_e (0: none)
+    device::String = "auto" in {"auto", "cuda", "cpu"}  # auto: CUDA when there is one (never MPS: float64)
+    parity::Bool = true                                 # the parity figure (costs an evaluation pass)
+    parity_frames::Int = 150 in 10..100000              # frames per set in the figure (train and probe subsampled)
+    gpus::Int = 1 in 0..4 as "resources.gpus"
+    cpus::Int = 16 in 1..256 as "resources.cpus"
+end
+"""

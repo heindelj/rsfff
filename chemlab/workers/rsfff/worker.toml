@@ -7,7 +7,7 @@
 # package's jobs. Recreated 2026-10-23 (the old chemlab/workers was deleted) in the package layout.
 [worker]
 name = "rsfff"
-description = "The rsfff walks and ion force fields: committee sampling, committee training, ion / complete-model training."
+description = "The rsfff walks and force fields: committee sampling, committee training, ion / complete-model training, bonding-model training."
 version = "0.2"
 
 [resources]
@@ -22,4 +22,9 @@ command = "bash {worker}/bin/gpu_worker.sh run {workdir}"
 timeout_minutes = 1440
 [run."train.ionct"]
 command = "bash {worker}/bin/gpu_worker.sh run {workdir}"
+timeout_minutes = 2880
+# The bonding (1-4) models (fff_bonding): this package's own program, rsfff.train.bonding_worker (bin/bonding_worker.sh),
+# needing no project dir -- the config, the data and the references come as the job's inputs.
+[run."train.bonding"]
+command = "bash {worker}/bin/bonding_worker.sh run {workdir}"
 timeout_minutes = 2880

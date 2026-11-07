@@ -197,7 +197,10 @@ class ECEElectricalHeads(nn.Module):
         self.env_log_scale = nn.Parameter(torch.zeros(len(FAMILIES)))
         # per bond type: how fast a heterolytic channel transfers its charge (log-scale on gamma)
         self.channels = bool(channels)
-        self.channel_onset, self.channel_width = float(channel_onset), float(channel_width)
+        # saved with the model, so a checkpoint keeps the onset it was trained with even when
+        # the config default changes (an older checkpoint without them keeps the built values)
+        self.register_buffer("channel_shape", torch.tensor([float(channel_onset), float(channel_width)],
+                                                           dtype=torch.float64))
         self.channel_log_rate = nn.Parameter(torch.zeros(n_types, n_types))
 
         self.type_emb = nn.Embedding(n_types, emb_dim)
@@ -219,6 +222,10 @@ class ECEElectricalHeads(nn.Module):
             self.alpha_env = zero_init_readout(mlp(self.resp_latent_dim, hidden, 1, 1))
             self.compliance_env = zero_init_readout(mlp(self.resp_latent_dim, hidden, 1, 1))
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        state_dict.setdefault(prefix + "channel_shape", self.channel_shape.clone())
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     # ------------------------------------------------------------------------------------- #
     def envelope(self, positions, type_idx, bonds) -> torch.Tensor:
         """``(Nb, n_families)`` electrical bond orders ``exp(-gamma (r - r_ref))``."""
@@ -239,7 +246,8 @@ class ECEElectricalHeads(nn.Module):
         rate = 0.5 * (self.channel_log_rate[ti, tj] + self.channel_log_rate[tj, ti])
         gamma = self.beta_ref[ti, tj].to(r.dtype) * (
             self.env_log_scale[FAMILIES.index("channel")] + rate).exp().to(r.dtype)
-        return -gamma * _ramp(r - r0 - self.channel_onset, self.channel_width)
+        onset, width = (float(v) for v in self.channel_shape)
+        return -gamma * _ramp(r - r0 - onset, width)
 
     def channel_charges(self, positions, type_idx, bonds, flow, group, graph) -> torch.Tensor:
         """``(N,)`` charge moved by the dissociation channels at this geometry (see the module

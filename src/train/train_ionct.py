@@ -121,6 +121,26 @@ def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",), min_ct=None, ct_
     return out
 
 
+def total_polar_targets(files, species=("Na", "Cl"), exclude=()):
+    """[(polar_id "<set>:<name>", symbols, coords A, target (3, 2) [alpha_total, nan] per axis bohr^3)] from labelled
+    sets' finite-field polarizability jobs (ct_model rows with a "polarizability" tensor, in the input frame): the
+    diagonal of the whole-cluster SCF polarizability. Trained against the model's alpha_pol + alpha_CT."""
+    out = []
+    for f in files:
+        stem = Path(f).stem
+        for line in open(f):
+            r = json.loads(line)
+            t = r.get("tags") or {}
+            if r.get("stage") != "label" or r.get("polarizability") is None or not r.get("symbols"):
+                continue
+            if not set(r["symbols"]) <= set(species) or t.get("name") in set(exclude):
+                continue
+            d = np.diag(np.asarray(r["polarizability"], float))
+            tgt = torch.tensor([[v, float("nan")] for v in d], dtype=torch.float64)
+            out.append((f"{stem}:{t.get('name')}", r["symbols"], np.asarray(r["coords"], float), tgt))
+    return out
+
+
 def polar_fields(B):
     """The 7 fields of the stencil (0, +-x, +-y, +-z) for each of B geometries: (7B, 3), geometry-major."""
     f = torch.zeros(7, 3, dtype=torch.float64)
@@ -150,11 +170,14 @@ def polar_loss(model, pb):
     t = torch.stack([torch.as_tensor(c.labels["alpha"]) for c in caches]).to(a.device)
     n = torch.tensor([c.species.shape[0] for c in caches], dtype=a.dtype, device=a.device)[:, None]
     ok = torch.tensor([c.labels["ct_ok"] for c in caches], device=a.device)[:, None]
+    tot = torch.tensor([bool(c.labels.get("total", False)) for c in caches], device=a.device)[:, None]
     have = torch.isfinite(t[..., 0])
     t = torch.nan_to_num(t)
     z = torch.zeros_like(a[..., 0])
-    return (torch.where(have, (a[..., 0] - t[..., 0]) / n, z),
-            torch.where(have & ok, (a[..., 1] - t[..., 1]) / n, z))
+    # a total target (whole-cluster SCF alpha, no MI / CT split) is compared with alpha_pol + alpha_CT, in the first slot
+    first = torch.where(tot, a[..., 0] + a[..., 1], a[..., 0])
+    return (torch.where(have, (first - t[..., 0]) / n, z),
+            torch.where(have & ok & ~tot, (a[..., 1] - t[..., 1]) / n, z))
 
 
 def _species_floats(spec):
@@ -214,7 +237,7 @@ def _channel_sums(r, ratio, types=None):
 
 
 def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 3.6, max_ho_ratio: float = 1.4,
-                species=("Na", "Cl"), types=None, ct_dimers=True, extra_sets=(), extra_files=()):
+                species=("Na", "Cl"), types=None, ct_dimers=True, extra_sets=(), extra_files=(), exclude=()):
     """[(symbols, coords A, labels, meta)], deduplicated.
 
     The ct label is kept only where ALMO's E_CT is a channel quantity: unlike pairs within ``dimer_ct_cut`` (``ct_max_pair`` for Na-Cl) and, for
@@ -266,6 +289,8 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
             if not set(r["symbols"]) <= set(species) or (r.get("tags") or {}).get("field"):
                 continue
             t = r.get("tags") or {}
+            if per_frame and t.get("name") in set(exclude):
+                continue
             if "mbe_set" in t:
                 parent = t["mbe_set"]
             elif per_frame:
@@ -429,6 +454,27 @@ def load_force_frames(dirs, mono, species=("Na", "Cl")):
     return out
 
 
+def load_force_sets(files, mono, species=("Na", "Cl"), exclude=()):
+    """load_force_frames from labelled sets (ct_model rows with "forces", Hartree / bohr in the input frame, and the
+    total "energy", Hartree); the frame's "file" is "<set>:<name>" (--force-test may name one)."""
+    out = []
+    for f in files:
+        stem = Path(f).stem
+        for line in open(f):
+            r = json.loads(line)
+            t = r.get("tags") or {}
+            if r.get("stage") != "label" or r.get("forces") is None or r.get("energy") is None:
+                continue
+            sym = r["symbols"]
+            if not set(sym) <= set(species) or t.get("name") in set(exclude):
+                continue
+            key = f"{stem}:{t.get('name')}"
+            out.append((sym, np.asarray(r["coords"], float),
+                        {"int": float(r["energy"]) - sum(mono[x] for x in sym), "forces": np.asarray(r["forces"], float)},
+                        {"workflow": stem, "parent": key, "file": key, "index": 0, "n": len(sym)}))
+    return out
+
+
 def radial_table(tab, params_path, cache_dir=None):
     """The complete model's :class:`RadialTable` for this parameter table, cached on disk by the table's hash."""
     import hashlib
@@ -529,7 +575,7 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
     g = a.get
     if g("model", "ionct") == "complete":
         from ..ff.complete import CompleteModel
-        flux = g("ct_model", "direct") == "flux"           # the flux solve replaces the gap factor / saturation / Stark
+        flux = g("ct_model", "direct") in ("flux", "twostate")   # the joint solve replaces the gap factor / saturation / Stark
         return CompleteModel(tab, chan, n_feat, feature_names=feature_names, hidden=g("hidden", 64),
                              feat_scale=feat_scale, c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"),
                              pseudo=g("pseudo", False), tie_c=g("tie_c", False), species_emb=g("species_emb", False),
@@ -542,12 +588,24 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              ct_sc=g("ct_sc", 0), env_cap=g("env_cap", 0.0), env_log=g("env_log", 0.0),
                              ct_sat=g("ct_sat", False) and not flux, ct_q_cap=g("ct_q_cap", 0.0), gap_cap=g("gap_cap", 4.0),
                              ct_sat_ion=g("ct_sat_ion", False) and not flux, ct_w_fixed=g("ct_w_fixed", False) and not flux, xpol=g("xpol", False),
-                             ct_model=g("ct_model", "direct"), head_frontier=g("head_frontier", None),
+                             ct_model=g("ct_model", "direct"), flux_solver=g("flux_solver", "atomic"),
+                             ct_outer=g("ct_outer", 1), ct_outer_tol=g("ct_outer_tol", 1e-10),
+                             ct_gap_min=g("ct_gap_min", 0.03), ct_gap_learn=g("ct_gap_learn", False),
+                             head_frontier=g("head_frontier", None),
                              gap_shift=g("gap_shift", "acceptor"),
                              xpol_perp=bool(g("xpol_perp", False)) and bool(g("xpol", False)),   # absent: before it was the default
                              xpol_kperp_init=_species_floats(g("xpol_kperp_init", None)),
                              xpol_kappa_head=not g("xpol_kappa_const", False),
-                             xpol_perp_weight=g("xpol_perp_weight", "pauli"), xpol_kappa_env=g("xpol_kappa_env", "overlap"))   # absent: a checkpoint from before scalefree
+                             xpol_perp_weight=g("xpol_perp_weight", "pauli"), xpol_kappa_env=g("xpol_kappa_env", "overlap"),   # absent: a checkpoint from before scalefree
+                             env_channels=g("env_channels", False), env_latent=g("env_latent", 4),
+                             env_mode=g("env_mode", "shared"),
+                             env_two_body=tuple(g("env_two_body", ("pauli", "disp", "ct")) or ()),
+                             ct_q_head=not g("ct_q_const", False), pin_a0=g("pin_a0", False),
+                             env_extra=tuple(g("env_extra", ()) or ()),
+                             env_extra_terms=tuple(g("env_extra_terms", ("ct",)) or ()),
+                             env_field=g("env_field", False), ct_legacy_head=g("ct_legacy_head", False),
+                             env_ct_pen=g("env_ct_pen", False),
+                             env_extra_capacity=g("env_extra_capacity", "small"))   # absent: a run from before "full"
     return IonCTModel(tab, chan, n_feat, hidden=g("hidden", 64), wkb=g("wkb", "smooth+floor"), feat_scale=feat_scale,
                       c_range=tuple(g("c_range", (0.05, 1.25))), confine=g("confine"), pseudo=g("pseudo", False),
                       joint=g("joint", False), ct_pol=g("ct_pol", False), gap_form=g("gap_form", "pair"),
@@ -762,7 +820,17 @@ def main():
     ap.add_argument("--w-fe", type=float, default=1.0, help="weight of the force frames' total energy (kJ/mol per ion)")
     ap.add_argument("--force-every", type=int, default=1, help="force step every k-th energy step (weight x k)")
     ap.add_argument("--force-batch", type=int, default=16)
-    ap.add_argument("--force-test", nargs="*", default=list(FORCE_TEST), help="force files (stems) held out")
+    ap.add_argument("--force-test", nargs="*", default=list(FORCE_TEST),
+                    help="force files (stems; '<set>:<name>' for --force-sets frames) held out")
+    ap.add_argument("--force-sets", nargs="*", default=[],
+                    help="labelled sets (ct_model jsonl) whose force jobs are force frames (total energy + forces)")
+    ap.add_argument("--polar-sets", nargs="*", default=[],
+                    help="labelled sets (ct_model jsonl) whose finite-field polarizability jobs are alpha targets: the "
+                         "whole-cluster alpha (diagonal), against the model's alpha_pol + alpha_CT")
+    ap.add_argument("--polar-almo", default=True, action=argparse.BooleanOptionalAction,
+                    help="the ALMO finite-field alpha_MI / alpha_CT targets (ct-polar, seed-<salt>-polar)")
+    ap.add_argument("--exclude-names", nargs="*", default=[],
+                    help="frames (name tag) of --extra-sets / --force-sets / --polar-sets left out entirely")
     ap.add_argument("--exchange", default="auto", choices=("auto", "xpol", "pseudo", "none"),
                     help="the exchange-polarization drive: xpol = the quadratic functional (pair Pauli energies as a PSD "
                          "quadratic in the induced moments and breathing amplitudes, one solve with the induction; the "
@@ -770,13 +838,27 @@ def main():
                          "breathing term, none. auto: xpol for --model complete --frozen, else pseudo with --pseudo, "
                          "else none. The confinement head (--confine, --conf-form) is independent of it")
     ap.add_argument("--xpol", action="store_true", help="same as --exchange xpol")
-    ap.add_argument("--ct-model", default="direct", choices=("direct", "gap", "flux"),
+    ap.add_argument("--flux-solver", default="atomic", choices=("atomic", "channel"),
+                    help="flux CT: atomic = channels eliminated, an N x N solve in atomic charges (default); "
+                         "channel = the original Schur complement over the channels (reference; identical "
+                         "results, cost ~ C^3 with C ~ N^2 channels)")
+    ap.add_argument("--ct-outer", type=int, default=1,
+                    help="twostate CT: outer (Newton) steps; 1 = linear response about the isolated two-state minimum, "
+                         "> 1 = up to that many steps towards the exact minimum")
+    ap.add_argument("--ct-outer-tol", type=float, default=1e-10, help="twostate CT: stop when max |dq| is below this")
+    ap.add_argument("--ct-gap-min", type=float, default=0.03,
+                    help="twostate CT: smooth floor of the channel gap (Hartree), see rsfff.ff.complete.twostate")
+    ap.add_argument("--ct-gap-learn", action="store_true",
+                    help="twostate CT: train per-species shifts of the table I, A (default: frozen at the table values)")
+    ap.add_argument("--ct-model", default="direct", choices=("direct", "gap", "flux", "twostate"),
                     help="complete: direct = environment-dependent donor/acceptor CT charges (+ the multiplicative gap "
                          "factor / two-state saturation); gap = fixed per-species couplings W and the environment only "
                          "in an additive gap I - A + phiD(i) - phiA(j) + overlap shifts of the frontier levels; flux = "
                          "explicit split charges per channel in the xpol solve, compliance from the direct-CT energy "
                          "(needs xpol; turns off the gap factor, --ct-sat/--ct-sat-ion/--ct-stark/--ct-w-fixed; no "
-                         "frontier potentials in the cache)")
+                         "frontier potentials in the cache); twostate = two-state channels (population from the direct-CT energy and "
+                         "a gap I - A + permanent potential difference - electron-hole attraction) coupled to the xpol "
+                         "solve, see rsfff.ff.complete.twostate")
     ap.add_argument("--gap-shift", default="acceptor", choices=("acceptor", "both"),
                     help="--ct-model gap: overlap shift of the acceptor level only (gap opens with overlap) or of both "
                          "frontier levels")
@@ -808,6 +890,47 @@ def main():
                     help="weight of the total interaction energy (cls_elec label + pauli + disp + pol + ct) vs ALMO int")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=10)
+    ap.add_argument("--env-channels", action="store_true",
+                    help="complete (m33): every environment log-factor (Pauli weight, C6, xpol kappa per component, "
+                         "CT q_D / q_A) from one shared environment on the 17 two- and three-body channels of the "
+                         "overlap- and electrostatics-weighted neighbour densities (src/ff/complete/channels.py) in "
+                         "place of head_frozen / head_xpol / head_ctq")
+    ap.add_argument("--env-latent", type=int, default=4, help="--env-channels: latent width of the trunk(s)")
+    ap.add_argument("--env-mode", default="shared", choices=("shared", "per_term"),
+                    help="--env-channels: one trunk for every parameter (shared) or one trunk, with its own latent, "
+                         "per term (Pauli, dispersion, kappa, CT)")
+    ap.add_argument("--env-two-body", nargs="*", default=["pauli", "disp", "ct"],
+                    help="--env-channels: the terms whose readouts see the two-body channels S^w, S^s (dimer-level "
+                         "corrections); the others are exactly constant on every dimer. Any of pauli disp kappa ct")
+    ap.add_argument("--env-extra", nargs="*", default=[],
+                    help="--env-channels: density-environment invariants (feature names, e.g. acceptor:S0 donor:S0) "
+                         "given as an extra branch to the readouts of --env-extra-terms")
+    ap.add_argument("--env-extra-terms", nargs="*", default=["ct"],
+                    help="terms whose readouts get --env-extra / --env-field")
+    ap.add_argument("--env-field", action="store_true",
+                    help="--env-channels: the permanent electrostatic field and field gradient at each site "
+                         "(|E|^2, |grad E|^2 of the induction drive) as an extra branch for --env-extra-terms (default ct)")
+    ap.add_argument("--env-extra-capacity", default="full", choices=("full", "small"),
+                    help="--env-channels: size of the extra branch's MLP (full = hidden x depth, as a head; small = "
+                         "16 x 1, the first m33 runs)")
+    ap.add_argument("--env-ct-pen", action="store_true",
+                    help="--env-channels: the diffuse probes' (donor, acceptor, breath) invariants up to l = 2 with "
+                         "penetration-only Coulomb blocks as an extra branch for --env-extra-terms (default ct)")
+    ap.add_argument("--w-curv", type=float, default=0.0,
+                    help="geometric smoothness prior: weight of the mean squared second difference (per A^2) of every "
+                         "environment log-factor along random per-atom displacements (--env-channels)")
+    ap.add_argument("--curv-every", type=int, default=4, help="--w-curv: every k-th step (weight x k)")
+    ap.add_argument("--curv-frames", type=int, default=8, help="--w-curv: training frames per evaluation")
+    ap.add_argument("--curv-delta", type=float, default=0.02, help="--w-curv: displacement (A)")
+    ap.add_argument("--ct-legacy-head", action="store_true",
+                    help="--env-channels: CT q_D, q_A from the m32 head on the 42 density invariants (hybrid)")
+    ap.add_argument("--ct-q-const", action="store_true",
+                    help="--env-channels: CT q_D, q_A = per-species constants (no environment readout)")
+    ap.add_argument("--pin-a0", action="store_true",
+                    help="complete: the breathing stiffness a0 stays at the ion table's monomer value (breath_lna frozen)")
+    ap.add_argument("--hull-k", type=int, default=6,
+                    help="write RUN/hull.pt: the training atoms' convex hull in this many whitened PCA "
+                         "components of the invariants (rsfff.coverage; 0 = off)")
     a = ap.parse_args()
     resolve_exchange(a)
     torch.manual_seed(a.seed)
@@ -821,7 +944,7 @@ def main():
     frames = load_frames(a.ct_sets, a.walk_eda, a.ct_max_pair, a.max_ho_ratio, species=tab.symbols,
                          types=channel_types(tab.symbols), ct_dimers=not a.ct_no_dimers,
                          extra_sets=[f"seed-{x}-{k}" for x in a.salts for k in ("scan", "mbe", "sat")],
-                         extra_files=a.extra_sets)
+                         extra_files=a.extra_sets, exclude=a.exclude_names)
     a.test = list(a.test) + [f"{x}{n}" for x in a.salts for n in ("6_03", "8_07", "9_09")]
     print(f"ct label kept for {sum(f[2]['ct_mask'] for f in frames)} of {len(frames)} frames", flush=True)
     tags = split(frames, a.test, seed=a.seed)
@@ -833,12 +956,12 @@ def main():
         if a.ct_form != "direct" or a.env != "density":
             raise SystemExit("--model complete needs --ct-form direct and --env density")
     lean = (a.ct_form == "direct") and not a.full_precompute
-    if a.ct_model == "flux":
+    if a.ct_model in ("flux", "twostate"):
         if a.model != "complete" or not a.xpol:
-            raise SystemExit("--ct-model flux needs --model complete with xpol")
+            raise SystemExit(f"--ct-model {a.ct_model} needs --model complete with xpol")
         off = [f for f in ("ct_sat", "ct_sat_ion", "ct_stark", "ct_w_fixed") if getattr(a, f, False)]
         if off:
-            print(f"--ct-model flux: ignoring {', '.join('--' + f.replace('_', '-') for f in off)}", flush=True)
+            print(f"--ct-model {a.ct_model}: ignoring {', '.join('--' + f.replace('_', '-') for f in off)}", flush=True)
         a.no_ct_gap = True
     frontier = a.model == "complete" and not a.no_ct_gap
     cache_path = a.cache
@@ -854,6 +977,22 @@ def main():
     nz = F.abs().sum(1) > 0
     scale = F[nz].std(0).clamp(min=1e-6)
     model = build_model(vars(a), tab, chan, F.shape[1], scale, getattr(feat, "feature_names", None))
+    Xc = None
+    if getattr(model, "env", None) is not None:      # the channels' training scale (an init checkpoint overrides it)
+        Xc = channel_matrix(model, tr)
+        nzc = Xc.abs().sum(1) > 0
+        model.chan_scale.copy_(Xc[nzc].std(0).clamp(min=1e-12))
+        if model.env_field:
+            Fv = model.field_invariants(torch.cat([c.L for c in tr]).double())
+            nzf = Fv.abs().sum(1) > 0
+            model.field_scale.copy_(Fv[nzf].std(0).clamp(min=1e-12))
+        if model.env_ct_pen:
+            Pv = pen_matrix(model, tr)
+            nzp = Pv.abs().sum(1) > 0
+            model.pen_scale.copy_(Pv[nzp].std(0).clamp(min=1e-12))
+        print(f"env channels: {Xc.shape[1]} ({model.env.mode} trunk, latent {model.env.latent}; two-body for "
+              f"{[p for p in model.env.names if model.env.two_body[p]]}), {int(nzc.sum())} training atoms with pairs",
+              flush=True)
     dev = torch.device(a.device)
     if dev.type != "cpu":
         tab = tab.to(dev)
@@ -862,15 +1001,20 @@ def main():
         print(f"device: {dev} ({torch.cuda.get_device_name(dev) if dev.type == 'cuda' else ''})", flush=True)
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
-        for pid, sym, X, tgt, ok in polar_targets(a.ct_sets, ct_dimers=not a.ct_no_dimers,
-                                                  files=("ct-polar", *[f"seed-{x}-polar" for x in a.salts]),
-                                                  min_ct=a.polar_min_ct, ct_max_pair=a.polar_ct_max_pair):
-            c = precompute(sym, X, tab, chan, feat, {"alpha": tgt, "ct_ok": ok}, {"polar_id": pid}, lean=lean,
-                           frontier=frontier)
+        almo = polar_targets(a.ct_sets, ct_dimers=not a.ct_no_dimers,
+                             files=("ct-polar", *[f"seed-{x}-polar" for x in a.salts]),
+                             min_ct=a.polar_min_ct, ct_max_pair=a.polar_ct_max_pair) if a.polar_almo else []
+        total = total_polar_targets(a.polar_sets, species=tab.symbols, exclude=a.exclude_names)
+        for pid, sym, X, tgt, ok, is_tot in ([(*t, False) for t in almo] + [(*t, False, True) for t in total]):
+            lab = {"alpha": tgt, "ct_ok": ok, **({"total": True} if is_tot else {})}
+            c = precompute(sym, X, tab, chan, feat, lab, {"polar_id": pid}, lean=lean, frontier=frontier)
             base = pid.split(":")[-1]
             held = (pid in set(a.polar_test) or (a.holdout_scans and base.startswith("pair_"))
                     or (":" in pid and base.startswith("shell_tet4")))
             (polar_te if held else polar_tr).append(c)
+        if total:
+            print(f"alpha targets: {len(almo)} ALMO alpha_MI / alpha_CT, {len(total)} whole-cluster totals "
+                  f"({', '.join(a.polar_sets)})", flush=True)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)
         pb_tr, pb_all = to_device(polar_batch(polar_tr), dev), to_device(polar_batch(polar_tr + polar_te), dev)
     if a.init_from:
@@ -880,25 +1024,42 @@ def main():
     if a.env_sat > 0 and hasattr(model, "feat_sat"):    # this run's training range, after any init
         m = a.env_sat * (F[nz] / scale).abs().max(0).values
         model.feat_sat.copy_(m.to(model.feat_sat))
+        if Xc is not None:
+            mc = a.env_sat * (Xc / model.chan_scale.cpu()).abs().max(0).values
+            model.chan_sat.copy_(mc.to(model.chan_sat))
+            if model.env_field:
+                Fv = model.field_invariants(torch.cat([c.L for c in tr]).double())
+                model.field_sat.copy_((a.env_sat * (Fv / model.field_scale.cpu()).abs().max(0).values).to(model.field_sat))
+            if model.env_ct_pen:
+                Pv = pen_matrix(model, tr)
+                model.pen_sat.copy_((a.env_sat * (Pv / model.pen_scale.cpu()).abs().max(0).values).to(model.pen_sat))
         print(f"env-sat: heads saturate at {a.env_sat} x the training range (median m {float(m.median()):.2f})",
               flush=True)
     force_tr, force_te, table = [], [], None
-    if a.force_data:
+    if a.force_data or a.force_sets:
         if not (a.model == "complete" and a.frozen):
             raise SystemExit("--force-data needs --model complete --frozen (the model must own every term)")
         mono = monomer_energies([a.walk_eda] if a.walk_eda else [])
         if len(mono) < 2:
             raise SystemExit("monomer energies: --walk-eda files with fragment_energies are needed")
         print(f"monomer energies (Hartree): {mono}", flush=True)
-        ff = load_force_frames(a.force_data, mono)
+        ff = load_force_frames(a.force_data or [], mono) + load_force_sets(a.force_sets, mono, tab.symbols,
+                                                                          a.exclude_names)
         held = set(a.force_test)
         force_tr = [f for f in ff if f[3]["file"] not in held]
         force_te = [f for f in ff if f[3]["file"] in held]
         print(f"force frames: {len(force_tr)} train, {len(force_te)} held out ({', '.join(sorted(held))})", flush=True)
         table = radial_table(tab, a.params, a.cache_dir).to(dev)
+    if a.w_curv > 0:
+        if getattr(model, "env", None) is None:
+            raise SystemExit("--w-curv needs --env-channels")
+        if table is None:
+            table = radial_table(tab, a.params, a.cache_dir).to(dev)
+    curv_log = []
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs, eta_min=a.lr * 0.02)
     best, best_state, log = math.inf, None, []
+    n_sing = 0
     t0 = time.time()
     for ep in range(1, a.epochs + 1):
         random.shuffle(tr)
@@ -921,10 +1082,24 @@ def main():
                 loss = loss + a.alpha_every * a.w_alpha * (ap_ ** 2 + a.w_alpha_ct * ac_ ** 2).mean()
             if a.w_smooth > 0:
                 loss = loss + a.w_smooth * model.smoothness_penalty(bt, a.smooth_sigma)
+            if a.w_curv > 0 and step % a.curv_every == 0:
+                cp = curvature_penalty(model, random.sample(tr, min(a.curv_frames, len(tr))), tab, table, chan,
+                                       a.curv_delta)
+                loss = loss + a.curv_every * a.w_curv * cp
+                curv_log.append(float(cp.detach()))
             if force_tr and a.w_force > 0 and step % a.force_every == 0:
                 fb = random.sample(force_tr, min(a.force_batch, len(force_tr)))
-                fe_, ff_, _ = force_terms(model, fb, tab, table, chan)
-                loss = loss + a.force_every * (a.w_fe * (fe_ ** 2).mean() + a.w_force * (ff_ ** 2).mean())
+                try:
+                    fe_, ff_, _ = force_terms(model, fb, tab, table, chan)
+                    loss = loss + a.force_every * (a.w_fe * (fe_ ** 2).mean() + a.w_force * (ff_ ** 2).mean())
+                except torch.linalg.LinAlgError as err:     # a singular response matrix: keep the evidence, skip
+                    n_sing += 1
+                    dump = out / f"singular_{n_sing:03d}.pt"
+                    if n_sing <= 5:
+                        torch.save({"state": {k_: v.detach().cpu() for k_, v in model.state_dict().items()},
+                                    "frames": fb, "error": str(err), "epoch": ep, "step": step}, dump)
+                    print(f"ep {ep} step {step}: force step skipped ({err}); "
+                          f"frames {[m_['file'] for *_, m_ in fb]}" + (f" -> {dump}" if n_sing <= 5 else ""), flush=True)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
@@ -942,13 +1117,26 @@ def main():
             if polar_tr:
                 with torch.no_grad():
                     ap_, ac_ = polar_loss(model, pb_all)
-                msg = f" | alpha/ion |err| pol {ap_.abs().mean():.2f} ct {ac_.abs().mean():.2f} bohr^3"
+                has_tot = any(c.labels.get("total") for c in pb_all["caches"])
+                msg = (f" | alpha/ion |err| {'pol|total' if has_tot else 'pol'} {ap_.abs().mean():.2f} "
+                       f"ct {ac_.abs().mean():.2f} bohr^3")
             if "pauli_mae" in sv:
                 msg = f" pauli MAE {sv['pauli_mae']:.2f}" + (f" disp MAE {sv['disp_mae']:.2f}" if "disp_mae" in sv else "") + msg
             if force_te:
                 fm = force_metrics(model, force_te, tab, table, chan)
                 msg += f" | held-out forces: E/ion MAE {fm['e_mae']:.2f} kJ/mol, F rms {fm['f_rms']:.1f} kJ/mol/A"
                 log[-1].update({f"force_{k}": v for k, v in fm.items()})
+            if getattr(model, "env", None) is not None and table is not None and va:
+                # the parameters' geometric curvature on fixed validation frames and displacements (a diagnostic
+                # whether or not --w-curv trains it): mean squared second difference per A^2 of the log-factors
+                st = torch.random.get_rng_state()
+                torch.manual_seed(1234)
+                with torch.no_grad():
+                    cv = float(curvature_penalty(model, va[:16], tab, table, chan, a.curv_delta))
+                torch.random.set_rng_state(st)
+                log[-1]["val_curv"] = cv
+                msg += f" | curv {cv:.3g}" + (f" (train {np.mean(curv_log):.3g})" if curv_log else "")
+                curv_log.clear()
             print(f"ep {ep:4d} loss {tot / len(tr):.4f} | val pol MAE {sv.get('pol_mae', 0):.2f} ct MAE "
                   f"{sv.get('ct_mae', 0):.2f} kJ/mol{msg} [{time.time() - t0:.0f}s]", flush=True)
     model.load_state_dict(best_state)
@@ -1006,6 +1194,105 @@ def main():
         extra = "".join(f"  {k} MAE {m[f'{k}_mae']:.2f}" for k in ("pauli", "disp", "int") if f"{k}_mae" in m)
         print(f"{name:5} pol MAE {m.get('pol_mae', 0):.2f}  ct MAE {m.get('ct_mae', 0):.2f}{extra} kJ/mol "
               f"(ct rel {m.get('ct_rel', 0):.3f}); full clusters: {res[name].get('full', {})}")
+    if a.hull_k > 0 and a.env == "density":
+        write_hull(a, out, feat, F, scale, tr, va + te, force_tr, force_te,
+                   model=model if getattr(model, "env", None) is not None else None)
+
+
+def pen_matrix(model, caches, bs=128):
+    """(N, 15) raw diffuse-probe penetration invariants (``env_ct_pen``) of every atom of the caches."""
+    out = []
+    with torch.no_grad():
+        for k in range(0, len(caches), bs):
+            out.append(model.diffuse_pen_invariants(collate(caches[k:k + bs])).cpu())
+    return torch.cat(out)
+
+
+def curvature_penalty(model, caches, tab, table, chan, delta=0.02):
+    """Mean squared second difference (per A^2) of every environment log-factor of the shared environment along one
+    random per-atom displacement field (unit vectors x delta A) of the given frames: the geometric smoothness prior
+    (a fold in the features shows up as curvature of the parameters in R, which a feature-space prior cannot see)."""
+    from ..ff.complete import batched_precompute
+    from ..ff.ionct.params import ATOMIC_NUMBER as Zmap
+    dev = table.device
+    pos = torch.cat([c.pos for c in caches]).to(dev, torch.float64)
+    Z = torch.tensor([Zmap[tab.symbols[int(s)]] for c in caches for s in c.species], device=dev)
+    fr = torch.cat([torch.full((c.species.shape[0],), k, dtype=torch.long) for k, c in enumerate(caches)]).to(dev)
+    xi = torch.randn_like(pos)
+    xi = xi / xi.norm(dim=1, keepdim=True).clamp(min=1e-12)
+    us = []
+    for sgn in (0.0, 1.0, -1.0):
+        bt = batched_precompute(pos + sgn * delta * xi, Z, fr, tab, table, chan, inv_form=model.inv_form)
+        model.env_prepare(bt, bt["species"])
+        us.append(model._env_u)
+    pen = 0.0
+    for k in us[0]:
+        pen = pen + (((us[1][k] - 2 * us[0][k] + us[2][k]) / delta ** 2) ** 2).mean()
+    return pen
+
+
+def channel_matrix(model, caches, bs=256):
+    """(N, 17) raw m33 environment channels of every atom of ``caches`` (FrameCache) or of raw frames
+    (symbols, coords, ...), batched per frame."""
+    from ase.data import atomic_numbers
+    out = []
+    model_dev = next(model.parameters()).device
+    with torch.no_grad():
+        for k in range(0, len(caches), bs):
+            chunk = caches[k:k + bs]
+            pos, sp, fr = [], [], []
+            for q, c in enumerate(chunk):
+                if hasattr(c, "species"):
+                    s_, x_ = c.species, c.pos
+                else:
+                    sym, X = c[0], c[1]
+                    s_ = model.tab.species_index(torch.tensor([atomic_numbers[x] for x in sym]))
+                    x_ = torch.as_tensor(X, dtype=torch.float64)
+                sp.append(s_.to(model_dev))
+                pos.append(x_.to(model_dev, torch.float64))
+                fr.append(torch.full((len(s_),), q, dtype=torch.long, device=model_dev))
+            out.append(model.env_raw(torch.cat(pos), torch.cat(sp), torch.cat(fr)).cpu())
+    return torch.cat(out) if out else torch.zeros(0, 17, dtype=torch.float64)
+
+
+def write_hull(a, out, feat, F, scale, tr, held, force_tr, force_te, model=None):
+    """RUN/hull.pt: the convex hull of the training atoms' invariants (EDA frames + force frames) in the network's
+    input space, and the fraction of held-out atoms outside it. With the m33 environment (``model`` given) the space
+    is that of the 17 channels the heads read. Never fails the run."""
+    try:
+        from ase.data import atomic_numbers
+        from ..coverage import INSIDE_TOL, FeatureHull
+        if model is not None:
+            Xtr = channel_matrix(model, list(tr) + list(force_tr)).numpy()
+            hull = FeatureHull.fit(Xtr, model.chan_scale.double().cpu().numpy(), k=a.hull_k,
+                                   feature_names=list(model.channel_names), verbose=True,
+                                   meta={"run": str(out), "params": str(a.params), "n_train_frames": len(tr),
+                                         "n_force_frames": len(force_tr), "space": "env_channels"})
+            hull.save(out / "hull.pt")
+            Xh = channel_matrix(model, list(held) + list(force_te)).numpy()
+            if len(Xh):
+                d = hull.distance(Xh)
+                print(f"hull: {100 * float((d > INSIDE_TOL).mean()):.1f} % of {len(d)} held-out atoms outside "
+                      f"-> {out / 'hull.pt'}", flush=True)
+            return
+
+        def ff_feats(frames):
+            return [feat(torch.as_tensor(X, dtype=torch.float64), torch.tensor([atomic_numbers[x] for x in sym]),
+                         torch.zeros(len(sym), dtype=torch.long)).inv_feats.double().numpy() for sym, X, *_ in frames]
+
+        Ftr = np.concatenate([F.double().cpu().numpy(), *ff_feats(force_tr)])
+        hull = FeatureHull.fit(Ftr, scale.double().cpu().numpy(), k=a.hull_k,
+                               feature_names=getattr(feat, "feature_names", None), verbose=True,
+                               meta={"run": str(out), "params": str(a.params), "n_train_frames": len(tr),
+                                     "n_force_frames": len(force_tr)})
+        hull.save(out / "hull.pt")
+        Fh = [c.feats.double().cpu().numpy() for c in held] + ff_feats(force_te)
+        if Fh:
+            d = hull.distance(np.concatenate(Fh))
+            print(f"hull: {100 * float((d > INSIDE_TOL).mean()):.1f} % of {len(d)} held-out atoms outside "
+                  f"-> {out / 'hull.pt'}", flush=True)
+    except Exception as e:      # the hull is a by-product; a failure here must not cost the trained model
+        print(f"hull: not written ({type(e).__name__}: {e})", flush=True)
 
 
 if __name__ == "__main__":

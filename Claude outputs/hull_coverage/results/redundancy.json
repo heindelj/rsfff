@@ -1,0 +1,296 @@
+{
+ "twonn_all_train": 1.7226791558363215,
+ "twonn_full_cluster_ions": 0.10696132339805878,
+ "n_full_ions": 2319,
+ "twonn_by_species": {
+  "Li": 1.2,
+  "Na": 1.97,
+  "K": 1.4,
+  "Cs": 1.06,
+  "F": 1.33,
+  "Cl": 1.89,
+  "Br": 1.29,
+  "I": 0.99
+ },
+ "n_pairs_rho_gt_0.98": 30,
+ "pairs_rho_gt_0.98": [
+  [
+   "shell:V0_pen",
+   "dip:V0_pen",
+   0.9948
+  ],
+  [
+   "shell:|V1|^2",
+   "dip:|V1|^2",
+   0.9929
+  ],
+  [
+   "shell:|V1|^2",
+   "quad:|V1|^2",
+   0.9887
+  ],
+  [
+   "shell:|V1|^2",
+   "donor:|V1|^2",
+   0.9968
+  ],
+  [
+   "shell:|V2|^2",
+   "donor:|V2|^2",
+   0.989
+  ],
+  [
+   "shell:S0",
+   "dip:S0",
+   0.9913
+  ],
+  [
+   "shell:S0",
+   "quad:S0",
+   0.9848
+  ],
+  [
+   "shell:S0",
+   "donor:S0",
+   0.9865
+  ],
+  [
+   "shell:|S1|^2",
+   "dip:|S1|^2",
+   0.9899
+  ],
+  [
+   "shell:|S1|^2",
+   "quad:|S1|^2",
+   0.9903
+  ],
+  [
+   "shell:|S1|^2",
+   "donor:|S1|^2",
+   0.9884
+  ],
+  [
+   "shell:|S2|^2",
+   "dip:|S2|^2",
+   0.9885
+  ],
+  [
+   "shell:|S2|^2",
+   "donor:|S2|^2",
+   0.9902
+  ],
+  [
+   "shell:V1.S1",
+   "dip:V1.S1",
+   0.9925
+  ],
+  [
+   "shell:V1.S1",
+   "quad:V1.S1",
+   0.9881
+  ],
+  [
+   "shell:V1.S1",
+   "donor:V1.S1",
+   0.9974
+  ],
+  [
+   "dip:|V1|^2",
+   "quad:|V1|^2",
+   0.9933
+  ],
+  [
+   "dip:|V1|^2",
+   "donor:|V1|^2",
+   0.9935
+  ],
+  [
+   "dip:|V2|^2",
+   "quad:|V2|^2",
+   0.9817
+  ],
+  [
+   "dip:S0",
+   "quad:S0",
+   0.9809
+  ],
+  [
+   "dip:S0",
+   "donor:S0",
+   0.9803
+  ],
+  [
+   "dip:|S1|^2",
+   "quad:|S1|^2",
+   0.9897
+  ],
+  [
+   "dip:|S1|^2",
+   "donor:|S1|^2",
+   0.9802
+  ],
+  [
+   "dip:V1.S1",
+   "quad:V1.S1",
+   0.9947
+  ],
+  [
+   "dip:V1.S1",
+   "donor:V1.S1",
+   0.9931
+  ],
+  [
+   "quad:|V1|^2",
+   "donor:|V1|^2",
+   0.9917
+  ],
+  [
+   "quad:S0",
+   "donor:S0",
+   0.9878
+  ],
+  [
+   "quad:|S1|^2",
+   "donor:|S1|^2",
+   0.9804
+  ],
+  [
+   "quad:V1.S1",
+   "donor:V1.S1",
+   0.9889
+  ],
+  [
+   "breath:|S1|^2",
+   "breath:|S2|^2",
+   0.9809
+  ]
+ ],
+ "pivoted_qr_order": [
+  "shell:|S2|^2",
+  "quad:|V1|^2",
+  "acceptor:V0_pen",
+  "breath:|S1|^2",
+  "breath:|V2|^2",
+  "breath:V0_pen",
+  "acceptor:V1.S1",
+  "donor:S0",
+  "acceptor:|S2|^2",
+  "quad:V1.S1",
+  "dip:|V2|^2",
+  "breath:|S2|^2",
+  "breath:|V1|^2",
+  "acceptor:|V2|^2",
+  "donor:V0_pen",
+  "acceptor:|S1|^2",
+  "breath:V1.S1",
+  "donor:|V2|^2",
+  "quad:V0_pen",
+  "acceptor:S0"
+ ],
+ "pivoted_qr_rdiag_rel": [
+  1.0,
+  0.9287,
+  0.7885,
+  0.7214,
+  0.6488,
+  0.6314,
+  0.5979,
+  0.463,
+  0.4588,
+  0.4038,
+  0.3705,
+  0.3032,
+  0.2952,
+  0.2921,
+  0.2568,
+  0.2504,
+  0.2127,
+  0.1497,
+  0.1376,
+  0.1253,
+  0.1241,
+  0.1102,
+  0.0972,
+  0.0887,
+  0.0853,
+  0.0727,
+  0.0688,
+  0.0532,
+  0.0482,
+  0.0427,
+  0.038,
+  0.0364,
+  0.0352,
+  0.0278,
+  0.0227,
+  0.0208,
+  0.0194,
+  0.0112,
+  0.0102,
+  0.01,
+  0.0085,
+  0.0072
+ ],
+ "information_imbalance": {
+  "shell": {
+   "rest_to_full": 0.0007,
+   "full_to_rest": 0.0007,
+   "group_to_rest": 0.0258,
+   "rest_to_group": 0.0029
+  },
+  "dip": {
+   "rest_to_full": 0.0007,
+   "full_to_rest": 0.0007,
+   "group_to_rest": 0.0275,
+   "rest_to_group": 0.0029
+  },
+  "quad": {
+   "rest_to_full": 0.0007,
+   "full_to_rest": 0.0007,
+   "group_to_rest": 0.0239,
+   "rest_to_group": 0.0031
+  },
+  "donor": {
+   "rest_to_full": 0.0007,
+   "full_to_rest": 0.0007,
+   "group_to_rest": 0.0272,
+   "rest_to_group": 0.0038
+  },
+  "acceptor": {
+   "rest_to_full": 0.0043,
+   "full_to_rest": 0.0014,
+   "group_to_rest": 0.0442,
+   "rest_to_group": 0.0268
+  },
+  "breath": {
+   "rest_to_full": 0.0017,
+   "full_to_rest": 0.0008,
+   "group_to_rest": 0.3366,
+   "rest_to_group": 0.2146
+  },
+  "frontier": {
+   "rest_to_full": 0.0045,
+   "full_to_rest": 0.0014,
+   "group_to_rest": 0.0075,
+   "rest_to_group": 0.0127
+  },
+  "coulomb": {
+   "rest_to_full": 0.005,
+   "full_to_rest": 0.0013,
+   "group_to_rest": 0.0288,
+   "rest_to_group": 0.0207
+  },
+  "overlap": {
+   "rest_to_full": 0.001,
+   "full_to_rest": 0.0011,
+   "group_to_rest": 0.1259,
+   "rest_to_group": 0.0166
+  },
+  "cross": {
+   "rest_to_full": 0.0008,
+   "full_to_rest": 0.0007,
+   "group_to_rest": 0.0826,
+   "rest_to_group": 0.03
+  }
+ }
+}
