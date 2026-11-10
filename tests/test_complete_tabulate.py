@@ -48,9 +48,9 @@ def test_batched_matches_per_frame(setup):
     assert set(map(tuple, ref["ps_index"].T.tolist())) == set(map(tuple, bt["ps_index"].T.tolist()))
     m = CompleteModel(tab, chan, ref["feats"].shape[1], feature_names=feat.feature_names,
                       feat_scale=ref["feats"].std(0).clamp(min=1e-6), pseudo=True, frozen=True,
-                      pauli_form="shells", pauli_ii=True, conf_form="sq", ct_stark=True)
+                      pauli_form="shells", pauli_ii=True, ct_stark=True)
     with torch.no_grad():
-        for p in (m.kappa_aniso, m.gap_lamD, m.gap_lamA, m.breath_lam, m.pp_kappa, m.conf_h, m.stark_D):
+        for p in (m.kappa_aniso, m.gap_lamD, m.gap_lamA, m.breath_lam, m.pp_kappa, m.stark_D):
             p.fill_(0.3)
     o1, o2 = m(ref), m(bt)
     for k in ("e_pol", "e_ct", "e_pauli", "e_disp"):
@@ -128,7 +128,7 @@ def test_forces_continuous_at_a_lattice_site(setup):
         m = CompleteModel(tab, chan, len(names), feature_names=names, pseudo=True, frozen=True, pauli_form="shells")
         torch.manual_seed(0)
         with torch.no_grad():
-            for hd in (m.head_conf, m.head_ctq, m.head_frozen, m.head_ps):
+            for hd in (m.head_ctq, m.head_frozen, m.head_ps):
                 hd.lin.weight.normal_(0, 0.3)
                 hd.net[-1].weight.normal_(0, 0.3)
 

@@ -100,7 +100,6 @@ def test_frontier_blocks_are_not_head_inputs(setup):
     with torch.no_grad():
         a, b = m.scaled(bt["feats"]), m.scaled(f2)
         assert (m.gap_deltas(a, sp) - m.gap_deltas(b, sp)).abs().max() == 0
-        assert (m.confinement_from(a, sp) - m.confinement_from(b, sp)).abs().max() == 0
         assert (m.xpol_kappa(a, sp) - m.xpol_kappa(b, sp)).abs().max() == 0
 
 

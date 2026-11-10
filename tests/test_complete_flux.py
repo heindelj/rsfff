@@ -57,9 +57,8 @@ def _pieces(m, bt, field=None):
     I = m.scaled(bt["feats"])
     B, nmax = bt["B"], bt["nmax"]
     m.frozen_terms(I, bt, sp)
-    c = m.confinement(I, None, sp)
-    alpha = m.tab.alpha[sp] * c[:, 0]
-    Cq = torch.ones(B, nmax, dtype=I.dtype).masked_scatter(bt["mask"], m.tab.C[sp] * c[:, 1])
+    alpha = m.tab.alpha[sp]
+    Cq = torch.ones(B, nmax, dtype=I.dtype).masked_scatter(bt["mask"], m.tab.C[sp])
     ainv = m.alpha_inverse(alpha, sp, bt.get("env"))
     ainv_pad = torch.eye(3, dtype=I.dtype).expand(B, nmax, 3, 3).clone()
     ainv_pad = ainv_pad.masked_scatter(bt["mask"][..., None, None].expand(B, nmax, 3, 3), ainv)

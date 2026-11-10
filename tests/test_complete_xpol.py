@@ -140,9 +140,9 @@ def test_positivity_and_stationarity(setup):
     def F(zf):
         zz = zf.reshape(n, D)
         L = bt["L"][0]
-        alpha = m.tab.alpha[sp] * m.confinement(I, None, sp)[:, 0]
+        alpha = m.tab.alpha[sp]
         A = induction_matrix_blocks(bt["A_off"], m.alpha_inverse(alpha, sp, bt.get("env"))[None],
-                                    (m.tab.C[sp] * m.confinement(I, None, sp)[:, 1])[None])[0]
+                                    m.tab.C[sp][None])[0]
         x = zz[:, :8].reshape(-1)
         e = 0.5 * x @ A @ x + L.reshape(-1) @ x
         if D == 9:

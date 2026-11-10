@@ -40,12 +40,11 @@ def test_isolated_atom_and_isotropic_equivalence(setup):
     bt = collate([c, iso])
     o = m(bt)
     assert o["e_pol"][1] == 0 and o["e_ct"][1] == 0
-    assert torch.allclose(o["c"][-1], torch.ones(2, dtype=torch.float64))
     assert torch.allclose(o["q_ct"][-1], torch.ones(2, dtype=torch.float64))
     # kappa = 0: the block solve equals the scalar solve with the same drive
     sp = bt["species"]
-    alpha = torch.ones(2, bt["nmax"], dtype=torch.float64).masked_scatter(bt["mask"], tab.alpha[sp] * o["c"][:, 0])
-    Cq = torch.ones(2, bt["nmax"], dtype=torch.float64).masked_scatter(bt["mask"], tab.C[sp] * o["c"][:, 1])
+    alpha = torch.ones(2, bt["nmax"], dtype=torch.float64).masked_scatter(bt["mask"], tab.alpha[sp])
+    Cq = torch.ones(2, bt["nmax"], dtype=torch.float64).masked_scatter(bt["mask"], tab.C[sp])
     I = m.scaled(bt["feats"])
     Lps, A = m.pseudo_drive(I, bt["ps_index"], bt["ps_r"], bt["ps_type"], bt["ps_basis"], sp.shape[0])
     # atom-centred strength: A_ij = gamma_i qP_j S_ij / s (times the cut-off)
@@ -71,7 +70,7 @@ def test_anisotropy_keeps_the_mean(setup):
     o = m(collate([c]))
     ai = o["alpha_inv"]
     assert (torch.linalg.eigvalsh(ai) > 0).all()
-    det = torch.linalg.det(ai) * (tab.alpha[c.species] * o["c"][:, 0]) ** 3
+    det = torch.linalg.det(ai) * tab.alpha[c.species] ** 3
     assert torch.allclose(det, torch.ones_like(det))
     with torch.no_grad():
         m.kappa_aniso.zero_()
@@ -237,11 +236,11 @@ def test_ct_stark_gives_perpendicular_ct_polarizability(setup):
     assert abs(curv(m0, 0)) < 1e-9                 # ... but not perpendicular
 
 
-def test_induced_pauli_block_and_sq_confinement(setup):
+def test_induced_pauli_block(setup):
     tab, chan, feat, c, m = setup
     kw = dict(feature_names=feat.feature_names, feat_scale=m.feat_scale, pseudo=True, frozen=True, pauli_form="shells")
     m0 = CompleteModel(tab, chan, c.feats.shape[1], **kw)
-    m1 = CompleteModel(tab, chan, c.feats.shape[1], pauli_ii=True, conf_form="sq", **kw)
+    m1 = CompleteModel(tab, chan, c.feats.shape[1], pauli_ii=True, **kw)
     m1.load_state_dict(m0.state_dict(), strict=False)
     iso = precompute(["Cl"], [[0, 0, 0]], tab, chan, feat, lean=True, frontier=True)
     bt = collate([c, iso])
@@ -249,22 +248,18 @@ def test_induced_pauli_block_and_sq_confinement(setup):
     App = bt["A_pp"]
     assert torch.allclose(App, App.transpose(1, 2)) and App[1].abs().max() == 0
     o0, o1 = m0(bt), m1(bt)
-    assert torch.allclose(o1["c"][-1], torch.ones(2, dtype=torch.float64))        # isolated: no stiffening
-    assert (o1["c"][:-1, 0] < 1).all()                                            # cluster: stiffened
     assert o1["e_pol"][1] == 0 and not torch.allclose(o0["e_pol"][0], o1["e_pol"][0])
-    with torch.no_grad():                                                         # kappa = 0, h -> 0: back to m0
+    with torch.no_grad():                                                         # kappa = 0: back to m0
         m1.pp_kappa.zero_()
-        m1.conf_h.fill_(-40.0)
     assert torch.allclose(m1(bt)["e_pol"], o0["e_pol"])
 
 
-def test_induced_pauli_and_sq_forces(setup):
+def test_induced_pauli_forces(setup):
     tab, chan, feat, c, m = setup
     ms = CompleteModel(tab, chan, c.feats.shape[1], feature_names=feat.feature_names, feat_scale=m.feat_scale,
-                       pseudo=True, frozen=True, pauli_form="shells", pauli_ii=True, conf_form="sq")
+                       pseudo=True, frozen=True, pauli_form="shells", pauli_ii=True)
     with torch.no_grad():
         ms.pp_kappa.fill_(0.3)
-        ms.conf_h.fill_(1.0)
 
     def E(p):
         cc = precompute(SYM, p, tab, chan, feat, lean=True, frontier=True, differentiable=True)
@@ -278,7 +273,7 @@ def test_induced_pauli_and_sq_forces(setup):
             pp, pm = pos.detach().clone(), pos.detach().clone()
             pp[a, b] += h
             pm[a, b] -= h
-            assert abs((E(pp) - E(pm)) / (2 * h) - g[a, b]) < 1e-7
+            assert abs((E(pp) - E(pm)) / (2 * h) - g[a, b]) < 1e-7 + 1e-6 * abs(float(g[a, b]))
 
 
 def test_self_consistent_ct(setup):

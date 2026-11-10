@@ -248,6 +248,7 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
     label whatever the ratio (1.11-1.30, one at 1.51); above ~1.4 the fragments' CT per ion jumps from ~-3 to
     -5..-6 kJ/mol (e.g. a Cl- 5.5 A from a Na2 2+ pair, E_CT -70 kJ/mol at ratio 1.58).
 
+    ``ct_dimers="like"`` keeps it on like-ion pairs only (Cl-Cl, Na-Na) and drops every unlike pair's.
     ``ct_dimers=False`` drops the ct label of every two-ion frame instead of cutting unlike pairs at ``ct_max_pair``:
     in vacuum the dimer's ionic configuration is not the ground state at long range, so dimer CT needs a dielectric
     (out of scope); cluster CT keeps its label. ``extra_sets``: more ct_model sets of the same kinds
@@ -263,7 +264,7 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
         seen.add(key)
         n = len(symbols)
         ct_mask = True
-        if n == 2 and not ct_dimers:
+        if n == 2 and (not ct_dimers or (ct_dimers == "like" and symbols[0] != symbols[1])):
             ct_mask = False
         elif n == 2 and symbols[0] != symbols[1]:
             ct_mask = float(np.linalg.norm(np.subtract(coords[0], coords[1]))) <= dimer_ct_cut(symbols, ct_max_pair)
@@ -454,6 +455,18 @@ def load_force_frames(dirs, mono, species=("Na", "Cl")):
     return out
 
 
+def force_set_monomers(files):
+    """{symbol: isolated-ion energy (Hartree)} from the single-ion force rows of labelled sets (the seed-<salt>-cuts
+    sets carry one per ion, at the same level as the frames: Na, Cl agree with the walk EDA's to 1e-9 Eh)."""
+    out = {}
+    for f in files:
+        for line in open(f):
+            r = json.loads(line)
+            if r.get("stage") == "label" and len(r.get("symbols") or ()) == 1 and r.get("energy") is not None:
+                out.setdefault(r["symbols"][0], float(r["energy"]))
+    return out
+
+
 def load_force_sets(files, mono, species=("Na", "Cl"), exclude=()):
     """load_force_frames from labelled sets (ct_model rows with "forces", Hartree / bohr in the input frame, and the
     total "energy", Hartree); the frame's "file" is "<set>:<name>" (--force-test may name one)."""
@@ -466,9 +479,12 @@ def load_force_sets(files, mono, species=("Na", "Cl"), exclude=()):
             if r.get("stage") != "label" or r.get("forces") is None or r.get("energy") is None:
                 continue
             sym = r["symbols"]
-            if not set(sym) <= set(species) or t.get("name") in set(exclude):
+            name = t.get("name") or t.get("cut_id") or r["job"][:12]       # seed-<salt>-cuts frames carry a cut_id
+            if len(sym) < 2 or not set(sym) <= set(species) or name in set(exclude):
                 continue
-            key = f"{stem}:{t.get('name')}"
+            key = f"{stem}:{name}"
+            if not set(sym) <= set(mono):
+                raise SystemExit(f"monomer energies: none for {sorted(set(sym) - set(mono))} ({key})")
             out.append((sym, np.asarray(r["coords"], float),
                         {"int": float(r["energy"]) - sum(mono[x] for x in sym), "forces": np.asarray(r["forces"], float)},
                         {"workflow": stem, "parent": key, "file": key, "index": 0, "n": len(sym)}))
@@ -581,10 +597,9 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              pseudo=g("pseudo", False), tie_c=g("tie_c", False), species_emb=g("species_emb", False),
                              aniso=not g("no_aniso", False), ct_gap=not g("no_ct_gap", False),
                              dphi_scale=g("dphi_scale", 0.05), frozen=g("frozen", False),
-                             conf_form=g("conf_form", "tanh"),
-                             hyper=g("hyper", False), pauli_moments=g("pauli_moments", False),
+                             pauli_moments=g("pauli_moments", False),
                              pauli_form=g("pauli_form", "slater"), ct_stark=g("ct_stark", False) and not flux,
-                             pauli_ii=g("pauli_ii", False), conf_head=not g("conf_nohead", False),
+                             pauli_ii=g("pauli_ii", False),
                              ct_sc=g("ct_sc", 0), env_cap=g("env_cap", 0.0), env_log=g("env_log", 0.0),
                              ct_sat=g("ct_sat", False) and not flux, ct_q_cap=g("ct_q_cap", 0.0), gap_cap=g("gap_cap", 4.0),
                              ct_sat_ion=g("ct_sat_ion", False) and not flux, ct_w_fixed=g("ct_w_fixed", False) and not flux, xpol=g("xpol", False),
@@ -595,12 +610,17 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              gap_shift=g("gap_shift", "acceptor"),
                              xpol_perp=bool(g("xpol_perp", False)) and bool(g("xpol", False)),   # absent: before it was the default
                              xpol_kperp_init=_species_floats(g("xpol_kperp_init", None)),
-                             xpol_kappa_head=not g("xpol_kappa_const", False),
+                             xpol_kappa_head=not g("xpol_kappa_const", False), xpol_kappa_fixed=g("xpol_kappa_fixed", None), sr_features=g("sr_features", False),
+                             env_species=g("env_species", "none"), env_species_emb=g("env_species_emb", "descriptor"),
+                             env_species_dim=g("env_species_dim", 8), env_extra_latent=g("env_extra_latent", False),
+                             tie_disp_range=g("tie_disp_range", False),
                              xpol_perp_weight=g("xpol_perp_weight", "pauli"), xpol_kappa_env=g("xpol_kappa_env", "overlap"),   # absent: a checkpoint from before scalefree
                              env_channels=g("env_channels", False), env_latent=g("env_latent", 4),
                              env_mode=g("env_mode", "shared"),
                              env_two_body=tuple(g("env_two_body", ("pauli", "disp", "ct")) or ()),
                              ct_q_head=not g("ct_q_const", False), pin_a0=g("pin_a0", False),
+                             hyperpol=g("hyperpol", False), hyperpol_form=g("hyperpol_form", "oneshot"),   # absent: before the fix
+                             xpol_form=g("xpol_form", "lam"),
                              env_extra=tuple(g("env_extra", ()) or ()),
                              env_extra_terms=tuple(g("env_extra_terms", ("ct",)) or ()),
                              env_field=g("env_field", False), ct_legacy_head=g("ct_legacy_head", False),
@@ -671,26 +691,45 @@ def evaluate(model, caches, bs=64):
     return rows
 
 
-def summarize(rows):
+#: validation errors are capped at this (kJ/mol) per frame in the logged / selection MAEs (``--val-cap``; 0 = no cap):
+#: one extreme frame (a squeezed pair with a 1700 kJ/mol Pauli energy) otherwise moves a ~200-frame MAE by 0.5
+VAL_CAP = 20.0
+
+
+def _mae(d, cap):
+    d = np.abs(d)
+    return float((np.minimum(d, cap) if cap > 0 else d).mean())
+
+
+def summarize(rows, cap=None):
+    cap = VAL_CAP if cap is None else cap
+
     def stats(sel):
         if not sel:
             return {}
         p = np.array([r["pol"] - r["pol_ref"] for r in sel])
         c = np.array([r["ct"] - r["ct_ref"] for r in sel if r["ct_mask"]])
         cr = np.array([r["ct_ref"] for r in sel if r["ct_mask"]])
-        out = {"n": len(sel), "pol_mae": float(np.abs(p).mean()), "pol_rms": float(np.sqrt((p ** 2).mean()))}
+        out = {"n": len(sel), "pol_mae": _mae(p, cap), "pol_mae_raw": float(np.abs(p).mean()),
+               "pol_rms": float(np.sqrt((p ** 2).mean()))}
+        big = [np.abs(p)]
         pa = np.array([r["pauli"] - r["pauli_ref"] for r in sel if np.isfinite(r.get("pauli_ref", np.nan))])
         if len(pa) and any(r["pauli"] != 0 for r in sel):
-            out["pauli_mae"] = float(np.abs(pa).mean())
+            out["pauli_mae"], out["pauli_mae_raw"] = _mae(pa, cap), float(np.abs(pa).mean())
+            big.append(np.abs(pa))
         if any(r["pauli"] != 0 for r in sel):          # a model with frozen terms: dispersion and total interaction
             for key in ("disp", "int"):
                 d = np.array([r[key] - r[f"{key}_ref"] for r in sel if (key != "int" or r["ct_mask"])
                               and np.isfinite(r.get(f"{key}_ref", np.nan)) and np.isfinite(r.get(key, np.nan))])
                 if len(d):
-                    out[f"{key}_mae"] = float(np.abs(d).mean())
+                    out[f"{key}_mae"], out[f"{key}_mae_raw"] = _mae(d, cap), float(np.abs(d).mean())
         if len(c):
-            out.update(ct_mae=float(np.abs(c).mean()), ct_rms=float(np.sqrt((c ** 2).mean())),
+            big.append(np.abs(c))
+            out.update(ct_mae=_mae(c, cap), ct_mae_raw=float(np.abs(c).mean()), ct_rms=float(np.sqrt((c ** 2).mean())),
                        ct_rel=float(np.abs(c).sum() / max(np.abs(cr).sum(), 1e-12)))
+        if cap > 0:                       # pol / Pauli / CT errors above the cap (counted per term) and the worst one
+            b = np.concatenate(big)
+            out["n_over_cap"], out["max_err"] = int((b > cap).sum()), float(b.max()) if len(b) else 0.0
         return out
     res = {"all": stats(rows)}
     for key in ("full", "subset"):
@@ -701,6 +740,7 @@ def summarize(rows):
 
 
 def main():
+    global VAL_CAP
     ap = argparse.ArgumentParser()
     ap.add_argument("--ct-sets", required=True)
     ap.add_argument("--walk-eda", default=None)
@@ -806,14 +846,14 @@ def main():
     ap.add_argument("--pauli-ii", action="store_true",
                     help="complete: induced-induced Pauli kernel in the induction solve (kappa_i kappa_j A_pp)")
     ap.add_argument("--conf-nohead", action="store_true",
-                    help="complete: stiffening rate = the per-species constant only (no environment head on it)")
+                    help="ion CT model only (the complete model has no confinement head)")
     ap.add_argument("--ct-sc", type=int, default=0,
                     help="complete: self-consistent CT, N fixed-point iterations of (CT charges -> induction -> CT)")
     ap.add_argument("--hyper", action="store_true",
-                    help="complete: field-induced polarizability enhancement alpha (1 + g |V[dip]^(1)|^2) (hyperpolarizability)")
+                    help="ion CT model only (the complete model has no confinement head; see --hyperpol)")
     ap.add_argument("--conf-form", default="tanh", choices=("tanh", "mono", "sq"),
-                    help="complete: confinement form -- tanh (c_range-bounded, either sign) or mono (stiffening only, "
-                         "c <= 1, overlap-gated)")
+                    help="ion CT model only (the complete model has no confinement head: confinement is exchange "
+                         "polarization's)")
     ap.add_argument("--force-data", nargs="*", default=None,
                     help="complete + frozen: extxyz dirs with total energies and forces (atomic units); trains total "
                          "interaction energies and forces through the tabulated, differentiable precompute")
@@ -830,6 +870,9 @@ def main():
                          "whole-cluster alpha (diagonal), against the model's alpha_pol + alpha_CT")
     ap.add_argument("--polar-almo", default=True, action=argparse.BooleanOptionalAction,
                     help="the ALMO finite-field alpha_MI / alpha_CT targets (ct-polar, seed-<salt>-polar)")
+    ap.add_argument("--train-subset", default=None,
+                    help="JSON {eda: [frame geometry keys (_geom_key)], force: ['<file>#<index>']}: train on these "
+                         "frames only; the val / test split, held-out force frames and alpha targets are unchanged")
     ap.add_argument("--exclude-names", nargs="*", default=[],
                     help="frames (name tag) of --extra-sets / --force-sets / --polar-sets left out entirely")
     ap.add_argument("--exchange", default="auto", choices=("auto", "xpol", "pseudo", "none"),
@@ -877,6 +920,39 @@ def main():
                     help="xpol: the kappa head's inputs: the 3 scale-free coordination descriptors (n_eff - 1, eta1, "
                          "eta2; exactly constant along any pair, so kappa = kappa0 on every pair; default), or the 18 "
                          "overlap invariants (R dependent: the head can learn distance switches)")
+    ap.add_argument("--val-cap", type=float, default=VAL_CAP,
+                    help="cap (kJ/mol) on each frame's error in the logged / checkpoint-selection validation MAEs "
+                         "(the over-cap count and the largest error are logged; 0 = plain MAE)")
+    ap.add_argument("--env-species", default="none", choices=("none", "film", "concatenate"),
+                    help="--env-channels: condition the shared environment's encoders (latent trunk, two-body branches) "
+                         "on the centre atom's species embedding; the readouts stay shared")
+    ap.add_argument("--env-species-emb", default="descriptor", choices=("descriptor", "table"),
+                    help="--env-species: the embedding from the free ion's physical descriptors (an MLP; transfers to "
+                         "unseen ions) or a learned vector per species")
+    ap.add_argument("--env-species-dim", type=int, default=8, help="--env-species: embedding width")
+    ap.add_argument("--tie-disp-range", action="store_true",
+                    help="complete (shells Pauli): the Tang-Toennies damping exponent of each species = its Pauli range "
+                         "(outermost shell exponent x the learned Pauli scale); the pair still uses sqrt(b_i b_j)")
+    ap.add_argument("--w-env-mid", type=float, default=0.0,
+                    help="--env-channels: weight of the low-overlap penalty on the environment log-factors, "
+                         "sum_p m u_p^2 with m = 1 / (1 + (S / --env-mid-scale)^2), S the atom's total overlap")
+    ap.add_argument("--env-mid-scale", type=float, default=5e-4,
+                    help="--w-env-mid: the total overlap S^w (bohr^-3) at which the penalty weight is 1/2 "
+                         "(Na-Cl ~3.4 A, Cl-Cl ~3.9 A; contact ~2e-3 or more)")
+    ap.add_argument("--ct-dimers", default=None, choices=("all", "none", "like"),
+                    help="CT labels on two-ion frames: all (unlike pairs cut at --ct-max-pair), none (= --ct-no-dimers) "
+                         "or like (like-ion pairs only: Cl-Cl, Na-Na scans)")
+    ap.add_argument("--env-extra-latent", action="store_true",
+                    help="--env-channels: the extra inputs (--env-extra / --env-field / --env-ct-pen / --env-ct-gated) "
+                         "join the three-body channels as the shared trunk's input -- one latent for every readout -- "
+                         "instead of a side branch for the readouts of --env-extra-terms")
+    ap.add_argument("--sr-features", action="store_true",
+                    help="complete model: drop the long-range invariants (|V1|^2, |V2|^2, V1.S1 of every probe: full "
+                         "Coulomb field / field gradient) from the heads on the density invariants (confinement, "
+                         "--ct-legacy-head); V0_pen and the overlaps stay")
+    ap.add_argument("--xpol-kappa-fixed", type=float, default=None, metavar="K",
+                    help="xpol: kappa = K on every species and component, not learned and no environment head (K = 1: "
+                         "the tabulated overlap change d_ij / O_ij unscaled)")
     ap.add_argument("--xpol-kappa-const", action="store_true",
                     help="xpol: kappa = kappa0 per species and component, no environment head (the exchange term's R "
                          "dependence is then the Pauli energy and the tabulated overlap derivatives alone)")
@@ -935,13 +1011,29 @@ def main():
                     help="--env-channels: CT q_D, q_A from the m32 head on the 42 density invariants (hybrid)")
     ap.add_argument("--ct-q-const", action="store_true",
                     help="--env-channels: CT q_D, q_A = per-species constants (no environment readout)")
+    ap.add_argument("--hyperpol", action="store_true",
+                    help="complete: the free-ion dipole hyperpolarizabilities (ion table hyperpol: gamma, field-gradient "
+                         "b) added to each atom's polarizability at its permanent field / gradient, one-shot, no "
+                         "learned parameters")
+    ap.add_argument("--hyperpol-form", choices=("legendre", "oneshot"), default="legendre",
+                    help="complete --hyperpol: legendre (gamma only; the ion's internal energy expanded about its polarized "
+                         "state: alpha(E_p) on site, a field offset and a constant -- exact energy and moment for an "
+                         "isolated ion) or oneshot (gamma + field-gradient b inside the linear solve: 6x the "
+                         "hyperpolarizable energy; reproduces checkpoints from 2026-11-09)")
+    ap.add_argument("--xpol-form", choices=("lam", "gram"), default="lam",
+                    help="complete --xpol: lam (fitted kappa + head, lam u^2, k_perp) or gram (parameter-free: kappa = 1/2 "
+                         "fixed and the on-site Gram blocks of the perturbed von Weizsaecker orbital in the neighbours' "
+                         "densities; theory/parameter_free_xpol.tex)")
     ap.add_argument("--pin-a0", action="store_true",
                     help="complete: the breathing stiffness a0 stays at the ion table's monomer value (breath_lna frozen)")
     ap.add_argument("--hull-k", type=int, default=6,
                     help="write RUN/hull.pt: the training atoms' convex hull in this many whitened PCA "
                          "components of the invariants (rsfff.coverage; 0 = off)")
     a = ap.parse_args()
+    VAL_CAP = a.val_cap
     resolve_exchange(a)
+    # CT labels on dimers: --ct-dimers (all / none / like) or the older --ct-no-dimers
+    ct_dimers_mode = {"all": True, "none": False, "like": "like", None: not a.ct_no_dimers}[a.ct_dimers]
     torch.manual_seed(a.seed)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -951,7 +1043,7 @@ def main():
         print(f"environment: density projections, {feat.n_feat} invariants", flush=True)
     from ..ff.ionct.model import channel_types
     frames = load_frames(a.ct_sets, a.walk_eda, a.ct_max_pair, a.max_ho_ratio, species=tab.symbols,
-                         types=channel_types(tab.symbols), ct_dimers=not a.ct_no_dimers,
+                         types=channel_types(tab.symbols), ct_dimers=ct_dimers_mode,
                          extra_sets=[f"seed-{x}-{k}" for x in a.salts for k in ("scan", "mbe", "sat")],
                          extra_files=a.extra_sets, exclude=a.exclude_names)
     a.test = list(a.test) + [f"{x}{n}" for x in a.salts for n in ("6_03", "8_07", "9_09")]
@@ -980,6 +1072,12 @@ def main():
     caches = build_cache(frames, tab, chan, feat, cache_path or out / "cache.pt", lean=lean, workers=a.precompute_workers,
                          frontier=frontier)
     tr = [c for c, t in zip(caches, tags) if t == "train"]
+    if a.train_subset:                  # data-efficiency runs: train on these frames only (val / test unchanged)
+        sub = json.load(open(a.train_subset))
+        keep = set(sub.get("eda") or ())
+        n0 = len(tr)
+        tr = [c for c, t, f in zip(caches, tags, frames) if t == "train" and _geom_key(f[0], f[1]) in keep]
+        print(f"train subset {a.train_subset}: {len(tr)} of {n0} training frames", flush=True)
     va = [c for c, t in zip(caches, tags) if t == "val"]
     te = [c for c, t in zip(caches, tags) if t == "test"]
     F = torch.cat([c.feats for c in tr])
@@ -1016,7 +1114,7 @@ def main():
         print(f"device: {dev} ({torch.cuda.get_device_name(dev) if dev.type == 'cuda' else ''})", flush=True)
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
-        almo = polar_targets(a.ct_sets, ct_dimers=not a.ct_no_dimers,
+        almo = polar_targets(a.ct_sets, ct_dimers=ct_dimers_mode is True,
                              files=("ct-polar", *[f"seed-{x}-polar" for x in a.salts]),
                              min_ct=a.polar_min_ct, ct_max_pair=a.polar_ct_max_pair) if a.polar_almo else []
         total = total_polar_targets(a.polar_sets, species=tab.symbols, exclude=a.exclude_names)
@@ -1057,7 +1155,7 @@ def main():
     if a.force_data or a.force_sets:
         if not (a.model == "complete" and a.frozen):
             raise SystemExit("--force-data needs --model complete --frozen (the model must own every term)")
-        mono = monomer_energies([a.walk_eda] if a.walk_eda else [])
+        mono = {**force_set_monomers(a.force_sets), **monomer_energies([a.walk_eda] if a.walk_eda else [])}
         if len(mono) < 2:
             raise SystemExit("monomer energies: --walk-eda files with fragment_energies are needed")
         print(f"monomer energies (Hartree): {mono}", flush=True)
@@ -1065,6 +1163,11 @@ def main():
                                                                           a.exclude_names)
         held = set(a.force_test)
         force_tr = [f for f in ff if f[3]["file"] not in held]
+        if a.train_subset:
+            fk = set(json.load(open(a.train_subset)).get("force") or ())
+            n0 = len(force_tr)
+            force_tr = [f for f in force_tr if f"{f[3]['file']}#{f[3]['index']}" in fk]
+            print(f"train subset: {len(force_tr)} of {n0} training force frames", flush=True)
         force_te = [f for f in ff if f[3]["file"] in held]
         print(f"force frames: {len(force_tr)} train, {len(force_te)} held out ({', '.join(sorted(held))})", flush=True)
         table = radial_table(tab, a.params, a.cache_dir).to(dev)
@@ -1078,6 +1181,7 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs, eta_min=a.lr * 0.02)
     best, best_state, log = math.inf, None, []
     n_sing = 0
+    n_nonfin = 0
     t0 = time.time()
     for ep in range(1, a.epochs + 1):
         random.shuffle(tr)
@@ -1087,29 +1191,41 @@ def main():
             o = model(bt)
             ep_, ec_, ech_ = loss_terms(o, bt)
             loss = (a.w_pol * ep_ ** 2 + a.w_ct * ec_ ** 2 + a.w_chan * (ech_ ** 2).sum(1)).mean()
+            parts = [("energy", loss.detach())]
+            if a.w_env_mid > 0:              # right after model(bt): the readouts on the model are this batch's
+                loss = loss + a.w_env_mid * model.env_mid_penalty(a.env_mid_scale)
+                parts.append(("env_mid", loss.detach()))
             if a.w_pauli > 0:
                 loss = loss + a.w_pauli * (pauli_term(o, bt) ** 2).mean()
+                parts.append(("pauli", loss.detach()))
             if a.w_disp > 0:
                 loss = loss + a.w_disp * (disp_term(o, bt) ** 2).mean()
+                parts.append(("disp", loss.detach()))
             if a.w_pauli_prior > 0:
                 loss = loss + a.w_pauli_prior * model.pauli_prior()
+                parts.append(("pauli_prior", loss.detach()))
             if a.w_int > 0:
                 loss = loss + a.w_int * (int_term(o, bt) ** 2).mean()
+                parts.append(("int", loss.detach()))
             if polar_tr and step % a.alpha_every == 0:      # the stencil batch is the costly part: every k-th step, k x weight
                 ap_, ac_ = polar_loss(model, pb_tr)
                 loss = loss + a.alpha_every * a.w_alpha * (ap_ ** 2 + a.w_alpha_ct * ac_ ** 2).mean()
+                parts.append(("alpha", loss.detach()))
             if a.w_smooth > 0:
                 loss = loss + a.w_smooth * model.smoothness_penalty(bt, a.smooth_sigma)
+                parts.append(("smooth", loss.detach()))
             if a.w_curv > 0 and step % a.curv_every == 0:
                 cp = curvature_penalty(model, random.sample(tr, min(a.curv_frames, len(tr))), tab, table, chan,
                                        a.curv_delta)
                 loss = loss + a.curv_every * a.w_curv * cp
+                parts.append(("curv", loss.detach()))
                 curv_log.append(float(cp.detach()))
             if force_tr and a.w_force > 0 and step % a.force_every == 0:
                 fb = random.sample(force_tr, min(a.force_batch, len(force_tr)))
                 try:
                     fe_, ff_, _ = force_terms(model, fb, tab, table, chan)
                     loss = loss + a.force_every * (a.w_fe * (fe_ ** 2).mean() + a.w_force * (ff_ ** 2).mean())
+                    parts.append(("force", loss.detach()))
                 except torch.linalg.LinAlgError as err:     # a singular response matrix: keep the evidence, skip
                     n_sing += 1
                     dump = out / f"singular_{n_sing:03d}.pt"
@@ -1120,7 +1236,22 @@ def main():
                           f"frames {[m_['file'] for *_, m_ in fb]}" + (f" -> {dump}" if n_sing <= 5 else ""), flush=True)
             opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+            if not (torch.isfinite(loss) and torch.isfinite(gn)):
+                # a non-finite loss or gradient: keep the evidence (first 5), skip the step so the parameters survive
+                n_nonfin += 1
+                bad = next((nm for nm, v in parts if not torch.isfinite(v)), "gradient only")
+                names = [f.meta.get("parent", f.meta.get("file", "?")) for f in tr[k:k + a.batch]]
+                if n_nonfin <= 5:
+                    torch.save({"state": {k_: v.detach().cpu() for k_, v in model.state_dict().items()},
+                                "batch": names, "parts": [(nm, float(v)) for nm, v in parts], "epoch": ep,
+                                "step": step, "grad_norm": float(gn)}, out / f"nonfinite_{n_nonfin:03d}.pt")
+                print(f"ep {ep} step {step}: non-finite loss/gradient (first bad term: {bad}, |g| {float(gn):.3g}); "
+                      f"step skipped", flush=True)
+                opt.zero_grad()
+                if n_nonfin > 50:
+                    raise RuntimeError("more than 50 non-finite steps: giving up")
+                continue
             opt.step()
             tot += loss.item() * len(bt["labels"]["n"])
         sched.step()
@@ -1156,8 +1287,11 @@ def main():
                 msg += f" | curv {cv:.3g}" + (f" (train {np.mean(curv_log):.3g})" if curv_log else "")
                 curv_log.clear()
             print(f"ep {ep:4d} loss {tot / len(tr):.4f} | val pol MAE {sv.get('pol_mae', 0):.2f} ct MAE "
-                  f"{sv.get('ct_mae', 0):.2f} kJ/mol{msg} [{time.time() - t0:.0f}s]", flush=True)
-    model.load_state_dict(best_state)
+                  f"{sv.get('ct_mae', 0):.2f} kJ/mol{msg}"
+                  + (f" | val >{VAL_CAP:g}: {sv['n_over_cap']} (max {sv['max_err']:.0f})" if "n_over_cap" in sv else "")
+                  + f" [{time.time() - t0:.0f}s]", flush=True)
+    if best_state is not None:          # --epochs 0: evaluate the (--init-from) model as is
+        model.load_state_dict(best_state)
     if model.gap_form == "density":
         print("coupling ln w / gamma / lambda: " + "; ".join(
             f"{t} {model.lnw[k]:.2f} / {model.gamma[k]:.3f} / {model.lam[k]:.3f}" for k, t in enumerate(model.ctypes))

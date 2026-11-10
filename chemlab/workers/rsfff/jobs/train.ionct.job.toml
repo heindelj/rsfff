@@ -14,14 +14,14 @@ format = "tar"
 doc = "run.tar.gz: model.pt, metrics.json, predictions.csv, train.log, the pair-scan diagnostics"
 
 [report]
-"train.loss"         = "Float64"
-"rsfff.ionct.test"   = { type = "Dict", doc = "test metrics (all / full / subset)" }
-"rsfff.ionct.val"    = { type = "Dict", doc = "validation metrics" }
-"rsfff.ionct.alpha"  = { type = "Dict", doc = "the last epoch's polarizability errors" }
-"rsfff.ionct.n_feat" = "Int"
+"train.loss"         = "Float64 [unknown]"
+"rsfff.ionct.test"   = { type = "Dict", doc = "test metrics (all / full / subset)", unit = "unknown" }
+"rsfff.ionct.val"    = { type = "Dict", doc = "validation metrics", unit = "unknown" }
+"rsfff.ionct.alpha"  = { type = "Dict", doc = "the last epoch's polarizability errors", unit = "unknown" }
+"rsfff.ionct.n_feat" = "Int [1]"
 "rsfff.ionct.params" = "String"
 "rsfff.ionct.env"    = "String"
-"rsfff.wall_s"       = "Float64"
+"rsfff.wall_s"       = "Float64 [s]"
 
 [settings]
 text = """

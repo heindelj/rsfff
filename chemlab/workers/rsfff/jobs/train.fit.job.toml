@@ -23,11 +23,19 @@ format = "tar"
 doc = "committee.tar.gz: the trained members and committee.json"
 
 [report]
-"train.loss"       = "Float64"
-"train.loss_val"   = { type = "Vector{Float64}", doc = "per member" }
-"train.size"       = { type = "Dict", doc = "frames per set" }
-"train.members"    = "Int"
+"train.loss"       = "Float64 [unknown]"
+"train.loss_val"   = { type = "Vector{Float64}", doc = "per member", unit = "unknown" }
+"train.size"       = { type = "Dict", doc = "frames per set", unit = "unknown" }
+"train.members"    = "Int [1]"
 "train.warm_start" = "Bool"
+"train.n_train" = "Int [1]"
+"train.n_val" = "Int [1]"
+"train.round" = "Int [1]"
+"train.val" = "Dict [unknown]"
+"train.wall_s" = "Float64 [s]"
+"train.curves" = "Dict [unknown]"
+"rsfff.files" = "Dict [unknown]"
+"rsfff.wall_s" = "Float64 [s]"
 
 [settings]
 text = """

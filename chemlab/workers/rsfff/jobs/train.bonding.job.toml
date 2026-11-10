@@ -57,15 +57,15 @@ format = "yaml"
 doc = "the config as run"
 
 [report]
-"train.loss_val"                  = "Float64"
-"train.epochs"                    = "Int"
-"train.size"                      = { type = "Dict", doc = "frames: train / heldout / probe" }
+"train.loss_val"                  = "Float64 [unknown]"
+"train.epochs"                    = "Int [unknown]"
+"train.size"                      = { type = "Dict", doc = "frames: train / heldout / probe", unit = "unknown" }
 "rsfff.bonding.val.f_mae"         = { type = "Float64", unit = "kcal/mol/A" }
 "rsfff.bonding.val.mu"            = { type = "Float64", unit = "D" }
 "rsfff.bonding.heldout.f_mae"     = { type = "Float64", unit = "kcal/mol/A" }
 "rsfff.bonding.heldout.mu"        = { type = "Float64", unit = "D" }
 "rsfff.bonding.probe_val.de_int"  = { type = "Float64", unit = "kcal/mol" }
-"rsfff.bonding.wall_s"            = "Float64"
+"rsfff.bonding.wall_s"            = "Float64 [s]"
 
 [settings]
 text = """

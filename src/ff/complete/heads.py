@@ -63,11 +63,24 @@ class SharedEnvironment(nn.Module):
     Every readout's last layer starts at zero and nothing has a bias path at zero input, so u_p = 0 exactly for an
     isolated atom (and, for readouts without two-body input, for every dimer). ``readouts``: (name, term, two_body)
     or (name, term, two_body, extra); readouts with ``extra`` also get a linear + small-MLP branch on ``n_extra``
-    additional per-atom inputs (``forward(X, E)``), exactly zero where those inputs all vanish."""
+    additional per-atom inputs (``forward(X, E)``), exactly zero where those inputs all vanish.
+
+    ``cond_dim > 0`` (m35): the encoders -- the trunk(s) and the two-body branches g_p -- also read a per-atom
+    conditioning vector c (the centre atom's species embedding, :mod:`.species`), by FiLM (``cond_mode="film"``,
+    bb.nn.ConditionedTrunk: per-layer scale and shift generated from c, zero at initialisation) or by concatenation
+    (``"concatenate"``); ``forward(X, E, c)``. The readouts (W_p, a_p, b_p) stay shared by every species. The isolated
+    and dimer limits hold per atom: z = phi(T, c) - phi(0, c), g = g(B, c) - g(0, c)."""
 
     def __init__(self, n_in, three_cols, two_cols, readouts, latent=4, hidden=64, depth=2, mode="shared", tb_hidden=16,
-                 n_extra=0, extra_capacity="full"):
+                 n_extra=0, extra_capacity="full", cond_dim=0, cond_mode="film", extra_latent=False):
         super().__init__()
+        # extra_latent (m35): the extra inputs join the three-body channels as the trunk's input -- one latent from
+        # one feature set for every readout -- instead of a per-readout side branch. The latent is then live wherever
+        # either is non-zero (on dimers too, through the extra inputs)
+        self.extra_latent = bool(extra_latent) and n_extra > 0
+        self.cond_dim, self.cond_mode = int(cond_dim), cond_mode
+        if self.cond_dim and cond_mode not in ("film", "concatenate"):
+            raise ValueError(f"cond_mode {cond_mode!r}: film or concatenate")
         if mode not in ("shared", "per_term"):
             raise ValueError(f"mode {mode!r}: shared or per_term")
         self.mode, self.latent = mode, int(latent)
@@ -76,16 +89,18 @@ class SharedEnvironment(nn.Module):
         self.names = [r[0] for r in readouts]
         self.terms = {r[0]: r[1] for r in readouts}
         self.two_body = {r[0]: bool(r[2]) for r in readouts}
-        self.extra = {r[0]: bool(r[3]) if len(r) > 3 and n_extra else False for r in readouts}
+        self.extra = {r[0]: bool(r[3]) if len(r) > 3 and n_extra and not self.extra_latent else False
+                      for r in readouts}
         self.n_extra = int(n_extra)
         n3, n2 = len(three_cols), len(two_cols)
         keys = ["shared"] if mode == "shared" else sorted(set(self.terms.values()))
-        self.trunks = nn.ModuleDict({k: _mlp(n3, hidden, self.latent, depth) for k in keys})
+        n_trunk = n3 + (self.n_extra if self.extra_latent else 0)
+        self.trunks = nn.ModuleDict({k: self._encoder(n_trunk, hidden, self.latent, depth) for k in keys})
         self.W = nn.ModuleDict({p: nn.Linear(self.latent, 1, bias=False) for p in self.names})
         self.lin3 = nn.ModuleDict({p: nn.Linear(n3, 1, bias=False) for p in self.names})
         tb = [p for p in self.names if self.two_body[p]]
         self.lin2 = nn.ModuleDict({p: nn.Linear(n2, 1, bias=False) for p in tb})
-        self.g2 = nn.ModuleDict({p: _mlp(n2, tb_hidden, 1, 1) for p in tb})
+        self.g2 = nn.ModuleDict({p: self._encoder(n2, tb_hidden, 1, 1) for p in tb})
         ex = [p for p in self.names if self.extra[p]]
         self.line = nn.ModuleDict({p: nn.Linear(self.n_extra, 1, bias=False) for p in ex})
         # the extra branch gets a full head's capacity (hidden x depth): it carries a whole parameter (e.g. the CT
@@ -93,6 +108,15 @@ class SharedEnvironment(nn.Module):
         eh, ed = (hidden, depth) if extra_capacity == "full" else (tb_hidden, 1)     # "small": the first m33 runs
         self.ge = nn.ModuleDict({p: _mlp(self.n_extra, eh, 1, ed) for p in ex})
         self.zero_()
+
+    def _encoder(self, i, h, o, depth):
+        return _mlp(i, h, o, depth) if not self.cond_dim else _CondMLP(i, h, o, depth, self.cond_dim, self.cond_mode)
+
+    def _enc(self, net, x, c, x0):
+        """net(x, c) - net(x0, c): x0 the zero input (one row when unconditioned, broadcast)."""
+        if not self.cond_dim:
+            return net(x) - net(x0)
+        return net(x, c) - net(x0.expand_as(x), c)
 
     @torch.no_grad()
     def zero_(self):
@@ -102,26 +126,35 @@ class SharedEnvironment(nn.Module):
             nn.init.zeros_(self.lin3[p].weight)
         for p in self.lin2:
             nn.init.zeros_(self.lin2[p].weight)
-            nn.init.zeros_(self.g2[p][-1].weight)
-            nn.init.zeros_(self.g2[p][-1].bias)
+            last = self.g2[p][-1] if not self.cond_dim else self.g2[p].out
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
         for p in self.line:
             nn.init.zeros_(self.line[p].weight)
             nn.init.zeros_(self.ge[p][-1].weight)
             nn.init.zeros_(self.ge[p][-1].bias)
 
-    def latents(self, X):
-        """{trunk key: (N, latent)} z = phi(T) - phi(0)."""
+    def latents(self, X, c=None, E=None):
+        """{trunk key: (N, latent)} z = phi(T, c) - phi(0, c) (T: the three-body channels, with the extra inputs
+        appended when ``extra_latent``)."""
+        if self.cond_dim and c is None:
+            raise ValueError("SharedEnvironment with cond_dim needs the conditioning vectors c")
         T = X[:, self.three_cols]
+        if self.extra_latent:
+            if E is None:
+                raise ValueError("SharedEnvironment with extra_latent needs the extra inputs E")
+            T = torch.cat([T, E], 1)
         T0 = torch.zeros_like(T[:1])
         live = (T != 0).any(1, keepdim=True)          # exactly 0 where every three-body channel is (dimers, isolated)
-        return {k: torch.where(live, m(T) - m(T0), torch.zeros_like(T[:, :1]).expand(-1, self.latent))
+        return {k: torch.where(live, self._enc(m, T, c, T0), torch.zeros_like(T[:, :1]).expand(-1, self.latent))
                 for k, m in self.trunks.items()}
 
-    def forward(self, X, E=None):
-        """X (N, n_in) scaled channels (E (N, n_extra): the extra inputs) -> {name: (N,)} log-factors."""
+    def forward(self, X, E=None, c=None):
+        """X (N, n_in) scaled channels (E (N, n_extra): the extra inputs; c (N, cond_dim): the conditioning) ->
+        {name: (N,)} log-factors."""
         T = X[:, self.three_cols]
         B = X[:, self.two_cols]
-        Z = self.latents(X)
+        Z = self.latents(X, c, E)
         B0 = torch.zeros_like(B[:1])
         out = {}
         for p in self.names:
@@ -129,7 +162,7 @@ class SharedEnvironment(nn.Module):
             u = self.W[p](z)[:, 0] + self.lin3[p](T)[:, 0]
             if self.two_body[p]:
                 live2 = (B != 0).any(1)
-                g = (self.g2[p](B) - self.g2[p](B0))[:, 0]
+                g = self._enc(self.g2[p], B, c, B0)[:, 0]
                 u = u + self.lin2[p](B)[:, 0] + torch.where(live2, g, torch.zeros_like(g))
             if self.extra[p]:
                 livee = (E != 0).any(1)
@@ -137,3 +170,17 @@ class SharedEnvironment(nn.Module):
                 u = u + self.line[p](E)[:, 0] + torch.where(livee, ge, torch.zeros_like(ge))
             out[p] = u
         return out
+
+
+class _CondMLP(nn.Module):
+    """``depth`` conditioned hidden layers (bb.nn.ConditionedTrunk, ending on an activation) and a linear output:
+    the conditioned counterpart of ``_mlp(i, h, o, depth)``; ``forward(x, c)``."""
+
+    def __init__(self, i, h, o, depth, cond_dim, cond_mode="film"):
+        super().__init__()
+        from bb.nn.conditioning import ConditionedTrunk
+        self.trunk = ConditionedTrunk(i, h, depth, d_c=cond_dim, mode=cond_mode)
+        self.out = nn.Linear(h, o)
+
+    def forward(self, x, c):
+        return self.out(self.trunk(x, c))

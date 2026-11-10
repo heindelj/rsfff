@@ -19,11 +19,17 @@ format = "extxyz"
 doc = "the picks, one frame each: pick=, sigma_energy=, eda=1 / monomer=1 on the comment line"
 
 [report]
-"search.selected"         = "Int"
-"search.eda"              = "Int"
-"search.uncertainty.max"  = "Float64"
-"search.uncertainty.mean" = "Float64"
+"search.selected"         = "Int [1]"
+"search.eda"              = "Int [unknown]"
+"search.uncertainty.max"  = "Float64 [unknown]"
+"search.uncertainty.mean" = "Float64 [unknown]"
 "rsfff.sizes"             = "String"
+"search.round" = "Int [1]"
+"search.stage" = "Dict [unknown]"
+"search.wall_s" = "Float64 [s]"
+"rsfff.n_starts" = "Int [1]"
+"rsfff.summary" = "Dict [unknown]"
+"rsfff.wall_s" = "Float64 [s]"
 
 [settings]
 text = """

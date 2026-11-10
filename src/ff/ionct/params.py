@@ -10,6 +10,9 @@ Every per-ion quantity is indexed by a species index ``s`` (the order of ``IonTa
                                 single-exponent parent b_ind / w_dip is T = 1); padded terms have w = 0
     b_quad, w_quad              induced-quadrupole parent, same layout
     b_breath, w_breath, a0      l = 0 (breathing) response shape and its polarizability (a0 = 0: no such term)
+    hyper_gamma, hyper_b (S,)   free-ion dipole hyperpolarizabilities (ions[s]['hyperpol'] = {gamma, b}; 0 if absent):
+                                alpha_zz = alpha0 + gamma/2 E^2 + b G_zz, alpha_xx = alpha0 + gamma/6 E^2 - b/2 G_zz
+                                (G_zz = 2q/R^3 for a charge q at R on z; Buckingham B = -2b)
     front_b[role], front_w[role] (S,), (S, 4)   frontier densities, role in ('donor', 'acceptor')
     I_donor (S,)                electron-removal energy of the free ion as a CT donor (Hartree)
     A_acceptor (S,)             electron-attachment energy as an acceptor (Hartree; NaN where unbound, e.g. Cl-)
@@ -66,6 +69,8 @@ class IonTable:
     A_acceptor: torch.Tensor
     pauli_w: torch.Tensor | None = None
     pauli_s: torch.Tensor | None = None
+    hyper_gamma: torch.Tensor | None = None
+    hyper_b: torch.Tensor | None = None
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_PARAMS, symbols=None, dtype=torch.float64) -> "IonTable":
@@ -95,6 +100,8 @@ class IonTable:
         b_quad, w_quad = parent("quad", "b_quad", "w_quad")
         b_breath, w_breath = parent("breath", "-", "-")
         a0 = t([float(((ions[s].get("parents") or {}).get("a0")) or 0.0) for s in symbols])
+        hyper_gamma = t([float((ions[s].get("hyperpol") or {}).get("gamma") or 0.0) for s in symbols])
+        hyper_b = t([float((ions[s].get("hyperpol") or {}).get("b") or 0.0) for s in symbols])
         front_b = {r: t([ions[s]["frontier"][r]["b"] for s in symbols]) for r in ROLES}
         front_w = {r: t([_onehot(ions[s]["frontier"][r]["k"]) for s in symbols]) for r in ROLES}
         nan = float("nan")
@@ -111,7 +118,7 @@ class IonTable:
             b_dip=b_dip, w_dip=w_dip, b_quad=b_quad, w_quad=w_quad, b_breath=b_breath, w_breath=w_breath, a0=a0,
             front_b=front_b, front_w=front_w, I_donor=t([ions[s]["I_donor"] for s in symbols]),
             A_acceptor=t([float("nan") if ions[s]["A_acceptor"] is None else ions[s]["A_acceptor"] for s in symbols]),
-            pauli_w=pauli_w, pauli_s=pauli_s,
+            pauli_w=pauli_w, pauli_s=pauli_s, hyper_gamma=hyper_gamma, hyper_b=hyper_b,
         )
 
     def to(self, device) -> "IonTable":
