@@ -1,0 +1,57 @@
+[job]
+type        = "train.complete"
+description = "One complete (ion) model: rsfff.train.train_ionct with the salts runs' arguments (rsfff.train.complete_worker) on a data bundle -- the folded ct sets, the walk EDAs, the force frames, the ion table. The settings choose the exchange-polarization form, the hyperpolarization, the CT exponents and the environment's inputs; everything else is fixed in the worker."
+tags        = ["train"]
+
+[[inputs]]
+name = "data"
+format = "tar"
+doc = "the data bundle (scripts/complete_bundle.py): ct_sets/, walk_eda/, force/, ct/, params/, force_test.txt"
+[[inputs]]
+name = "settings"
+format = "json"
+generated = true
+
+[[outputs]]
+name = "run"
+format = "tar"
+doc = "run.tar.gz: model.pt, metrics.json, predictions.csv, hull.pt, train.log, the ion table, settings.json (load_complete_model opens it)"
+[[outputs]]
+name = "metrics"
+format = "json"
+doc = "metrics.json: per split and per subset errors, the training log rows, the arguments"
+[[outputs]]
+name = "train"
+format = "log"
+doc = "train.log"
+
+[report]
+"train.loss"                 = "Float64 [unknown]"
+"train.epochs"               = "Int [1]"
+"rsfff.complete.val"         = { type = "Dict", doc = "validation errors (all / full clusters)", unit = "kJ/mol" }
+"rsfff.complete.test"        = { type = "Dict", doc = "test errors (all / full clusters)", unit = "kJ/mol" }
+"rsfff.complete.force_test"  = { type = "Dict", doc = "held-out force frames: e_mae, f_rms, ...", unit = "unknown" }
+"rsfff.complete.val_curv"    = "Float64 [unknown]"
+"rsfff.complete.device"      = "String"
+"rsfff.complete.wall_s"      = "Float64 [s]"
+
+[settings]
+text = """
+struct Settings terms "rsfff.complete"
+    xpol::String = "gram" in {"gram", "lam"}                 # exchange polarization: the Gram form or the fitted lam / k_perp form
+    weights::Bool = true                                     # gram: the learned magnitudes W1 (drive) and W2 (on-site stiffness)
+    hyperpol::String = "legendre" in {"legendre", "bounded", "bounded-learn", "none"}
+    ct_b_pin::String = "all" in {"all", "donor", "donor-scale", "none"}   # the CT exponents from the ion table
+    latent::Int = 6 in 1..64                                 # width of the shared latent
+    one_latent::Bool = true                                  # the two-body channels through the shared latent (no two-body branches)
+    pairs::String = "ww/ws/ss"                               # channel families: ww plain overlap weights; ws, ss dressed by the pair electrostatics
+    probes::Bool = true                                      # the gated diffuse-probe invariants as trunk inputs
+    epochs::Int = 500 in 0..100000 as "train.epochs"
+    seed::Int = 0 in 0..1000000
+    lr::Float64 = 0.0005 in 0.0..1.0
+    device::String = "auto" in {"auto", "cuda", "cpu"}       # auto: CUDA when there is one
+    args::String = "" as ""                                  # extra train_ionct arguments, appended last
+    gpus::Int = 1 in 0..4 as "resources.gpus"
+    cpus::Int = 16 in 1..256 as "resources.cpus"
+end
+"""

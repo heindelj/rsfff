@@ -73,13 +73,35 @@ def test_gram_rotates_and_is_psd(gtab):
     assert torch.isclose(G0[0, 0], G0[1, 1]) and abs(float(G0[0, 2])) < 1e-12
 
 
+def test_hyper_legendre_field_gradient():
+    """With the b term: an isolated ion in a permanent field E and gradient G = 2T gets W = -1/2 a E^2 - g E^4/24
+    - b E^T T E and mu_p = a E + g/6 E^2 E + 2 b T E exactly."""
+    from types import SimpleNamespace
+    from rsfff.ff.complete.model import CompleteModel
+    g, b, a0 = 5500.0, 540.0, 31.3
+    E = torch.tensor([[0.004, -0.012, 0.021]])
+    Lq = torch.tensor([[0.011, -0.003, 0.002, 0.004, -0.001]])          # spherical gradient components
+    Lp = torch.cat([-E, Lq], 1)
+    fake = SimpleNamespace(tab=SimpleNamespace(hyper_gamma=torch.tensor([g]), hyper_b=torch.tensor([b])),
+                           hyperpol_b=True, _hyper_ET=CompleteModel._hyper_ET)
+    ainvE, h, c = CompleteModel.hyper_legendre(fake, torch.eye(3)[None] / a0, Lp, torch.tensor([0]))
+    _, T = CompleteModel._hyper_ET(Lp)
+    mu = torch.linalg.solve(ainvE[0], E[0] + h[0])
+    e = -0.5 * ((E[0] + h[0]) * mu).sum() + c[0]
+    e2 = float((E * E).sum())
+    TE = T[0] @ E[0]
+    assert torch.allclose(mu, a0 * E[0] + g / 6 * e2 * E[0] + 2 * b * TE, rtol=1e-12)
+    assert math.isclose(float(e), -0.5 * a0 * e2 - g * e2 * e2 / 24 - b * float(E[0] @ TE), rel_tol=1e-12)
+
+
 def test_hyper_legendre_isolated_ion():
     """An isolated ion in a permanent field E: the expansion returns W(E) and mu_p exactly."""
     from types import SimpleNamespace
     from rsfff.ff.complete.model import CompleteModel
     g, a0 = 5500.0, 31.3
     E = torch.tensor([[0.004, -0.012, 0.021]])
-    fake = SimpleNamespace(tab=SimpleNamespace(hyper_gamma=torch.tensor([g])))
+    fake = SimpleNamespace(tab=SimpleNamespace(hyper_gamma=torch.tensor([g])), hyperpol_b=False,
+                           _hyper_ET=CompleteModel._hyper_ET)
     ainvE, h, c = CompleteModel.hyper_legendre(fake, torch.eye(3)[None] / a0, torch.cat([-E, torch.zeros(1, 5)], 1),
                                                torch.tensor([0]))
     mu = torch.linalg.solve(ainvE[0], E[0] + h[0])                  # the solve's minimizer at field E + h

@@ -28,6 +28,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import random
 import time
 from pathlib import Path
@@ -585,6 +586,38 @@ def resolve_exchange(a):
     print(f"exchange polarization: {a.exchange}", flush=True)
 
 
+def _env_skip(a):
+    """The per-readout linear skip of the shared environment: off by default since 2026-11-11 (--env-skip turns it
+    back on); runs from before carry no ``env_skip`` and kept it unless they passed --env-no-skip."""
+    if a.get("env_skip") is not None:
+        return bool(a["env_skip"])
+    return not a.get("env_no_skip", False)
+
+
+def _translate_f(path, symbols, key="f"):
+    from ..ff.complete.contract import load_translate_f
+    return load_translate_f(path, symbols, key)
+
+
+def _contract_A(path, symbols):
+    from ..ff.complete.contract import load_contract_A
+    return load_contract_A(path, symbols)
+
+
+def _wself(path, symbols, tab):
+    """(S, 4) [kV, kT, w, s1] of the bounded field energy from a json {ion: {kV, kT, w, s1}} (free-ion point-charge
+    fits). An ion without an entry gets its table values: kT = 2 b / a, gamma = 12 w a^2 / s1 at s1 = 0.01 a, kV = 0."""
+    d = json.loads(Path(path).read_text()) if path else {}
+    d = d.get("ions", d)
+    rows = []
+    for k, x in enumerate(symbols):
+        a_, g_, b_ = float(tab.alpha[k]), float(tab.hyper_gamma[k]), float(tab.hyper_b[k])
+        s1 = 0.01 * a_
+        e = d.get(x) or {"kV": 0.0, "kT": 2 * b_ / a_, "w": g_ * s1 / (12 * a_ * a_), "s1": s1}
+        rows.append([float(e["kV"]), float(e["kT"]), float(e["w"]), float(e["s1"])])
+    return torch.tensor(rows, dtype=torch.float64)
+
+
 def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None):
     """The model of a run from its arguments (train_ionct's, as saved in model.pt): the ion CT model or, with
     ``model == "complete"``, the complete model on the environment heads."""
@@ -620,7 +653,19 @@ def build_model(a: dict, tab, chan, n_feat, feat_scale=None, feature_names=None)
                              env_two_body=tuple(g("env_two_body", ("pauli", "disp", "ct")) or ()),
                              ct_q_head=not g("ct_q_const", False), pin_a0=g("pin_a0", False),
                              hyperpol=g("hyperpol", False), hyperpol_form=g("hyperpol_form", "oneshot"),   # absent: before the fix
-                             xpol_form=g("xpol_form", "lam"),
+                             hyperpol_b=g("hyperpol_b", False),     # absent: legendre runs before 2026-11-11 (gamma only)
+                             xpol_form=g("xpol_form", "lam"), env_skip=_env_skip(a),
+                             xpol_weights=g("xpol_weights", False), xpol_w1=g("xpol_w1", "rank"),
+                             ct_b_pin=g("ct_b_pin", "none"),     # absent: checkpoints from before the pinned default
+                             env_two_latent=g("env_two_latent", False), env_pairs=tuple(g("env_pairs", None) or ("ww", "ws", "ss")),
+                             wself=(_wself(g("wself_params", None), tab.symbols, tab) if g("hyperpol_form", "oneshot") == "bounded" else None),
+                             wself_caps=tuple(g("wself_caps", (0.5, 3.0, 1.5))), wself_learn=g("wself_learn", False),
+                             breath_form=g("breath_form", "shape"),
+                             xpol_dipole=g("xpol_dipole", "parent"), xpol_trans_pi=g("xpol_trans_pi", "zero"),
+                             translate_f=_translate_f(g("translate_cpks", None), tab.symbols) if g("xpol_dipole", "parent") == "translate" else None,
+                             xpol_quad=g("xpol_quad", "parent"),
+                             strain_f=_translate_f(g("translate_cpks", None), tab.symbols, "f2") if g("xpol_quad", "parent") == "strain" else None,
+                             contract_A=_contract_A(g("contract_cpks", None), tab.symbols) if g("breath_form", "shape") == "contract" else None,
                              env_extra=tuple(g("env_extra", ()) or ()),
                              env_extra_terms=tuple(g("env_extra_terms", ("ct",)) or ()),
                              env_field=g("env_field", False), ct_legacy_head=g("ct_legacy_head", False),
@@ -979,6 +1024,13 @@ def main():
     ap.add_argument("--env-two-body", nargs="*", default=["pauli", "disp", "ct"],
                     help="--env-channels: the terms whose readouts see the two-body channels S^w, S^s (dimer-level "
                          "corrections); the others are exactly constant on every dimer. Any of pauli disp kappa ct")
+    ap.add_argument("--env-two-latent", action="store_true",
+                    help="--env-channels: the two-body channels S^w, S^s join the shared trunk's input and no readout has "
+                         "a two-body branch (--env-two-body is ignored): one latent for the dimer-level and the many-body "
+                         "dependence of every parameter")
+    ap.add_argument("--env-pairs", nargs="+", choices=("ww", "ws", "ss"), default=["ww", "ws", "ss"],
+                    help="--env-channels: the channel families the environment reads -- ww: plain overlap weights (and S^w); "
+                         "ws, ss: dressed by the pair electrostatics (and S^s). The feature-reduction ablations")
     ap.add_argument("--env-extra", nargs="*", default=[],
                     help="--env-channels: density-environment invariants (feature names, e.g. acceptor:S0 donor:S0) "
                          "given as an extra branch to the readouts of --env-extra-terms")
@@ -1015,21 +1067,68 @@ def main():
                     help="complete: the free-ion dipole hyperpolarizabilities (ion table hyperpol: gamma, field-gradient "
                          "b) added to each atom's polarizability at its permanent field / gradient, one-shot, no "
                          "learned parameters")
-    ap.add_argument("--hyperpol-form", choices=("legendre", "oneshot"), default="legendre",
-                    help="complete --hyperpol: legendre (gamma only; the ion's internal energy expanded about its polarized "
+    ap.add_argument("--wself-params", default=None,
+                    help="--hyperpol-form bounded: json {ion: {kV, kT, w, s1}} of the bounded field energy (free-ion "
+                         "point-charge fits); ions without an entry use the table's gamma and b")
+    ap.add_argument("--wself-caps", type=float, nargs=3, default=(0.5, 3.0, 1.5), metavar=("SOFT", "STIFF", "T"),
+                    help="--hyperpol-form bounded: saturation of the penetration exponent (softening, stiffening) and of "
+                         "the gradient exponent's norm")
+    ap.add_argument("--wself-learn", action="store_true", help="--hyperpol-form bounded: train the constants (default: frozen)")
+    ap.add_argument("--hyperpol-form", choices=("legendre", "oneshot", "bounded"), default="legendre",
+                    help="complete --hyperpol: legendre (gamma and the field-gradient b, see --no-hyperpol-b; the ion's internal energy expanded about its polarized "
                          "state: alpha(E_p) on site, a field offset and a constant -- exact energy and moment for an "
                          "isolated ion) or oneshot (gamma + field-gradient b inside the linear solve: 6x the "
                          "hyperpolarizable energy; reproduces checkpoints from 2026-11-09)")
+    ap.add_argument("--xpol-dipole", choices=("parent", "translate"), default="parent",
+                    help="--xpol-form gram: the dipole channel's exchange from the CPKS parent (vW Gram) or from the rigid "
+                         "translation of the shells (exact drive and along-bond second order; --translate-cpks)")
+    ap.add_argument("--translate-cpks", default=None,
+                    help="--xpol-dipole translate: the CPKS split of the induced dipole between the shells "
+                         "(scripts/ion_translate_cpks.py output); stored in the checkpoint")
+    ap.add_argument("--xpol-quad", choices=("parent", "strain"), default="parent",
+                    help="--xpol-form gram: the quadrupole channel's exchange from the CPKS parent (vW Gram) or from the "
+                         "volume-preserving strain of the shells (exact drive and second order; the CPKS l = 2 split "
+                         "'f2' of --translate-cpks)")
+    ap.add_argument("--xpol-trans-pi", choices=("zero", "exact"), default="zero",
+                    help="--xpol-dipole translate: the perpendicular second order (zero, or the rigid shift's exact "
+                         "softening S'/R)")
+    ap.add_argument("--breath-form", choices=("shape", "contract"), default="shape",
+                    help="complete --xpol: the l = 0 response as the fitted breathing shape (shape) or as the contraction "
+                         "of the permanent shells (contract: two modes per breathing ion, CPKS stiffness from "
+                         "--contract-cpks, Coulomb drive and inter-ion coupling; theory/parameter_free_xpol.tex)")
+    ap.add_argument("--contract-cpks", default=None,
+                    help="--breath-form contract: the CPKS compliance of the contraction modes "
+                         "(scripts/ion_contract_cpks.py output); stored in the checkpoint, not needed to load it")
+    ap.add_argument("--env-skip", action="store_true",
+                    help="--env-channels: add back the per-readout linear skip a_p . T on the three-body channels (off by "
+                         "default since 2026-11-11: every parameter's environment dependence beyond the two-body branch "
+                         "goes through the shared conditioned latent; widen --env-latent if needed)")
+    ap.add_argument("--env-no-skip", action="store_true", help=argparse.SUPPRESS)   # the default now; kept for old scripts
+    ap.add_argument("--no-hyperpol-b", dest="hyperpol_b", action="store_false",
+                    help="--hyperpol-form legendre: gamma only (default: gamma and the field-gradient b term)")
     ap.add_argument("--xpol-form", choices=("lam", "gram"), default="lam",
                     help="complete --xpol: lam (fitted kappa + head, lam u^2, k_perp) or gram (parameter-free: kappa = 1/2 "
                          "fixed and the on-site Gram blocks of the perturbed von Weizsaecker orbital in the neighbours' "
                          "densities; theory/parameter_free_xpol.tex)")
+    ap.add_argument("--ct-b-pin", choices=("none", "all", "donor", "donor-scale"), default="all",
+                    help="complete: the direct-CT exponents from the ion table (acceptor: outer electrostatic shell for "
+                         "anions, Fukui for cations; cation donor: its shell). The anion donor: all = its outer shell, "
+                         "donor = learned freely, donor-scale = outer shell x a learned factor >= 1; none = all four learned "
+                         "(the default before 2026-11-11). Default all: pinning cost nothing in m37")
+    ap.add_argument("--xpol-weights", action="store_true",
+                    help="--xpol-form gram: free the two magnitudes -- W1 = 2 kappa on the drive (per species and rank, "
+                         "started at 1/2) and W2 on each atom's on-site Gram blocks (per species, started at 1), both "
+                         "with a readout of the shared latent (--xpol-kappa-const: per-species constants only)")
+    ap.add_argument("--xpol-w1", choices=("rank", "shared"), default="rank",
+                    help="--xpol-weights: one drive weight per rank (dipole, quadrupole, breathing) or one shared by the three")
     ap.add_argument("--pin-a0", action="store_true",
                     help="complete: the breathing stiffness a0 stays at the ion table's monomer value (breath_lna frozen)")
     ap.add_argument("--hull-k", type=int, default=6,
                     help="write RUN/hull.pt: the training atoms' convex hull in this many whitened PCA "
                          "components of the invariants (rsfff.coverage; 0 = off)")
     a = ap.parse_args()
+    if a.cache_dir:                      # the model's lazily built pair tables share the precompute cache's directory
+        os.environ.setdefault("RSFFF_TABLE_CACHE", str(a.cache_dir))
     VAL_CAP = a.val_cap
     resolve_exchange(a)
     # CT labels on dimers: --ct-dimers (all / none / like) or the older --ct-no-dimers
@@ -1261,6 +1360,12 @@ def main():
                      + (sv.get("disp_mae", 0) if a.w_disp > 0 else 0))
             if score < best:
                 best, best_state = score, {k: v.detach().clone() for k, v in model.state_dict().items()}
+                # the best model so far, written as it is found (model.pt, replaced atomically; the final save below
+                # is the same state): a running or interrupted job can be analysed
+                tmp = out / "model.pt.tmp"
+                torch.save({"state": {k: v.cpu() for k, v in best_state.items()}, "args": vars(a), "n_feat": F.shape[1],
+                            "feature_names": getattr(feat, "feature_names", None), "epoch": ep, "val_score": score}, tmp)
+                tmp.replace(out / "model.pt")
             log.append({"epoch": ep, "train_loss": tot / len(tr), **{f"val_{k}": v for k, v in sv.items()}})
             msg = ""
             if polar_tr:

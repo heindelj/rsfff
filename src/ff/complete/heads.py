@@ -57,7 +57,7 @@ class SharedEnvironment(nn.Module):
     linear readout per emitted parameter,
 
         z_i   = phi(T_i) - phi(0)                       (phi: MLP to ``latent`` numbers; ``mode="per_term"``: one phi per term)
-        u_p,i = W_p z_i + a_p . T_i [+ b_p . B_i + g_p(B_i) - g_p(0)]       (B = the two-body channels, only for
+        u_p,i = W_p z_i [+ a_p . T_i] [+ b_p . B_i + g_p(B_i) - g_p(0)]       (B = the two-body channels, only for
                                                                              readouts with ``two_body``)
 
     Every readout's last layer starts at zero and nothing has a bias path at zero input, so u_p = 0 exactly for an
@@ -69,11 +69,19 @@ class SharedEnvironment(nn.Module):
     conditioning vector c (the centre atom's species embedding, :mod:`.species`), by FiLM (``cond_mode="film"``,
     bb.nn.ConditionedTrunk: per-layer scale and shift generated from c, zero at initialisation) or by concatenation
     (``"concatenate"``); ``forward(X, E, c)``. The readouts (W_p, a_p, b_p) stay shared by every species. The isolated
-    and dimer limits hold per atom: z = phi(T, c) - phi(0, c), g = g(B, c) - g(0, c)."""
+    and dimer limits hold per atom: z = phi(T, c) - phi(0, c), g = g(B, c) - g(0, c).
+
+    ``skip`` (False by default since 2026-11-11): the per-readout linear skip a_p . T. Without it every readout's
+    three-body dependence goes through the shared (conditioned) latent alone, u_p = W_p z [+ the two-body branch];
+    widen ``latent`` if it needs more. Checkpoints from before carry it (train_ionct.build_model restores it)."""
 
     def __init__(self, n_in, three_cols, two_cols, readouts, latent=4, hidden=64, depth=2, mode="shared", tb_hidden=16,
-                 n_extra=0, extra_capacity="full", cond_dim=0, cond_mode="film", extra_latent=False):
+                 n_extra=0, extra_capacity="full", cond_dim=0, cond_mode="film", extra_latent=False, skip=False,
+                 two_latent=False):
         super().__init__()
+        # two_latent (2026-11-12): the two-body channels join the trunk's input and no readout has a two-body branch --
+        # every readout is W_p z of one latent that carries the dimer-level and the many-body dependence together
+        self.two_latent = bool(two_latent)
         # extra_latent (m35): the extra inputs join the three-body channels as the trunk's input -- one latent from
         # one feature set for every readout -- instead of a per-readout side branch. The latent is then live wherever
         # either is non-zero (on dimers too, through the extra inputs)
@@ -88,16 +96,17 @@ class SharedEnvironment(nn.Module):
         self.register_buffer("two_cols", torch.tensor(list(two_cols), dtype=torch.long), persistent=False)
         self.names = [r[0] for r in readouts]
         self.terms = {r[0]: r[1] for r in readouts}
-        self.two_body = {r[0]: bool(r[2]) for r in readouts}
+        self.two_body = {r[0]: bool(r[2]) and not self.two_latent for r in readouts}
         self.extra = {r[0]: bool(r[3]) if len(r) > 3 and n_extra and not self.extra_latent else False
                       for r in readouts}
         self.n_extra = int(n_extra)
         n3, n2 = len(three_cols), len(two_cols)
         keys = ["shared"] if mode == "shared" else sorted(set(self.terms.values()))
-        n_trunk = n3 + (self.n_extra if self.extra_latent else 0)
+        n_trunk = n3 + (n2 if self.two_latent else 0) + (self.n_extra if self.extra_latent else 0)
         self.trunks = nn.ModuleDict({k: self._encoder(n_trunk, hidden, self.latent, depth) for k in keys})
         self.W = nn.ModuleDict({p: nn.Linear(self.latent, 1, bias=False) for p in self.names})
-        self.lin3 = nn.ModuleDict({p: nn.Linear(n3, 1, bias=False) for p in self.names})
+        self.skip = bool(skip)
+        self.lin3 = nn.ModuleDict({p: nn.Linear(n3, 1, bias=False) for p in self.names} if self.skip else {})
         tb = [p for p in self.names if self.two_body[p]]
         self.lin2 = nn.ModuleDict({p: nn.Linear(n2, 1, bias=False) for p in tb})
         self.g2 = nn.ModuleDict({p: self._encoder(n2, tb_hidden, 1, 1) for p in tb})
@@ -123,7 +132,8 @@ class SharedEnvironment(nn.Module):
         """Every readout to zero (the trunks keep their weights): all u_p = 0."""
         for p in self.names:
             nn.init.zeros_(self.W[p].weight)
-            nn.init.zeros_(self.lin3[p].weight)
+            if p in self.lin3:
+                nn.init.zeros_(self.lin3[p].weight)
         for p in self.lin2:
             nn.init.zeros_(self.lin2[p].weight)
             last = self.g2[p][-1] if not self.cond_dim else self.g2[p].out
@@ -140,6 +150,8 @@ class SharedEnvironment(nn.Module):
         if self.cond_dim and c is None:
             raise ValueError("SharedEnvironment with cond_dim needs the conditioning vectors c")
         T = X[:, self.three_cols]
+        if getattr(self, "two_latent", False):
+            T = torch.cat([T, X[:, self.two_cols]], 1)
         if self.extra_latent:
             if E is None:
                 raise ValueError("SharedEnvironment with extra_latent needs the extra inputs E")
@@ -159,7 +171,9 @@ class SharedEnvironment(nn.Module):
         out = {}
         for p in self.names:
             z = Z["shared"] if self.mode == "shared" else Z[self.terms[p]]
-            u = self.W[p](z)[:, 0] + self.lin3[p](T)[:, 0]
+            u = self.W[p](z)[:, 0]
+            if p in self.lin3:
+                u = u + self.lin3[p](T)[:, 0]
             if self.two_body[p]:
                 live2 = (B != 0).any(1)
                 g = self._enc(self.g2[p], B, c, B0)[:, 0]

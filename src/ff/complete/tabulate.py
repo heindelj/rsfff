@@ -40,7 +40,7 @@ from .environment import INVARIANT_NAMES, PROBE_NAMES, invariants, shaped_overla
 from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
                        recip_apply, smooth_switch)
 
-__all__ = ["FluxTable", "ProbeOverlapTable", "RadialTable", "XpolTable", "batched_precompute", "flux_pair_terms",
+__all__ = ["FluxTable", "ProbeOverlapTable", "RadialTable", "XpolTable", "cached_table", "batched_precompute", "flux_pair_terms",
            "shape_self_coulomb", "xpol_overlap_map"]
 
 NORD = 5          # damping orders of the rank-2 tensor
@@ -52,6 +52,61 @@ def _expand(b, w, G):
     if b.dim() == 0:
         return b.expand(G), w[None].expand(G, -1)
     return b[None].expand(G, -1), w[None].expand(G, -1, -1)
+
+
+def _tab_fingerprint(tab) -> bytes:
+    """Bytes that change whenever the ion table's content does (every tensor and string field, by name)."""
+    import dataclasses
+    import hashlib
+    h = hashlib.sha1()
+
+    def feed(name, v):
+        if isinstance(v, torch.Tensor):
+            h.update(name.encode() + str(tuple(v.shape)).encode() + v.detach().cpu().double().contiguous().numpy().tobytes())
+        elif isinstance(v, dict):
+            for k in sorted(v):
+                feed(f"{name}.{k}", v[k])
+        elif isinstance(v, (str, int, float, tuple, list)):
+            h.update(name.encode() + repr(v).encode())
+
+    for f in dataclasses.fields(tab):
+        feed(f.name, getattr(tab, f.name))
+    return h.digest()
+
+
+def cached_table(cls, tab, **kw):
+    """``cls(tab, **kw)``, kept on disk when the environment names a directory (``RSFFF_TABLE_CACHE``; the trainer
+    sets it to its --cache-dir): the pair tables the model builds lazily (overlap, Gram, flux, probe) take minutes
+    and depend only on the ion table. The key is the class, its arguments, the ion table's content and the source of
+    the module that defines the class, so an edit of the table code or of the ion table makes a new entry."""
+    import hashlib
+    import inspect
+    import os
+    from pathlib import Path
+    d = os.environ.get("RSFFF_TABLE_CACHE")
+    if not d:
+        return cls(tab, **kw)
+    try:
+        src = Path(inspect.getsourcefile(cls)).read_bytes() + Path(__file__).read_bytes()
+    except (OSError, TypeError):
+        return cls(tab, **kw)
+    key = hashlib.sha1(cls.__name__.encode() + repr(sorted(kw.items())).encode() + _tab_fingerprint(tab) + src).hexdigest()[:16]
+    path = Path(d) / f"pair_{cls.__name__}_{key}.pt"
+    if path.exists():
+        try:
+            return torch.load(path, weights_only=False, map_location="cpu")
+        except Exception:  # noqa: BLE001 -- a truncated file: rebuild
+            pass
+    cpu = tab.to("cpu") if hasattr(tab, "to") else tab
+    table = cls(cpu, **kw)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".tmp{os.getpid()}")
+        torch.save(table, tmp)
+        tmp.replace(path)
+    except OSError:
+        pass
+    return table
 
 
 class RadialTable:
