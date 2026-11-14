@@ -141,3 +141,58 @@ def test_forces_continuous_at_a_lattice_site(setup):
         jumps[form] = float((F0(h) - F0(-h)).norm() / (F0(0.1) - F0(-0.1)).norm())
     assert jumps["norm"] > 1e-2, jumps          # a finite jump over a 2e-4 A step (O(1) of the 0.2 A change)
     assert jumps["sq"] < 1e-2, jumps            # linear in the step: ~1e-3 of the 0.2 A change
+
+
+def _table_points(table, n=400, seed=5):
+    g = torch.Generator().manual_seed(seed)
+    S = len(table.tab.symbols)
+    r = torch.rand(n, generator=g, dtype=torch.float64) * (table.r_max + 1.0 - 0.1) + 0.1    # below r_min to past r_max
+    nodes = table.r_min + table.h * torch.arange(0, table.G, max(table.G // 40, 1), dtype=torch.float64)
+    r = torch.cat([r, nodes, torch.tensor([table.r_min, table.r_max], dtype=torch.float64)])   # t = 0 exactly
+    si = torch.randint(0, S, (r.shape[0],), generator=g)
+    sj = torch.randint(0, S, (r.shape[0],), generator=g)
+    return si, sj, r
+
+
+def test_vectorized_lookup_matches_transcription(setup):
+    _, _, table, _, _ = setup
+    si, sj, r = _table_points(table)
+    a, b = table._call_ref(si, sj, r), table(si, sj, r)
+    assert b.shape == a.shape and b.dtype == a.dtype
+    assert torch.allclose(b, a, rtol=1e-12, atol=1e-13 * float(a.abs().max()))
+
+
+def test_vectorized_lookup_derivatives_match_transcription(setup):
+    """First and second derivatives in r (forces, and their gradient in the force loss)."""
+    _, _, table, _, _ = setup
+    si, sj, r0 = _table_points(table)
+    outs = []
+    for fn in (table._call_ref, table.__call__):
+        r = r0.clone().requires_grad_(True)
+        y = fn(si, sj, r)
+        w = torch.linspace(-1.0, 1.0, y.numel(), dtype=y.dtype).reshape(y.shape)
+        g = torch.autograd.grad((y * w).sum(), r, create_graph=True)[0]
+        h = torch.autograd.grad((g * torch.cos(r0)).sum(), r)[0]
+        outs.append((g.detach(), h))
+    # the second derivative carries the summation-order rounding times 1/h^2 (400 on this grid): ~2e-12 of its scale
+    for (x, y), scale in zip(zip(*outs), (1e-12, 1e-11)):
+        assert torch.isfinite(y).all()
+        assert torch.allclose(y, x, rtol=1e-11, atol=scale * float(x.abs().max()))
+
+
+def test_vectorized_lookup_is_a_handful_of_ops(setup):
+    from torch.overrides import TorchFunctionMode
+
+    class Count(TorchFunctionMode):
+        n = 0
+
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            Count.n += 1
+            return func(*args, **(kwargs or {}))
+
+    _, _, table, _, _ = setup
+    si, sj, r = _table_points(table)
+    table(si, sj, r)
+    with Count():
+        table(si, sj, r)
+    assert Count.n < 40, Count.n

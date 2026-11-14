@@ -122,7 +122,15 @@ class SharedEnvironment(nn.Module):
         return _mlp(i, h, o, depth) if not self.cond_dim else _CondMLP(i, h, o, depth, self.cond_dim, self.cond_mode)
 
     def _enc(self, net, x, c, x0):
-        """net(x, c) - net(x0, c): x0 the zero input (one row when unconditioned, broadcast)."""
+        """net(x, c) - net(x0, c): x0 the zero input (one row, broadcast). One pass of the network: unconditioned, the
+        zero row rides along as an extra row; conditioned, :meth:`_CondMLP.diff` (the FiLM generators run once)."""
+        if not self.cond_dim:
+            y = net(torch.cat([x, x0], 0))
+            return y[:-1] - y[-1:]
+        return net.diff(x, x0, c)
+
+    def _enc_ref(self, net, x, c, x0):
+        """Two-pass form of :meth:`_enc` (kept for tests)."""
         if not self.cond_dim:
             return net(x) - net(x0)
         return net(x, c) - net(x0.expand_as(x), c)
@@ -144,7 +152,7 @@ class SharedEnvironment(nn.Module):
             nn.init.zeros_(self.ge[p][-1].weight)
             nn.init.zeros_(self.ge[p][-1].bias)
 
-    def latents(self, X, c=None, E=None):
+    def latents(self, X, c=None, E=None, ref=False):
         """{trunk key: (N, latent)} z = phi(T, c) - phi(0, c) (T: the three-body channels, with the extra inputs
         appended when ``extra_latent``)."""
         if self.cond_dim and c is None:
@@ -158,15 +166,50 @@ class SharedEnvironment(nn.Module):
             T = torch.cat([T, E], 1)
         T0 = torch.zeros_like(T[:1])
         live = (T != 0).any(1, keepdim=True)          # exactly 0 where every three-body channel is (dimers, isolated)
-        return {k: torch.where(live, self._enc(m, T, c, T0), torch.zeros_like(T[:, :1]).expand(-1, self.latent))
+        enc = self._enc_ref if ref else self._enc
+        return {k: torch.where(live, enc(m, T, c, T0), torch.zeros_like(T[:, :1]).expand(-1, self.latent))
                 for k, m in self.trunks.items()}
 
     def forward(self, X, E=None, c=None):
         """X (N, n_in) scaled channels (E (N, n_extra): the extra inputs; c (N, cond_dim): the conditioning) ->
-        {name: (N,)} log-factors."""
+        {name: (N,)} log-factors. The readouts W_p (and the skips a_p) of every parameter on the same latent are one
+        matmul; the two-body and extra branches, when present, are added per parameter."""
         T = X[:, self.three_cols]
         B = X[:, self.two_cols]
         Z = self.latents(X, c, E)
+        groups = {}
+        for p in self.names:
+            groups.setdefault("shared" if self.mode == "shared" else self.terms[p], []).append(p)
+        out = {}
+        for k, ps in groups.items():
+            U = Z[k] @ torch.cat([self.W[p].weight for p in ps], 0).T                    # (N, len(ps))
+            if any(p in self.lin3 for p in ps):         # the skips a_p . T (zero rows for readouts without one)
+                U = U + T @ torch.cat([self.lin3[p].weight if p in self.lin3 else
+                                       T.new_zeros(1, T.shape[1]) for p in ps], 0).T
+            for m, p in enumerate(ps):
+                out[p] = U[:, m]
+        B0 = torch.zeros_like(B[:1])
+        for p in self.names:
+            u = out[p]
+            if self.two_body[p]:
+                live2 = (B != 0).any(1)
+                g = self._enc(self.g2[p], B, c, B0)[:, 0]
+                u = u + self.lin2[p](B)[:, 0] + torch.where(live2, g, torch.zeros_like(g))
+            if self.extra[p]:
+                livee = (E != 0).any(1)
+                ge = (self.ge[p](E) - self.ge[p](torch.zeros_like(E[:1])))[:, 0]
+                u = u + self.line[p](E)[:, 0] + torch.where(livee, ge, torch.zeros_like(ge))
+            out[p] = u
+        return {p: out[p] for p in self.names}
+
+    def _forward_ref(self, X, E=None, c=None):
+        """Per-readout, two-pass reference of :meth:`forward` (kept for tests).
+
+        X (N, n_in) scaled channels (E (N, n_extra): the extra inputs; c (N, cond_dim): the conditioning) ->
+        {name: (N,)} log-factors."""
+        T = X[:, self.three_cols]
+        B = X[:, self.two_cols]
+        Z = self.latents(X, c, E, ref=True)
         B0 = torch.zeros_like(B[:1])
         out = {}
         for p in self.names:
@@ -176,7 +219,7 @@ class SharedEnvironment(nn.Module):
                 u = u + self.lin3[p](T)[:, 0]
             if self.two_body[p]:
                 live2 = (B != 0).any(1)
-                g = self._enc(self.g2[p], B, c, B0)[:, 0]
+                g = self._enc_ref(self.g2[p], B, c, B0)[:, 0]
                 u = u + self.lin2[p](B)[:, 0] + torch.where(live2, g, torch.zeros_like(g))
             if self.extra[p]:
                 livee = (E != 0).any(1)
@@ -198,3 +241,15 @@ class _CondMLP(nn.Module):
 
     def forward(self, x, c):
         return self.out(self.trunk(x, c))
+
+    def diff(self, x, x0, c):
+        """net(x, c) - net(x0, c) in one pass: the FiLM generators run once on c and both inputs go through the
+        layers stacked (2, N, .) (x0: zero row(s), broadcast to x)."""
+        tr = self.trunk
+        h = torch.stack([x, x0.expand_as(x)], 0)
+        if tr.mode == "concatenate":
+            h = torch.cat([h, c.expand(2, -1, -1)], -1)
+        for k, layer in enumerate(tr.layers):
+            h = layer(h, tr.generators[k](c) if tr.generators is not None else None)
+        y = self.out(h)
+        return y[0] - y[1]

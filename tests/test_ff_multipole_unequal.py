@@ -117,3 +117,68 @@ def test_multi_term_shapes_are_sums_of_terms():
     from rsfff.ff.multipole import shaped_one_center_damp
     ref1 = 0.6 * shaped_one_center_damp(bi * r, wi, 2) + 0.4 * shaped_one_center_damp(bi * 1.7 * r, wi, 2)
     assert torch.allclose(shaped_one_center_multi(b2, w2, r, 2), ref1, atol=1e-12)
+
+
+# --- vectorized form against the per-order reference loop ---------------------------------------------------------
+
+def _mixed_pairs(dtype, P=3000, seed=0):
+    """Pairs straddling the switch: equal, near-equal (series) and far (closed form) exponents, r from 0."""
+    g = torch.Generator().manual_seed(seed)
+    bi = 0.5 + 2.5 * torch.rand(P, generator=g, dtype=dtype)
+    spread = torch.where(torch.rand(P, generator=g) < 0.5, 0.01, 0.6).to(dtype)
+    bj = bi * (1 + spread * torch.randn(P, generator=g, dtype=dtype)).abs().clamp_min(0.05)
+    bj[:100] = bi[:100]
+    r = 14 * torch.rand(P, generator=g, dtype=dtype)
+    r[:20] = 0.0
+    return bi, bj, r
+
+
+@pytest.mark.parametrize("max_rank", [0, 1, 2])
+@pytest.mark.parametrize("dtype,tol", [(torch.float64, 1e-11), (torch.float32, 1e-5)])
+def test_vectorized_matches_reference(max_rank, dtype, tol):
+    from rsfff.ff.multipole import _slater_two_center_damp_unequal_ref
+    bi, bj, r = _mixed_pairs(dtype)
+    near = ((bi - bj) / (bi + bj)).abs() < UNEQUAL_SWITCH[dtype]
+    assert near.any() and (~near).any()
+    new = slater_two_center_damp_unequal(bi, bj, r, max_rank)
+    ref = _slater_two_center_damp_unequal_ref(bi, bj, r, max_rank)
+    assert new.shape == ref.shape == (2 * max_rank + 1, r.numel()) and new.dtype == dtype
+    torch.testing.assert_close(new, ref, atol=tol, rtol=0)
+
+
+@pytest.mark.parametrize("max_rank", [0, 2])
+def test_vectorized_gradients_match_reference(max_rank):
+    from rsfff.ff.multipole import _slater_two_center_damp_unequal_ref
+    bi, bj, r = (t.requires_grad_(True) for t in _mixed_pairs(D, P=1500, seed=1))
+    w = torch.randn(2 * max_rank + 1, r.numel(), dtype=D)
+    g_new = torch.autograd.grad((w * slater_two_center_damp_unequal(bi, bj, r, max_rank)).sum(), (bi, bj, r))
+    g_ref = torch.autograd.grad((w * _slater_two_center_damp_unequal_ref(bi, bj, r, max_rank)).sum(), (bi, bj, r))
+    for a, b in zip(g_new, g_ref):
+        assert torch.isfinite(a).all()
+        # the closed form cancels near the switch (A, B ~ 1/eps); summation order moves the last digits
+        torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
+
+
+def test_vectorized_broadcasts_scalar_exponents():
+    r = torch.linspace(0.0, 8.0, 17, dtype=D)
+    out = slater_two_center_damp_unequal(torch.tensor(2.0, dtype=D), torch.tensor(1.3, dtype=D), r, 1)
+    ref = slater_two_center_damp_unequal(torch.full_like(r, 2.0), torch.full_like(r, 1.3), r, 1)
+    assert out.shape == (3, 17)
+    torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+def test_vectorized_keeps_input_shape():
+    from rsfff.ff.multipole import _slater_two_center_damp_unequal_ref
+    g = torch.Generator().manual_seed(5)
+    bi, bj, r = 0.5 + 2 * torch.rand(3, 4, generator=g, dtype=D), 0.5 + 2 * torch.rand(4, generator=g, dtype=D), \
+        6 * torch.rand(3, 1, generator=g, dtype=D)
+    out = slater_two_center_damp_unequal(bi, bj, r, 1)
+    assert out.shape == (3, 3, 4)
+    ref = _slater_two_center_damp_unequal_ref(*torch.broadcast_tensors(bi, bj, r), 1)
+    torch.testing.assert_close(out, ref, atol=1e-11, rtol=0)
+
+
+@pytest.mark.parametrize("max_rank", [0, 1, 2])
+def test_vectorized_empty_pair_list(max_rank):
+    e = torch.zeros(0, dtype=D)
+    assert slater_two_center_damp_unequal(e, e, e, max_rank).shape == (2 * max_rank + 1, 0)

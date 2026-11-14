@@ -21,10 +21,13 @@ Settings (:data:`DEFAULTS`; the job's ``in/settings``, or ``--set``):
     xpol        gram | lam            exchange polarization: the Gram form or the fitted lam / k_perp form
     weights     bool                  gram: the learned magnitudes W1, W2 (--xpol-weights)
     hyperpol    legendre | bounded | bounded-learn | none
-    ct_b_pin    all | donor | donor-scale | none
+    ct_b_pin    acceptor-float | all | donor | donor-scale | donor-shell | none   (default acceptor-float: the cation
+                                      acceptor exponents learned within exp(+-0.5) of Fukui, the rest pinned as "all")
     latent      int                   width of the shared latent
     one_latent  bool                  the two-body channels through the shared latent, no two-body branches
-    pairs       "ww/ws/ss"            the channel families read (ww: plain overlap weights; ws, ss: dressed)
+    pairs       "ww"                  the channels read (default ww = S^w + T^ww): families ww (plain overlap weights),
+                                      ws, ss (dressed), or
+                                      exact groups Sw, Ss, Tww, Tws, Tss, e.g. "Ss/Tws"
     probes      bool                  the gated diffuse-probe invariants as trunk inputs
     epochs, seed, device (auto | cuda | cpu), args (extra train_ionct arguments, appended last)
 
@@ -47,8 +50,8 @@ from pathlib import Path
 
 __all__ = ["DEFAULTS", "train_args", "run_training", "main"]
 
-DEFAULTS = {"xpol": "gram", "weights": True, "hyperpol": "legendre", "ct_b_pin": "all", "latent": 6, "one_latent": True,
-            "pairs": "ww/ws/ss", "probes": True, "epochs": 500, "seed": 0, "device": "auto", "args": "", "lr": 0.0005,
+DEFAULTS = {"xpol": "gram", "weights": True, "hyperpol": "legendre", "ct_b_pin": "acceptor-float", "latent": 6, "one_latent": True,
+            "pairs": "ww", "probes": True, "epochs": 500, "seed": 0, "device": "auto", "args": "", "lr": 0.001,
             "params": "ions_salts8_cpksb.json", "salts": "lif/kbr/csi"}
 
 POLAR_TEST = ["al-nacl-r1:nacl_polar_002", "al-nacl-r1:nacl_polar_008", "al-nacl-r1:nacl_polar_012",
@@ -94,10 +97,10 @@ def train_args(data: Path, out: Path, settings: dict | None = None, *, cache_dir
          "--ct-model", "flux", "--frozen", "--w-pauli", 1, "--w-disp", 1, "--conf-form", "mono", "--pauli-form", "shells",
          "--w-pol", 1, "--w-ct", 1, "--w-chan", 0.3, "--w-alpha", 0.2, "--alpha-every", 4, "--w-smooth", 0.003,
          "--no-polar-almo", "--polar-sets", CT / "al-nacl-r1.jsonl", "--polar-test", *POLAR_TEST,
-         "--batch", 32, "--lr", s["lr"], "--hidden", 64, "--wkb", "smooth+floor", "--ct-max-pair", 3.6,
+         "--batch", 128, "--force-batch", 64, "--lr", s["lr"], "--hidden", 64, "--wkb", "smooth+floor", "--ct-max-pair", 3.6,
          "--max-ho-ratio", 1.4, "--env-cap", 3, "--env-sat", 1.2, "--ct-q-cap", 1.5, "--gap-cap", 2,
          "--force-data", data / "force", "--force-sets", *fsets, "--force-test", *FORCE_TEST, *ftest,
-         "--w-force", 0.01, "--force-every", 5,
+         "--w-force", 0.1, "--force-every", 5,
          "--extra-sets", CT / "nacl-compressed.jsonl", CT / "al-nacl-r0.jsonl", CT / "al-nacl-r1.jsonl",
          CT / "al-nacl-lin.jsonl", CT / "al-nacl-holes.jsonl",
          "--exclude-names", *EXCLUDE, "--log-every", 25, "--pin-a0", "--no-aniso",

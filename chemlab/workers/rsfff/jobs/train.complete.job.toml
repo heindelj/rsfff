@@ -41,14 +41,14 @@ struct Settings terms "rsfff.complete"
     xpol::String = "gram" in {"gram", "lam"}                 # exchange polarization: the Gram form or the fitted lam / k_perp form
     weights::Bool = true                                     # gram: the learned magnitudes W1 (drive) and W2 (on-site stiffness)
     hyperpol::String = "legendre" in {"legendre", "bounded", "bounded-learn", "none"}
-    ct_b_pin::String = "all" in {"all", "donor", "donor-scale", "none"}   # the CT exponents from the ion table
+    ct_b_pin::String = "acceptor-float" in {"all", "donor", "donor-scale", "donor-shell", "acceptor-float", "none"}   # the CT exponents from the ion table
     latent::Int = 6 in 1..64                                 # width of the shared latent
     one_latent::Bool = true                                  # the two-body channels through the shared latent (no two-body branches)
-    pairs::String = "ww/ws/ss"                               # channel families: ww plain overlap weights; ws, ss dressed by the pair electrostatics
+    pairs::String = "ww"                                     # channels: families ww (plain), ws, ss (dressed); or exact groups Sw, Ss, Tww, Tws, Tss (e.g. "Ss/Tws")
     probes::Bool = true                                      # the gated diffuse-probe invariants as trunk inputs
     epochs::Int = 500 in 0..100000 as "train.epochs"
     seed::Int = 0 in 0..1000000
-    lr::Float64 = 0.0005 in 0.0..1.0
+    lr::Float64 = 0.001 in 0.0..1.0
     device::String = "auto" in {"auto", "cuda", "cpu"}       # auto: CUDA when there is one
     args::String = "" as ""                                  # extra train_ionct arguments, appended last
     gpus::Int = 1 in 0..4 as "resources.gpus"

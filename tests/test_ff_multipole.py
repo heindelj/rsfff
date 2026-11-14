@@ -496,3 +496,84 @@ def test_l2_generators_exponentiate_to_the_rotation_representation():
         assert torch.allclose(
             torch.matrix_exp(theta * l_n), _wigner_d_l2(rotation), atol=1e-12
         )
+
+
+# ---------------------------------------------------------------------------
+# The matmul form of the tensor against the per-component transcription
+# ---------------------------------------------------------------------------
+
+
+def _tensor_inputs(dtype, n=300, seed=7):
+    g = torch.Generator().manual_seed(seed)
+    dr = torch.randn(n, 3, generator=g, dtype=torch.float64) * 3.0
+    dr[:20, 0] = 0.0                                    # pairs on an axis or in a plane: exact zero components
+    dr[20:40, :2] = 0.0
+    damp = torch.rand(5, n, generator=g, dtype=torch.float64)
+    return dr.to(dtype), damp.to(dtype)
+
+
+@pytest.mark.parametrize("max_rank", [0, 1, 2])
+@pytest.mark.parametrize("damped", [False, True])
+@pytest.mark.parametrize("dtype,rtol", [(torch.float64, 1e-12), (torch.float32, 2e-5)])
+@pytest.mark.parametrize("pass_rinv", [False, True])
+def test_tensor_matches_transcription(max_rank, damped, dtype, rtol, pass_rinv):
+    from rsfff.ff.multipole import _damped_interaction_tensor_ref
+
+    dr, damp = _tensor_inputs(dtype)
+    d = damp[: 2 * max_rank + 1] if damped else None
+    rinv = 1.0 / dr.norm(dim=-1) if pass_rinv else None
+    a = _damped_interaction_tensor_ref(dr, d, rinv, max_rank=max_rank)
+    b = damped_interaction_tensor(dr, d, rinv, max_rank=max_rank)
+    assert b.shape == a.shape and b.dtype == a.dtype
+    assert torch.allclose(b, a, rtol=rtol, atol=rtol * float(a.abs().max()))
+
+
+@pytest.mark.parametrize("max_rank", [1, 2])
+def test_tensor_derivatives_match_transcription(max_rank):
+    """First and second derivatives with respect to the geometry and the damping factors: the force loss
+    differentiates the energy (create_graph) and then the forces."""
+    from rsfff.ff.multipole import _damped_interaction_tensor_ref
+
+    dr0, damp0 = _tensor_inputs(torch.float64)
+    outs = []
+    for fn in (_damped_interaction_tensor_ref, damped_interaction_tensor):
+        dr = dr0.clone().requires_grad_(True)
+        damp = damp0[: 2 * max_rank + 1].clone().requires_grad_(True)
+        T = fn(dr, damp, max_rank=max_rank)
+        w = torch.linspace(-1.0, 1.0, T.numel(), dtype=T.dtype).reshape(T.shape)
+        g_dr, g_damp = torch.autograd.grad((T * w).sum(), (dr, damp), create_graph=True)
+        v = torch.linspace(0.5, -0.5, g_dr.numel(), dtype=T.dtype).reshape(g_dr.shape)
+        h_dr, h_damp = torch.autograd.grad((g_dr * v).sum(), (dr, damp))
+        outs.append((g_dr, g_damp, h_dr, h_damp))
+    for x, y in zip(*outs):
+        assert torch.isfinite(y).all()
+        x, y = x.detach(), y.detach()
+        assert torch.allclose(y, x, rtol=1e-11, atol=1e-12 * float(x.abs().max()))
+
+
+def test_tensor_is_a_handful_of_ops():
+    """The point of the matmul form: a fixed small number of torch calls, not one per component."""
+    from torch.overrides import TorchFunctionMode
+
+    class Count(TorchFunctionMode):
+        n = 0
+
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            Count.n += 1
+            return func(*args, **(kwargs or {}))
+
+    dr, damp = _tensor_inputs(torch.float64)
+    damped_interaction_tensor(dr, damp, max_rank=2)     # builds and caches the plan outside the count
+    with Count():
+        damped_interaction_tensor(dr, damp, max_rank=2)
+    assert Count.n < 40, Count.n
+
+
+@pytest.mark.parametrize("max_rank", [0, 1, 2])
+def test_damped_interaction_tensor_empty_pair_list(max_rank):
+    from rsfff.ff.multipole import damped_interaction_tensor, slater_two_center_damp
+    dr = torch.zeros(0, 3, dtype=torch.float64)
+    u = torch.zeros(0, dtype=torch.float64)
+    for damp in (None, slater_two_center_damp(u, max_rank)):
+        T = damped_interaction_tensor(dr, damp, max_rank=max_rank)
+        assert T.shape == (0, (1, 4, 10)[max_rank], (1, 4, 10)[max_rank])

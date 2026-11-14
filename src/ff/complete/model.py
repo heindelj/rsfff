@@ -358,8 +358,16 @@ class CompleteModel(IonCTModel):
         #   "donor"        learned freely, per species (as before; started at the Fukui donor exponent)
         #   "donor-scale"  b_shell (1 + softplus(c_s)) >= b_shell: a learned factor < 1 on the shell's range (CT no
         #                  longer ranged than the density), started at the Fukui / shell ratio
-        if ct_b_pin not in ("none", "all", "donor", "donor-scale"):
-            raise ValueError(f"ct_b_pin {ct_b_pin!r}: none, all, donor or donor-scale")
+        #   "donor-shell"  the same factor, started at the shell itself (1.01 b_shell: softplus > 0), so training can
+        #                  only shorten the donor's range from the electrostatic shell (2026-11-13; the free m37 runs put
+        #                  the halide donors at 1.1-1.7 x b_shell)
+        #   "acceptor-float" every donor and the anion acceptors as "all"; each cation acceptor b_Fukui exp(c tanh(x/c))
+        #                  with c = CT_FA_CAP, started at Fukui (x = 0): a bounded per-species scale (0.61-1.65 x) around
+        #                  the Fukui exponent (2026-11-13; the free m37 runs put Na+ at 0.8 x, the others at 1.0 x, and with
+        #                  the cation acceptors pinned the donor-shell runs pushed the halide donors onto the shell bound)
+        modes = ("none", "all", "donor", "donor-scale", "donor-shell", "acceptor-float")
+        if ct_b_pin not in modes:
+            raise ValueError(f"ct_b_pin {ct_b_pin!r}: one of {modes}")
         self.ct_b_pin = ct_b_pin
         if ct_b_pin != "none":
             f64 = torch.float64
@@ -373,9 +381,12 @@ class CompleteModel(IonCTModel):
             self.ct_bA_raw.requires_grad_(False)
             if ct_b_pin != "donor":
                 self.ct_bD_raw.requires_grad_(False)
-            if ct_b_pin == "donor-scale":
-                x0 = (tab.front_b["donor"].to(f64) / b_sh - 1).clamp(min=0.05)
+            if ct_b_pin in ("donor-scale", "donor-shell"):
+                x0 = ((tab.front_b["donor"].to(f64) / b_sh - 1).clamp(min=0.05) if ct_b_pin == "donor-scale"
+                      else torch.full_like(b_sh, 0.01))
                 self.ct_fD_raw = nn.Parameter(torch.log(torch.expm1(x0)))
+            if ct_b_pin == "acceptor-float":
+                self.ct_fA_raw = nn.Parameter(torch.zeros(S, dtype=f64))       # used for cations only
         # pauli_ii: the induced-induced Pauli kernel in the solve, A -> A + kappa_i kappa_j A_pp (the penetration part
         # of the parent-parent coupling, cached); kappa per species, free sign, small nonzero start (the gradient of
         # a product vanishes at zero)
@@ -686,12 +697,17 @@ class CompleteModel(IonCTModel):
             # env_pairs (2026-11-12): which weight-pair families of the channels the environment reads -- "ww" the plain
             # overlap-weighted ones (with S^w), "ws" / "ss" the ones dressed by the pair electrostatics (with S^s). The
             # others are zeroed before the trunk (scaled_channels): the feature-reduction ablations
-            bad = set(env_pairs) - {"ww", "ws", "ss"}
+            # Exact groups as well (2026-11-13, the descriptor-reduction runs): Sw, Ss (the two-body sums) and Tww, Tws,
+            # Tss (one three-body family, L = 0..LMAX); a family token is the union ww = {Sw, Tww}, ws = {Ss, Tws},
+            # ss = {Ss, Tss}, so the old selections are unchanged. Tokens combine by union.
+            groups = {"ww": ("S^w", "ww"), "ws": ("S^s", "ws"), "ss": ("S^s", "ss"), "Sw": ("S^w",), "Ss": ("S^s",),
+                      "Tww": ("ww",), "Tws": ("ws",), "Tss": ("ss",)}
+            bad = set(env_pairs) - set(groups)
             if bad or not env_pairs:
-                raise ValueError(f"env_pairs {env_pairs!r}: a non-empty subset of ww, ws, ss")
+                raise ValueError(f"env_pairs {env_pairs!r}: a non-empty subset of {sorted(groups)}")
             self.env_pairs = tuple(env_pairs)
-            keep_c = [("ww" in env_pairs) if nm == "S^w" else (("ws" in env_pairs) or ("ss" in env_pairs)) if nm == "S^s"
-                      else (nm[2:4] in env_pairs) for nm in CHANNEL_NAMES]
+            sel = {g for t in env_pairs for g in groups[t]}
+            keep_c = [(nm in sel) if nm.startswith("S^") else (nm[2:4] in sel) for nm in CHANNEL_NAMES]
             self.register_buffer("chan_keep", torch.tensor(keep_c, dtype=torch.float64), persistent=False)
             unknown = tb - {"pauli", "disp", "kappa", "ct"}
             if unknown:
@@ -905,6 +921,8 @@ class CompleteModel(IonCTModel):
         """A log environment factor, bounded to +-env_cap (unchanged when env_cap = 0)."""
         return self.env_cap * torch.tanh(u / self.env_cap) if self.env_cap > 0 else u
 
+    CT_FA_CAP = 0.5      # ct_b_pin="acceptor-float": |ln(bA / b_Fukui)| <= 0.5 for the cation acceptors
+
     def ct_exponents(self):
         """(donor, acceptor) Slater exponents (1/bohr) of the direct CT kernel, per species (``ct_b_pin``)."""
         mode = getattr(self, "ct_b_pin", "none")
@@ -915,7 +933,10 @@ class CompleteModel(IonCTModel):
             bD = bs
         elif mode == "donor":
             bD = torch.where(an, nn.functional.softplus(self.ct_bD_raw), bs)
-        else:
+        elif mode == "acceptor-float":
+            c = self.CT_FA_CAP
+            return bs, torch.where(an, self.ct_bA_pin, self.ct_bA_pin * torch.exp(c * torch.tanh(self.ct_fA_raw / c)))
+        else:                                               # donor-scale / donor-shell
             bD = torch.where(an, bs * (1 + nn.functional.softplus(self.ct_fD_raw)), bs)
         return bD, self.ct_bA_pin
 
@@ -1307,6 +1328,46 @@ class CompleteModel(IonCTModel):
         qP = torch.exp(self.pauli_lnq0[sp] + u[:, 0])
         return qP, self.pauli_lnb[sp].exp(), C6, self.disp_lnb[sp].exp()
 
+    @staticmethod
+    def pauli_pair_energy(qPs, bPs, i, j, rb, dr, mom=None):
+        """(P,) Pauli pair energies of the shell densities: every shell pair (t of i, u of j) in one batched call of
+        the unequal-exponent kernel, shape (P, T, T). ``qPs``, ``bPs`` (N, T) shell weights and exponents; ``mom``
+        = (polym (N, 9), outer (N,)) adds the induced moments on each atom's outermost shell (rank-2 kernel)."""
+        T_ = qPs.shape[1]
+        bi, bj = bPs[i][:, :, None], bPs[j][:, None, :]                          # (P, T, 1), (P, 1, T)
+        if mom is None:
+            f = slater_two_center_damp_unequal(bi, bj, rb[:, None, None], 0)[0]   # (P, T, T)
+            return torch.einsum("pt,ptu,pu->p", qPs[i], f, qPs[j]) / rb
+        polym, outer = mom
+        on = (outer[:, None] == torch.arange(T_, device=outer.device)).to(qPs.dtype)          # (N, T)
+        pt = torch.cat([qPs[..., None], polym[:, None, :] * on[..., None]], -1)               # (N, T, 10)
+        f = slater_two_center_damp_unequal(bi, bj, rb[:, None, None], 2)                      # (5, P, T, T)
+        P_ = rb.shape[0]
+        Tt = K._tensor(dr[:, None, None, :].expand(P_, T_, T_, 3).reshape(-1, 3),
+                       f.reshape(5, -1)).reshape(P_, T_, T_, 10, 10)                          # [j, i] blocks
+        return torch.einsum("pua,ptuab,ptb->p", pt[j], Tt, pt[i])
+
+    @staticmethod
+    def _pauli_pair_energy_ref(qPs, bPs, i, j, rb, dr, mom=None):
+        """Per-shell-pair loop form of :meth:`pauli_pair_energy` (kept for tests)."""
+        T_ = qPs.shape[1]
+        e_p = rb.new_zeros(rb.shape[0])
+        if mom is not None:
+            polym, outer = mom
+            for t in range(T_):
+                pt = torch.cat([qPs[:, t:t + 1], polym * (outer == t).to(qPs.dtype)[:, None]], 1)
+                for u in range(T_):
+                    pu = torch.cat([qPs[:, u:u + 1], polym * (outer == u).to(qPs.dtype)[:, None]], 1)
+                    f = slater_two_center_damp_unequal(bPs[i, t], bPs[j, u], rb, 2)   # (5, P) complements = the kernel
+                    Tt = K._tensor(dr, f)                                             # (P, 10, 10) [j, i]
+                    e_p = e_p + torch.einsum("pa,pab,pb->p", pu[j], Tt, pt[i])
+            return e_p
+        for t in range(T_):
+            for u in range(T_):
+                f = slater_two_center_damp_unequal(bPs[i, t], bPs[j, u], rb, 0)[0]
+                e_p = e_p + qPs[i, t] * qPs[j, u] * f / rb
+        return e_p
+
     def frozen_terms(self, I, bt, sp):
         """Frozen Pauli and dispersion energies per frame (B,), (B,) and the parameters."""
         B = bt["B"]
@@ -1323,31 +1384,18 @@ class CompleteModel(IonCTModel):
         shells = self.pauli_form == "shells"
         qPs = qP if shells else qP[:, None]                                       # (N, T)
         bPs = bP if shells else bP[:, None]
-        T_ = qPs.shape[1]
+        mom = None
         if self.pauli_moments and bt.get("env") is not None:
             env = bt["env"]
             mu = -self.pm_a1[sp][:, None] * env["shell:S1"] / self.pm_scale[0]
             th = self.pm_a2[sp][:, None] * cartesian_to_spherical_quadrupole(env["shell:S2"]) / self.pm_scale[1]
             P = K._poly_map(I.dtype, I.device)
             polym = (torch.cat([mu, th], 1) @ P.T)[:, 1:]                        # (N, 9) induced Pauli moments
-            dr = dr_ang / K.BOHR_ANG
             # the induced moments sit on the outermost shell (the overlap-gradient probe)
             outer = self.pauli_outer[sp] if shells else torch.zeros_like(sp)
-            e_p = rb.new_zeros(rb.shape[0])
-            for t in range(T_):
-                pt = torch.cat([qPs[:, t:t + 1], polym * (outer == t).to(I.dtype)[:, None]], 1)
-                for u in range(T_):
-                    pu = torch.cat([qPs[:, u:u + 1], polym * (outer == u).to(I.dtype)[:, None]], 1)
-                    f = slater_two_center_damp_unequal(bPs[i, t], bPs[j, u], rb, 2)   # (5, P) complements = the kernel
-                    Tt = K._tensor(dr, f)                                             # (P, 10, 10) [j, i]
-                    e_p = e_p + torch.einsum("pa,pab,pb->p", pu[j], Tt, pt[i])
+            mom = (polym, outer)
             self._pauli_moments_out = (mu, th)
-        else:
-            e_p = rb.new_zeros(rb.shape[0])
-            for t in range(T_):
-                for u in range(T_):
-                    f = slater_two_center_damp_unequal(bPs[i, t], bPs[j, u], rb, 0)[0]
-                    e_p = e_p + qPs[i, t] * qPs[j, u] * f / rb
+        e_p = self.pauli_pair_energy(qPs, bPs, i, j, rb, dr_ang / K.BOHR_ANG, mom)
         self._pauli_pairs = (pairs, e_p)
         e_d = tt_damped_c6_energy(r_ang, torch.sqrt(C6[i] * C6[j]), torch.sqrt(b6[i] * b6[j]))
         fr = bt["frame"][i]
@@ -1486,7 +1534,7 @@ class CompleteModel(IonCTModel):
         hit = on.any(0).any(0).any(0)
         return float(t.r[hit].max()) if bool(hit.any()) else 0.0
 
-    def diffuse_gated_invariants(self, bt):
+    def diffuse_gated_invariants(self, bt, ref: bool = False):
         """(N, 15) the diffuse probes' (donor, acceptor, breath) invariants S0, V0_pen, |V1g|^2, |V2g|^2, V1g . S1 with
         overlap-gated fields: V_g = V_pen + sum_j sigma_g(O_g,ij) q_j T_ij (the neighbours' point-charge field and
         field gradient, each switched off with the probe's overlap O_g,ij with neighbour j; V_pen the penetration
@@ -1515,6 +1563,36 @@ class CompleteModel(IonCTModel):
         tbl = self.gate_table(X.device)
         ov = tbl(sp[i], sp[j], r_ang)                                                               # (P, 3)
         lo, hi = math.log10(self.env_gate[0]), math.log10(self.env_gate[1])
+        probes = self.PEN_PROBES
+        G = len(probes)
+        if ref:
+            return self._diffuse_gated_ref(bt, env, sp, X, n, pbc, i, Dp, tbl, ov, lo, hi)
+        # all probes at once: (P, G) gates, one index_add of the gated point-charge drives (n, G, 8)
+        c = [tbl.index[f"ov:{p}"] for p in probes]
+        o = ov[:, c[0]:c[0] + G] if c == list(range(c[0], c[0] + G)) else ov[:, c]                  # (P, G)
+        t = ((torch.log10(o.clamp(min=1e-300)) - lo) / (hi - lo)).clamp(0.0, 1.0)
+        sig = t * t * (3 - 2 * t)                                                                   # smoothstep
+        SD = torch.cat([-Dp[:, :3], Dp[:, 3:]], 1)                                                  # (P, 8) -E, grad E
+        Vg = X.new_zeros(n, G, 8).index_add(0, i, sig[:, :, None] * SD[:, None, :])                 # (n, G, 8)
+        if all(f"{p}:V1pen" in env for p in probes):
+            Vpen = torch.stack([torch.cat([env[f"{p}:V1pen"], env[f"{p}:V2pen"]], 1) for p in probes], 1)
+        elif pbc is None:                               # caches from the featurizer: subtract the point charges
+            Vpen = (torch.stack([torch.cat([env[f"{p}:V1"], env[f"{p}:V2"]], 1) for p in probes], 1)
+                    - X.new_zeros(n, 8).index_add(0, i, SD)[:, None, :])
+        else:
+            raise ValueError("env_ct_gated under PBC needs the penetration blocks (batched_precompute)")
+        has = torch.stack([(self.tab.a0[sp] > 0).to(X.dtype) if p == "breath"
+                           else torch.ones(n, dtype=X.dtype, device=X.device) for p in probes], 1)  # (n, G)
+        V = (Vpen + Vg) * has[:, :, None]                                                           # (n, G, 8)
+        S1 = torch.stack([env[f"{p}:S1"] for p in probes], 1)                                       # (n, G, 3)
+        V1 = V[..., :3]
+        cols = torch.stack([torch.stack([env[f"{p}:S0"] for p in probes], 1),
+                            torch.stack([env[f"{p}:V0"] for p in probes], 1),
+                            (V1 * V1).sum(-1), (V[..., 3:] ** 2).sum(-1), (V1 * S1).sum(-1)], -1)   # (n, G, 5)
+        return cols.reshape(n, G * 5)
+
+    def _diffuse_gated_ref(self, bt, env, sp, X, n, pbc, i, Dp, tbl, ov, lo, hi):
+        """Per-probe reference loop of :meth:`diffuse_gated_invariants` (kept for tests)."""
         cols = []
         for p in self.PEN_PROBES:
             has = (self.tab.a0[sp] > 0).to(X.dtype) if p == "breath" else torch.ones(n, dtype=X.dtype, device=X.device)

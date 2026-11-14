@@ -501,7 +501,7 @@ def radial_table(tab, params_path, cache_dir=None):
     if path and path.exists():
         return torch.load(path, weights_only=False)
     t0 = time.time()
-    table = RadialTable(tab)
+    table = RadialTable(tab.to("cpu"))     # built on the CPU (its grids are CPU tensors); the caller moves it
     print(f"radial table: {table.n_funcs} functions x {table.G} points in {time.time() - t0:.0f}s", flush=True)
     if path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -520,6 +520,87 @@ def to_device(obj, device):
     if isinstance(obj, (list, tuple)):
         return type(obj)(to_device(v, device) for v in obj)
     return obj
+
+
+def pack_to_device(obj, device, stream=None):
+    """``obj`` (a batch dict / list tree) with its tensors on ``device`` in one host-to-device copy per dtype: the
+    tensors are packed into a pinned buffer, copied (non-blocking, on ``stream`` if given) and come back as views of
+    the device buffer. Returns (tree, device buffers). On CPU: (obj, [])."""
+    if device is None or str(device) == "cpu":
+        return obj, []
+    from torch.utils._pytree import tree_flatten, tree_unflatten
+    leaves, spec = tree_flatten(obj)
+    groups = {}
+    for k, t in enumerate(leaves):
+        if torch.is_tensor(t):
+            groups.setdefault(t.dtype, []).append(k)
+    out, bufs = list(leaves), []
+    for dt, ks in groups.items():
+        host = torch.empty(sum(leaves[k].numel() for k in ks), dtype=dt, pin_memory=True)
+        torch.cat([leaves[k].reshape(-1) for k in ks], out=host)
+        with torch.cuda.stream(stream) if stream is not None else _nullctx():
+            buf = host.to(device, non_blocking=True)
+        bufs.append(buf)
+        o = 0
+        for k in ks:
+            m = leaves[k].numel()
+            out[k] = buf[o:o + m].view(leaves[k].shape)
+            o += m
+    return tree_unflatten(out, spec), bufs
+
+
+class _nullctx:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
+def prefetch_batches(chunks, device, depth=2):
+    """Yield ``collate(chunk)`` on ``device`` for each chunk. On CUDA a background thread collates up to ``depth``
+    batches ahead and copies each with :func:`pack_to_device` on a side stream; the consumer's stream waits on the
+    copy. On CPU: collate inline."""
+    if device is None or str(device) == "cpu" or not torch.cuda.is_available():
+        for c in chunks:
+            yield collate(c)
+        return
+    import queue
+    import threading
+    q, stop = queue.Queue(maxsize=depth), threading.Event()
+    side = torch.cuda.Stream(device=device)
+
+    def work():
+        try:
+            for c in chunks:
+                if stop.is_set():
+                    return
+                bt, bufs = pack_to_device(collate(c), device, side)
+                ev = torch.cuda.Event()
+                ev.record(side)
+                item = (bt, bufs, ev)
+                while not stop.is_set():
+                    try:
+                        q.put(item, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+        except BaseException as e:                     # re-raised in the consumer
+            q.put((e, None, None))
+    th = threading.Thread(target=work, daemon=True, name="prefetch_batches")
+    th.start()
+    try:
+        for _ in range(len(chunks)):
+            bt, bufs, ev = q.get()
+            if isinstance(bt, BaseException):
+                raise bt
+            cur = torch.cuda.current_stream(device)
+            cur.wait_event(ev)
+            for b in bufs:                              # allocated on the side stream, used on this one
+                b.record_stream(cur)
+            yield bt
+    finally:
+        stop.set()
 
 
 def force_terms(model, frames, tab, table, chan):
@@ -720,7 +801,7 @@ def evaluate(model, caches, bs=64):
     with torch.no_grad():
         for k in range(0, len(caches), bs):
             chunk = caches[k:k + bs]
-            bt = to_device(collate(chunk), dev)
+            bt, _ = pack_to_device(collate(chunk), dev)
             out = {k_: (v.cpu() if torch.is_tensor(v) else v) for k_, v in model(bt).items()}
             for q, f in enumerate(chunk):
                 rows.append({**{k: v for k, v in f.meta.items() if k != "cta_E"}, "pol_ref": f.labels["pol"] * KJ, "ct_ref": f.labels["ct"] * KJ,
@@ -1028,9 +1109,12 @@ def main():
                     help="--env-channels: the two-body channels S^w, S^s join the shared trunk's input and no readout has "
                          "a two-body branch (--env-two-body is ignored): one latent for the dimer-level and the many-body "
                          "dependence of every parameter")
-    ap.add_argument("--env-pairs", nargs="+", choices=("ww", "ws", "ss"), default=["ww", "ws", "ss"],
-                    help="--env-channels: the channel families the environment reads -- ww: plain overlap weights (and S^w); "
-                         "ws, ss: dressed by the pair electrostatics (and S^s). The feature-reduction ablations")
+    ap.add_argument("--env-pairs", nargs="+", choices=("ww", "ws", "ss", "Sw", "Ss", "Tww", "Tws", "Tss"),
+                    default=["ww"],
+                    help="--env-channels: the channels the environment reads -- families ww: plain overlap weights (and "
+                         "S^w); ws, ss: dressed by the pair electrostatics (and S^s); or exact groups Sw, Ss (the two-body "
+                         "sums) and Tww, Tws, Tss (one three-body family each), combined by union. The feature-reduction "
+                         "ablations. Default ww (S^w + T^ww): the dressed blocks did not help in the b128 runs")
     ap.add_argument("--env-extra", nargs="*", default=[],
                     help="--env-channels: density-environment invariants (feature names, e.g. acceptor:S0 donor:S0) "
                          "given as an extra branch to the readouts of --env-extra-terms")
@@ -1110,11 +1194,14 @@ def main():
                     help="complete --xpol: lam (fitted kappa + head, lam u^2, k_perp) or gram (parameter-free: kappa = 1/2 "
                          "fixed and the on-site Gram blocks of the perturbed von Weizsaecker orbital in the neighbours' "
                          "densities; theory/parameter_free_xpol.tex)")
-    ap.add_argument("--ct-b-pin", choices=("none", "all", "donor", "donor-scale"), default="all",
+    ap.add_argument("--ct-b-pin", choices=("none", "all", "donor", "donor-scale", "donor-shell", "acceptor-float"), default="acceptor-float",
                     help="complete: the direct-CT exponents from the ion table (acceptor: outer electrostatic shell for "
                          "anions, Fukui for cations; cation donor: its shell). The anion donor: all = its outer shell, "
-                         "donor = learned freely, donor-scale = outer shell x a learned factor >= 1; none = all four learned "
-                         "(the default before 2026-11-11). Default all: pinning cost nothing in m37")
+                         "donor = learned freely, donor-scale = outer shell x a learned factor >= 1 (started at the Fukui ratio), "
+                         "donor-shell = the same factor started at the shell; acceptor-float = as all, with each cation acceptor "
+                         "a bounded scale (0.61-1.65 x) around its Fukui exponent; none = all four learned "
+                         "(the default before 2026-11-11). Default acceptor-float (since 2026-11-13): same energies as all, forces 0.2-0.9 kJ/mol/A better, "
+                         "Na+ settles at 0.85 x Fukui")
     ap.add_argument("--xpol-weights", action="store_true",
                     help="--xpol-form gram: free the two magnitudes -- W1 = 2 kappa on the drive (per species and rank, "
                          "started at 1/2) and W2 on each atom's on-site Gram blocks (per species, started at 1), both "
@@ -1206,11 +1293,6 @@ def main():
               f"{[p for p in model.env.names if model.env.two_body[p]]}), {int(nzc.sum())} training atoms with pairs",
               flush=True)
     dev = torch.device(a.device)
-    if dev.type != "cpu":
-        tab = tab.to(dev)
-        model.tab = tab
-        model.to(dev)
-        print(f"device: {dev} ({torch.cuda.get_device_name(dev) if dev.type == 'cuda' else ''})", flush=True)
     polar_tr, polar_te = [], []
     if a.w_alpha > 0:
         almo = polar_targets(a.ct_sets, ct_dimers=ct_dimers_mode is True,
@@ -1229,6 +1311,12 @@ def main():
                   f"({', '.join(a.polar_sets)})", flush=True)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)
         pb_tr, pb_all = to_device(polar_batch(polar_tr), dev), to_device(polar_batch(polar_tr + polar_te), dev)
+    # to the device only now: the alpha targets' precompute above, like the frames', runs on the CPU tensors
+    if dev.type != "cpu":
+        tab = tab.to(dev)
+        model.tab = tab
+        model.to(dev)
+        print(f"device: {dev} ({torch.cuda.get_device_name(dev) if dev.type == 'cuda' else ''})", flush=True)
     if a.init_from:
         ck = torch.load(a.init_from, weights_only=False)
         missing, unexpected = model.load_state_dict(ck["state"], strict=False)
@@ -1285,8 +1373,9 @@ def main():
     for ep in range(1, a.epochs + 1):
         random.shuffle(tr)
         tot = 0.0
+        batches = prefetch_batches([tr[k:k + a.batch] for k in range(0, len(tr), a.batch)], dev)
         for step, k in enumerate(range(0, len(tr), a.batch)):
-            bt = to_device(collate(tr[k:k + a.batch]), dev)
+            bt = next(batches)
             o = model(bt)
             ep_, ec_, ech_ = loss_terms(o, bt)
             loss = (a.w_pol * ep_ ** 2 + a.w_ct * ec_ ** 2 + a.w_chan * (ech_ ** 2).sum(1)).mean()
@@ -1458,19 +1547,19 @@ def main():
 
 def pen_matrix(model, caches, bs=128):
     """(N, 15) raw diffuse-probe penetration invariants (``env_ct_pen``) of every atom of the caches."""
-    out = []
+    out, dev = [], next(model.parameters()).device
     with torch.no_grad():
         for k in range(0, len(caches), bs):
-            out.append(model.diffuse_pen_invariants(collate(caches[k:k + bs])).cpu())
+            out.append(model.diffuse_pen_invariants(to_device(collate(caches[k:k + bs]), dev)).cpu())
     return torch.cat(out)
 
 
 def gate_matrix(model, caches, bs=128):
     """(N, 15) raw overlap-gated diffuse-probe invariants (``env_ct_gated``) of every atom of the caches."""
-    out = []
+    out, dev = [], next(model.parameters()).device
     with torch.no_grad():
         for k in range(0, len(caches), bs):
-            out.append(model.diffuse_gated_invariants(collate(caches[k:k + bs])).cpu())
+            out.append(model.diffuse_gated_invariants(to_device(collate(caches[k:k + bs]), dev)).cpu())
     return torch.cat(out)
 
 

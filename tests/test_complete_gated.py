@@ -150,3 +150,41 @@ def test_model_forward_with_gated_branch(setup):
     o = m(_bt(table, tab, chan, X, torch.tensor([11, 17, 17, 11]), m))
     g, = torch.autograd.grad(o["e_int"].sum(), X)
     assert torch.isfinite(g).all() and torch.isfinite(o["e_ct"]).all()
+
+
+# --- vectorized (all probes at once) against the per-probe reference loop ----------------------------------------
+
+def _salt(seed, n=12):
+    g = torch.Generator().manual_seed(seed)
+    X = torch.rand(n, 3, generator=g, dtype=f64) * 7.0
+    Z = torch.where(torch.arange(n) % 2 == 0, 11, 17)
+    return X, Z
+
+
+@pytest.mark.parametrize("variant", ["pen_blocks", "featurizer_cache", "periodic"])
+def test_vectorized_matches_reference(setup, variant):
+    tab, chan, table, feat, m = setup
+    X, Z = _salt(7)
+    if variant == "periodic":
+        bt = _bt(table, tab, chan, X, Z, m, cell=torch.eye(3, dtype=f64) * 7.0, cutoff=10.0)
+    else:
+        bt = _bt(table, tab, chan, X, Z, m)
+    if variant == "featurizer_cache":       # no penetration blocks: the point charges are subtracted in place
+        bt = dict(bt, env={k: v for k, v in bt["env"].items() if not k.endswith("pen")})
+        assert not any(k.endswith("V1pen") for k in bt["env"])
+    G, R = m.diffuse_gated_invariants(bt), m.diffuse_gated_invariants(bt, ref=True)
+    assert G.shape == R.shape == (12, 15)
+    assert float(R.abs().max()) > 0
+    torch.testing.assert_close(G, R, rtol=1e-12, atol=1e-15)
+
+
+def test_vectorized_gradient_matches_reference(setup):
+    tab, chan, table, feat, m = setup
+    X, Z = _salt(11, n=8)
+    w = torch.randn(8, 15, generator=torch.Generator().manual_seed(3), dtype=f64)
+    grads = []
+    for ref in (False, True):
+        Xr = X.clone().requires_grad_(True)
+        grads.append(torch.autograd.grad((m.diffuse_gated_invariants(_bt(table, tab, chan, Xr, Z, m), ref=ref) * w).sum(),
+                                         Xr)[0])
+    torch.testing.assert_close(grads[0], grads[1], rtol=1e-11, atol=1e-14)

@@ -220,10 +220,99 @@ def _poly(coeffs, u):
     return out
 
 
+#: Equal-exponent two-center polynomials p_n of :func:`slater_two_center_damp` (f_n = p_n(u) e^{-u}), as
+#: coefficient tuples in u -- the series branch of the unequal form starts from them.
+_EQ_TWO_CENTER = {
+    1: (1.0, 11 / 16, 3 / 16, 1 / 48),
+    3: (1.0, 1.0, 1 / 2, 7 / 48, 1 / 48),
+    5: (1.0, 1.0, 1 / 2, 1 / 6, 1 / 24, 1 / 144),
+    7: (1.0, 1.0, 1 / 2, 1 / 6, 1 / 24, 1 / 120, 1 / 720),
+    9: (1.0, 1.0, 1 / 2, 1 / 6, 1 / 24, 1 / 120, 1 / 720, 1 / 5040),
+}
+
+_UNEQ_PLAN_CACHE: dict = {}
+
+
+def _unequal_plan(max_rank: int, dtype, device):
+    """Constants of the vectorized unequal form, cached per (rank, dtype, device): ``M (D, nord*6)``, the
+    coefficients over powers u^0..u^(D-1) of the series branch's [p_eq, -s2, -s4, -s6] (columns ``:nord*4``,
+    order-major) and the closed form's [a, c] (columns ``nord*4:``); ``side (3, 1)`` = (0, 1, -1), which takes
+    z r to (u, u_i, u_j); ``pm (2, 1)`` = (-1, 1)."""
+    key = (max_rank, dtype, device)
+    plan = _UNEQ_PLAN_CACHE.get(key)
+    if plan is None:
+        orders = (1, 3, 5, 7, 9)[: 2 * max_rank + 1]
+        nord = len(orders)
+        ser = [[(1.0, _EQ_TWO_CENTER[n])] + [(-1.0, c) for c in _UNEQ_SERIES[n]] for n in orders]
+        cls = [[(1.0, _UNEQ_A[n]), (1.0, _UNEQ_C[n])] for n in orders]
+        D = max(len(c) for row in ser + cls for _, c in row)
+        M = torch.zeros(D, nord * 6, dtype=torch.float64)
+        for k in range(nord):
+            for m, (sg, c) in enumerate(ser[k]):
+                M[: len(c), 4 * k + m] = sg * torch.tensor(c, dtype=torch.float64)
+            for m, (sg, c) in enumerate(cls[k]):
+                M[: len(c), 4 * nord + 2 * k + m] = sg * torch.tensor(c, dtype=torch.float64)
+        f = dict(dtype=dtype, device=device)
+        plan = (M.to(**f), torch.tensor([[0.0], [1.0], [-1.0]], **f), torch.tensor([[-1.0], [1.0]], **f))
+        _UNEQ_PLAN_CACHE[key] = plan
+    return plan
+
+
+def _powers(u: torch.Tensor, n: int) -> torch.Tensor:
+    """``(..., n)`` powers u^0..u^(n-1) by a running product (finite gradients at u = 0, unlike pow)."""
+    return torch.cumprod(torch.cat([torch.ones_like(u)[..., None], u[..., None].expand(*u.shape, n - 1)], -1), -1)
+
+
 def slater_two_center_damp_unequal(
     b_i: torch.Tensor, b_j: torch.Tensor, r: torch.Tensor, max_rank: int = 1, switch: float | None = None,
 ) -> torch.Tensor:
     """Two-center Slater damping factors for **unequal** exponents, stacked like
+    :func:`slater_two_center_damp`: ``(2*max_rank + 1, P)`` overlap complements ``f_n``.
+
+    The interaction of two normalized Slater 1s densities ``b^3/(8 pi) exp(-b r)`` with their own
+    exponents, rather than the equal-exponent form evaluated at a combined exponent. Reduces to
+    :func:`slater_two_center_damp` at ``b_i == b_j``. Smooth (and with finite gradients) through
+    ``b_i == b_j``: near-equal pairs use the even series in ``eps = (b_i - b_j)/(b_i + b_j)``.
+
+    Vectorized over the orders and both branches: the powers of (u, u_i, u_j) go through one matmul
+    against a cached coefficient matrix (:func:`_unequal_plan`). With b_i = z(1 + e), b_j = z(1 - e),
+    A = b_j^2/(b_j^2 - b_i^2) = -(1 - e)^2/(4e) and B = 1 - A = (1 + e)^2/(4e).
+    :func:`_slater_two_center_damp_unequal_ref` is the per-order loop it replaces.
+    """
+    max_rank = _check_rank(max_rank)
+    nord = 2 * max_rank + 1
+    if switch is None:
+        switch = UNEQUAL_SWITCH.get(r.dtype, 0.2)
+    M, side, pm = _unequal_plan(max_rank, r.dtype, r.device)
+    b_i, b_j, r = torch.broadcast_tensors(b_i, b_j, r)
+    shape = r.shape
+    b_i, b_j, r = b_i.reshape(-1), b_j.reshape(-1), r.reshape(-1)
+    s = b_i + b_j
+    eps = (b_i - b_j) / s
+    near = eps.abs() < switch
+    # closed form at a guarded eps (never closer to equal than the switch, so it stays finite)
+    eps_s = torch.where(near, switch, eps)
+    U = (0.5 * s * r) * (1.0 + side * eps_s)                                     # (3, P): u, u_i, u_j
+    E = torch.exp(-U)
+    Y = _powers(U, M.shape[0]) @ M                                               # (3, P, nord*6)
+    # series branch: f_n = e^{-u} [p_n - e2 s2 - e4 s4 - e6 s6](u)
+    S = Y[0, :, : 4 * nord].reshape(-1, nord, 4)                                 # (P, nord, 4)
+    ser = (S @ _powers(eps * eps, 4)[..., None]).squeeze(-1) * E[0, :, None]     # (P, nord)
+    # closed form: [A^2 a(u_i) + 2 A^2 B c(u_i)] e^{-u_i} + [B^2 a(u_j) + 2 B^2 A c(u_j)] e^{-u_j}
+    t = 1.0 + pm * eps_s
+    AB = t * t * pm / (4.0 * eps_s)                                              # (2, P): A, B
+    W = torch.stack([AB * AB, 2.0 * AB * AB * AB.flip(0)], -1) * E[1:, :, None]  # (2, P, 2)
+    C = Y[1:, :, 4 * nord:].reshape(2, -1, nord, 2)                              # (2, P, nord, 2)
+    ex = (C * W[:, :, None, :]).sum((0, 3))                                      # (P, nord)
+    return torch.where(near[:, None], ser, ex).T.reshape(nord, *shape)
+
+
+def _slater_two_center_damp_unequal_ref(
+    b_i: torch.Tensor, b_j: torch.Tensor, r: torch.Tensor, max_rank: int = 1, switch: float | None = None,
+) -> torch.Tensor:
+    """Reference (per-order loop) form of :func:`slater_two_center_damp_unequal`, kept for tests.
+
+    Two-center Slater damping factors for **unequal** exponents, stacked like
     :func:`slater_two_center_damp`: ``(2*max_rank + 1, P)`` overlap complements ``f_n``.
 
     The interaction of two normalized Slater 1s densities ``b^3/(8 pi) exp(-b r)`` with their own
@@ -375,7 +464,7 @@ def shaped_two_center_damp(
     return _stack(out, dim=0).to(dt)
 
 
-def damped_interaction_tensor(
+def _damped_interaction_tensor_ref(
     dr_vec: torch.Tensor,                  # (P, 3) bohr, = pos[j] - pos[i]
     damp: torch.Tensor | None,             # (2*max_rank+1, P) or None for the bare tensor
     r_inv: torch.Tensor | None = None,     # (P,) 1/|dr_vec|, reused if already computed
@@ -500,6 +589,131 @@ def damped_interaction_tensor(
         ),
         dim=-1,
     ).reshape(-1, 10, 10)
+
+
+# ---- the interaction tensor as one matmul -----------------------------------------------------------------------
+# Every entry of the (K, K) tensor is a Cartesian derivative of 1/r, a sum of terms  coef * x^a y^b z^c * r^-(2p+1)
+# with each inverse power scaled by its own damping factor. So the tensor is  features (P, F) @ C (F, K*K),  with
+# features = damp_p r^-(2p+1) x^a y^b z^c over the (p, a, b, c) that occur and C a constant integer matrix generated
+# below from the closed form of the derivatives -- about 15 kernels where the transcription
+# (_damped_interaction_tensor_ref, kept for the tests) issues ~240, one per component.
+
+# polytensor components as Cartesian index tuples, in the row/column order [q, mu_x, mu_y, mu_z, Q_xx .. Q_zz]
+_TENSOR_COMPONENTS = ((), (0,), (1,), (2,), (0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
+
+
+def _matchings(positions, m):
+    """Every set of m disjoint pairs drawn from ``positions``."""
+    if m == 0:
+        yield ()
+        return
+    if len(positions) < 2 * m:
+        return
+    first, rest = positions[0], positions[1:]
+    for k in range(len(rest)):                      # first paired with rest[k]
+        for tail in _matchings(rest[:k] + rest[k + 1:], m - 1):
+            yield ((first, rest[k]),) + tail
+    yield from _matchings(rest, m)                  # first left unpaired
+
+
+def _derivative_terms(idx):
+    """d^n/dx_{i1}..dx_{in} (1/r) as {(p, (a, b, c)): coef}: coef * x^a y^b z^c * r^-(2p+1).
+
+    The closed form: sum over m of (-1)^(n-m) (2n-2m-1)!! r^-(2n-2m+1) times, for every way of pairing m of the n
+    indices (each pair a Kronecker delta), the product of the unpaired coordinates."""
+    n = len(idx)
+    out: dict = {}
+    for m in range(n // 2 + 1):
+        dfact = math.prod(range(2 * (n - m) - 1, 0, -2)) if n - m > 0 else 1
+        coef = (-1) ** (n - m) * dfact
+        for pairs in _matchings(tuple(range(n)), m):
+            if any(idx[a] != idx[b] for a, b in pairs):
+                continue                            # a delta between different axes
+            paired = {q for ab in pairs for q in ab}
+            e = [0, 0, 0]
+            for q in range(n):
+                if q not in paired:
+                    e[idx[q]] += 1
+            key = (n - m, tuple(e))
+            out[key] = out.get(key, 0) + coef
+    return out
+
+
+_TENSOR_PLAN: dict = {}
+
+
+def _tensor_plan(max_rank: int, dtype, device):
+    """(gather index (F, 4) into [x^0..x^d, y^0..y^d, z^0..z^d, damped r^-1, r^-3, ...], C (F, K*K)), cached."""
+    key = (max_rank, dtype, device)
+    plan = _TENSOR_PLAN.get(key)
+    if plan is not None:
+        return plan
+    K = (1, 4, 10)[max_rank]
+    deg = 2 * max_rank                              # highest monomial degree: rank-R x rank-R block
+    comps = _TENSOR_COMPONENTS[:K]
+    feats: dict = {}
+    entries = []
+    for I, ci in enumerate(comps):
+        for J, cj in enumerate(comps):
+            sign = (-1) ** len(cj)                  # energy m_j^T T m_i: the j side carries (-1)^rank
+            for f, c in _derivative_terms(ci + cj).items():
+                entries.append((feats.setdefault(f, len(feats)), I * K + J, sign * c))
+    C = torch.zeros(len(feats), K * K, dtype=torch.float64)
+    for f, col, c in entries:
+        C[f, col] += c
+    # gather columns: powers of x, y, z at [axis * (deg + 1) + exponent], the damped inverse powers after them
+    idx = torch.tensor([[a, (deg + 1) + b, 2 * (deg + 1) + c, 3 * (deg + 1) + p]
+                        for (p, (a, b, c)) in feats], dtype=torch.long)
+    plan = (idx.to(device), C.to(dtype=dtype, device=device))
+    _TENSOR_PLAN[key] = plan
+    return plan
+
+
+def damped_interaction_tensor(
+    dr_vec: torch.Tensor,                  # (P, 3) bohr, = pos[j] - pos[i]
+    damp: torch.Tensor | None,             # (2*max_rank+1, P) or None for the bare tensor
+    r_inv: torch.Tensor | None = None,     # (P,) 1/|dr_vec|, reused if already computed
+    max_rank: int = 1,
+) -> torch.Tensor:
+    """Multipole interaction tensor ``(P, K, K)``, ``K = 1``, ``4`` or ``10`` by rank.
+
+    Each inverse power is scaled by its damping factor before the Cartesian derivatives are assembled -- ``1/r`` by
+    ``damp[0]``, ``1/r^3`` by ``damp[1]``, and so on up to ``1/r^9`` by ``damp[4]`` -- which is what makes the result
+    the *damped* tensor rather than the bare one scaled uniformly. Passing ``damp=None`` gives the undamped tensor.
+
+    Evaluated as one matmul of the damped monomials with a generated coefficient matrix (see ``_tensor_plan``);
+    equal to the per-component transcription ``_damped_interaction_tensor_ref`` (tests/test_ff_multipole.py).
+    """
+    max_rank = _check_rank(max_rank)
+    if r_inv is None:
+        r_inv = 1.0 / dr_vec.norm(dim=-1)
+    if damp is not None:
+        expected = 2 * max_rank + 1
+        if damp.shape[0] != expected:
+            raise ValueError(
+                f"max_rank={max_rank} needs {expected} damping factors, got {damp.shape[0]}"
+            )
+    if max_rank == 0:
+        return (r_inv if damp is None else r_inv * damp[0]).reshape(-1, 1, 1)
+    # damped inverse powers r^-1, r^-3, ..., r^-(4R+1): (P, 2R+1)
+    r2 = r_inv * r_inv
+    pw = [r_inv]
+    for _ in range(2 * max_rank):
+        pw.append(pw[-1] * r2)
+    inv = torch.stack(pw, -1)
+    if damp is not None:
+        inv = inv * damp.movedim(0, -1)
+    # powers 0..2R of each coordinate by repeated products (pow(x, 0) has a NaN gradient at x = 0): (P, 3, 2R+1)
+    v = dr_vec
+    xs = [torch.ones_like(v), v, v * v]
+    if max_rank == 2:
+        xs += [xs[2] * v, xs[2] * xs[2]]
+    mono = torch.stack(xs, -1).reshape(v.shape[0], 3 * len(xs))   # explicit: P may be 0
+    idx, C = _tensor_plan(max_rank, inv.dtype, inv.device)
+    g = torch.cat([mono.to(inv.dtype), inv], -1)[:, idx]                # (P, F, 4)
+    feats = g[..., 0] * g[..., 1] * g[..., 2] * g[..., 3]
+    K = (1, 4, 10)[max_rank]
+    return (feats @ C).reshape(-1, K, K)
 
 
 def multipole_pair_energy(

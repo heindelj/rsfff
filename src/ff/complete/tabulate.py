@@ -46,6 +46,27 @@ __all__ = ["FluxTable", "ProbeOverlapTable", "RadialTable", "XpolTable", "cached
 NORD = 5          # damping orders of the rank-2 tensor
 BOHR = K.BOHR_ANG
 
+# Quintic Hermite basis on [0, 1] as a matrix on [1, t, t^2, t^3, t^4, t^5]: columns (h0, h2, h4, h1, h3, h5) --
+# the left node's value / slope / curvature weights, then the right node's -- matching coef[..., (y, h y', h^2 y'')].
+_HERMITE = torch.tensor([
+    # h0     h2    h4     h1     h3    h5
+    [1.0,   0.0,  0.0,   0.0,   0.0,  0.0],     # 1
+    [0.0,   1.0,  0.0,   0.0,   0.0,  0.0],     # t
+    [0.0,   0.0,  0.5,   0.0,   0.0,  0.0],     # t^2
+    [-10.0, -6.0, -1.5,  10.0,  -4.0, 0.5],     # t^3
+    [15.0,  8.0,  1.5,   -15.0, 7.0,  -1.0],    # t^4
+    [-6.0,  -3.0, -0.5,  6.0,   -3.0, 0.5],     # t^5
+], dtype=torch.float64)
+_HERMITE_CACHE: dict = {}
+
+
+def _hermite_matrix(dtype, device):
+    key = (dtype, device)
+    m = _HERMITE_CACHE.get(key)
+    if m is None:
+        m = _HERMITE_CACHE[key] = _HERMITE.to(dtype=dtype, device=device)
+    return m
+
 
 def _expand(b, w, G):
     """Species-level shape (T,), (T, 4) or (), (4,) -> per-point (G, T), (G, T, 4) / (G,), (G, 4)."""
@@ -226,7 +247,27 @@ class RadialTable:
 
     def __call__(self, si, sj, r_ang):
         """All functions at r (P,) Angstrom for species pairs (si, sj) (P,): (P, F). Quintic Hermite, zero past r_max,
-        clamped below r_min."""
+        clamped below r_min.
+
+        Vectorized: both grid nodes' coefficients in one gather, the six Hermite basis functions as
+        [1, t, .., t^5] @ M, and one contraction -- ~15 kernels; equal to the transcription ``_call_ref``."""
+        x = (r_ang - self.r_min) / self.h
+        G = self.G
+        inside = (x < G - 1) & (x >= 0)
+        xc = x.clamp(0.0, G - 1 - 1e-9)
+        k = xc.floor().long()
+        t = xc - k.to(xc.dtype)
+        kk = torch.stack([k, k + 1], -1)                                    # (P, 2): the interval's two nodes
+        c = self.coef[si[:, None], sj[:, None], :, kk]                      # (P, 2, F, 3): node, function, (y, hy', h^2y'')
+        t2 = t * t
+        t3 = t2 * t
+        tp = torch.stack([torch.ones_like(t), t, t2, t3, t2 * t2, t3 * t2], -1)     # products, not pow: finite at t = 0
+        H = (tp @ _hermite_matrix(tp.dtype, tp.device)).reshape(-1, 2, 3)   # (P, node, derivative order)
+        y = torch.einsum("pnfd,pnd->pf", c, H.to(c.dtype))
+        return y * inside.to(y.dtype)[:, None]
+
+    def _call_ref(self, si, sj, r_ang):
+        """The per-term transcription of :meth:`__call__`, kept for the tests."""
         x = (r_ang - self.r_min) / self.h
         G = self.G
         inside = (x < G - 1) & (x >= 0)

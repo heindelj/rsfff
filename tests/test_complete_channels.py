@@ -279,3 +279,59 @@ def test_diffuse_penetration_branch_and_curvature(setup):
     keep(m)
     assert torch.isfinite(cp) and float(cp) > 0
     assert any(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in m.env.parameters())
+
+
+# --- vectorized channels against the per-L reference loop ----------------------------------------------------------
+
+@pytest.mark.parametrize("lmax", [1, 2, 4, 6])
+def test_stacked_harmonics_are_e3nn_blocks(lmax):
+    from rsfff.ff.complete.channels import stacked_harmonics
+    g = torch.Generator().manual_seed(lmax)
+    v = torch.randn(300, 3, generator=g, dtype=f64)
+    v = v / v.norm(dim=1, keepdim=True)
+    v[:6] = torch.tensor([[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0], [-1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]], dtype=f64)
+    Y = stacked_harmonics(v, lmax)
+    ref = torch.cat([real_harmonics(v, L) for L in range(1, lmax + 1)], 1)
+    assert Y.shape == ref.shape
+    torch.testing.assert_close(Y, ref, atol=1e-13, rtol=0)
+
+
+def _random_pairs(n=9, P=60, seed=0, dtype=f64):
+    g = torch.Generator().manual_seed(seed)
+    i = torch.randint(0, n - 2, (P,), generator=g)                      # the last two atoms have no pairs
+    dr = torch.randn(P, 3, generator=g, dtype=dtype) * 3
+    dr[:3] = torch.tensor([[0, 0, 2.0], [0, 0, -2.5], [1.5, 0, 0]], dtype=dtype)   # axis-aligned bonds
+    w = torch.rand(P, generator=g, dtype=dtype) * 1e-2
+    s = (torch.rand(P, generator=g, dtype=dtype) - 0.5) * 1e-2
+    return n, i, dr, w, s
+
+
+@pytest.mark.parametrize("lmax", [0, 1, 4])
+@pytest.mark.parametrize("dtype,tol", [(f64, 1e-15), (torch.float32, 1e-7)])
+def test_vectorized_channels_match_reference(lmax, dtype, tol):
+    from rsfff.ff.complete.channels import _channels_from_pairs_ref
+    n, i, dr, w, s = _random_pairs(dtype=dtype)
+    X = channels_from_pairs(n, i, dr, w, s, lmax)
+    R = _channels_from_pairs_ref(n, i, dr, w, s, lmax)
+    assert X.shape == R.shape == (n, 2 + 3 * (lmax + 1)) and X.dtype == dtype
+    assert float(X[-2:].abs().max()) == 0.0
+    torch.testing.assert_close(X, R, atol=tol * float(R.abs().max()), rtol=0)
+
+
+def test_vectorized_channels_gradients_match_reference():
+    from rsfff.ff.complete.channels import _channels_from_pairs_ref
+    n, i, dr, w, s = _random_pairs(seed=3)
+    out = torch.randn(n, 2 + 3 * 5, generator=torch.Generator().manual_seed(1), dtype=f64)
+    grads = []
+    for f in (channels_from_pairs, _channels_from_pairs_ref):
+        args = [t.clone().requires_grad_(True) for t in (dr, w, s)]
+        grads.append(torch.autograd.grad((f(n, i, *args) * out).sum(), args))
+    for a, b in zip(*grads):
+        assert torch.isfinite(a).all()
+        torch.testing.assert_close(a, b, atol=1e-12 * float(b.abs().max()), rtol=0)
+
+
+def test_vectorized_channels_empty_pair_list():
+    e = torch.zeros(0, dtype=f64)
+    X = channels_from_pairs(3, torch.zeros(0, dtype=torch.long), torch.zeros(0, 3, dtype=f64), e, e)
+    assert X.shape == (3, 17) and float(X.abs().max()) == 0.0
