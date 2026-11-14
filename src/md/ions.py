@@ -4,8 +4,8 @@
 energies, forces and the virial -dE/d(strain) from one backward pass through positions and cell (the strain is
 applied to both, so the virial carries the Ewald reciprocal part and the dispersion tail). Periodic structures
 use the PBC path of :meth:`rsfff.ff.cmm.CmmModel.precompute` (pair list with images within ``cutoff``,
-short-range complements switched off over the last ``switch_width``, Ewald for the bare Coulomb part, a
-matrix-free CG induction solve warm-started from the previous call). :class:`CmmCalculator` is the ASE face
+short-range complements switched off over the last ``switch_width``, Ewald for the bare Coulomb part, the
+matrix-free CG solve of the joint induction + charge-flux minimum warm-started from the previous call). :class:`CmmCalculator` is the ASE face
 of it; ``rsfff/md/ipi_ions.py`` the i-PI driver.
 
 Energies are interaction energies relative to the isolated ions (the model's ``e_int``), Hartree internally.
@@ -41,13 +41,14 @@ def load_model(checkpoint, params=None, device="cpu", table_cache=None):
 class CmmPotential:
     """Energies, forces and virials of a batch of structures (same or different atoms, clusters or periodic).
 
-    ``cutoff`` / ``switch_width`` (Angstrom), ``ewald_tol`` and ``dispersion_tail`` are the periodic path's
-    settings; ``cg_tol`` the induction solve's relative tolerance. Periodic batches warm-start the solve from the
+    ``cutoff`` / ``switch_width`` (Angstrom; ``cutoff`` None: the model's short-range reach plus the switch width),
+    ``ewald_tol`` and ``dispersion_tail`` are the periodic path's settings. Periodic batches warm-start the solve from the
     previous call's moments when the atoms are the same (MD steps, or the same beads)."""
 
-    def __init__(self, model, *, cutoff=9.0, switch_width=1.0, ewald_tol=1e-10, dispersion_tail=True, warm_start=True):
+    def __init__(self, model, *, cutoff=None, switch_width=1.0, ewald_tol=1e-10, dispersion_tail=True, warm_start=True):
         self.model = model
-        self.cutoff, self.switch_width, self.ewald_tol = float(cutoff), float(switch_width), float(ewald_tol)
+        self.cutoff = None if cutoff is None else float(cutoff)
+        self.switch_width, self.ewald_tol = float(switch_width), float(ewald_tol)
         self.dispersion_tail, self.warm_start = bool(dispersion_tail), bool(warm_start)
         self.device = next(model.parameters()).device
         self._x = None
@@ -86,13 +87,12 @@ class CmmPotential:
         bt = self.model.precompute(p_in, Z, fr, **kw)
         key = (tuple(Z.tolist()), B)
         if periodic and self.warm_start and self._x is not None and key == self._key:
-            bt["x_guess"] = self._x
+            bt["guess"] = self._x
         out = self.model(bt)
         E = out["e_int"]
         grads = torch.autograd.grad(E.sum(), leaves)
         if periodic:
-            z = out.get("z_pol")             # the induction solve's variables (with breathing)
-            self._x, self._key = (z if z is not None else out["x"])[bt["mask"]].detach(), key
+            self._x, self._key = out.get("guess"), key
         self.last = {"cg_iters": out.get("cg_iters", 0), "terms": {k: out[k].detach().cpu().numpy() for k in
                      ("e_elst", "e_pauli", "e_disp", "e_pol", "e_ct")}}
         forces = (-grads[0]).detach().cpu().numpy()

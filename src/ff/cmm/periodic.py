@@ -20,10 +20,13 @@ itself, M the (N, 10) polytensors of :func:`rsfff.ff.multipole.build_polytensor`
 drive of the induced moments, as in the cluster code. Tin-foil boundary; a charged cell gets the uniform
 neutralizing background (energy -pi Q^2 / (2 V a^2)).
 
-The induction solve under PBC is preconditioned CG on the operator ``A x = D x + sum_pairs B_ij x_j + P^T recip(P x)``
-(never assembled), with first-order implicit differentiation: ``x = x* - A^-1 r(x*)`` where ``r = A x* + L`` is zero
-to tolerance and the inverse is applied only in the backward pass (one more CG). Forces and stress are exact to the
-CG tolerance; second derivatives (force training) are not supported -- train on clusters, run MD here.
+The cmm solve under PBC (:class:`CmmOperator`, :func:`solve_cmm_periodic`) is preconditioned CG on the joint Hessian
+of the response z and the CT channel charges q, never assembled: on-site blocks, real-space pair blocks of
+[slot charge, dipole, quadrupole] (the slot charge a source in its dipole-parent shape) and the reciprocal sum of the
+same sources. The energies are then evaluated at the solutions with the live operator: they are stationary there, so
+forces, stress and parameter gradients are exact to the CG tolerance; second derivatives (force training) are not --
+train on clusters, run MD here. :func:`solve_induction_periodic` is the plain induction solve (first-order implicit
+differentiation), kept for its tests.
 """
 from __future__ import annotations
 
@@ -35,9 +38,9 @@ import torch
 
 from . import kernels as K
 
-__all__ = ["EwaldFrame", "PolarizationCatastrophe", "dispersion_switch", "dispersion_tail_integral", "ewald_alpha",
-           "erfc_screening", "make_ewald_frames", "periodic_pairs", "recip_apply", "solve_induction_periodic",
-           "smooth_switch"]
+__all__ = ["CmmOperator", "EwaldFrame", "PolarizationCatastrophe", "dispersion_switch", "dispersion_tail_integral",
+           "ewald_alpha", "erfc_screening", "make_ewald_frames", "periodic_pairs", "poly_map9", "recip_apply",
+           "solve_cmm_periodic", "solve_induction_periodic", "smooth_switch"]
 
 BOHR = K.BOHR_ANG
 NORD = 5
@@ -324,81 +327,101 @@ def solve_induction_periodic(L, ainv, C, pairs, Bij, frames, quadrupoles=True, r
     return x_star - _ImplicitZero.apply(r, solve)
 
 
-#: the component blocks of the perpendicular exchange stiffening (dipole, quadrupole); see model.XPOL_PERP_BLOCKS
-_PERP_BLOCKS = ((0, 3), (3, 8))
+# ---- the cmm joint solve ---------------------------------------------------------------------------------------
+
+def poly_map9(dtype, device):
+    """(10, 9): [slot charge, site variables (dipole 3, quadrupole 5)] -> the rank-2 polytensor."""
+    P = K._poly_map(dtype, device)
+    e0 = torch.zeros(10, 1, dtype=dtype, device=device)
+    e0[0, 0] = 1.0
+    return torch.cat([e0, P], 1)
 
 
-def _perp_apply(v, z):
-    """(P, D) sum_blocks (|v_b|^2 z_b - (v_b.z_b) v_b): the on-site perpendicular-stiffening matrix times z."""
-    out = torch.zeros_like(z)
-    for a, b in _PERP_BLOCKS:
-        if b > z.shape[1]:
-            continue
-        vb, zb = v[:, a:b], z[:, a:b]
-        out[:, a:b] = (vb * vb).sum(1, keepdim=True) * zb - (vb * zb).sum(1, keepdim=True) * vb
-    return out
+class CmmOperator:
+    """The Hessian of the cmm joint quadratic under PBC, never assembled. Per atom the variables are the response z
+    (D = 8 or 9: dipole, quadrupole, breathing) and the slot charge Q = G q (q the channel charges, Q_i = sum of the
+    channels out of i minus those into i). Its parts:
+
+        on-site (N, D, D)    the response stiffness: alpha(E_p)^-1, 1 / C, 1 / a0 and the Gram blocks
+        eta (N,)             the slot's self-energy + hardness
+        pairs, blocks9       the real-space pair blocks (P, 9, 9) of [Q, z_1..8] between every pair and image within the
+                             cutoff (rows the source j, columns the receiver i): screened damped tensors
+        frames               the Ewald reciprocal part of the same sources (points)
+        b (C,)               the channels' compliance 1 / s_c^2
+
+    ``apply(Q, z)`` returns (H_Q Q + C^T z, A z + C Q): the slots' potential and the drive on z; ``joint(z, q)`` the
+    product with the joint Hessian [[A + H, C G], [G^T C^T, b + G^T H_Q G]]."""
+
+    def __init__(self, onsite, eta, pairs, blocks9, frames, ch_i, ch_j, b):
+        self.onsite, self.eta, self.pairs, self.B9, self.frames = onsite, eta, pairs, blocks9, frames
+        self.ci, self.cj, self.b = ch_i, ch_j, b
+        self.P9 = poly_map9(onsite.dtype, onsite.device)
+        self.D = onsite.shape[1]
+
+    def detach(self):
+        return CmmOperator(self.onsite.detach(), self.eta.detach(), self.pairs, self.B9.detach(),
+                           [f.detach() for f in self.frames], self.ci, self.cj, self.b.detach())
+
+    def apply(self, Q, z):
+        y = torch.cat([Q[:, None], z[:, :8]], 1)                                        # (N, 9)
+        ii, jj = self.pairs
+        out = torch.zeros_like(y).index_add(0, jj, torch.einsum("pca,pa->pc", self.B9, y[ii]))
+        out = out.index_add(0, ii, torch.einsum("pca,pc->pa", self.B9, y[jj]))
+        out = out + recip_apply(self.frames, y @ self.P9.T) @ self.P9
+        oz = torch.einsum("nab,nb->na", self.onsite, z)
+        oz = torch.cat([oz[:, :8] + out[:, 1:], oz[:, 8:]], 1)
+        return out[:, 0] + self.eta * Q, oz
+
+    def charges(self, q):
+        """Q = G q (N,)."""
+        n = self.onsite.shape[0]
+        return q.new_zeros(n).index_add(0, self.ci, q).index_add(0, self.cj, -q)
+
+    def joint(self, z, q):
+        oQ, oz = self.apply(self.charges(q), z)
+        return oz, self.b * q + oQ[self.ci] - oQ[self.cj]
 
 
-def _perp_quad(v, z):
-    """(P,) sum_blocks |v_b|^2 |z_b|^2 - (v_b.z_b)^2 >= 0."""
-    return (z * _perp_apply(v, z)).sum(1)
-
-
-def _xpol_matvec(z, ainv, cinv, ainv_b, pairs, Bij, frames, hp, P, dof):
-    """(A + H) z for z = (x, b) (N, D): the induction operator on x (``_matvec``), the breathing stiffness on b
-    (D = 9), and H = sum_p w_p v_p v_p^T over the exchange pairs ``hp`` = (i, j, w, v_i, v_j) (rank one per pair)."""
-    out = _matvec(z[:, :8], ainv, cinv, pairs, Bij, frames, P, dof[:8])
-    if z.shape[1] == 9:
-        out = torch.cat([out, (ainv_b * z[:, 8])[:, None]], 1)
-    i, j, w, vi, vj = hp[:5]
-    s = w * ((vi * z[i]).sum(1) + (vj * z[j]).sum(1))
-    out = out.index_add(0, i, s[:, None] * vi).index_add(0, j, s[:, None] * vj)
-    if len(hp) > 5:                     # the perpendicular stiffening: on-site blocks w_perp (|v|^2 1 - v v^T)
-        wp = hp[5][:, None]
-        out = out.index_add(0, i, wp * _perp_apply(vi, z[i])).index_add(0, j, wp * _perp_apply(vj, z[j]))
-    return out * dof
-
-
-def solve_xpol_periodic(L, ainv, C, ainv_b, pairs, Bij, frames, hp, quadrupoles=True, rtol=1e-10, maxiter=500,
-                        x0=None, info=None):
-    """The exchange-polarization minimum under PBC (``CompleteModel(xpol=True)``): z (N, D) minimizing
-    L.z + 1/2 z.(A + H) z, A as in :func:`solve_induction_periodic` plus the breathing stiffness ``ainv_b`` (N,) on
-    column 8 when D = 9, H the positive semi-definite exchange term of the pairs and images ``hp`` = (i, j, w, v_i,
-    v_j). Matrix-free CG, preconditioned with the on-site response; differentiable to first order through the
-    implicit function theorem (like the induction solve)."""
-    D = L.shape[1]
-    P = K._poly_map(L.dtype, L.device)
-    dof = L.new_ones(D)
-    if not quadrupoles:
-        dof[3:8] = 0
-    cinv = torch.where(C > 0, 1.0 / C.clamp(min=1e-30), torch.full_like(C, 1e12))
+def solve_cmm_periodic(op: CmmOperator, rhs_z, rhs_q, h=None, guess=None, rtol=1e-10, maxiter=1000, info=None):
+    """The CT-free minimum z_pol of 1/2 z (A + H) z - rhs_z . z and the joint minimum (z, q) of the full quadratic
+    with linear term -(rhs_z, rhs_q), by CG preconditioned with the on-site blocks and 1 / (b_c + h_c) (``h`` the
+    channels' local charge curvature). No graph: the energies are evaluated at the solutions with the live operator
+    (stationary, so their first derivatives are exact). ``guess``: {"z_pol", "z", "q"} starting points."""
+    guess = guess or {}
     with torch.no_grad():
-        d_hp = tuple(t.detach() for t in hp)
-        d_args = (ainv.detach(), cinv.detach(), ainv_b.detach(), pairs, Bij.detach(), [f.detach() for f in frames],
-                  d_hp, P, dof)
-        alpha = torch.linalg.inv(d_args[0])
-        cq = C.detach()
-        a_b = torch.where(ainv_b > 0, 1.0 / ainv_b.clamp(min=1e-30), torch.zeros_like(ainv_b)).detach()
+        d = op.detach()
+        N, D = d.onsite.shape[:2]
+        C = d.b.shape[0]
+        oinv = torch.linalg.inv(d.onsite)
+        pq = 1.0 / (d.b + (h.detach() if h is not None else 0.0))
+        zero_Q = rhs_z.new_zeros(N)
 
-        def mv(v):
-            return _xpol_matvec(v, *d_args)
+        def mv_z(v):
+            return d.apply(zero_Q, v.view(N, D))[1].reshape(-1)
 
-        def pre(v):
-            parts = [torch.einsum("nab,nb->na", alpha, v[:, :3]), cq[:, None] * v[:, 3:8]]
-            if D == 9:
-                parts.append(a_b[:, None] * v[:, 8:])
-            return torch.cat(parts, 1) * dof
+        def pre_z(v):
+            return torch.einsum("nab,nb->na", oinv, v.view(N, D)).reshape(-1)
 
-        def solve(g):
-            return _cg(mv, g * dof, pre, None, rtol, maxiter)[0]
+        def mv_j(v):
+            oz, oq = d.joint(v[:N * D].view(N, D), v[N * D:])
+            return torch.cat([oz.reshape(-1), oq])
 
-        z_star, n_iter = _cg(mv, -L.detach() * dof, pre, None if x0 is None else x0.detach() * dof, rtol, maxiter)
+        def pre_j(v):
+            return torch.cat([pre_z(v[:N * D]), pq * v[N * D:]])
+
+        g0 = guess.get("z_pol")
+        z_pol, it1 = _cg(mv_z, rhs_z.detach().reshape(-1), pre_z, None if g0 is None else g0.reshape(-1), rtol, maxiter)
+        z_pol = z_pol.view(N, D)
+        if C:
+            gz, gq = guess.get("z", z_pol), guess.get("q")
+            x0 = torch.cat([gz.reshape(-1), gq if gq is not None else rhs_q.new_zeros(C)])
+            y, it2 = _cg(mv_j, torch.cat([rhs_z.detach().reshape(-1), rhs_q.detach()]), pre_j, x0, rtol, maxiter)
+            z, q = y[:N * D].view(N, D), y[N * D:]
+        else:
+            z, q, it2 = z_pol, rhs_q.new_zeros(0), 0
     if info is not None:
-        info["cg_iters"] = n_iter
-    if not torch.is_grad_enabled():
-        return z_star
-    r = _xpol_matvec(z_star, ainv, cinv, ainv_b, pairs, Bij, frames, hp, P, dof) + L * dof
-    return z_star - _ImplicitZero.apply(r, solve)
+        info["cg_iters"] = it1 + it2
+    return z_pol, z, q
 
 
 # ---- short-range switches and the dispersion tail ----------------------------------------------------------------

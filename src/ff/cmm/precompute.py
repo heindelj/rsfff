@@ -1,7 +1,7 @@
 """The cmm precompute: everything of a batch that depends on the geometry (and the fixed species table) alone, from
 positions, in one pass over the pairs and one lookup of one table.
 
-:class:`CmmTable` is the one radial table: per ordered species pair, the precompute rows of
+:class:`rsfff.ff.cmm.table.CmmTable` is the one radial table: per ordered species pair, the precompute rows of
 :class:`rsfff.ff.cmm.tabulate.RadialTable` (permanent drive and induced-induced complements, the diffuse probes'
 drive complements and shell overlaps), the exchange-polarization rows of :class:`XpolTable` (frozen overlap and its
 derivative maps) and the Gram rows of :class:`rsfff.ff.cmm.gram.GramTable`, on one grid (0.3 .. 12 A, h = 0.01 A).
@@ -23,7 +23,8 @@ derivative maps) and the Gram rows of :class:`rsfff.ff.cmm.gram.GramTable`, on o
     pairs, pair_dr         every pair (clusters) or every pair and image within ``cutoff`` (periodic)
 
 Pairs beyond the table's reach (clusters) enter the drive, the operator and the slots as bare multipoles and are
-skipped everywhere else. Everything is differentiable in the positions (forces, stress).
+skipped everywhere else. Periodic cells (``cell``): the pairs are every pair and image within the cutoff, and the
+operator, slots and Ewald frames go to ``bt["pbc"]`` for the matrix-free solve (``batched_precompute``). Everything is differentiable in the positions (forces, stress).
 """
 from __future__ import annotations
 
@@ -35,39 +36,14 @@ from . import kernels as K
 from .batch import channel_types
 from .channels import channels_from_pairs, overlap_switch, pair_electrostatics
 from .elst import permanent_electrostatics
-from .gram import GramTable, gram_blocks_from_rows, gram_layout
+from .gram import gram_blocks_from_rows, gram_layout
 from .params import ChannelTable, IonTable, channel_taper
 from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
                        recip_apply, smooth_switch)
-from .tabulate import (BOHR, GATE, NORD, O_ON, PROBES, R_XPOL, RadialTable, XpolTable, _basis_tensors, cached_table,
-                       shape_self_coulomb)
+from .table import CmmTable, cmm_table
+from .tabulate import BOHR, GATE, NORD, O_ON, PROBES, R_XPOL, _basis_tensors
 
-__all__ = ["CmmTable", "batched_precompute", "hyperpolarization", "cmm_table", "smoothstep_log"]
-
-
-class CmmTable(GramTable):
-    """Every radial function of the cmm precompute on one grid (module docstring); ``jself`` (S,) the Coulomb
-    self-energy of each species' charge-slot shape."""
-
-    def __init__(self, tab: IonTable, r_max=12.0, h=0.01, **kw):
-        super().__init__(tab, r_max=r_max, breath="shape", probes=PROBES, h=h, **kw)
-        self.jself = shape_self_coulomb(tab)
-
-    def _functions(self, si, sj):
-        out = RadialTable._functions(self, si, sj)
-        out.update(XpolTable._xpol_rows(self, si, sj))
-        out.update(GramTable._gram_rows(self, si, sj))
-        return out
-
-    def to(self, device):
-        super().to(device)
-        self.jself = self.jself.to(device)
-        return self
-
-
-def cmm_table(tab: IonTable) -> CmmTable:
-    """The :class:`CmmTable` of a species table, kept on disk under ``RSFFF_TABLE_CACHE`` (:func:`cached_table`)."""
-    return cached_table(CmmTable, tab)
+__all__ = ["CmmTable", "batched_precompute", "default_cutoff", "hyperpolarization", "cmm_table", "smoothstep_log"]
 
 
 def smoothstep_log(O, on, full):
@@ -131,27 +107,45 @@ def _channel_lut(tab, chan):
     return ch
 
 
-def gate_reach(table: CmmTable, gate=GATE) -> float:
-    """(A) the largest distance at which any probe's overlap with any species reaches the gate's on-value."""
-    cols = [table.index[f"envS:{p}:0"] for p in PROBES]
-    on = table.coef[:, :, cols, :, 0].cpu() > gate[0]
+def _reach(table, names, thr) -> float:
+    cols = [table.index[k] for k in names]
+    on = table.coef[:, :, cols, :, 0].cpu() > thr
     hit = on.any(0).any(0).any(0)
     return float(table.r.cpu()[hit].max()) if bool(hit.any()) else 0.0
 
 
+def gate_reach(table: CmmTable, gate=GATE) -> float:
+    """(A) the largest distance at which any probe's overlap with any species reaches the gate's on-value."""
+    return _reach(table, [f"envS:{p}:0" for p in PROBES], gate[0])
+
+
+def short_range_reach(table: CmmTable, chan: ChannelTable, gate=GATE) -> float:
+    """(A) the largest distance at which a short-range term of the model is on: the CT channels, the probe gates
+    and the density overlap of the channels and the exchange pairs (above its switch-on value)."""
+    return max(chan.cutoff, gate_reach(table, gate), _reach(table, ["xp:ovl"], O_ON))
+
+
+def default_cutoff(table: CmmTable, chan: ChannelTable, gate=GATE, switch_width=1.0) -> float:
+    """The periodic pair cutoff (A): the short-range reach plus the switch width, rounded up to 0.5 A, so the
+    switch-off of the table's complements leaves every short-range term exactly as in a cluster."""
+    return math.ceil(2 * (short_range_reach(table, chan, gate) + switch_width)) / 2
+
+
 def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table: CmmTable, chan: ChannelTable,
-                       labels: dict | None = None, cell=None, cutoff: float = 9.0, switch_width: float = 1.0,
+                       labels: dict | None = None, cell=None, cutoff: float | None = None, switch_width: float = 1.0,
                        ewald_tol: float = 1e-10, dispersion_tail: bool = False, gate=GATE) -> dict:
     """The batch of :class:`rsfff.ff.cmm.CmmModel` from positions (N, 3) Angstrom (autograd flows through), atomic
     numbers (N,) and the frame index (N,) sorted by frame (module docstring). ``labels``: per-frame tensors (B,) to
     attach. Runs on the device of ``pos_ang``; ``tab`` and ``table`` must live there too.
 
     ``cell`` (3, 3) or (B, 3, 3) Angstrom, rows the lattice vectors, makes the frames periodic: the pairs are every
-    pair and image within ``cutoff``, the table's short-range complements are switched off over the last
+    pair and image within ``cutoff`` (default :func:`default_cutoff`), the table's short-range complements are switched
+    off over the last
     ``switch_width`` and the bare Coulomb part of the drive is the Ewald sum (:mod:`rsfff.ff.cmm.periodic`). The
-    induction operator is then not assembled: its pair blocks and the Ewald frames go into ``bt["pbc"]`` for the
-    matrix-free solve, and the charge slots are not built (the condensed-phase work). ``gate``: the probe overlap
-    window of the gated invariants (the model's ``env_gate``)."""
+    operator is then not assembled: the on-site blocks, the real-space pair blocks of [slot charge, dipole,
+    quadrupole] and the Ewald frames go into ``bt["pbc"]`` for the matrix-free joint solve
+    (:class:`rsfff.ff.cmm.periodic.CmmOperator`). ``gate``: the probe overlap window of the gated invariants (the
+    model's ``env_gate``)."""
     if tuple(table.probes) != PROBES:
         raise ValueError(f"the table's probes {table.probes} are not the cmm probes {PROBES}")
     X = pos_ang / BOHR
@@ -171,12 +165,11 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     if periodic:
         cell_ang = torch.as_tensor(cell, dtype=dt, device=dev)
         cell_ang = cell_ang.expand(B, 3, 3) if cell_ang.dim() == 2 else cell_ang
-        rc = float(cutoff)
-        if rc - switch_width < chan.cutoff:
-            raise ValueError(f"cutoff - switch_width = {rc - switch_width} A is inside the CT range")
-        reach = _memo(table, ("reach", tuple(gate)), "cpu", lambda: gate_reach(table, gate))
-        if rc < reach:
-            raise ValueError(f"the pair cutoff {rc} A is inside the gate's reach {reach:.2f} A")
+        reach = _memo(table, ("reach", tuple(gate), chan.cutoff), "cpu", lambda: short_range_reach(table, chan, gate))
+        rc = float(cutoff) if cutoff is not None else math.ceil(2 * (reach + switch_width)) / 2
+        if rc - switch_width < reach:
+            raise ValueError(f"cutoff - switch_width = {rc - switch_width} A is inside the short-range terms' reach "
+                             f"{reach:.2f} A (channels, probe gates, overlaps)")
         pairs, shifts = periodic_pairs(pos_ang, cell_ang, b_idx, rc)
         Cb = cell_ang / BOHR
         dr_u = X[pairs[1]] - X[pairs[0]] + torch.einsum("pk,pkl->pl", shifts, Cb[b_idx[pairs[0]]])
@@ -229,12 +222,20 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
         Lflat = Lflat.index_add(0, di, (tab.charge[s[dj]][:, None] * Tf[:, 0, :]) @ P)
     if periodic:
         Lflat = Lflat + rq
-    # -- induced-induced coupling (undirected) -----------------------------------------------------------------------
-    PTP = torch.einsum("ab,npbc,cd->npad", P.T, Tb[:, :nP], P)       # (NORD, nP, 8, 8)
+    # -- induced-induced coupling (undirected; rows the source jj, columns the receiver ii, aoff:{ii parent}{jj parent})
     arows = table.rows(y[:nP], ["aoff:dd", "aoff:dq", "aoff:qd", "aoff:qq"])
-    blocks = torch.einsum("knp,npab->kpab", g[:, :nP] - arows, PTP)  # (4, nP, 8, 8): dd, dq, qd, qq
-    Bij = torch.cat([torch.cat([blocks[0][:, :3, :3], blocks[2][:, :3, 3:]], 2),
-                     torch.cat([blocks[1][:, 3:, :3], blocks[3][:, 3:, 3:]], 2)], 1)
+    if periodic:                      # [slot charge, dipole, quadrupole]: the charge lives in the dipole parent
+        from .periodic import poly_map9
+        P9 = poly_map9(dt, dev)
+        PTP = torch.einsum("ab,npbc,cd->npad", P9.T, Tb[:, :nP], P9)                       # (NORD, nP, 9, 9)
+        blocks = torch.einsum("knp,npab->kpab", g[:, :nP] - arows, PTP)
+        Bij = torch.cat([torch.cat([blocks[0][:, :4, :4], blocks[2][:, :4, 4:]], 2),
+                         torch.cat([blocks[1][:, 4:, :4], blocks[3][:, 4:, 4:]], 2)], 1)   # (nP, 9, 9)
+    else:
+        PTP = torch.einsum("ab,npbc,cd->npad", P.T, Tb[:, :nP], P)       # (NORD, nP, 8, 8)
+        blocks = torch.einsum("knp,npab->kpab", g[:, :nP] - arows, PTP)  # (4, nP, 8, 8): dd, dq, qd, qq
+        Bij = torch.cat([torch.cat([blocks[0][:, :3, :3], blocks[2][:, :3, 3:]], 2),
+                         torch.cat([blocks[1][:, 3:, :3], blocks[3][:, 3:, 3:]], 2)], 1)
     ii, jj = pairs[:, pn]
     if Tf is not None:
         Bij = torch.cat([Bij, P.T @ Tf[:pf.shape[0]] @ P])
@@ -298,6 +299,13 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     ck = (ct >= 0) & (r_ang < chan.cutoff)
     ch_index = dp[:, ck]
     ch_r = r_ang[ck]
+    kk = ck.nonzero().squeeze(1)
+    pos_of = torch.full((2 * nP,), -1, dtype=torch.long, device=dev).index_put((kk,), torch.arange(kk.shape[0], device=dev))
+    ch_rev = pos_of[(kk + nP) % max(2 * nP, 1)]                     # the reverse channel j -> i (same image), or -1
+    ch_J = (1 - y[ck, table.index["aoff:dd:0"]]) / r[ck]             # the slots' Coulomb at the channel's distance
+    sh = torch.cat([shifts[pn], -shifts[pn]]) if periodic else torch.zeros(2 * nP, 3, dtype=dt, device=dev)
+    code = ((sh[ck] + 64).long() * torch.tensor([16384, 128, 1], device=dev)).sum(1)
+    ch_key = (ch_index[0] * N + ch_index[1]) * (1 << 21) + code       # the channel's identity across MD steps
     lab = dict(labels or {})
     lab.setdefault("n", counts.to(dt))
     lab.setdefault("ct_mask", torch.ones(B, dtype=torch.bool, device=dev))
@@ -307,12 +315,13 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     bt = {"B": B, "nmax": nmax, "D": D, "mask": mask, "species": s, "frame": b_idx, "pos": pos_ang, "pairs": pairs,
           "pair_dr": dr_u * BOHR, "Lz": Lz, "e_hyp": e_hyp, "chan": chan_raw, "gated": gated, "gate": tuple(gate),
           "x_sel": pn[xs], "x_rel": x_rel, "x_swO": swO[:Px], "x_Gi": x_Gi, "x_Gj": x_Gj,
-          "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]],
+          "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]], "ch_rev": ch_rev,
+          "ch_J": ch_J, "ch_key": ch_key,
           "ch_ltaper": torch.log(channel_taper(ch_r, chan.cutoff, chan.taper).clamp(min=1e-300)), "labels": lab}
     if periodic:
         bt.update(A=None, Ca=None, Jq=None, pbc={
             "cell": cell_ang, "volume": torch.linalg.det(Cb).abs(), "cutoff": rc, "switch_width": switch_width,
-            "alpha": alpha, "frames": frames, "A_pairs": pairs, "A_blocks": Bij, "onsite": on, "dp": dp,
+            "alpha": alpha, "frames": frames, "A_pairs": pairs, "blocks9": Bij, "onsite": on, "jself": table.jself[s],
             "e_elst_recip": 0.5 * X.new_zeros(B).index_add(0, b_idx, Mq[:, 0] * out_q[:, 0]), "g0_pairs": g[0, :nP],
             "disp_tail": dispersion_tail_integral(rc, switch_width) if dispersion_tail else None})
         bt["e_elst"] = permanent_electrostatics(pos_ang, s, b_idx, tab, pairs, dr_u * BOHR, bt["pbc"])

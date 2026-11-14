@@ -28,8 +28,14 @@ The environment factors u (``encoder.READOUTS``) are decoded from one latent per
 are the overlap-weighted two- and three-body channels (``channels.py``) and the overlap-gated diffuse-probe
 invariants. Everything that depends on the geometry alone (A, L, h, c, the encoder's inputs, the exchange pairs'
 overlap maps and Gram blocks, the charge slots, the channels, E_elst) comes from :meth:`CmmModel.precompute`
-(``precompute.py``); the forward does what depends on the parameters. Clusters only for now: the periodic Gram blocks
-and the periodic flux solve are the condensed-phase work.
+(``precompute.py``); the forward does what depends on the parameters.
+
+Clusters solve the joint minimum densely (Cholesky of A + H, the channels eliminated onto the atomic charges).
+Periodic cells (``precompute(..., cell=...)``) solve the same minimum by matrix-free CG on (z, q) with Ewald sums for
+the long-range couplings of the moments and the slot charges (:class:`rsfff.ff.cmm.periodic.CmmOperator`); every
+short-range piece -- Pauli, the exchange drive and Gram blocks, the channels' kernels, compliances, drives and
+curvatures h_c, the encoder's inputs -- is the cluster's, from the image pair list. Dispersion is switched off at the
+cutoff with the uniform tail added. A cluster in a large cell reproduces the cluster (to the images' 1/L^5).
 """
 from __future__ import annotations
 
@@ -44,6 +50,7 @@ from . import kernels as K
 from .batch import channel_types
 from .channels import CHANNEL_NAMES, THREE_BODY_COLS, TWO_BODY_COLS
 from .params import ChannelTable, IonTable
+from .periodic import CmmOperator, dispersion_switch, solve_cmm_periodic
 from .precompute import CmmTable, batched_precompute, cmm_table
 from .species import SpeciesEmbedding
 from .tabulate import PROBES, shape_self_coulomb
@@ -237,8 +244,15 @@ class CmmModel(nn.Module):
         e_p = torch.einsum("pt,ptu,pu->p", w[i], f, w[j]) / rb
         self._pauli_pairs = ((i, j), e_p)
         e_d = tt_damped_c6_energy(r_ang, torch.sqrt(C6[i] * C6[j]), torch.sqrt(b6[i] * b6[j]))
+        pbc = bt.get("pbc")
+        if pbc is not None:           # switched off over the cutoff's last switch_width, the uniform tail beyond
+            e_d = e_d * dispersion_switch(r_ang, pbc["cutoff"], pbc["switch_width"])
         fr = bt["frame"][i]
-        return (r_ang.new_zeros(B).index_add(0, fr, e_p), r_ang.new_zeros(B).index_add(0, fr, e_d), (w, b, C6, b6))
+        E_d = r_ang.new_zeros(B).index_add(0, fr, e_d)
+        if pbc is not None and pbc.get("disp_tail") is not None:
+            sq = r_ang.new_zeros(B).index_add(0, bt["frame"], torch.sqrt(C6))
+            E_d = E_d - 2 * math.pi / pbc["volume"] * sq * sq * pbc["disp_tail"]
+        return r_ang.new_zeros(B).index_add(0, fr, e_p), E_d, (w, b, C6, b6)
 
     @staticmethod
     def _local(bt):
@@ -263,14 +277,16 @@ class CmmModel(nn.Module):
         w2 = self.w2(sp)
         return (i, j), g, w2[i][:, None, None] * (w * bt["x_Gi"]), w2[j][:, None, None] * (w * bt["x_Gj"])
 
-    @staticmethod
-    def _reverse(i, j, n):
-        """(C,) the index of each channel's reverse channel j -> i, -1 where there is none."""
-        key, rkey = i * n + j, j * n + i
-        srt, order = torch.sort(key)
-        pos = torch.searchsorted(srt, rkey).clamp(max=max(key.shape[0] - 1, 0))
-        hit = srt[pos] == rkey if key.shape[0] else torch.zeros_like(key, dtype=torch.bool)
-        return torch.where(hit, order[pos], torch.full_like(key, -1))
+    def slot_eta(self, sp):
+        """(N,) the slots' self-energy + hardness."""
+        return self.ct_jself[sp] + nn.functional.softplus(self.ct_eta_raw[sp])
+
+    def channel_curvature(self, bt, sp):
+        """(C,) h_c = (G^T H_Q G)_cc of each channel's own pair: eta_i + eta_j - 2 J_ij (the slots' Coulomb at the
+        channel's distance, unscreened -- a local quantity, the same in a cluster and in a cell)."""
+        i, j = bt["ch_index"]
+        eta = self.slot_eta(sp)
+        return eta[i] + eta[j] - 2 * bt["ch_J"]
 
     def channel_drives(self, bt, sp, q, h):
         """Per channel, given h_c = (G^T H_Q G)_cc: the kernel energy e_c <= 0, the drive V_c and s_c = 1 / sqrt(b_c).
@@ -285,7 +301,7 @@ class CmmModel(nn.Module):
         V0 = v0[sp[i]] + v0[sp[j]]
         Vh2 = V0 * V0 + 2 * ae * h
         cc = 2 * ae / Vh2
-        rev = self._reverse(i, j, sp.shape[0])
+        rev = bt["ch_rev"]
         has = rev >= 0
         rv = rev.clamp(min=0)
         ae2 = torch.where(has, ae[rv], torch.zeros_like(ae))
@@ -332,8 +348,7 @@ class CmmModel(nn.Module):
         i, j = bt["ch_index"]
         cf = bt["ch_frame"]
         li, lj = loc[i], loc[j]
-        h = Hq[cf, li, li] + Hq[cf, lj, lj] - Hq[cf, li, lj] - Hq[cf, lj, li]
-        e_c, V, s = self.channel_drives(bt, sp, self._q, h)
+        e_c, V, s = self.channel_drives(bt, sp, self._q, self.channel_curvature(bt, sp))
         w = s * s
         Kl = Hq.new_zeros(B, N, N)
         Kl = Kl.index_put((cf, li, li), w, accumulate=True).index_put((cf, lj, lj), w, accumulate=True)
@@ -362,7 +377,9 @@ class CmmModel(nn.Module):
         (``alpha_pol``): the energy is quadratic in the field, so these are exact (extra right-hand sides of the
         same factorizations)."""
         if bt.get("pbc") is not None:
-            raise NotImplementedError("cmm: clusters only so far (periodic Gram blocks and flux solve not implemented)")
+            if field is not None or alpha:
+                raise NotImplementedError("cmm under PBC: no uniform field / polarizability (tin-foil cells)")
+            return self._forward_pbc(bt)
         sp = bt["species"]
         self.environment(bt)
         B, nmax, D, mask = bt["B"], bt["nmax"], bt["D"], bt["mask"]
@@ -417,6 +434,69 @@ class CmmModel(nn.Module):
                     "e_ct": e_ct, "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct, "e_ch": e_ch, "e_type": e_type,
                     "q_ch": qc, "e_kernel": e_c, "x": x, "x_pol": z_pol[..., :8], "z_pol": z_pol, "dq": Q,
                     "q_ct": self._q, "frozen_params": frz})
+        return out
+
+    def _forward_pbc(self, bt: dict) -> dict:
+        """The periodic forward: the same terms, the joint (z, q) minimum by matrix-free CG
+        (:func:`rsfff.ff.cmm.periodic.solve_cmm_periodic`); the energies are the quadratic forms at the (detached)
+        solutions with the live operator, so their first derivatives (forces, stress, parameter gradients) are exact.
+        ``bt["guess"]``: the previous call's ``out["guess"]`` (warm start; channels matched by ``ch_key``)."""
+        sp = bt["species"]
+        self.environment(bt)
+        B, D, mask, fr = bt["B"], bt["D"], bt["mask"], bt["frame"]
+        if D != 8 + self.n_b:
+            raise ValueError(f"the batch's response layout D = {D} is not the model's {8 + self.n_b}")
+        pb = bt["pbc"]
+        n = sp.shape[0]
+        e_pauli, e_disp, frz = self.frozen_terms(bt, sp)
+        self._q = self.ct_charges(sp)
+        (i, j), g, Gi, Gj = self.exchange(bt, sp)
+        on = pb["onsite"].index_add(0, i, Gi).index_add(0, j, Gj)
+        Lz = bt["Lz"][mask]
+        ci, cj = bt["ch_index"]
+        cf = bt["ch_frame"]
+        h = self.channel_curvature(bt, sp)
+        e_c, V, s = self.channel_drives(bt, sp, self._q, h)
+        op = CmmOperator(on, self.slot_eta(sp), pb["A_pairs"], pb["blocks9"], pb["frames"], ci, cj, 1.0 / (s * s))
+        guess, info = self._guess(bt), {}
+        z_pol, z, q = solve_cmm_periodic(op, -(Lz + g), V, h, guess, info=info)
+        zero = Lz.new_zeros(n)
+        # E_pol at q = 0, the joint energy, both stationary
+        psi0, oz0 = op.apply(zero, z_pol)
+        zHz = (torch.einsum("pa,pab,pb->p", z_pol[i], Gi, z_pol[i]) + torch.einsum("pa,pab,pb->p", z_pol[j], Gj, z_pol[j]))
+        per = lambda v, idx: Lz.new_zeros(B).index_add(0, idx, v)                         # noqa: E731
+        e_quad = per(0.5 * (z_pol * oz0).sum(1) + ((Lz + g) * z_pol).sum(1), fr)
+        e_x = per((g * z_pol).sum(1), fr) + 0.5 * per(zHz, fr[i])
+        e_pol = e_quad + bt["e_hyp"]
+        oz, oq = op.joint(z, q)
+        e_joint = per(0.5 * (z * oz).sum(1) + ((Lz + g) * z).sum(1), fr) + per(0.5 * q * oq - V * q, cf)
+        e_ct = e_joint - e_quad
+        with torch.no_grad():
+            e_ch = 0.5 * (-V + psi0[ci] - psi0[cj]) * q
+            e_type = e_ch.new_zeros(B * self.nT).index_add(0, cf * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT)
+        nmax = bt["nmax"]
+        pad = lambda v: v.new_zeros(B, nmax, v.shape[1]).masked_scatter(mask[..., None].expand(B, nmax, v.shape[1]), v)  # noqa: E731
+        e_elst = bt["e_elst"]
+        return {"e_elst": e_elst, "e_pauli": e_pauli, "e_disp": e_disp, "e_pol": e_pol, "e_xpol": e_x, "e_ct": e_ct,
+                "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct, "e_ch": e_ch, "e_type": e_type, "q_ch": q,
+                "e_kernel": e_c, "x": pad(z[:, :8]), "x_pol": pad(z_pol[:, :8]), "z_pol": pad(z_pol),
+                "dq": op.charges(q), "q_ct": self._q, "frozen_params": frz, "cg_iters": info.get("cg_iters", 0),
+                "guess": {"z_pol": z_pol.detach(), "z": z.detach(), "q": q.detach(), "ch_key": bt["ch_key"],
+                          "n": n}}
+
+    @staticmethod
+    def _guess(bt):
+        """The warm start of a periodic solve from ``bt["guess"]`` (same atoms; channels matched by key)."""
+        gs = bt.get("guess")
+        if not gs or gs.get("n") != bt["species"].shape[0]:
+            return None
+        out = {"z_pol": gs["z_pol"], "z": gs["z"]}
+        key, okey = bt["ch_key"], gs["ch_key"]
+        if okey.numel():
+            srt, order = torch.sort(okey)
+            pos = torch.searchsorted(srt, key).clamp(max=okey.shape[0] - 1)
+            hit = srt[pos] == key
+            out["q"] = torch.where(hit, gs["q"][order[pos]], torch.zeros_like(key, dtype=gs["q"].dtype))
         return out
 
     # -- regularizers ------------------------------------------------------------------------------------------
