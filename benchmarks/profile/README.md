@@ -86,17 +86,8 @@ The same switches in production: `RSFFF_COMPILE=cg|network|all` (read by
 bash benchmarks/profile/run_train_split.sh main cg2 cg4 ccg ccg2 cinf
 ```
 
-## Complete (ion) model phase timings
+## cmm (ion) model phase timings
 
-`profile_complete.py` loads a `train_ionct --model complete` run and times, on rock-salt cubes of n^3 ions, the
-inference, energy-training, forces, force-training (double backward) and polarizability-stencil steps and the MD
-API, and splits the precompute + forward of the forces step by region (inclusive times). Run it from the directory
-the training ran in so the checkpoint's parameter table resolves, or pass `--params`.
-
-```bash
-cd ~/research/rsfff
-python ~/dev/rsfff/benchmarks/profile/profile_complete.py train/salts/m37/hyp_noskip_w6 --device cpu \
-    --table-cache train/salts/cache --sizes 2,3 --batch 8 --reps 3            # local smoke test
-python .../profile_complete.py RUN_DIR --device cuda --table-cache train/salts/cache --sizes 2,3,4,5 --batch 16 \
-    --periodic --out complete_gpu.json                                         # GPU node
-```
+`profile_complete.py` (the complete model's phase timer) was retired with the complete model (tag
+complete-explore-final); a cmm version comes with the optimization pass of the cleanup plan
+(project doc claude/complete_cleanup_plan.md, step 4).

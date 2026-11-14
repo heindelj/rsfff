@@ -22,8 +22,8 @@ import torch
 from scipy.optimize import least_squares
 from scipy.special import eval_legendre
 
-from rsfff.ff.ionct import kernels as K
-from rsfff.ff.ionct.params import IonTable
+from rsfff.ff.cmm import kernels as K
+from rsfff.ff.cmm.params import IonTable
 from rsfff.ff.multipole import shaped_one_center_damp
 
 BOHR = K.BOHR_ANG

@@ -1,5 +1,8 @@
 """Golden reference of the complete model as trained in the complete.* runs (tag complete-explore-final).
 
+Runs only at that tag (the legacy model and train_ionct are gone from the cmm code): ``git worktree add /tmp/golden
+complete-explore-final`` and run it there; the references it wrote are tests/cmm_golden/golden_*.pt.
+
 Builds the legacy ``CompleteModel`` with the arguments of ``complete_worker`` (DEFAULTS of 2026-11-13), puts every
 trainable parameter at a random non-trivial value (readouts included, which start at zero), sets the input scales and
 saturations from the frames themselves, and records per frame: every energy term, the forces, the joint moments, the

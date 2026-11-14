@@ -68,30 +68,33 @@ def resolve_params(name, near=None):
 def load_cmm(path, params=None, map_location="cpu", tab=None, chan=None):
     """A :class:`CmmModel` (eval mode) from a cmm or legacy complete-model checkpoint, or a run tarball.
     ``params``: the species table (default: the checkpoint's own, or the copy in the tarball)."""
-    from ..ionct import ct as CT
-    from ..ionct.params import IonTable
     from .model import CmmModel
+    from .params import ChannelTable, IonTable
     ck, files = _open(path, map_location)
     legacy = ck.get("format") != "cmm"
     pname = params or (ck.get("args", {}).get("params") if legacy else ck.get("params"))
-    tmp = None
+    tmp, ppath = None, None
     if tab is None:
         if params is None and pname and Path(pname).name in files:          # the tarball's own copy of the table
             import tempfile
-            tmp = tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False)
+            tmp = tempfile.NamedTemporaryFile("wb", prefix="cmm_table_", suffix=".json", delete=False)
             tmp.write(files[Path(pname).name])
             tmp.close()
-            ppath = Path(tmp.name)
+            ppath = Path(tmp.name)          # kept: model.params_path (the precompute's table is keyed by it)
         else:
             ppath = resolve_params(pname, near=path)
         symbols = None if legacy else ck.get("symbols")
-        tab, chan = IonTable.load(ppath, symbols=symbols), CT.ChannelTable.load(ppath)
+        tab, chan = IonTable.load(ppath, symbols=symbols), ChannelTable.load(ppath)
     if legacy:
         from .legacy import load_legacy
         m = load_legacy(ck, tab, chan)
     else:
         m = CmmModel(tab, chan, CmmConfig.from_dict(ck["config"]))
         m.load_state_dict(ck["state"])
-    if tmp is not None:
-        Path(tmp.name).unlink(missing_ok=True)
+    if ppath is None and pname:
+        try:
+            ppath = resolve_params(pname, near=path)
+        except FileNotFoundError:
+            ppath = None
+    m.params_path = ppath
     return m.eval()

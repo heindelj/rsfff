@@ -1,20 +1,17 @@
-"""Dynamics on the complete ion model (:mod:`rsfff.ff.complete`): clusters and periodic cells.
+"""Dynamics on a cmm model (:mod:`rsfff.ff.cmm`): clusters (periodic cells once the model supports them).
 
-:class:`CompletePotential` evaluates a batch of structures in one call of the batched precompute and the model --
+:class:`CmmPotential` evaluates a batch of structures in one call of the batched precompute and the model --
 energies, forces and the virial -dE/d(strain) from one backward pass through positions and cell (the strain is
 applied to both, so the virial carries the Ewald reciprocal part and the dispersion tail). Periodic structures
-use the PBC path of :func:`rsfff.ff.complete.batched_precompute` (pair list with images within ``cutoff``,
+use the PBC path of :func:`rsfff.ff.cmm.batched_precompute` (pair list with images within ``cutoff``,
 short-range complements switched off over the last ``switch_width``, Ewald for the bare Coulomb part, a
-matrix-free CG induction solve warm-started from the previous call). :class:`CompleteCalculator` is the ASE face
+matrix-free CG induction solve warm-started from the previous call). :class:`CmmCalculator` is the ASE face
 of it; ``rsfff/md/ipi_ions.py`` the i-PI driver.
 
 Energies are interaction energies relative to the isolated ions (the model's ``e_int``), Hartree internally.
 """
 from __future__ import annotations
 
-import io
-import tarfile
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -22,72 +19,26 @@ import torch
 from ase.calculators.calculator import Calculator, all_changes
 from ase.stress import full_3x3_to_voigt_6_stress
 
-from ..ff.complete import DensityEnvironment, PROBE_NAMES, batched_precompute
-from ..ff.ionct import ct as CT
-from ..ff.ionct.params import IonTable
+from ..ff.cmm import batched_precompute, load_cmm
 
-__all__ = ["CompleteCalculator", "CompletePotential", "load_complete_model"]
+__all__ = ["CmmCalculator", "CmmPotential", "load_model"]
 
 HARTREE_TO_EV = 27.211386245988
-REPO = Path(__file__).resolve().parents[2]
 
 
-def _resolve_params(params, args, ckpt_path):
-    """The parameter table: the given path, else the run's ``--params`` (absolute, relative to the working
-    directory or to any parent of the checkpoint), else the file of that name in rsfff's params/."""
-    if params is not None:
-        return Path(params)
-    name = (args or {}).get("params")
-    if not name:
-        raise ValueError("the checkpoint does not name its parameter table: pass params=")
-    p = Path(name)
-    cands = [p, Path.cwd() / p] + ([q / p for q in Path(ckpt_path).resolve().parents] if ckpt_path else [])
-    cands.append(REPO / "params" / p.name)
-    for c in cands:
-        if c.exists():
-            return c
-    raise FileNotFoundError(f"parameter table {name!r} not found (tried {[str(c) for c in cands]})")
+def load_model(checkpoint, params=None, device="cpu", table_cache=None):
+    """(model, IonTable, RadialTable, ChannelTable) of a cmm checkpoint, a legacy complete-model checkpoint or a run
+    tarball (:func:`rsfff.ff.cmm.load_cmm`); the radial table of the precompute is cached in ``table_cache``."""
+    from ..train.cmm import radial_table
+    model = load_cmm(checkpoint, params=params)
+    tab, chan = model.tab, model.chan
+    table = radial_table(tab, model.params_path, table_cache)
+    tab = tab.to(device)
+    model.tab = tab
+    return model.to(device), tab, table.to(device), chan
 
 
-def _open_checkpoint(path):
-    """model.pt, a run directory holding it, or a tarball with a model.pt (and optionally the params json)."""
-    path = Path(path)
-    if path.is_dir():
-        path = path / "model.pt"
-    if tarfile.is_tarfile(path):
-        tmp = Path(tempfile.mkdtemp(prefix="rsfff_model_"))
-        with tarfile.open(path) as tf:
-            tf.extractall(tmp, filter="data")
-        found = sorted(tmp.rglob("model.pt"))
-        if not found:
-            raise FileNotFoundError(f"no model.pt in {path}")
-        jsons = sorted(found[0].parent.glob("*.json"))
-        return found[0], next((j for j in jsons if j.name.startswith("ions_")), None)
-    return path, None
-
-
-def load_complete_model(checkpoint, params=None, device="cpu", table_cache=None, strict=True):
-    """(model, IonTable, RadialTable, ChannelTable) of a train_ionct ``--model complete`` run."""
-    from ..train.train_ionct import build_model, radial_table
-
-    ck_path, bundled = _open_checkpoint(checkpoint)
-    ck = torch.load(ck_path, map_location="cpu", weights_only=False)
-    args = ck["args"]
-    if args.get("model", "ionct") != "complete":
-        raise ValueError(f"{checkpoint}: not a complete-model run (model = {args.get('model')!r})")
-    p = _resolve_params(params if params is not None else bundled, args, ck_path)
-    tab, chan = IonTable.load(p), CT.ChannelTable.load(p)
-    probes = args.get("env_probes") or PROBE_NAMES
-    names = ck.get("feature_names") or DensityEnvironment(tab, probes=probes,
-                                                         inv_form=args.get("inv_form") or "norm").feature_names
-    model = build_model(args, tab, chan, ck["n_feat"], ck["state"]["feat_scale"], names)
-    model.load_state_dict(ck["state"], strict=strict)
-    model.eval()
-    table = radial_table(tab, p, table_cache)
-    return model.to(device), tab.to(device), table.to(device), chan
-
-
-class CompletePotential:
+class CmmPotential:
     """Energies, forces and virials of a batch of structures (same or different atoms, clusters or periodic).
 
     ``cutoff`` / ``switch_width`` (Angstrom), ``ewald_tol`` and ``dispersion_tail`` are the periodic path's
@@ -106,7 +57,7 @@ class CompletePotential:
 
     @classmethod
     def from_checkpoint(cls, checkpoint, params=None, device="cpu", table_cache=None, **kw):
-        return cls(*load_complete_model(checkpoint, params, device, table_cache), **kw)
+        return cls(*load_model(checkpoint, params, device, table_cache), **kw)
 
     def evaluate(self, numbers, positions, cells=None, stress=True):
         """``numbers`` a list of (n_b,) atomic numbers, ``positions`` a list of (n_b, 3) Angstrom, ``cells`` None
@@ -133,7 +84,7 @@ class CompletePotential:
                 leaves.append(eps)
         else:
             p_in = pos
-        bt = batched_precompute(p_in, Z, fr, self.tab, self.table, self.chan, inv_form=self.model.inv_form, **kw)
+        bt = batched_precompute(p_in, Z, fr, self.tab, self.table, self.chan, inv_form="sq", **kw)
         key = (tuple(Z.tolist()), B)
         if periodic and self.warm_start and self._x is not None and key == self._key:
             bt["x_guess"] = self._x
@@ -141,7 +92,7 @@ class CompletePotential:
         E = out["e_int"]
         grads = torch.autograd.grad(E.sum(), leaves)
         if periodic:
-            z = out.get("z_xpol")            # the exchange-polarization solve's variables (with breathing)
+            z = out.get("z_pol")             # the induction solve's variables (with breathing)
             self._x, self._key = (z if z is not None else out["x"])[bt["mask"]].detach(), key
         self.last = {"cg_iters": out.get("cg_iters", 0), "terms": {k: out[k].detach().cpu().numpy() for k in
                      ("e_elst", "e_pauli", "e_disp", "e_pol", "e_ct")}}
@@ -154,25 +105,25 @@ class CompletePotential:
         return E.detach().cpu().numpy(), np.split(forces, split), vir
 
 
-class CompleteCalculator(Calculator):
+class CmmCalculator(Calculator):
     """ASE calculator: eV, eV/Angstrom, eV/Angstrom^3. ``atoms.pbc`` all True is a periodic cell, all False a
     cluster (mixed is not supported)."""
 
     implemented_properties = ["energy", "free_energy", "forces", "stress"]
 
-    def __init__(self, potential: CompletePotential, **kwargs):
+    def __init__(self, potential: CmmPotential, **kwargs):
         super().__init__(**kwargs)
         self.potential = potential
 
     @classmethod
     def from_checkpoint(cls, checkpoint, params=None, device="cpu", table_cache=None, **kw):
-        return cls(CompletePotential.from_checkpoint(checkpoint, params, device, table_cache, **kw))
+        return cls(CmmPotential.from_checkpoint(checkpoint, params, device, table_cache, **kw))
 
     def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
         super().calculate(atoms, properties, system_changes)
         pbc = np.asarray(self.atoms.pbc, bool)
         if pbc.any() and not pbc.all():
-            raise NotImplementedError("CompleteCalculator: mixed periodicity (pbc must be all True or all False)")
+            raise NotImplementedError("CmmCalculator: mixed periodicity (pbc must be all True or all False)")
         periodic = bool(pbc.all())
         want_stress = "stress" in properties
         if want_stress and not periodic:

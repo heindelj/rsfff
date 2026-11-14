@@ -1,5 +1,5 @@
 # Every site. RSFFF_AL is the project dir (the project's workers/rsfff/context/<site>.toml sets `project`);
-# RSFFF_SCRIPTS this checkout's scripts/ (train.ionct's pair-scan diagnostics); RSFFF_WORKER_ENV = "" keeps the
+# RSFFF_SCRIPTS this checkout's scripts/; RSFFF_WORKER_ENV = "" keeps the
 # environment the manager runs in (the allocation's modules and env) instead of sourcing an env script.
 [context]
 env = { RSFFF_WORKER_ENV = "", RSFFF_AL = "{context.project}", RSFFF_SCRIPTS = "{worker}/../../../scripts" }

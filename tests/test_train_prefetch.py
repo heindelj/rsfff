@@ -1,9 +1,9 @@
-"""Batch transfer of train_ionct: pack_to_device (one copy per dtype, views of the device buffer) and
+"""Batch transfer of the cmm trainer (cmm_data): pack_to_device (one copy per dtype, views of the device buffer) and
 prefetch_batches (background collate + side-stream copy) give the same batches as collate + to_device."""
 import pytest
 import torch
 
-import rsfff.train.train_ionct as T
+import rsfff.train.cmm_data as T
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 

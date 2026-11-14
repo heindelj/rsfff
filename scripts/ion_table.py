@@ -36,8 +36,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from rsfff.ff.ionct import kernels as K
-from rsfff.ff.ionct.params import IonTable
+from rsfff.ff.cmm import kernels as K
+from rsfff.ff.cmm.params import IonTable
 from rsfff.qcgen import elst_db as Db
 from rsfff.qcgen import elst_fit as EF
 from rsfff.qcgen import elst_ref as E
@@ -244,7 +244,7 @@ def _load_table(doc, syms):
 def refine_shells(ions, syms, scans, r_min, lam, iters, log):
     """Refit every requested ion's shell (n_t, b_t) to the frozen pair scans with a log penalty toward the ESP fit;
     the last shell's electron count closes the charge. Writes the shells back into ions[s]."""
-    from rsfff.ff.complete.elst import permanent_electrostatics
+    from rsfff.ff.cmm.elst import permanent_electrostatics
     tab0 = _load_table({"ions": ions}, syms)
     frames, ref = [], []
     for key, d in scans.items():

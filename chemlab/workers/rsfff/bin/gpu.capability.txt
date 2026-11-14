@@ -9,6 +9,3 @@ rsfff.n_wigner = *; rsfff.wigner_temperature = *; rsfff.n_dimers = *; rsfff.n_di
 profile train:
 train.fit; train.model = rsfff_committee; train.epochs = *
 rsfff.config = *; rsfff.members = *; rsfff.warm_start = *; rsfff.warm_epochs = *; rsfff.seed = *; rsfff.set = *
-profile train_ionct:
-train.ionct; train.epochs = *; rsfff.seed = *
-rsfff.ionct.data = *; rsfff.ionct.params = *; rsfff.ionct.env = *; rsfff.ionct.preset = *; rsfff.ionct.args = *; rsfff.ionct.analysis = *

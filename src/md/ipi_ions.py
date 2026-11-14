@@ -1,4 +1,4 @@
-"""i-PI driver for the complete ion model: ``i-pi-py_driver -m custom -P <rsfff>/src/md/ipi_ions.py -o ...``.
+"""i-PI driver for a cmm model: ``i-pi-py_driver -m custom -P <rsfff>/src/md/ipi_ions.py -o ...``.
 
 Parameters (``-o`` key=value, comma-separated): ``template`` (an ASE-readable file with the atoms in i-PI's
 order, e.g. the run's init.xyz), ``model`` (model.pt, its run directory or a tarball holding it), and optionally
@@ -19,7 +19,7 @@ import numpy as np
 from ase.io import read
 from ipi.pes.dummy import Dummy_driver
 
-from rsfff.md.ions import CompletePotential
+from rsfff.md.ions import CmmPotential
 
 __DRIVER_NAME__ = "rsfff_ions"
 __DRIVER_CLASS__ = "RsfffIonsDriver"
@@ -43,7 +43,7 @@ class RsfffIonsDriver(Dummy_driver):
 
     def check_parameters(self):
         self.numbers = read(self.template).numbers
-        self.potential = CompletePotential.from_checkpoint(self.model_path, self.params, self.device, self.table_cache,
+        self.potential = CmmPotential.from_checkpoint(self.model_path, self.params, self.device, self.table_cache,
                                                            **self.settings)
 
     def _evaluate(self, cells, positions):

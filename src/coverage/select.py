@@ -60,11 +60,30 @@ class Guard:
         return None
 
 
-def featurizer_for_params(params, inv_form="sq"):
-    """The complete model's density environment for a parameter table (what the heads read, before feat_scale)."""
-    from ..ff.complete.environment import DensityEnvironment
-    from ..ff.ionct.params import IonTable
-    return DensityEnvironment(IonTable.load(params), inv_form=inv_form)
+def featurizer_for_params(params, inv_form="sq", space="density"):
+    """The features a hull lives in, for a species table: ``space="env_channels"`` (cmm runs' hull.pt) the 17 raw
+    encoder channels, else the density environment's invariants (before the feature scale)."""
+    from ..ff.cmm.params import IonTable
+    tab = IonTable.load(params)
+    if space == "env_channels":
+        return _ChannelFeaturizer(tab)
+    from ..ff.cmm.environment import DensityEnvironment
+    return DensityEnvironment(tab, inv_form=inv_form)
+
+
+class _ChannelFeaturizer:
+    """The cmm encoder's raw channels of a frame (``rsfff.ff.cmm.channels.raw_channels``)."""
+
+    def __init__(self, tab):
+        from ..ff.cmm.channels import R_MAX
+        from ..ff.cmm.tabulate import XpolTable, cached_table
+        self.tab, self.table = tab, cached_table(XpolTable, tab, r_max=R_MAX)
+
+    def __call__(self, positions, atomic_numbers, batch_idx):
+        from types import SimpleNamespace
+        from ..ff.cmm.channels import raw_channels
+        sp = self.tab.species_index(atomic_numbers)
+        return SimpleNamespace(inv_feats=raw_channels(self.tab, self.table, positions.double(), sp, batch_idx))
 
 
 def frame_features(featurizer, numbers, pos):

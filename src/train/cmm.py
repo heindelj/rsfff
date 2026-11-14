@@ -39,9 +39,8 @@ import torch
 
 from ..ff.cmm import CmmConfig, CmmModel
 from ..ff.cmm.io import load_cmm, save_cmm
-from ..ff.ionct import ct as CT
-from ..ff.ionct.model import collate
-from ..ff.ionct.params import ATOMIC_NUMBER, IonTable
+from ..ff.cmm.batch import collate, precompute
+from ..ff.cmm.params import ATOMIC_NUMBER, ChannelTable, IonTable
 from . import cmm_data as D
 
 KJ, KJ_ANG = D.KJ, D.KJ_ANG
@@ -243,7 +242,7 @@ def polar_loss(model, pb):
 
 def frames_batch(frames, tab, table, chan, requires_grad=False, device="cpu"):
     """(positions, batched_precompute batch) of raw frames [(symbols, coords A, ...)]."""
-    from ..ff.complete import batched_precompute
+    from ..ff.cmm import batched_precompute
     pos = torch.tensor(np.concatenate([np.asarray(X, float) for _, X, *_ in frames]), dtype=torch.float64,
                        device=device, requires_grad=requires_grad)
     Z = torch.tensor([ATOMIC_NUMBER[x] for sym, *_ in frames for x in sym], device=device)
@@ -296,7 +295,7 @@ def force_metrics(model, frames, tab, table, chan, bs=16):
 def curvature_penalty(model, caches, tab, table, chan, delta=0.02):
     """Mean squared second difference (per A^2) of every environment log-factor along one random per-atom
     displacement field (unit vectors x delta A) of the given frames."""
-    from ..ff.complete import batched_precompute
+    from ..ff.cmm import batched_precompute
     dev = table.device
     pos = torch.cat([c.pos for c in caches]).to(dev, torch.float64)
     Z = torch.tensor([ATOMIC_NUMBER[tab.symbols[int(s)]] for c in caches for s in c.species], device=dev)
@@ -399,11 +398,14 @@ def summarize(rows, cap=20.0):
 def radial_table(tab, params_path, cache_dir=None):
     """The :class:`RadialTable` of the precompute for this species table, cached on disk by the table's hash."""
     import hashlib
-    from ..ff.complete import RadialTable
-    key = hashlib.sha1(Path(params_path).read_bytes() + b"|table-v2").hexdigest()[:16]
+    from ..ff.cmm import RadialTable
+    key = hashlib.sha1(Path(params_path).read_bytes() + b"|cmm-table-v1").hexdigest()[:16]
     path = Path(cache_dir) / f"table_{key}.pt" if cache_dir else None
     if path and path.exists():
-        return torch.load(path, weights_only=False)
+        try:
+            return torch.load(path, weights_only=False)
+        except Exception:  # noqa: BLE001 -- a truncated or stale file: rebuild
+            pass
     t0 = time.time()
     table = RadialTable(tab.to("cpu"))
     print(f"radial table: {table.n_funcs} functions x {table.G} points in {time.time() - t0:.0f}s", flush=True)
@@ -417,7 +419,7 @@ def write_hull(out, X_train, X_held, model, k, meta):
     """out/hull.pt: the training atoms' convex hull in the encoder's channel space; never fails the run."""
     try:
         from ..coverage import INSIDE_TOL, FeatureHull
-        from ..ff.complete.channels import CHANNEL_NAMES
+        from ..ff.cmm.channels import CHANNEL_NAMES
         hull = FeatureHull.fit(X_train.numpy(), model.chan_scale.double().cpu().numpy(), k=k,
                                feature_names=list(CHANNEL_NAMES), verbose=True, meta={**meta, "space": "env_channels"})
         hull.save(out / "hull.pt")
@@ -442,8 +444,8 @@ def run(cfg: TrainConfig, base: Path):
     torch.manual_seed(rc.seed)
     random.seed(rc.seed)
     params = P(dc.params)
-    tab, chan = IonTable.load(params), CT.ChannelTable.load(params)
-    from ..ff.complete import PROBE_NAMES, DensityEnvironment
+    tab, chan = IonTable.load(params), ChannelTable.load(params)
+    from ..ff.cmm import PROBE_NAMES, DensityEnvironment
     feat = DensityEnvironment(tab, probes=PROBE_NAMES, inv_form="sq")
     ct_dimers = {"all": True, "none": False, "like": "like"}[dc.ct_dimers]
     frames = D.load_frames(P(dc.ct_sets), P(dc.walk_eda) if dc.walk_eda else None, dc.ct_max_pair, dc.max_ho_ratio,
@@ -456,9 +458,8 @@ def run(cfg: TrainConfig, base: Path):
     print(f"{len(frames)} frames: " + ", ".join(f"{t} {tags.count(t)}" for t in ("train", "val", "test")), flush=True)
     cache_path = None
     if rc.cache_dir:
-        cache_path = Path(rc.cache_dir) / f"cache_{D.cache_key(params, 'density', True, frames, False)}.pt"
-    caches = D.build_cache(frames, tab, chan, feat, cache_path or out / "cache.pt", lean=True,
-                           workers=rc.precompute_workers, frontier=False)
+        cache_path = Path(rc.cache_dir) / f"cache_{D.cache_key(params, frames)}.pt"
+    caches = D.build_cache(frames, tab, chan, feat, cache_path or out / "cache.pt", workers=rc.precompute_workers)
     tr = [c for c, t in zip(caches, tags) if t == "train"]
     va = [c for c, t in zip(caches, tags) if t == "val"]
     te = [c for c, t in zip(caches, tags) if t == "test"]
@@ -475,10 +476,9 @@ def run(cfg: TrainConfig, base: Path):
                                 files=("ct-polar", *[f"seed-{x}-polar" for x in dc.salts]),
                                 ct_max_pair=dc.polar_ct_max_pair) if dc.polar_almo else [])
         total = D.total_polar_targets([P(f) for f in dc.polar_sets], species=tab.symbols, exclude=dc.exclude_names)
-        from ..ff.ionct.model import precompute
         for pid, sym, X, tgt, ok, is_tot in ([(*t, False) for t in almo] + [(*t, False, True) for t in total]):
             lab = {"alpha": tgt, "ct_ok": ok, **({"total": True} if is_tot else {})}
-            c = precompute(sym, X, tab, chan, feat, lab, {"polar_id": pid}, lean=True, frontier=False)
+            c = precompute(sym, X, tab, chan, feat, lab, {"polar_id": pid})
             (polar_te if pid in set(dc.polar_test) else polar_tr).append(c)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)
         if polar_tr:

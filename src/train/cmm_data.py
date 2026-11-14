@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ..ff.ionct.model import collate, precompute
+from ..ff.cmm.batch import collate, precompute
 
 KJ = 2625.4996
 
@@ -37,7 +37,7 @@ IONIC_RADIUS = {"Li": 0.76, "Na": 1.02, "K": 1.38, "Rb": 1.52, "Cs": 1.67, "F": 
 
 _PP = {}
 
-CACHE_VERSION = 4     # 2: equivariant environment blocks; 3: per-shell pseudo basis; 4: induced Pauli block A_pp
+CACHE_VERSION = 5     # 5: the cmm FrameCache (rsfff.ff.cmm.batch)
 
 FORCE_TEST = ("nacl14", "nacl16", "nacl18", "nacl20")
 
@@ -232,6 +232,25 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
     return out
 
 
+def elec_labels(ct_sets, walk_eda):
+    """{geometry key: ALMO cls_elec (kJ/mol)} of the ct-* sets and the walk EDAs (the frozen electrostatics labels
+    the shell fits use)."""
+    out = {}
+    for wf in ("ct-walk", "ct-mbe", "ct-sat", "ct-scan"):
+        p = Path(ct_sets) / f"{wf}.jsonl"
+        for line in open(p) if p.exists() else []:
+            r = json.loads(line)
+            if r.get("stage") == "label" and "eda" in r and r.get("symbols") and not (r.get("tags") or {}).get("field"):
+                out.setdefault(_geom_key(r["symbols"], r["coords"]), r["eda"]["cls_elec"])
+    if walk_eda:
+        from ase.io import read
+        for f in sorted(Path(walk_eda).glob("*.xyz")):
+            for a in read(f, ":"):
+                if "eda_cls_elec" in a.info:
+                    out.setdefault(_geom_key(a.get_chemical_symbols(), a.positions), a.info["eda_cls_elec"] * KJ)
+    return out
+
+
 def split(frames, test_parents, val_frac=0.1, seed=0):
     parents = sorted({m["parent"] for *_, m in frames})
     rest = [p for p in parents if p not in set(test_parents)]
@@ -242,9 +261,9 @@ def split(frames, test_parents, val_frac=0.1, seed=0):
     return [tag(m["parent"]) for *_, m in frames]
 
 
-def _pp_init(tab, chan, featurizer, lean, frontier=False):
+def _pp_init(tab, chan, featurizer):
     torch.set_num_threads(1)
-    _PP.update(tab=tab, chan=chan, featurizer=featurizer, lean=lean, frontier=frontier)
+    _PP.update(tab=tab, chan=chan, featurizer=featurizer)
 
 
 def _pp_one(item):
@@ -253,67 +272,54 @@ def _pp_one(item):
     import io
     k, sym, X = item
     buf = io.BytesIO()
-    torch.save(precompute(sym, X, _PP["tab"], _PP["chan"], _PP["featurizer"], lean=_PP["lean"],
-                          frontier=_PP["frontier"]), buf)
+    torch.save(precompute(sym, X, _PP["tab"], _PP["chan"], _PP["featurizer"]), buf)
     return k, buf.getvalue()
 
 
-def cache_key(params_path, env, lean, frames, frontier=False):
-    """A short hash of what the precompute depends on: the parameter table's contents, the environment, lean (and
-    whether the lean cache keeps the frontier potentials), the cache layout version and the frames' geometries
-    (species + coordinates), in order."""
-    import hashlib
+def cache_key(params_path, frames):
+    """A short hash of what the precompute depends on: the species table's contents, the cache layout version and
+    the frames' geometries (in order)."""
     h = hashlib.sha1()
     h.update(Path(params_path).read_bytes())
-    h.update(f"|{env}|lean={int(lean)}|frontier={int(frontier)}|v{CACHE_VERSION}|{len(frames)}|".encode())
+    h.update(f"|cmm-cache-v{CACHE_VERSION}|".encode())
     for sym, X, *_ in frames:
-        h.update("".join(sym).encode())
-        h.update(np.asarray(X, dtype=np.float64).round(6).tobytes())
+        h.update(("".join(sym)).encode())
+        h.update(np.round(np.asarray(X, float), 6).tobytes())
     return h.hexdigest()[:16]
 
 
-def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0, frontier=False):
-    """The per-frame precompute (:func:`rsfff.ff.ionct.model.precompute`), from ``path`` when it holds a complete
-    cache for these frames, else computed -- in ``workers`` processes when > 0 (the frames are independent; each
-    worker runs single-threaded, so use the node's cores) -- and saved there. Labels and masks always come from
-    the data, never from the cache."""
+def build_cache(frames, tab, chan, featurizer, path=None, workers=0):
+    """The per-frame precompute (:func:`rsfff.ff.cmm.batch.precompute`), from ``path`` when it holds a cache for
+    these frames, else computed -- in ``workers`` processes when > 0 (each single-threaded) -- and saved there.
+    Labels and masks always come from the data, never from the cache."""
     if path and Path(path).exists():
         caches = torch.load(path, weights_only=False)
-        need = ("ps_index",) if lean else ("ps_index", "EVD", "ch_EP", "ch_J")
-        complete = all(getattr(caches[0], k, None) is not None for k in need) if caches else False
-        if len(caches) == len(frames) and complete:   # geometry is cached; labels and masks always come from the data
-            refeat = getattr(featurizer, "inv_form", None) is not None and all(c.env for c in caches)
-            if refeat:                  # the features in the requested invariant form, from the cached blocks
-                from ..ff.complete import env_invariants
+        if len(caches) == len(frames) and caches and hasattr(caches[0], "ch_ltaper"):
             for c, (sym, X, lab, meta) in zip(caches, frames):
                 assert len(sym) == c.species.shape[0]
                 c.labels, c.meta = dict(lab), dict(meta)
-                if refeat:
-                    c.feats = env_invariants(c.env, featurizer.probes, featurizer.inv_form).to(c.feats.dtype)
             return caches
     t0 = time.time()
     caches = [None] * len(frames)
     if workers and workers > 1 and len(frames) > 2 * workers:
+        import io
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor
         items = [(k, sym, X) for k, (sym, X, *_rest) in enumerate(frames)]
         with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"), initializer=_pp_init,
-                                 initargs=(tab, chan, featurizer, lean, frontier)) as ex:
-            done = 0
-            import io
-            for k, blob in ex.map(_pp_one, items, chunksize=8):
+                                 initargs=(tab, chan, featurizer)) as ex:
+            for done, (k, blob) in enumerate(ex.map(_pp_one, items, chunksize=8), 1):
                 caches[k] = torch.load(io.BytesIO(blob), weights_only=False)
-                done += 1
                 if done % 500 == 0:
                     print(f"  precomputed {done}/{len(frames)} [{time.time() - t0:.0f}s, {workers} workers]", flush=True)
     else:
         for k, (sym, X, *_rest) in enumerate(frames):
-            caches[k] = precompute(sym, X, tab, chan, featurizer, lean=lean, frontier=frontier)
+            caches[k] = precompute(sym, X, tab, chan, featurizer)
             if (k + 1) % 200 == 0:
                 print(f"  precomputed {k + 1}/{len(frames)} [{time.time() - t0:.0f}s]", flush=True)
     for c, (sym, X, lab, meta) in zip(caches, frames):
         c.labels, c.meta = dict(lab), dict(meta)
-    print(f"  precompute done: {len(frames)} frames in {time.time() - t0:.0f}s (lean={lean})", flush=True)
+    print(f"  precompute done: {len(frames)} frames in {time.time() - t0:.0f}s", flush=True)
     if path:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(caches, path)

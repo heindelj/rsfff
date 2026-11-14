@@ -26,19 +26,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from rsfff.ff.ionct import IonTable
-from rsfff.ff.ionct import kernels as K
+from rsfff.ff.cmm import IonTable
+from rsfff.ff.cmm import kernels as K
 from rsfff.ff.multipole import slater_one_center_damp
-from rsfff.train.train_ionct import KJ, _geom_key, load_frames
+from rsfff.train.cmm_data import KJ, _geom_key, load_frames
 
 warnings.filterwarnings("ignore")
 ZMAP = {"Na": 11, "Cl": 17}
 
 
 def elec_labels(ct_sets, walk_eda):
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from ionct_parity import elec_labels as f
+    from rsfff.train.cmm_data import elec_labels as f
     return f(ct_sets, walk_eda)
 
 

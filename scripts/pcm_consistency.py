@@ -1,6 +1,6 @@
 """QM / force-field consistency of the continuum (the cpcm plan's S5 + S6 on the complete model's frozen densities).
 
-Runs the pyscf ALMO-EDA in C-PCM (``rsfff.qcgen.almo``) and the force-field continuum (``rsfff.ff.complete.solvent``)
+Runs the pyscf ALMO-EDA in C-PCM (``rsfff.qcgen.almo``) and the force-field continuum (``rsfff.ff.cmm.solvent``)
 on the same ions with the same cavity, and compares what does not depend on any trained parameter:
 
 1. the cavity (points, exponents, switching);
@@ -20,8 +20,8 @@ import numpy as np
 import torch
 
 from rsfff.ff import cpcm
-from rsfff.ff.complete.solvent import permanent_surface_potential
-from rsfff.ff.ionct.params import IonTable
+from rsfff.ff.cmm.solvent import permanent_surface_potential
+from rsfff.ff.cmm.params import IonTable
 from rsfff.qcgen.almo import Fragment, Continuum, almo_eda, KJ, surface_potential, pcm_energy
 
 ORDER = {110: 17, 194: 23, 302: 29, 590: 41}

@@ -31,8 +31,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from rsfff.ff.ionct import IonTable
-from rsfff.ff.ionct import kernels as K
+from rsfff.ff.cmm import IonTable
+from rsfff.ff.cmm import kernels as K
 from rsfff.qcgen import elst_db as Db
 from rsfff.qcgen import elst_ref as E
 
@@ -105,8 +105,7 @@ def scan_frames(scans, r_min):
 
 
 def cls_elec_frames(ct_sets, walk_eda):
-    from ionct_parity import elec_labels
-    from rsfff.train.train_ionct import _geom_key, load_frames
+    from rsfff.train.cmm_data import _geom_key, elec_labels, load_frames
     frames = load_frames(ct_sets, walk_eda)
     el = elec_labels(ct_sets, walk_eda)
     fr = [(sym, X) for sym, X, *_ in frames]

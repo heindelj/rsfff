@@ -2,8 +2,8 @@
 import json, sys, numpy as np, torch
 from rsfff.qcgen import elst_ref as E
 from rsfff.qcgen import pol_ref as PR
-from rsfff.ff.ionct import kernels as K
-from rsfff.ff.ionct.params import IonTable
+from rsfff.ff.cmm import kernels as K
+from rsfff.ff.cmm.params import IonTable
 BOHR = K.BOHR_ANG; KJ = 2625.4996
 tab = IonTable.load("/home/claude/env/rsfff/params/ions_wb97mv_tzvpd_pf2.json")
 ion, q = sys.argv[1], float(sys.argv[2])

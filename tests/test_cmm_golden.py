@@ -31,13 +31,10 @@ def _case(name):
 
 
 def _run(ck):
-    from rsfff.ff.cmm import load_legacy
-    from rsfff.ff.complete import batched_precompute
-    from rsfff.ff.ionct import ct as CT
-    from rsfff.ff.ionct.params import ATOMIC_NUMBER, IonTable
-    from rsfff.train.train_ionct import radial_table
+    from rsfff.ff.cmm import ATOMIC_NUMBER, ChannelTable, IonTable, batched_precompute, load_legacy
+    from rsfff.train.cmm import radial_table
 
-    tab, chan = IonTable.load(PARAMS), CT.ChannelTable.load(PARAMS)
+    tab, chan = IonTable.load(PARAMS), ChannelTable.load(PARAMS)
     table = radial_table(tab, PARAMS, os.environ.get("RSFFF_TABLE_CACHE"))
     m = load_legacy(ck, tab, chan)
     m.eval()
@@ -65,7 +62,11 @@ def _run(ck):
 def test_cmm_reproduces_complete(name):
     ck = _case(name)
     if ck["film"]:
-        pytest.importorskip("bb.nn.conditioning")
+        try:
+            from bb.nn.conditioning import ConditionedTrunk
+            ConditionedTrunk(2, 2, 1, d_c=2, mode="film")
+        except Exception:  # noqa: BLE001
+            pytest.skip("needs bb (FiLM trunk)")
     u, out, F, alpha = _run(ck)
     ref = ck["ref"]
     for k in ("e_elst", "e_pauli", "e_disp", "e_pol", "e_xpol", "e_ct", "e_int"):

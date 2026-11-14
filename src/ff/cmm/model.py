@@ -35,15 +35,15 @@ import torch
 from torch import nn
 
 from ..dispersion import tt_damped_c6_energy
-from ..ionct import kernels as K
-from ..ionct.params import IonTable
-from ..ionct.ct import ChannelTable
 from ..multipole import slater_two_center_damp_unequal
-from ..complete.channels import CHANNEL_NAMES, THREE_BODY_COLS, TWO_BODY_COLS
-from ..complete.elst import permanent_electrostatics
-from ..complete.environment import invariant_names
-from ..complete.species import SpeciesEmbedding
-from ..complete.tabulate import FluxTable, XpolTable, cached_table, flux_pair_terms, shape_self_coulomb, xpol_overlap_map
+from . import kernels as K
+from .batch import channel_types
+from .channels import CHANNEL_NAMES, THREE_BODY_COLS, TWO_BODY_COLS
+from .elst import permanent_electrostatics
+from .environment import PROBE_NAMES, invariant_names
+from .params import ChannelTable, IonTable
+from .species import SpeciesEmbedding
+from .tabulate import FluxTable, XpolTable, cached_table, flux_pair_terms, shape_self_coulomb, xpol_overlap_map
 from .config import PAIR_GROUPS, CmmConfig
 from .encoder import READOUTS, Encoder
 
@@ -103,7 +103,7 @@ class CmmModel(nn.Module):
         f64 = dict(dtype=torch.float64)
         S, T = len(tab.symbols), tab.shell_n.shape[1]
         sym = tab.symbols
-        self.ctypes = [f"{a}>{b}" for a in sym for b in sym]
+        self.ctypes = list(channel_types(sym))
         self.nT = len(self.ctypes)
         # -- frozen level: Pauli (the permanent shells, per-shell weights, one exponent scale) and dispersion
         occ = tab.shell_n > 0
@@ -175,12 +175,12 @@ class CmmModel(nn.Module):
             if name == "xpol":
                 t = cached_table(XpolTable, self.tab, r_max=R_MAX)
             elif name == "gram":
-                from ..complete.gram import GramTable
+                from .gram import GramTable
                 t = cached_table(GramTable, self.tab, r_max=R_MAX, breath="shape")
             elif name == "flux":
                 t = cached_table(FluxTable, self.tab)
             else:
-                from ..complete.tabulate import ProbeOverlapTable
+                from .tabulate import ProbeOverlapTable
                 t = cached_table(ProbeOverlapTable, self.tab)
             self._tables[name] = t
         if t.device != device:
@@ -197,21 +197,11 @@ class CmmModel(nn.Module):
         return p, bt["pos"][p[1]] - bt["pos"][p[0]]
 
     def channels_raw(self, bt):
-        """(N, 17) the raw two- and three-body channels of every atom (``channels.channels_from_pairs``)."""
-        from ..complete.channels import channels_from_pairs, overlap_switch, pair_electrostatics
-        sp = bt["species"]
-        (i, j), dr = self._pairs(bt)
-        r = dr.norm(dim=-1)
-        keep = r < R_MAX
-        i, j, dr, r = i[keep], j[keep], dr[keep], r[keep]
-        a, b = torch.cat([i, j]), torch.cat([j, i])
-        rr = torch.cat([r, r])
-        tbl = self._table("xpol", dr.device)
-        y = tbl(sp[a], sp[b], rr)
-        O = y[:, tbl.cols(("xp:ovl",), y.device)[0]]
-        w = overlap_switch(O) * O.clamp(min=0.0)
-        E = pair_electrostatics(sp[a], sp[b], rr / K.BOHR_ANG, self.tab)
-        return channels_from_pairs(sp.shape[0], a, torch.cat([dr, -dr]), w, E * w)
+        """(N, 17) the raw two- and three-body channels of every atom (``channels.raw_channels``)."""
+        from .channels import raw_channels
+        pbc = bt.get("pbc") is not None
+        return raw_channels(self.tab, self._table("xpol", bt["pos"].device), bt["pos"], bt["species"], bt["frame"],
+                            bt["pairs"] if pbc else None, bt["pair_dr"] if pbc else None)
 
     def gate_reach(self):
         """(A) the largest distance at which any probe's overlap with any species is above the gate's on-value."""
@@ -400,7 +390,7 @@ class CmmModel(nn.Module):
 
     def gram_blocks(self, sp, i, j, geo, D):
         """(P, D, D) the on-site Hessians W2_i 2 A_ij Gt(i <- j) and W2_j 2 A_ij Gt(j <- i)."""
-        from ..complete.gram import gram_blocks
+        from .gram import gram_blocks
         dr, Aij = geo
         tbl = self._table("gram", dr.device)
         w = (2 * Aij)[:, None, None]
@@ -531,7 +521,6 @@ class CmmModel(nn.Module):
     @property
     def _breath_feature(self):
         """The column of breath:V0_pen in the batch's environment invariants (the breathing drive)."""
-        from ..complete.environment import PROBE_NAMES
         names = invariant_names("sq")
         return PROBE_NAMES.index("breath") * len(names) + self.breath_col
 
