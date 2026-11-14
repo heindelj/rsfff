@@ -23,10 +23,10 @@ timeout_minutes = 1440
 [run."train.ionct"]
 command = "bash {worker}/bin/gpu_worker.sh run {workdir}"
 timeout_minutes = 2880
-# The complete (ion) models: this package's own program, rsfff.train.complete_worker (bin/complete_worker.sh), needing
-# no project dir -- the data bundle comes as the job's input (scripts/complete_bundle.py writes it).
-[run."train.complete"]
-command = "bash {worker}/bin/complete_worker.sh run {workdir}"
+# The cmm (ion) models: this package's own program, rsfff.train.cmm_worker (bin/cmm_worker.sh), needing no project
+# dir -- the data bundle comes as the job's input (scripts/cmm_bundle.py writes it).
+[run."train.cmm"]
+command = "bash {worker}/bin/cmm_worker.sh run {workdir}"
 timeout_minutes = 2880
 # The bonding (1-4) models (fff_bonding): this package's own program, rsfff.train.bonding_worker (bin/bonding_worker.sh),
 # needing no project dir -- the config, the data and the references come as the job's inputs.

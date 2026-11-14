@@ -1,0 +1,490 @@
+"""Data of the cmm trainer: the labelled ALMO-EDA sets, the force frames, the polarizability targets, the per-frame
+precompute cache and the batch transfer to the device.
+
+Moved from ``train_ionct`` (tag complete-explore-final). The ALMO-CTA channel sums are no longer labels; the CTA
+data still decides where a frame's E_CT is a channel quantity (``max_ho_ratio``).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from ..ff.ionct.model import collate, precompute
+
+KJ = 2625.4996
+
+DEFAULT_TEST = ("walk_nacl10_111", "walk_nacl10_112", "walk_nacl10_113", "walk_nacl10_114",
+                "nacl4_03", "nacl5_07", "nacl6_11", "nacl8_15", "nacl9_19")
+
+F_SET = 0.002
+
+#: ct-polar geometries held out of the alpha loss (the rest train it)
+POLAR_TEST = ("pair_Na-Cl_r2.250", "pair_Na-Cl_r2.750", "pair_Na-Cl_r3.250", "pair_Cl-Cl_r3.500", "pair_Cl-Cl_r4.500",
+              "pair_Cl-Cl_r5.500", "shell_tet4_r2.800", "trimer_Na-Cl-Na_r2.800_a90", "trimer_Na-Cl-Na_r2.800_a120",
+              "trimer_Na-Cl-Na_r2.800_a150", "trimer_Na-Cl-Na_r2.800_a180")
+
+#: Na-Cl pairs beyond this (A) carry ionic-covalent mixing in ALMO's alpha_CT: no CT target there
+POLAR_CT_MAX_PAIR = 3.6
+
+# Shannon ionic radii (A, 6-coordinate): scale the Na-Cl dimer CT cut to the other salts
+IONIC_RADIUS = {"Li": 0.76, "Na": 1.02, "K": 1.38, "Rb": 1.52, "Cs": 1.67, "F": 1.33, "Cl": 1.81, "Br": 1.96, "I": 2.20}
+
+_PP = {}
+
+CACHE_VERSION = 4     # 2: equivariant environment blocks; 3: per-shell pseudo basis; 4: induced Pauli block A_pp
+
+FORCE_TEST = ("nacl14", "nacl16", "nacl18", "nacl20")
+
+KJ_ANG = KJ / 0.529177210903          # Hartree/bohr -> kJ/mol/A
+
+
+def dimer_ct_cut(symbols, na_cl_cut):
+    """The distance below which an unlike ion pair's ALMO E_CT is a label: ``na_cl_cut`` for Na-Cl (3.6 A by
+    default), scaled by the sum of the two ionic radii for the other salts (KBr 4.24, CsI 4.89, LiF 2.67 A at 3.6).
+    Beyond it the vacuum dimer's ionic and covalent configurations mix and E_CT is not a channel quantity."""
+    a, b = symbols
+    return na_cl_cut * (IONIC_RADIUS[a] + IONIC_RADIUS[b]) / (IONIC_RADIUS["Na"] + IONIC_RADIUS["Cl"])
+
+
+def polar_targets(ct_sets, ct_dimers=True, files=("ct-polar",), min_ct=None, ct_max_pair=POLAR_CT_MAX_PAIR):
+    """[(polar_id, symbols, coords A, target (3, 2) [alpha_MI, alpha_CT] per axis bohr^3 (nan: axis not computed),
+    ct_ok)] from the
+    ct-polar finite-field EDAs: alpha = -d2E/dF2 by central differences at F_SET; MI = full - ct.
+    ``files``: the polar sets to read (ct-polar, seed-<salt>-polar); a seed set's ids carry its salt,
+    "<salt>:<polar_id>" (its shell ids name no species).
+    ``min_ct``: drop a geometry whose alpha_CT per ion falls below it on any axis (bohr^3): a negative alpha_CT means
+    the field switched the EDA's CT partition (LiF near contact: CT -157, MI +163 per ion, full ~5), so MI is wrong too.
+    ``ct_max_pair``: an unlike pair's alpha_CT is a target only within ``dimer_ct_cut(pair, ct_max_pair)`` (its alpha_MI
+    always is): beyond it the field mixes the dimer's ionic and covalent configurations (ALMO alpha_CT keeps rising)."""
+    import collections
+    g = collections.defaultdict(dict)
+    for name in files:
+        p = Path(ct_sets) / f"{name}.jsonl"
+        if not p.exists():
+            continue
+        prefix = f"{name.split('-')[1]}:" if name.startswith("seed-") else ""
+        for line in open(p):
+            r = json.loads(line)
+            t = r.get("tags") or {}
+            if r.get("stage") != "label" or "polar_id" not in t or "eda" not in r:
+                continue
+            f = t.get("field") or ""
+            key = ("", 0.0) if not f else (f.split(":")[0], round(float(f.split(":")[1]), 6))
+            g[prefix + t["polar_id"]][key] = r
+    out = []
+    for pid, d in sorted(g.items()):
+        if ("", 0.0) not in d:
+            continue
+        r0 = d[("", 0.0)]
+        full = lambda r: r["energy"]
+        ct = lambda r: r["eda"]["ct"] / KJ
+        tgt = []
+        for ax in "xyz":
+            if (ax, F_SET) not in d or (ax, -F_SET) not in d:      # axis not computed (pairs: one perpendicular)
+                tgt.append([float("nan"), float("nan")])
+                continue
+            rp, rm = d[(ax, F_SET)], d[(ax, -F_SET)]
+            af = -(full(rp) + full(rm) - 2 * full(r0)) / F_SET ** 2
+            ac = -(ct(rp) + ct(rm) - 2 * ct(r0)) / F_SET ** 2
+            tgt.append([af - ac, ac])
+        X = np.asarray(r0["coords"], float)
+        if min_ct is not None and min((c for _, c in tgt if c == c), default=0.0) / len(r0["symbols"]) < min_ct:
+            continue
+        base = pid.split(":")[-1]
+        if not ct_dimers:                   # no alpha_CT target on any pair (dimer CT needs a dielectric)
+            ct_ok = len(r0["symbols"]) > 2
+        else:
+            ab = base.split("_")[1].split("-") if base.startswith("pair_") else []
+            ct_ok = not (len(ab) == 2 and ab[0] != ab[1]
+                         and float(base.split("_r")[1]) > dimer_ct_cut(ab, ct_max_pair))
+        out.append((pid, r0["symbols"], X, torch.tensor(tgt, dtype=torch.float64), ct_ok))
+    return out
+
+
+def total_polar_targets(files, species=("Na", "Cl"), exclude=()):
+    """[(polar_id "<set>:<name>", symbols, coords A, target (3, 2) [alpha_total, nan] per axis bohr^3)] from labelled
+    sets' finite-field polarizability jobs (ct_model rows with a "polarizability" tensor, in the input frame): the
+    diagonal of the whole-cluster SCF polarizability. Trained against the model's alpha_pol + alpha_CT."""
+    out = []
+    for f in files:
+        stem = Path(f).stem
+        for line in open(f):
+            r = json.loads(line)
+            t = r.get("tags") or {}
+            if r.get("stage") != "label" or r.get("polarizability") is None or not r.get("symbols"):
+                continue
+            if not set(r["symbols"]) <= set(species) or t.get("name") in set(exclude):
+                continue
+            d = np.diag(np.asarray(r["polarizability"], float))
+            tgt = torch.tensor([[v, float("nan")] for v in d], dtype=torch.float64)
+            out.append((f"{stem}:{t.get('name')}", r["symbols"], np.asarray(r["coords"], float), tgt))
+    return out
+
+
+def _geom_key(symbols, coords):
+    """Rigid-motion invariant key: species counts and the sorted, rounded interatomic distances by species pair."""
+    a = np.asarray(coords, float)
+    d = np.linalg.norm(a[:, None] - a[None], axis=-1)
+    i, j = np.triu_indices(len(symbols), 1)
+    parts = sorted(f"{min(symbols[p], symbols[q])}{max(symbols[p], symbols[q])}{d[p, q]:.3f}" for p, q in zip(i, j))
+    return hashlib.md5(("".join(sorted(symbols)) + "|" + ",".join(parts)).encode()).hexdigest()
+
+
+def _ho_ratio(r):
+    """E_CT / (sum of the ALMO-CTA channel energies, complement included); NaN without CTA or if not attractive."""
+    c = r.get("cta") or {}
+    if not c.get("E"):
+        return float("nan")
+    n = len(r["symbols"])
+    E = np.nan_to_num(np.array([[np.nan if v is None else v for v in x] for x in c["E"]], float))[:n, :n]
+    pct = E.sum() - np.trace(E) + sum(v or 0.0 for v in (c.get("E_to_complement") or []))
+    return r["eda"]["ct"] / pct if pct < 0 else float("inf")
+
+
+def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 3.6, max_ho_ratio: float = 1.4,
+                species=("Na", "Cl"), ct_dimers=True, extra_sets=(), extra_files=(), exclude=()):
+    """[(symbols, coords A, labels, meta)], deduplicated.
+
+    The ct label is kept only where ALMO's E_CT is a channel quantity: unlike pairs within ``dimer_ct_cut`` (``ct_max_pair`` for Na-Cl) and, for
+    every frame with CTA, E_CT / sum PCT <= ``max_ho_ratio``. Above that the higher-order relaxation dominates --
+    the ionic-covalent state mixing of a Cl- far from its Na+ partners, which cluster *fragments* (an MBE pair or
+    triple without its environment) show and whole clusters do not (E_CT / sum PCT = 1.1-1.2 for every walk
+    cluster; up to 4-10 for long-range Na-Cl pairs and Na2Cl+ triples). Whole clusters of 4 or more ions keep their
+    label whatever the ratio (1.11-1.30, one at 1.51); above ~1.4 the fragments' CT per ion jumps from ~-3 to
+    -5..-6 kJ/mol (e.g. a Cl- 5.5 A from a Na2 2+ pair, E_CT -70 kJ/mol at ratio 1.58).
+
+    ``ct_dimers="like"`` keeps it on like-ion pairs only (Cl-Cl, Na-Na) and drops every unlike pair's.
+    ``ct_dimers=False`` drops the ct label of every two-ion frame instead of cutting unlike pairs at ``ct_max_pair``:
+    in vacuum the dimer's ionic configuration is not the ground state at long range, so dimer CT needs a dielectric
+    (out of scope); cluster CT keeps its label. ``extra_sets``: more ct_model sets of the same kinds
+    (seed-<salt>-scan / -mbe / -sat), read like the ct-* ones. ``extra_files``: labelled sets anywhere (a ct_model
+    data/ct_sets/<instance>.jsonl, e.g. nacl-compressed), every frame its own parent (by its name tag), so the
+    train / val split takes them one by one."""
+    out, seen = [], set()
+
+    def add(symbols, coords, pol, ct, meta, ho=float("nan"), pauli=float("nan"), extra=None):
+        key = _geom_key(symbols, coords)
+        if key in seen:
+            return
+        seen.add(key)
+        n = len(symbols)
+        ct_mask = True
+        if n == 2 and (not ct_dimers or (ct_dimers == "like" and symbols[0] != symbols[1])):
+            ct_mask = False
+        elif n == 2 and symbols[0] != symbols[1]:
+            ct_mask = float(np.linalg.norm(np.subtract(coords[0], coords[1]))) <= dimer_ct_cut(symbols, ct_max_pair)
+        whole = bool(meta.get("full")) and n >= 4
+        if (np.isfinite(ho) or ho == float("inf")) and not whole:
+            ct_mask = ct_mask and ho <= max_ho_ratio
+        out.append((list(symbols), np.asarray(coords, float),
+                    {"pol": pol / KJ, "ct": ct / KJ, "ct_mask": ct_mask,
+                     "pauli": pauli / KJ, **{k: v / KJ for k, v in (extra or {}).items()}},
+                    {**meta, "n": n, "ho_ratio": ho}))
+
+    sets_ = [(wf, Path(ct_sets) / f"{wf}.jsonl", False) for wf in ("ct-walk", "ct-mbe", "ct-sat", "ct-scan", *extra_sets)]
+    sets_ += [(Path(f).stem, Path(f), True) for f in extra_files]
+    for wf, p, per_frame in sets_:
+        if not p.exists():
+            if per_frame:
+                raise FileNotFoundError(p)
+            continue
+        for line in open(p):
+            r = json.loads(line)
+            if r.get("stage") != "label" or "eda" not in r or not r.get("symbols") or len(r["symbols"]) < 2:
+                continue
+            if not set(r["symbols"]) <= set(species) or (r.get("tags") or {}).get("field"):
+                continue
+            t = r.get("tags") or {}
+            if per_frame and t.get("name") in set(exclude):
+                continue
+            if "mbe_set" in t:
+                parent = t["mbe_set"]
+            elif per_frame:
+                parent = f"{wf}_{t.get('name') or len(out)}"
+            elif t.get("scan") == "pair":
+                parent = f"scan_{t.get('scan_pair')}"
+            else:
+                parent = f"{wf}_{t.get('source', 'x')}"
+            add(r["symbols"], r["coords"], r["eda"]["pol"], r["eda"]["ct"],
+                {"workflow": wf, "parent": parent, "order": int(t.get("mbe_order", len(r["symbols"]))),
+                 "full": t.get("mbe_order") == t.get("mbe_n") if "mbe_set" in t else True}, _ho_ratio(r),
+                r["eda"].get("mod_pauli", float("nan")),
+                {k: r["eda"].get(e, float("nan")) for k, e in (("disp", "disp"), ("elec", "cls_elec"), ("int", "int"))})
+    if walk_eda:
+        from ase.io import read
+        for f in sorted(Path(walk_eda).glob("*.xyz")):
+            for k, a in enumerate(read(f, ":")):
+                sym = a.get_chemical_symbols()
+                if "eda_ct" not in a.info or not set(sym) <= set(species):
+                    continue
+                parent = f"walkeda_{f.stem}_{k}" if len(sym) == 2 else f"walkeda_{f.stem}_{k}"
+                add(sym, a.positions, a.info["eda_pol"] * KJ, a.info["eda_ct"] * KJ,
+                    {"workflow": "walk-eda", "parent": parent, "order": len(sym), "full": True},
+                    pauli=a.info.get("eda_mod_pauli", float("nan")) * KJ,
+                    extra={k: a.info.get(e, float("nan")) * KJ for k, e in (("disp", "eda_disp"), ("elec", "eda_cls_elec"),
+                                                                             ("int", "eda_int"))})
+    return out
+
+
+def split(frames, test_parents, val_frac=0.1, seed=0):
+    parents = sorted({m["parent"] for *_, m in frames})
+    rest = [p for p in parents if p not in set(test_parents)]
+    rng = random.Random(seed)
+    rng.shuffle(rest)
+    val = set(rest[: max(1, int(val_frac * len(rest)))])
+    tag = lambda p: "test" if p in set(test_parents) else "val" if p in val else "train"
+    return [tag(m["parent"]) for *_, m in frames]
+
+
+def _pp_init(tab, chan, featurizer, lean, frontier=False):
+    torch.set_num_threads(1)
+    _PP.update(tab=tab, chan=chan, featurizer=featurizer, lean=lean, frontier=frontier)
+
+
+def _pp_one(item):
+    """One frame's cache, serialized with torch.save (bytes): torch's own pickling of tensors between processes
+    passes shared-memory file descriptors and runs out of them on big batches ("received 0 items of ancdata")."""
+    import io
+    k, sym, X = item
+    buf = io.BytesIO()
+    torch.save(precompute(sym, X, _PP["tab"], _PP["chan"], _PP["featurizer"], lean=_PP["lean"],
+                          frontier=_PP["frontier"]), buf)
+    return k, buf.getvalue()
+
+
+def cache_key(params_path, env, lean, frames, frontier=False):
+    """A short hash of what the precompute depends on: the parameter table's contents, the environment, lean (and
+    whether the lean cache keeps the frontier potentials), the cache layout version and the frames' geometries
+    (species + coordinates), in order."""
+    import hashlib
+    h = hashlib.sha1()
+    h.update(Path(params_path).read_bytes())
+    h.update(f"|{env}|lean={int(lean)}|frontier={int(frontier)}|v{CACHE_VERSION}|{len(frames)}|".encode())
+    for sym, X, *_ in frames:
+        h.update("".join(sym).encode())
+        h.update(np.asarray(X, dtype=np.float64).round(6).tobytes())
+    return h.hexdigest()[:16]
+
+
+def build_cache(frames, tab, chan, featurizer, path=None, lean=False, workers=0, frontier=False):
+    """The per-frame precompute (:func:`rsfff.ff.ionct.model.precompute`), from ``path`` when it holds a complete
+    cache for these frames, else computed -- in ``workers`` processes when > 0 (the frames are independent; each
+    worker runs single-threaded, so use the node's cores) -- and saved there. Labels and masks always come from
+    the data, never from the cache."""
+    if path and Path(path).exists():
+        caches = torch.load(path, weights_only=False)
+        need = ("ps_index",) if lean else ("ps_index", "EVD", "ch_EP", "ch_J")
+        complete = all(getattr(caches[0], k, None) is not None for k in need) if caches else False
+        if len(caches) == len(frames) and complete:   # geometry is cached; labels and masks always come from the data
+            refeat = getattr(featurizer, "inv_form", None) is not None and all(c.env for c in caches)
+            if refeat:                  # the features in the requested invariant form, from the cached blocks
+                from ..ff.complete import env_invariants
+            for c, (sym, X, lab, meta) in zip(caches, frames):
+                assert len(sym) == c.species.shape[0]
+                c.labels, c.meta = dict(lab), dict(meta)
+                if refeat:
+                    c.feats = env_invariants(c.env, featurizer.probes, featurizer.inv_form).to(c.feats.dtype)
+            return caches
+    t0 = time.time()
+    caches = [None] * len(frames)
+    if workers and workers > 1 and len(frames) > 2 * workers:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        items = [(k, sym, X) for k, (sym, X, *_rest) in enumerate(frames)]
+        with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"), initializer=_pp_init,
+                                 initargs=(tab, chan, featurizer, lean, frontier)) as ex:
+            done = 0
+            import io
+            for k, blob in ex.map(_pp_one, items, chunksize=8):
+                caches[k] = torch.load(io.BytesIO(blob), weights_only=False)
+                done += 1
+                if done % 500 == 0:
+                    print(f"  precomputed {done}/{len(frames)} [{time.time() - t0:.0f}s, {workers} workers]", flush=True)
+    else:
+        for k, (sym, X, *_rest) in enumerate(frames):
+            caches[k] = precompute(sym, X, tab, chan, featurizer, lean=lean, frontier=frontier)
+            if (k + 1) % 200 == 0:
+                print(f"  precomputed {k + 1}/{len(frames)} [{time.time() - t0:.0f}s]", flush=True)
+    for c, (sym, X, lab, meta) in zip(caches, frames):
+        c.labels, c.meta = dict(lab), dict(meta)
+    print(f"  precompute done: {len(frames)} frames in {time.time() - t0:.0f}s (lean={lean})", flush=True)
+    if path:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(caches, path)
+    return caches
+
+
+def monomer_energies(eda_dirs):
+    """{symbol: isolated-ion SCF energy (Hartree)} from the ``fragment_energies`` of EDA extxyz files."""
+    from ase.io import read
+    out = {}
+    for d in eda_dirs:
+        for f in sorted(Path(d).glob("*.xyz")):
+            for a in read(f, ":"):
+                fe = a.info.get("fragment_energies")
+                if fe is None:
+                    continue
+                fi = a.arrays["fragment_idx"]
+                for k, e in enumerate(np.asarray(fe, float).reshape(-1)):
+                    out.setdefault(a.get_chemical_symbols()[int(np.argmax(fi == k))], float(e))
+                if len(out) >= 2:
+                    return out
+    return out
+
+
+def load_force_frames(dirs, mono, species=("Na", "Cl")):
+    """[(symbols, coords A, {'int': Hartree, 'forces': (N, 3) Hartree/bohr}, meta)] from extxyz files with total
+    energies and forces (atomic units); the interaction energy is E - sum of the isolated-ion energies."""
+    from ase.io import read
+    out = []
+    for d in dirs:
+        for f in sorted(Path(d).glob("*.xyz")):
+            for k, a in enumerate(read(f, ":")):
+                sym = a.get_chemical_symbols()
+                if not set(sym) <= set(species) or a.calc is None or "forces" not in a.calc.results:
+                    continue
+                e_int = float(a.get_potential_energy()) - sum(mono[x] for x in sym)
+                out.append((sym, np.asarray(a.positions, float), {"int": e_int, "forces": np.asarray(a.get_forces(), float)},
+                            {"workflow": "force", "parent": f.stem, "file": f.stem, "index": k, "n": len(sym)}))
+    return out
+
+
+def force_set_monomers(files):
+    """{symbol: isolated-ion energy (Hartree)} from the single-ion force rows of labelled sets (the seed-<salt>-cuts
+    sets carry one per ion, at the same level as the frames: Na, Cl agree with the walk EDA's to 1e-9 Eh)."""
+    out = {}
+    for f in files:
+        for line in open(f):
+            r = json.loads(line)
+            if r.get("stage") == "label" and len(r.get("symbols") or ()) == 1 and r.get("energy") is not None:
+                out.setdefault(r["symbols"][0], float(r["energy"]))
+    return out
+
+
+def load_force_sets(files, mono, species=("Na", "Cl"), exclude=()):
+    """load_force_frames from labelled sets (ct_model rows with "forces", Hartree / bohr in the input frame, and the
+    total "energy", Hartree); the frame's "file" is "<set>:<name>" (--force-test may name one)."""
+    out = []
+    for f in files:
+        stem = Path(f).stem
+        for line in open(f):
+            r = json.loads(line)
+            t = r.get("tags") or {}
+            if r.get("stage") != "label" or r.get("forces") is None or r.get("energy") is None:
+                continue
+            sym = r["symbols"]
+            name = t.get("name") or t.get("cut_id") or r["job"][:12]       # seed-<salt>-cuts frames carry a cut_id
+            if len(sym) < 2 or not set(sym) <= set(species) or name in set(exclude):
+                continue
+            key = f"{stem}:{name}"
+            if not set(sym) <= set(mono):
+                raise SystemExit(f"monomer energies: none for {sorted(set(sym) - set(mono))} ({key})")
+            out.append((sym, np.asarray(r["coords"], float),
+                        {"int": float(r["energy"]) - sum(mono[x] for x in sym), "forces": np.asarray(r["forces"], float)},
+                        {"workflow": stem, "parent": key, "file": key, "index": 0, "n": len(sym)}))
+    return out
+
+
+def to_device(obj, device):
+    """Recursively move the tensors of a batch dict / list to ``device`` (no-op on CPU)."""
+    if device is None or str(device) == "cpu":
+        return obj
+    if torch.is_tensor(obj):
+        return obj.to(device)
+    if isinstance(obj, dict):
+        return {k: to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(to_device(v, device) for v in obj)
+    return obj
+
+
+def pack_to_device(obj, device, stream=None):
+    """``obj`` (a batch dict / list tree) with its tensors on ``device`` in one host-to-device copy per dtype: the
+    tensors are packed into a pinned buffer, copied (non-blocking, on ``stream`` if given) and come back as views of
+    the device buffer. Returns (tree, device buffers). On CPU: (obj, [])."""
+    if device is None or str(device) == "cpu":
+        return obj, []
+    from torch.utils._pytree import tree_flatten, tree_unflatten
+    leaves, spec = tree_flatten(obj)
+    groups = {}
+    for k, t in enumerate(leaves):
+        if torch.is_tensor(t):
+            groups.setdefault(t.dtype, []).append(k)
+    out, bufs = list(leaves), []
+    for dt, ks in groups.items():
+        host = torch.empty(sum(leaves[k].numel() for k in ks), dtype=dt, pin_memory=True)
+        torch.cat([leaves[k].reshape(-1) for k in ks], out=host)
+        with torch.cuda.stream(stream) if stream is not None else _nullctx():
+            buf = host.to(device, non_blocking=True)
+        bufs.append(buf)
+        o = 0
+        for k in ks:
+            m = leaves[k].numel()
+            out[k] = buf[o:o + m].view(leaves[k].shape)
+            o += m
+    return tree_unflatten(out, spec), bufs
+
+
+class _nullctx:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
+def prefetch_batches(chunks, device, depth=2):
+    """Yield ``collate(chunk)`` on ``device`` for each chunk. On CUDA a background thread collates up to ``depth``
+    batches ahead and copies each with :func:`pack_to_device` on a side stream; the consumer's stream waits on the
+    copy. On CPU: collate inline."""
+    if device is None or str(device) == "cpu" or not torch.cuda.is_available():
+        for c in chunks:
+            yield collate(c)
+        return
+    import queue
+    import threading
+    q, stop = queue.Queue(maxsize=depth), threading.Event()
+    side = torch.cuda.Stream(device=device)
+
+    def work():
+        try:
+            for c in chunks:
+                if stop.is_set():
+                    return
+                bt, bufs = pack_to_device(collate(c), device, side)
+                ev = torch.cuda.Event()
+                ev.record(side)
+                item = (bt, bufs, ev)
+                while not stop.is_set():
+                    try:
+                        q.put(item, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+        except BaseException as e:                     # re-raised in the consumer
+            q.put((e, None, None))
+    th = threading.Thread(target=work, daemon=True, name="prefetch_batches")
+    th.start()
+    try:
+        for _ in range(len(chunks)):
+            bt, bufs, ev = q.get()
+            if isinstance(bt, BaseException):
+                raise bt
+            cur = torch.cuda.current_stream(device)
+            cur.wait_event(ev)
+            for b in bufs:                              # allocated on the side stream, used on this one
+                b.record_stream(cur)
+            yield bt
+    finally:
+        stop.set()
+
+
+def _mae(d, cap):
+    d = np.abs(d)
+    return float((np.minimum(d, cap) if cap > 0 else d).mean())

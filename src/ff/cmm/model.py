@@ -593,18 +593,15 @@ class CmmModel(nn.Module):
         return (m[:, None] * u ** 2).sum(1).mean()
 
     def smoothness_penalty(self, bt, sigma=0.05):
-        """Mean squared change of the readouts under input noise of sigma x the inputs' training scales."""
+        """Sum over readouts of the mean squared change under noise of sigma x the channels' training scales."""
         sp = bt["species"]
         X = self.channels_raw(bt)
         Gv = self.gated_raw(bt) if self.config.probes else None
         c = self.species(sp) if self.species is not None else None
         nzc = (X.abs().sum(1, keepdim=True) > 0).to(X.dtype)
         u1 = self.encoder(self.encoder_inputs(X, Gv), c)
-        Gv2 = None
-        if Gv is not None:
-            nzg = (Gv.abs().sum(1, keepdim=True) > 0).to(Gv.dtype)
-            Gv2 = Gv + sigma * self.gate_scale * torch.randn_like(Gv) * nzg
-        u2 = self.encoder(self.encoder_inputs(X + sigma * self.chan_scale * torch.randn_like(X) * nzc, Gv2), c)
+        # noise on the channels only, as the complete-model runs trained it (the probe invariants enter unperturbed)
+        u2 = self.encoder(self.encoder_inputs(X + sigma * self.chan_scale * torch.randn_like(X) * nzc, Gv), c)
         return ((u2 - u1) ** 2).mean(0).sum() / sigma ** 2
 
     @torch.no_grad()

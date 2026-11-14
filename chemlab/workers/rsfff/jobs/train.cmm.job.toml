@@ -1,0 +1,56 @@
+[job]
+type        = "train.cmm"
+description = "One cmm model: rsfff.train.cmm (rsfff.train.cmm_worker) on a data bundle -- the folded ct sets, the walk EDAs, the force frames, the species table. The settings choose the encoder's inputs and size and the run's length; `overrides` passes any other training-config key (table.key=value)."
+tags        = ["train"]
+
+[[inputs]]
+name = "data"
+format = "tar"
+doc = "the data bundle (scripts/cmm_bundle.py): ct_sets/, walk_eda/, force/, ct/, params/, force_test.txt"
+[[inputs]]
+name = "settings"
+format = "json"
+generated = true
+
+[[outputs]]
+name = "run"
+format = "tar"
+doc = "run.tar.gz: model.pt, metrics.json, predictions.csv, hull.pt, train.log, config.json, the species table (rsfff.ff.cmm.load_cmm opens it)"
+[[outputs]]
+name = "metrics"
+format = "json"
+doc = "metrics.json: per split and per subset errors, the training log rows, the config"
+[[outputs]]
+name = "train"
+format = "log"
+doc = "train.log"
+
+[report]
+"train.loss"            = "Float64 [unknown]"
+"train.epochs"          = "Int [1]"
+"rsfff.cmm.val"         = { type = "Dict", doc = "validation errors (all / full clusters)", unit = "kJ/mol" }
+"rsfff.cmm.test"        = { type = "Dict", doc = "test errors (all / full clusters)", unit = "kJ/mol" }
+"rsfff.cmm.force_test"  = { type = "Dict", doc = "held-out force frames: e_mae, f_rms, ...", unit = "unknown" }
+"rsfff.cmm.val_curv"    = "Float64 [unknown]"
+"rsfff.cmm.device"      = "String"
+"rsfff.cmm.wall_s"      = "Float64 [s]"
+
+[settings]
+text = """
+struct Settings terms "rsfff.cmm"
+    latent::Int = 6 in 1..64                                 # width of the shared latent
+    pairs::String = "ww"                                     # channel groups: ww (plain), ws, ss (dressed); or Sw, Ss, Tww, Tws, Tss (e.g. "Sw/Tws")
+    probes::Bool = true                                      # the gated diffuse-probe invariants as encoder inputs
+    film::Bool = true                                        # FiLM conditioning of the encoder on the species embedding
+    epochs::Int = 500 in 0..100000 as "train.epochs"
+    seed::Int = 0 in 0..1000000
+    lr::Float64 = 0.001 in 0.0..1.0
+    batch::Int = 128 in 1..4096
+    force_batch::Int = 64 in 1..4096
+    w_force::Float64 = 0.1 in 0.0..100.0
+    device::String = "auto" in {"auto", "cuda", "cpu"}       # auto: CUDA when there is one
+    overrides::String = "" as ""                             # more training-config keys: "loss.w_curv=0 train.alpha_every=2"
+    gpus::Int = 1 in 0..4 as "resources.gpus"
+    cpus::Int = 16 in 1..256 as "resources.cpus"
+end
+"""

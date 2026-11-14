@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Write the data bundle of the complete-model salts runs (rsfff.train.complete_worker) from the two projects.
+"""Write the data bundle of the cmm salts runs (rsfff.train.cmm_worker) from the two projects.
 
-    python scripts/complete_bundle.py OUT.tar.gz [--rsfff ~/research/rsfff] [--ct ~/research/ct_model]
+    python scripts/cmm_bundle.py OUT.tar.gz [--rsfff ~/research/rsfff] [--ct ~/research/ct_model]
 
 Collects (symlinks followed): research/rsfff train/salts/data/ct_sets, train/nacl/ionct/data/{walk_eda,force},
 train/salts/data/force_test.txt, train/salts/params/{ions_salts8_cpksb.json,wself.json}; research/ct_model
