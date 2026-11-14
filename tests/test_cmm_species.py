@@ -4,16 +4,14 @@ Checks: the descriptors of an ion do not depend on which other ions the table ca
 heteronuclear dimer gives both atoms the same log-factors (the symmetric pair overlap is all the encoder sees, the
 probes aside); a fresh FiLM encoder equals the unconditioned one with the same trunk weights (the FiLM generators start
 at zero)."""
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from rsfff.ff.cmm import ChannelTable, CmmConfig, CmmModel, IonTable, batched_precompute
+from rsfff.ff.cmm import ChannelTable, CmmConfig, CmmModel, IonTable, batched_precompute, cmm_table
 from rsfff.ff.cmm.species import species_descriptors
-from rsfff.train.cmm import radial_table
 
 PARAMS = Path(__file__).parent / "cmm_golden" / "ions_golden.json"
 f64 = torch.float64
@@ -23,7 +21,7 @@ DIMER = ([[0.0, 0, 0], [2.6, 0, 0]], [11, 17])
 @pytest.fixture(scope="module")
 def setup():
     tab, chan = IonTable.load(PARAMS), ChannelTable.load(PARAMS)
-    return tab, chan, radial_table(tab, PARAMS, os.environ.get("RSFFF_TABLE_CACHE"))
+    return tab, chan, cmm_table(tab)
 
 
 def env_u(setup, m, X, Z):

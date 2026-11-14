@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 import torch
 
-from rsfff.ff.cmm import DensityEnvironment, RadialTable, batched_precompute
 from rsfff.ff.cmm.periodic import (erfc_screening, make_ewald_frames, periodic_pairs, recip_apply,
                                         solve_induction_periodic)
 from rsfff.ff.cmm import params as CT
@@ -16,8 +15,6 @@ from rsfff.ff.multipole import damped_interaction_tensor
 
 PARAMS = Path(__file__).resolve().parents[1] / "params" / "ions_wb97mv_tzvpd_pf2p.json"
 ZMAP = {"Na": 11, "Cl": 17}
-
-
 
 
 def _ewald_out(X, C, M, alpha, rc, kcut):
@@ -71,17 +68,6 @@ def _rocksalt(n, a=5.64, jitter=0.0, seed=0):
     X = torch.stack(X)
     X = X + jitter * torch.randn(X.shape, generator=g, dtype=torch.float64)
     return X, torch.tensor(Z), torch.eye(3, dtype=torch.float64) * a * n
-
-
-def _energy(m, tab, table, chan, X, Z, cell, **kw):
-    fr = torch.zeros(len(Z), dtype=torch.long)
-    return m(batched_precompute(X, Z, fr, tab, table, chan, cell=cell, **kw))
-
-
-
-
-
-
 
 
 def test_cg_matches_dense_solve():

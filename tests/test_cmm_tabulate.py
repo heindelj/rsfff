@@ -1,13 +1,13 @@
-"""The tabulated, batched precompute reproduces the per-frame path, and its forces are exact derivatives."""
+"""The radial-table machinery: the vectorized lookup and damped-tensor basis against their transcriptions, and the
+frozen electrostatics. (The precompute against the exact per-frame quantities: tests/test_cmm_model.py.)"""
 from pathlib import Path
 
 import pytest
 import torch
 
 from rsfff.ff.cmm import params as CT
-from rsfff.ff.cmm.batch import collate, precompute
 from rsfff.ff.cmm.params import IonTable
-from rsfff.ff.cmm import DensityEnvironment, RadialTable, batched_precompute, permanent_electrostatics
+from rsfff.ff.cmm import RadialTable, permanent_electrostatics
 
 PARAMS = Path(__file__).resolve().parents[1] / "params" / "ions_wb97mv_tzvpd_pf2p.json"
 
@@ -17,7 +17,7 @@ def setup():
     torch.manual_seed(3)
     tab, chan = IonTable.load(PARAMS), CT.ChannelTable.load(PARAMS)
     table = RadialTable(tab, h=0.05)            # coarse grid keeps the test fast; the training default is 0.01 A
-    feat = DensityEnvironment(tab)
+    feat = None
     frames = []
     for n in (2, 4, 6):
         sym = (["Na", "Cl"] * 3)[:n]
@@ -34,10 +34,6 @@ def _flat(frames):
     Z = torch.tensor([{"Na": 11, "Cl": 17}[a] for sym, _ in frames for a in sym])
     fr = torch.cat([torch.full((len(sym),), k) for k, (sym, _) in enumerate(frames)])
     return pos, Z, fr
-
-
-
-
 
 
 def test_fused_basis_matches_transcription():
@@ -72,8 +68,6 @@ def test_electrostatics_pair_limit(setup):
     s = tab.species_index(torch.tensor([11, 17]))
     e = permanent_electrostatics(X, s, torch.zeros(2, dtype=torch.long), tab)[0]
     assert abs(e + 1.0 / (20.0 / 0.529177210903)) < 1e-9          # two point charges at 20 A
-
-
 
 
 def _table_points(table, n=400, seed=5):

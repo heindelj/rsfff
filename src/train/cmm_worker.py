@@ -62,8 +62,7 @@ def make_config(data: Path, out: Path, settings: dict | None = None, *, cache_di
            "loss": {"w_force": s["w_force"]},
            "train": {"out": str(Path(out).resolve()), "epochs": s["epochs"], "seed": s["seed"], "lr": s["lr"],
                      "batch": s["batch"], "force_batch": s["force_batch"], "device": device,
-                     "cache_dir": str(cache_dir or (Path(out).resolve().parent / "cache")),
-                     "precompute_workers": threads}}
+                     "cache_dir": str(cache_dir or (Path(out).resolve().parent / "cache"))}}
     for kv in shlex.split(str(s["overrides"] or "")):
         key, val = kv.split("=", 1)
         tbl, k = key.split(".", 1)
@@ -102,7 +101,7 @@ def run_training(data, run_dir, settings=None, *, cache_dir=None, threads=None, 
     run_dir.mkdir(parents=True, exist_ok=True)
     s = _settings(settings)
     bundle = _bundle(Path(data).resolve(), run_dir.parent / "bundle")
-    threads = int(threads or os.environ.get("RSFFF_PRECOMPUTE_WORKERS") or os.environ.get("CHEMLAB_THREADS") or 8)
+    threads = int(threads or os.environ.get("CHEMLAB_THREADS") or 8)
     threads = max(1, min(threads, 64))
     device = _device(s["device"])
     cache = Path(cache_dir or os.environ.get("RSFFF_CACHE_DIR") or (run_dir.parent / "cache"))

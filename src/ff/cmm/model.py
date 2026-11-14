@@ -21,11 +21,15 @@ frontier exponents and the channel cutoff / taper.
   on-site Gram blocks W2_i sum_j 2 (E0_ij / O_ij) Gt(i <- j). The CT channels (every directed pair within the CT
   cutoff) have the kernel energy e_c = -qD_i qA_j f(bD_i, bA_j; r) / r (taper), compliance b_c = V0_c^2 / (2|e_c|) and
   drive V_c calibrated so that a lone pair gives exactly e_c + e_c'. E_pol is the minimum at q = 0 (ALMO's CT-free
-  polarization); E_CT = E_joint - E_pol (the CT-induced repolarization is CT). One factorization of A + H serves both.
+  polarization); E_CT = E_joint - E_pol (the CT-induced repolarization is CT). One Cholesky factorization of A + H
+  serves both, and the polarizability (the energy is quadratic in a uniform field: exact, three more right-hand sides).
 
 The environment factors u (``encoder.READOUTS``) are decoded from one latent per atom (:class:`Encoder`) whose inputs
 are the overlap-weighted two- and three-body channels (``channels.py``) and the overlap-gated diffuse-probe
-invariants. Clusters only for now: the periodic Gram blocks and the periodic flux solve are the condensed-phase work.
+invariants. Everything that depends on the geometry alone (A, L, h, c, the encoder's inputs, the exchange pairs'
+overlap maps and Gram blocks, the charge slots, the channels, E_elst) comes from :meth:`CmmModel.precompute`
+(``precompute.py``); the forward does what depends on the parameters. Clusters only for now: the periodic Gram blocks
+and the periodic flux solve are the condensed-phase work.
 """
 from __future__ import annotations
 
@@ -39,50 +43,23 @@ from ..multipole import slater_two_center_damp_unequal
 from . import kernels as K
 from .batch import channel_types
 from .channels import CHANNEL_NAMES, THREE_BODY_COLS, TWO_BODY_COLS
-from .elst import permanent_electrostatics
-from .environment import PROBE_NAMES, invariant_names
 from .params import ChannelTable, IonTable
+from .precompute import CmmTable, batched_precompute, cmm_table
 from .species import SpeciesEmbedding
-from .tabulate import FluxTable, XpolTable, cached_table, flux_pair_terms, shape_self_coulomb, xpol_overlap_map
+from .tabulate import PROBES, shape_self_coulomb
 from .config import PAIR_GROUPS, CmmConfig
 from .encoder import READOUTS, Encoder
 
-__all__ = ["CmmModel", "induction_matrix_blocks", "PROBES", "GATED_NAMES"]
+__all__ = ["CmmModel", "PROBES", "GATED_NAMES"]
 
-#: exchange pairs and environment channels end here (the frozen overlaps are < 1e-9 beyond)
-R_MAX = 10.0
-#: the overlap window over which a pair's exchange ratios and channel weights switch on (above the tables' noise)
-O_ON, O_FULL = 1e-7, 1e-6
 #: |ln(bA / b_Fukui)| bound of the floating cation acceptor exponents
 CT_ACC_CAP = 0.5
-#: the diffuse probes whose gated invariants the encoder reads
-PROBES = ("donor", "acceptor", "breath")
 GATED_NAMES = tuple(f"{p}:{k}" for p in PROBES for k in ("S0", "V0_pen", "|V1g|^2", "|V2g|^2", "V1g.S1"))
 #: start values of the learned per-species constants (fits of the frozen-level labels for Na+ / Cl-)
 PAULI_SHELL_INIT = {"Na": ([8.856], 0.871), "Cl": ([9.78, 0.302], 0.893)}
 DISP_INIT = {"Na": (3.41, 3.872), "Cl": (554.7, 1.130)}
 DISP_FALLBACK = (10.0, 2.0)
 FLUX_V0_INIT = 0.025
-
-
-def induction_matrix_blocks(A_off, alpha_inv, C):
-    """(B, 8N, 8N) the induction matrix: A_off plus the on-site blocks (alpha_inv (B, N, 3, 3), 1/C (B, N) on the
-    quadrupoles; C = 0: no quadrupole response)."""
-    B, N = C.shape
-    cinv = torch.where(C > 0, 1.0 / C.clamp(min=1e-30), torch.full_like(C, 1e12))
-    D = alpha_inv.new_zeros(B, N, 8, 8)
-    D[:, :, :3, :3] = alpha_inv
-    D[:, :, 3:, 3:] = torch.diag_embed(cinv[..., None].expand(B, N, 5))
-    ar = torch.arange(N, device=C.device)
-    Ad = alpha_inv.new_zeros(B, N, 8, N, 8)
-    Ad[:, ar, :, ar, :] = D.permute(1, 0, 2, 3)
-    return A_off + Ad.reshape(B, 8 * N, 8 * N)
-
-
-def _smoothstep_log(O, on, full):
-    lo, hi = math.log10(on), math.log10(full)
-    t = ((torch.log10(O.clamp(min=1e-300)) - lo) / (hi - lo)).clamp(0.0, 1.0)
-    return t * t * (3 - 2 * t)
 
 
 def _saturate(x, m):
@@ -94,7 +71,8 @@ def _saturate(x, m):
 
 
 class CmmModel(nn.Module):
-    """``CmmModel(tab, chan, config)``; ``forward(bt, field=None)`` on a batch of :func:`batched_precompute`."""
+    """``CmmModel(tab, chan, config)``; ``forward(bt, field=None, alpha=False)`` on a batch of
+    :meth:`precompute` (:func:`rsfff.ff.cmm.precompute.batched_precompute`)."""
 
     def __init__(self, tab: IonTable, chan: ChannelTable, config: CmmConfig | None = None):
         super().__init__()
@@ -135,7 +113,6 @@ class CmmModel(nn.Module):
         self.breath = bool((tab.a0 > 0).any())
         self.n_b = 1 if self.breath else 0
         self.register_buffer("breath_mask", (tab.a0 > 0).to(torch.float64), persistent=False)
-        self.breath_col = list(invariant_names("sq")).index("V0_pen")       # within the breath probe's block
         # -- CT
         self.ct_ln_q0 = nn.Parameter(torch.zeros(S, 2, **f64))                  # ln qD0, ln qA0
         self.ct_acc_raw = nn.Parameter(torch.zeros(S, **f64))                   # cation acceptor exponent scale
@@ -164,96 +141,25 @@ class CmmModel(nn.Module):
             if cfg.film else None
         self.encoder = Encoder(n_ch + n_g, latent=cfg.latent, hidden=cfg.hidden, depth=cfg.depth,
                                cond_dim=cfg.species_dim if cfg.film else 0)
-        self._tables = {}
+        self._table = None
         self._u = None
         self.double()
 
-    # -- tables ------------------------------------------------------------------------------------------------
-    def _table(self, name, device):
-        t = self._tables.get(name)
-        if t is None:
-            if name == "xpol":
-                t = cached_table(XpolTable, self.tab, r_max=R_MAX)
-            elif name == "gram":
-                from .gram import GramTable
-                t = cached_table(GramTable, self.tab, r_max=R_MAX, breath="shape")
-            elif name == "flux":
-                t = cached_table(FluxTable, self.tab)
-            else:
-                from .tabulate import ProbeOverlapTable
-                t = cached_table(ProbeOverlapTable, self.tab)
-            self._tables[name] = t
-        if t.device != device:
-            t.to(device)
-        return t
+    # -- geometry ----------------------------------------------------------------------------------------------
+    def table(self, device=None) -> CmmTable:
+        """The precompute's radial table of this species table (built once, cached on disk under
+        ``RSFFF_TABLE_CACHE``), on ``device``."""
+        if self._table is None:
+            self._table = cmm_table(self.tab.to("cpu"))
+        if device is not None and self._table.device != torch.device(device):
+            self._table.to(device)
+        return self._table
 
-    # -- encoder inputs ----------------------------------------------------------------------------------------
-    @staticmethod
-    def _pairs(bt):
-        """(i, j) and dr = X_j - X_i (Angstrom): the batch's pair list (periodic: with images) or all pairs."""
-        if bt.get("pbc") is not None:
-            return bt["pairs"], bt["pair_dr"]
-        p = K.all_pairs(bt["frame"])
-        return p, bt["pos"][p[1]] - bt["pos"][p[0]]
-
-    def channels_raw(self, bt):
-        """(N, 17) the raw two- and three-body channels of every atom (``channels.raw_channels``)."""
-        from .channels import raw_channels
-        pbc = bt.get("pbc") is not None
-        return raw_channels(self.tab, self._table("xpol", bt["pos"].device), bt["pos"], bt["species"], bt["frame"],
-                            bt["pairs"] if pbc else None, bt["pair_dr"] if pbc else None)
-
-    def gate_reach(self):
-        """(A) the largest distance at which any probe's overlap with any species is above the gate's on-value."""
-        t = self._table("probe", torch.device("cpu"))
-        on = t.coef[..., 0] > self.config.env_gate[0]
-        hit = on.any(0).any(0).any(0)
-        return float(t.r[hit].max()) if bool(hit.any()) else 0.0
-
-    def gated_raw(self, bt):
-        """(N, 15) the diffuse probes' invariants S0, V0_pen, |V1g|^2, |V2g|^2, V1g . S1 with the neighbours'
-        point-charge field and gradient switched off with the probe's overlap with each neighbour (``env_gate``)."""
-        env = bt.get("env")
-        if not env:
-            raise ValueError("the gated probe invariants need the equivariant environment blocks (bt['env'])")
-        sp, X = bt["species"], bt["pos"] / K.BOHR_ANG
-        n = sp.shape[0]
-        pbc = bt.get("pbc")
-        if pbc is not None:
-            if pbc["cutoff"] < self.gate_reach():
-                raise ValueError(f"the pair cutoff {pbc['cutoff']} A is inside the gate's reach {self.gate_reach():.2f} A")
-            pr, du = bt["pairs"], bt["pair_dr"] / K.BOHR_ANG
-        else:
-            pr = K.all_pairs(bt["frame"])
-            du = X[pr[1]] - X[pr[0]]
-        i, j = torch.cat([pr[0], pr[1]]), torch.cat([pr[1], pr[0]])
-        dr = torch.cat([du, -du])
-        T0 = K._tensor(dr, torch.ones(5, dr.shape[0], dtype=X.dtype, device=X.device))[:, 0, :]
-        Dp = (self.tab.charge[sp[j]].to(X.dtype)[:, None] * T0) @ K._poly_map(X.dtype, X.device)      # (P, 8)
-        tbl = self._table("probe", X.device)
-        ov = tbl(sp[i], sp[j], dr.norm(dim=-1) * K.BOHR_ANG)
-        G = len(PROBES)
-        c = [tbl.index[f"ov:{p}"] for p in PROBES]
-        o = ov[:, c[0]:c[0] + G] if c == list(range(c[0], c[0] + G)) else ov[:, c]
-        sig = _smoothstep_log(o, *self.config.env_gate)
-        SD = torch.cat([-Dp[:, :3], Dp[:, 3:]], 1)
-        Vg = X.new_zeros(n, G, 8).index_add(0, i, sig[:, :, None] * SD[:, None, :])
-        if all(f"{p}:V1pen" in env for p in PROBES):
-            Vpen = torch.stack([torch.cat([env[f"{p}:V1pen"], env[f"{p}:V2pen"]], 1) for p in PROBES], 1)
-        elif pbc is None:
-            Vpen = (torch.stack([torch.cat([env[f"{p}:V1"], env[f"{p}:V2"]], 1) for p in PROBES], 1)
-                    - X.new_zeros(n, 8).index_add(0, i, SD)[:, None, :])
-        else:
-            raise ValueError("periodic frames need the penetration blocks (batched_precompute)")
-        has = torch.stack([self.breath_mask[sp] if p == "breath" else torch.ones(n, dtype=X.dtype, device=X.device)
-                           for p in PROBES], 1)
-        V = (Vpen + Vg) * has[:, :, None]
-        S1 = torch.stack([env[f"{p}:S1"] for p in PROBES], 1)
-        V1 = V[..., :3]
-        cols = torch.stack([torch.stack([env[f"{p}:S0"] for p in PROBES], 1),
-                            torch.stack([env[f"{p}:V0"] for p in PROBES], 1),
-                            (V1 * V1).sum(-1), (V[..., 3:] ** 2).sum(-1), (V1 * S1).sum(-1)], -1)
-        return cols.reshape(n, G * 5)
+    def precompute(self, pos_ang, atomic_numbers, batch_idx, labels=None, **kw) -> dict:
+        """The batch of positions (N, 3) Angstrom, atomic numbers (N,) and frame index (N,) (autograd flows from the
+        positions): :func:`batched_precompute` with this model's tables and gate (``cell`` etc. pass through)."""
+        return batched_precompute(pos_ang, atomic_numbers, batch_idx, self.tab, self.table(pos_ang.device), self.chan,
+                                  labels=labels, gate=self.config.env_gate, **kw)
 
     def encoder_inputs(self, X, Gv=None):
         """The encoder's input rows from the raw channels X (N, 17) and gated invariants Gv (N, 15): scaled, saturated,
@@ -264,11 +170,15 @@ class CmmModel(nn.Module):
             parts.append(_saturate(Gv / self.gate_scale, self.gate_sat))
         return torch.cat(parts, 1)
 
+    def _inputs(self, bt):
+        if tuple(bt["gate"]) != tuple(self.config.env_gate):
+            raise ValueError(f"the batch's probe gate {bt['gate']} is not the model's {self.config.env_gate}")
+        return bt["chan"], (bt["gated"] if self.config.probes else None)
+
     def environment(self, bt):
         """{readout: (N,)} the raw log-factors of this batch (also kept for the parameter maps and the penalties)."""
         sp = bt["species"]
-        X = self.channels_raw(bt)
-        Gv = self.gated_raw(bt) if self.config.probes else None
+        X, Gv = self._inputs(bt)
         c = self.species(sp) if self.species is not None else None
         U = self.encoder(self.encoder_inputs(X, Gv), c)
         self._u = {k: U[:, m] for m, k in enumerate(READOUTS)}
@@ -320,7 +230,7 @@ class CmmModel(nn.Module):
         """Frozen Pauli and dispersion energies per frame (B,), (B,); keeps the Pauli pair energies for xpol."""
         B = bt["B"]
         w, b, C6, b6 = self.frozen_params(sp)
-        (i, j), dr = self._pairs(bt)
+        (i, j), dr = bt["pairs"], bt["pair_dr"]
         r_ang = dr.norm(dim=-1)
         rb = r_ang / K.BOHR_ANG
         f = slater_two_center_damp_unequal(b[i][:, :, None], b[j][:, None, :], rb[:, None, None], 0)[0]
@@ -336,87 +246,22 @@ class CmmModel(nn.Module):
         counts = torch.bincount(fr, minlength=bt["B"])
         return fr, torch.arange(fr.shape[0], device=fr.device) - (torch.cumsum(counts, 0) - counts)[fr]
 
-    @staticmethod
-    def _hyper_ET(Lp):
-        """E (n, 3) and the traceless gradient tensor T (n, 3, 3) of the permanent drive Lp (n, 8)."""
-        E = -Lp[:, :3]
-        q20, q21c, q21s, q22c, q22s = Lp[:, 3:8].unbind(1)
-        h3 = 0.5 * 3.0 ** 0.5
-        txx = 0.5 * (-q20 + 2 * h3 * q22c)
-        tyy = 0.5 * (-q20 - 2 * h3 * q22c)
-        txy, txz, tyz = h3 * q22s, h3 * q21c, h3 * q21s
-        T = torch.stack([torch.stack([txx, txy, txz], -1), torch.stack([txy, tyy, tyz], -1),
-                         torch.stack([txz, tyz, q20], -1)], -2)
-        return E, T
-
-    def hyperpolarization(self, Lp, sp):
-        """The Legendre hyperpolarization: with the free-ion field energy W(E) = -1/2 a|E|^2 - gamma |E|^4 / 24 - b E T E
-        and its polarized dipole mu_p, the ion's internal energy expanded to second order about mu_p is the solve's
-        quadratic form with alpha(E) = a + gamma/6 (|E|^2 1 + 2 E E^T) + 2 b T on site (returned inverted), a field
-        offset h = alpha(E)^-1 mu_p - E and a constant c = W + 1/2 mu_p alpha(E)^-1 mu_p."""
-        E, T = self._hyper_ET(Lp)
-        a = self.tab.alpha[sp][:, None, None] * torch.eye(3, dtype=E.dtype, device=E.device)
-        g, bb = self.tab.hyper_gamma[sp], self.tab.hyper_b[sp]
-        e2 = (E * E).sum(-1)
-        eye = torch.eye(3, dtype=E.dtype, device=E.device)
-        TE = (T @ E[:, :, None])[..., 0]
-        aE = a + (g / 6)[:, None, None] * (e2[:, None, None] * eye + 2 * E[:, :, None] * E[:, None, :]) \
-            + (2 * bb)[:, None, None] * T
-        mu = (a @ E[:, :, None])[..., 0] + (g / 6 * e2)[:, None] * E + (2 * bb)[:, None] * TE
-        W = -0.5 * (E * (a @ E[:, :, None])[..., 0]).sum(-1) - g * e2 * e2 / 24 - bb * (E * TE).sum(-1)
-        ainvE = torch.linalg.inv(aE)
-        aimu = (ainvE @ mu[:, :, None])[..., 0]
-        return ainvE, aimu - E, W + 0.5 * (mu * aimu).sum(-1)
-
-    def exchange_pairs(self, bt, sp):
-        """Exchange pairs (i, j) within R_MAX: their Pauli energies E0 (P,), the drive vectors W1 d ln O / dz of each
-        side (P, D) and the Gram geometry (dr bohr, A_ij = E0_ij / O_ij)."""
-        tbl = self._table("xpol", bt["pos"].device)
-        (i, j), e0 = self._pauli_pairs
-        dr = (bt["pair_dr"] if bt.get("pbc") is not None else bt["pos"][j] - bt["pos"][i]) / K.BOHR_ANG
-        keep = dr.norm(dim=-1) * K.BOHR_ANG < R_MAX
-        i, j, dr, e0 = i[keep], j[keep], dr[keep], e0[keep]
-        P = i.shape[0]
-        dp = torch.stack([torch.cat([i, j]), torch.cat([j, i])])
-        O, d, e = xpol_overlap_map(tbl, sp, dp, torch.cat([dr, -dr]))
-        sw = _smoothstep_log(O, O_ON, O_FULL)
-        e = e - O / self.tab.shell_n.sum(1)[sp[dp[1]]]          # the breathing density has zero monopole
-        rel = torch.cat([d, e[:, None]], 1) * (sw / O.clamp(min=O_ON))[:, None]
+    def exchange(self, bt, sp):
+        """The exchange pairs' drive g (N, D) and on-site Gram blocks W2_i 2 A_ij Gt(i <- j), W2_j 2 A_ij Gt(j <- i):
+        g_i = sum_j 2 E0_ij W1_i d ln O_ij / dz_i over the pairs within R_XPOL, E0_ij the pair's Pauli energy and
+        A_ij = E0_ij / O_ij (switched on above the overlap noise). Returns (i, j), g, Gi, Gj."""
+        xs = bt["x_sel"]
+        i, j = bt["pairs"][:, xs]
+        e0 = self._pauli_pairs[1][xs]
+        P = xs.shape[0]
         k = self.w1(sp)
-        D = k.shape[1]
-        vj = 0.5 * k[j] * rel[:P, :D]                            # (i <- j): j's deformation changes O_ij
-        vi = 0.5 * k[i] * rel[P:, :D]
-        return i, j, e0, vi, vj, (dr, e0 * sw[:P] / O[:P].clamp(min=O_ON))
-
-    def gram_blocks(self, sp, i, j, geo, D):
-        """(P, D, D) the on-site Hessians W2_i 2 A_ij Gt(i <- j) and W2_j 2 A_ij Gt(j <- i)."""
-        from .gram import gram_blocks
-        dr, Aij = geo
-        tbl = self._table("gram", dr.device)
-        w = (2 * Aij)[:, None, None]
-        Gi = w * gram_blocks(tbl, sp, (i, j), dr)[:, :D, :D]
-        Gj = w * gram_blocks(tbl, sp, (j, i), -dr)[:, :D, :D]
+        rel = bt["x_rel"]
+        vj = 0.5 * k[j] * rel[:P]                                # (i <- j): j's deformation changes O_ij
+        vi = 0.5 * k[i] * rel[P:]
+        g = rel.new_zeros(sp.shape[0], k.shape[1]).index_add(0, i, 2 * e0[:, None] * vi).index_add(0, j, 2 * e0[:, None] * vj)
+        w = (2 * e0 * bt["x_swO"])[:, None, None]
         w2 = self.w2(sp)
-        return w2[i][:, None, None] * Gi, w2[j][:, None, None] * Gj
-
-    def charge_slots(self, bt, sp, D):
-        """C (B, nmax D, nmax) the coupling of a unit charge in each atom's slot (its dipole-parent shape) to the site
-        variables, and H_Q (B, nmax, nmax) the slots' Coulomb with the self-energy + hardness on the diagonal."""
-        B, nmax = bt["B"], bt["nmax"]
-        fr, loc = self._local(bt)
-        tbl = self._table("flux", bt["pos"].device)
-        X = bt["pos"] / K.BOHR_ANG
-        pairs = K.all_pairs(bt["frame"])
-        dp = torch.cat([pairs, pairs.flip(0)], 1)
-        a_, b_ = dp
-        Kp, Jp = flux_pair_terms(tbl, sp, dp, X[b_] - X[a_])
-        Kd = X.new_zeros(B, nmax, nmax, 8).index_put((fr[a_], loc[a_], loc[b_]), Kp)
-        eta = self.ct_jself[sp] + nn.functional.softplus(self.ct_eta_raw[sp])
-        Hq = X.new_zeros(B, nmax, nmax).index_put((fr[a_], loc[a_], loc[b_]), Jp).index_put((fr, loc, loc), eta)
-        Ca = Kd.permute(0, 1, 3, 2)
-        if D > 8:
-            Ca = torch.cat([Ca, Ca.new_zeros(B, nmax, D - 8, nmax)], 2)
-        return Ca.reshape(B, nmax * D, nmax), Hq
+        return (i, j), g, w2[i][:, None, None] * (w * bt["x_Gi"]), w2[j][:, None, None] * (w * bt["x_Gj"])
 
     @staticmethod
     def _reverse(i, j, n):
@@ -450,50 +295,38 @@ class CmmModel(nn.Module):
         t2 = torch.where(has, t2, torch.ones_like(t2))
         return e_c, torch.sqrt(t2 * Vh2), torch.sqrt(2 * ae + 1e-30) / V0
 
-    def solve(self, bt, sp, L, ainv_pad, Cq, rhs_extra):
-        """The minimum of 1/2 z (A + H) z + (L + g) z over z = (dipole, quadrupole, breathing) for clusters, one dense
-        factorization that also solves ``rhs_extra``. Returns z (B, nmax, D), the electrical part 1/2 z A z + L z (B,),
-        the exchange part g z + 1/2 z H z (B,) and (A + H)^-1 rhs_extra."""
-        B, nmax, mask = bt["B"], bt["nmax"], bt["mask"]
-        n = sp.shape[0]
-        fr, loc = self._local(bt)
-        A = induction_matrix_blocks(bt["A_off"], ainv_pad, Cq).reshape(B, nmax, 8, nmax, 8)
-        D = 8 + self.n_b
-        M = A.new_zeros(B, nmax, D, nmax, D)
-        M[:, :, :8, :, :8] = A
-        Lz = L.new_zeros(B, nmax, D)
-        Lz[..., :8] = L
-        if self.n_b:
-            a_b = self.tab.a0[sp]
-            has = a_b > 0
-            ainv_b = torch.where(has, 1.0 / a_b.clamp(min=1e-30), torch.ones_like(a_b))
-            V0 = bt["feats"][:, self._breath_feature] * has.to(a_b.dtype)
-            ar = torch.arange(nmax, device=A.device)
-            M[:, ar, 8, ar, 8] = torch.ones(B, nmax, dtype=A.dtype, device=A.device).index_put((fr, loc), ainv_b)
-            Lz = Lz.index_put((fr, loc, torch.full_like(fr, 8)), -V0, accumulate=True)
-        i, j, e0, vi, vj, geo = self.exchange_pairs(bt, sp)
-        g = L.new_zeros(n, D).index_add(0, i, 2 * e0[:, None] * vi).index_add(0, j, 2 * e0[:, None] * vj)
-        gz = L.new_zeros(B, nmax, D).index_put((fr, loc), g)
-        f, li, lj = fr[i][:, None, None], loc[i][:, None, None], loc[j][:, None, None]
-        a_ = torch.arange(D, device=A.device)[None, :, None]
-        b_ = torch.arange(D, device=A.device)[None, None, :]
-        Gi, Gj = self.gram_blocks(sp, i, j, geo, D)
-        H = A.new_zeros(B, nmax, D, nmax, D)
-        H = H.index_put((f, li, a_, li, b_), Gi, accumulate=True).index_put((f, lj, a_, lj, b_), Gj, accumulate=True)
+    def solve(self, bt, sp, Lz, rhs_extra):
+        """The minimum of 1/2 z (A + H) z + (Lz + g) z over z = (dipole, quadrupole, breathing): one Cholesky
+        factorization of A + H (LU if it is not positive definite) that also solves ``rhs_extra``. Returns z
+        (B, nmax, D), the electrical part 1/2 z A z + Lz z (B,), the exchange part g z + 1/2 z H z (B,) and
+        (A + H)^-1 rhs_extra."""
+        B, nmax, D = bt["B"], bt["nmax"], bt["D"]
         N = nmax * D
-        Mf, Hf = M.reshape(B, N, N), H.reshape(B, N, N)
-        rhs = torch.cat([(Lz + gz).reshape(B, N, 1), rhs_extra], 2)
-        Y = torch.linalg.solve(Mf + Hf, rhs)
-        z = -Y[..., 0]
+        fr, loc = self._local(bt)
+        (i, j), g, Gi, Gj = self.exchange(bt, sp)
+        gz = Lz.new_zeros(B, nmax, D).index_put((fr, loc), g).reshape(B, N)
+        ar = torch.arange(D, device=Lz.device)
+        A = bt["A"]
+        oi, oj = (loc[i] * D)[:, None, None], (loc[j] * D)[:, None, None]
+        M = A.index_put((fr[i][:, None, None], oi + ar[None, :, None], oi + ar[None, None, :]), Gi, accumulate=True)
+        M = M.index_put((fr[j][:, None, None], oj + ar[None, :, None], oj + ar[None, None, :]), Gj, accumulate=True)
         Lf = Lz.reshape(B, N)
-        e_el = 0.5 * (z * (Mf @ z[..., None])[..., 0]).sum(1) + (Lf * z).sum(1)
-        e_x = (gz.reshape(B, N) * z).sum(1) + 0.5 * (z * (Hf @ z[..., None])[..., 0]).sum(1)
-        return z.reshape(B, nmax, D), e_el, e_x, Y[..., 1:]
+        rhs = torch.cat([(Lf + gz)[..., None], rhs_extra], 2)
+        Lc, info = torch.linalg.cholesky_ex(M)
+        Y = torch.cholesky_solve(rhs, Lc) if not bool(info.any()) else torch.linalg.solve(M, rhs)
+        z = -Y[..., 0]
+        zr = z.reshape(B, nmax, D)
+        zi, zj = zr[fr[i], loc[i]], zr[fr[j], loc[j]]
+        zHz = torch.einsum("pa,pab,pb->p", zi, Gi, zi) + torch.einsum("pa,pab,pb->p", zj, Gj, zj)
+        e_el = 0.5 * (z * (A @ z[..., None])[..., 0]).sum(1) + (Lf * z).sum(1)
+        e_x = (gz * z).sum(1) + 0.5 * z.new_zeros(B).index_add(0, fr[i], zHz)
+        return zr, e_el, e_x, Y[..., 1:]
 
-    def charge_flux(self, bt, sp, Ca, Hq, z_pol, W, phi_ext):
+    def charge_flux(self, bt, sp, Ca, Hq, z_pol, W, phi_ext, dpsi=None):
         """The joint minimum with the channels eliminated: K = G diag(s^2) G^T, u = G s^2 V, (1 + K S) Q = u - K psi0
         with S = H_Q - C^T W and psi0 = phi_ext + C^T z_pol; q_c = s_c^2 (V_c - (psi_i - psi_j)), z* = z_pol - W Q.
-        Returns E_CT (B,), per channel 1/2 b~_c q_c (C,), q (C,), z* (B, nmax D), Q (B, nmax), e_c (C,)."""
+        Returns E_CT (B,), per channel 1/2 b~_c q_c (C,), q (C,), z* (B, nmax D), Q (B, nmax), e_c (C,) and, for
+        ``dpsi`` (B, nmax, k) derivatives of psi0, the derivatives of Q (B, nmax, k) (else None)."""
         B, N = Hq.shape[0], Hq.shape[1]
         fr, loc = self._local(bt)
         i, j = bt["ch_index"]
@@ -510,66 +343,81 @@ class CmmModel(nn.Module):
         psi0 = Hq.new_zeros(B, N).index_put((fr, loc), phi_ext) + torch.einsum("bnk,bn->bk", Ca, z_pol)
         S = Hq - Ca.transpose(1, 2) @ W
         Mq = torch.eye(N, dtype=Hq.dtype, device=Hq.device) + Kl @ S
-        Q = torch.linalg.solve(Mq, (u - (Kl @ psi0[..., None])[..., 0])[..., None])[..., 0]
+        rhs = (u - (Kl @ psi0[..., None])[..., 0])[..., None]
+        if dpsi is not None:
+            rhs = torch.cat([rhs, -(Kl @ dpsi)], 2)
+        Ys = torch.linalg.solve(Mq, rhs)
+        Q = Ys[..., 0]
         psi = psi0 + (S @ Q[..., None])[..., 0]
         qc = w * (V - (psi[cf, li] - psi[cf, lj]))
         e_ch = 0.5 * (-V + psi0[cf, li] - psi0[cf, lj]) * qc
         z = z_pol - (W @ Q[..., None])[..., 0]
-        return Hq.new_zeros(B).index_add(0, cf, e_ch), e_ch, qc, z, Q, e_c
+        return Hq.new_zeros(B).index_add(0, cf, e_ch), e_ch, qc, z, Q, e_c, (Ys[..., 1:] if dpsi is not None else None)
 
     # -- the model ---------------------------------------------------------------------------------------------
-    @property
-    def _breath_feature(self):
-        """The column of breath:V0_pen in the batch's environment invariants (the breathing drive)."""
-        names = invariant_names("sq")
-        return PROBE_NAMES.index("breath") * len(names) + self.breath_col
-
-    def forward(self, bt: dict, field=None) -> dict:
-        """``bt`` from :func:`batched_precompute`; ``field`` (B, 3) a uniform external field per frame (atomic units).
-        Returns the energy terms (B,) (Hartree) and the solution."""
+    def forward(self, bt: dict, field=None, alpha: bool = False) -> dict:
+        """``bt`` from :meth:`precompute`; ``field`` (B, 3) a uniform external field per frame (atomic units).
+        Returns the energy terms (B,) (Hartree) and the solution; with ``alpha`` also the polarizability per frame
+        (B, 3, 3) [induced dipole, field] (bohr^3) of the joint minimum (``alpha``) and of the CT-free one
+        (``alpha_pol``): the energy is quadratic in the field, so these are exact (extra right-hand sides of the
+        same factorizations)."""
         if bt.get("pbc") is not None:
             raise NotImplementedError("cmm: clusters only so far (periodic Gram blocks and flux solve not implemented)")
         sp = bt["species"]
         self.environment(bt)
-        B, nmax, mask = bt["B"], bt["nmax"], bt["mask"]
+        B, nmax, D, mask = bt["B"], bt["nmax"], bt["D"], bt["mask"]
+        if D != 8 + self.n_b:
+            raise ValueError(f"the batch's response layout D = {D} is not the model's {8 + self.n_b}")
         n = sp.shape[0]
         dt, dev = bt["pos"].dtype, bt["pos"].device
-        Cq = torch.ones(B, nmax, dtype=dt, device=dev).masked_scatter(mask, self.tab.C[sp])
-        m8 = mask[..., None].expand(B, nmax, 8)
+        fr, loc = self._local(bt)
+        Lz = bt["Lz"]
         phi_ext = torch.zeros(n, dtype=dt, device=dev)
-        L = bt["L"]
         if field is not None:
-            Fa = field[bt["frame"]]
-            L = L - torch.zeros(B, nmax, 8, dtype=dt, device=dev).masked_scatter(m8, torch.cat([Fa, Fa.new_zeros(n, 5)], 1))
-            phi_ext = -(Fa * bt["pos"] / K.BOHR_ANG).sum(-1)
-        ainv, hyp_h, hyp_c = self.hyperpolarization(bt["L"][mask], sp)
-        L = L - torch.zeros(B, nmax, 8, dtype=dt, device=dev).masked_scatter(m8, torch.cat([hyp_h, hyp_h.new_zeros(n, 5)], 1))
-        ainv_pad = torch.eye(3, dtype=dt, device=dev).expand(B, nmax, 3, 3).clone()
-        ainv_pad = ainv_pad.masked_scatter(mask[..., None, None].expand(B, nmax, 3, 3), ainv)
+            Fp = field[:, None, :] * mask[..., None].to(dt)
+            Lz = Lz - torch.cat([Fp, Fp.new_zeros(B, nmax, D - 3)], 2)
+            phi_ext = -(field[fr] * bt["pos"] / K.BOHR_ANG).sum(-1)
         e_pauli, e_disp, frz = self.frozen_terms(bt, sp)
-        D = 8 + self.n_b
         self._q = self.ct_charges(sp)
         nC = bt["ch_index"].shape[1]
-        Ca, Hq = self.charge_slots(bt, sp, D)
-        z_pol, e_el, e_x, W = self.solve(bt, sp, L, ainv_pad, Cq, Ca)
-        e_pol = e_el + e_x + torch.zeros(B, dtype=dt, device=dev).index_add(0, bt["frame"], hyp_c)
+        Ca = bt["Ca"]
+        Hq = bt["Jq"].index_put((fr, loc, loc), nn.functional.softplus(self.ct_eta_raw[sp]), accumulate=True)
+        rhs = Ca
+        if alpha:                       # unit fields along x, y, z on every dipole
+            Ef = torch.zeros(B, nmax, D, 3, dtype=dt, device=dev)
+            Ef[:, :, :3, :] = torch.eye(3, dtype=dt, device=dev) * mask[..., None, None].to(dt)
+            rhs = torch.cat([Ca, Ef.reshape(B, nmax * D, 3)], 2)
+        z_pol, e_el, e_x, Yx = self.solve(bt, sp, Lz, rhs)
+        W = Yx[..., :nmax]
+        e_pol = e_el + e_x + bt["e_hyp"]
         Q = torch.zeros(n, dtype=dt, device=dev)
         x = z_pol[..., :8]
+        out = {}
+        dpsi = None
+        if alpha:
+            Zf = Yx[..., nmax:]                                          # dz_pol / dF (B, nmax D, 3)
+            Xb = torch.zeros(B, nmax, 3, dtype=dt, device=dev).index_put((fr, loc), bt["pos"] / K.BOHR_ANG)
+            a_pol = Zf.reshape(B, nmax, D, 3)[:, :, :3].sum(1)
+            out["alpha_pol"] = out["alpha"] = a_pol
+            dpsi = -Xb + Ca.transpose(1, 2) @ Zf
         if nC:
-            e_ct, e_ch, qc, zj, Qd, e_c = self.charge_flux(bt, sp, Ca, Hq, z_pol.reshape(B, -1), W, phi_ext)
+            e_ct, e_ch, qc, zj, Qd, e_c, dQ = self.charge_flux(bt, sp, Ca, Hq, z_pol.reshape(B, -1), W, phi_ext, dpsi)
             e_type = e_ch.new_zeros(B * self.nT).index_add(0, bt["ch_frame"] * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT)
             x = zj.reshape(B, nmax, -1)[..., :8]
-            fr, loc = self._local(bt)
             Q = Qd[fr, loc]
+            if alpha:
+                dz = (Zf - W @ dQ).reshape(B, nmax, D, 3)
+                out["alpha"] = dz[:, :, :3].sum(1) + torch.einsum("bka,bkc->bca", dQ, Xb)
         else:
             e_ct, e_ch, qc, e_c = (torch.zeros(B, dtype=dt, device=dev), torch.zeros(0, dtype=dt, device=dev),
                                    torch.zeros(0, dtype=dt, device=dev), torch.zeros(0, dtype=dt, device=dev))
             e_type = torch.zeros(B, self.nT, dtype=dt, device=dev)
-        e_elst = permanent_electrostatics(bt["pos"], sp, bt["frame"], self.tab)
-        return {"e_elst": e_elst, "e_pauli": e_pauli, "e_disp": e_disp, "e_pol": e_pol, "e_xpol": e_x, "e_ct": e_ct,
-                "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct, "e_ch": e_ch, "e_type": e_type, "q_ch": qc,
-                "e_kernel": e_c, "x": x, "x_pol": z_pol[..., :8], "z_pol": z_pol, "dq": Q, "q_ct": self._q,
-                "frozen_params": frz}
+        e_elst = bt["e_elst"]
+        out.update({"e_elst": e_elst, "e_pauli": e_pauli, "e_disp": e_disp, "e_pol": e_pol, "e_xpol": e_x,
+                    "e_ct": e_ct, "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct, "e_ch": e_ch, "e_type": e_type,
+                    "q_ch": qc, "e_kernel": e_c, "x": x, "x_pol": z_pol[..., :8], "z_pol": z_pol, "dq": Q,
+                    "q_ct": self._q, "frozen_params": frz})
+        return out
 
     # -- regularizers ------------------------------------------------------------------------------------------
     def env_mid_penalty(self, s_c=5e-4):
@@ -584,8 +432,7 @@ class CmmModel(nn.Module):
     def smoothness_penalty(self, bt, sigma=0.05):
         """Sum over readouts of the mean squared change under noise of sigma x the channels' training scales."""
         sp = bt["species"]
-        X = self.channels_raw(bt)
-        Gv = self.gated_raw(bt) if self.config.probes else None
+        X, Gv = self._inputs(bt)
         c = self.species(sp) if self.species is not None else None
         nzc = (X.abs().sum(1, keepdim=True) > 0).to(X.dtype)
         u1 = self.encoder(self.encoder_inputs(X, Gv), c)

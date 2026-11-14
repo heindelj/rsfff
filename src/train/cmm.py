@@ -8,20 +8,22 @@ The config has four tables, every key optional (the defaults are the complete.de
     [data]    params (species table), ct_sets, walk_eda, salts, extra_sets, force_sets, force_data, force_test,
               polar_sets, polar_test, polar_almo, exclude_names, ct_max_pair, max_ho_ratio, ct_dimers, test
     [loss]    w_pol, w_ct, w_pauli, w_disp, w_alpha, w_alpha_ct, w_force, w_fe, w_smooth, w_curv, w_env_mid
-    [train]   out, epochs, batch, lr, seed, device, cache_dir, precompute_workers, force_batch, force_every,
+    [train]   out, epochs, batch, lr, seed, device, cache_dir, force_batch, force_every,
               alpha_every, curv_every, curv_frames, curv_delta, smooth_sigma, env_mid_scale, env_sat, val_cap,
               log_every, init_from, hull_k
 
 Relative data paths are taken relative to ``data.root`` (default: the config file's directory).
 
 Loss: per-ion squared errors of the ALMO-EDA pol and ct (kJ/mol; ct only where it is a channel quantity, see
-``cmm_data.load_frames``), mod_pauli and disp; the whole-cluster finite-field alpha (every ``alpha_every``-th step);
+``cmm_data.load_frames``), mod_pauli and disp; the whole-cluster polarizability (exact, from the model's linear
+response; every ``alpha_every``-th step);
 total interaction energies and forces of the force frames (every ``force_every``-th step); and three regularizers on
 the environment factors: the readouts' sensitivity to input noise (w_smooth), their curvature along random
 displacements (w_curv) and their size where the atom's overlaps are small (w_env_mid).
 
-Outputs in ``train.out``: model.pt (the best validation state, written as it is found; :func:`rsfff.ff.cmm.load_cmm`),
-metrics.json, predictions.csv, hull.pt (the training atoms' channel hull, ``rsfff.coverage``), config.json.
+Every batch is precomputed from positions on the training device (:meth:`CmmModel.precompute`; no per-frame cache);
+``train.cache_dir`` keeps the radial table on disk. Outputs in ``train.out``: model.pt (the best validation state,
+written as it is found; :func:`rsfff.ff.cmm.load_cmm`), metrics.json, predictions.csv, hull.pt (the training atoms' channel hull, ``rsfff.coverage``), config.json.
 """
 from __future__ import annotations
 
@@ -39,8 +41,7 @@ import torch
 
 from ..ff.cmm import CmmConfig, CmmModel
 from ..ff.cmm.io import load_cmm, save_cmm
-from ..ff.cmm.batch import collate, precompute
-from ..ff.cmm.params import ATOMIC_NUMBER, ChannelTable, IonTable
+from ..ff.cmm.params import ChannelTable, IonTable
 from . import cmm_data as D
 
 KJ, KJ_ANG = D.KJ, D.KJ_ANG
@@ -98,7 +99,6 @@ class RunConfig:
     seed: int = 0
     device: str = "cpu"
     cache_dir: str = ""
-    precompute_workers: int = 0
     force_batch: int = 64
     force_every: int = 5
     alpha_every: int = 4
@@ -204,34 +204,22 @@ def term_error(e, bt, key):
     return torch.where(torch.isfinite(y), (e - torch.nan_to_num(y)) * KJ / lab["n"], torch.zeros_like(y))
 
 
-def polar_fields(B):
-    f = torch.zeros(7, 3, dtype=torch.float64)
-    for k in range(3):
-        f[1 + 2 * k, k], f[2 + 2 * k, k] = D.F_SET, -D.F_SET
-    return f.repeat(B, 1)
+def polar_alpha(model, frames):
+    """(B, 3, 2) the model's [alpha_pol, alpha_CT] per axis (the diagonal of its exact polarizabilities)."""
+    _, bt = D.batch_of(frames, model)
+    o = model(bt, alpha=True)
+    ap = torch.diagonal(o["alpha_pol"], dim1=1, dim2=2)
+    return torch.stack([ap, torch.diagonal(o["alpha"], dim1=1, dim2=2) - ap], -1)
 
 
-def polar_batch(caches):
-    return {"bt": collate([c for c in caches for _ in range(7)]), "field": polar_fields(len(caches)), "caches": caches}
-
-
-def polar_alpha(model, pb):
-    """(B, 3, 2) the model's [alpha_pol, alpha_CT] per axis (7-point field stencil)."""
-    B = len(pb["caches"])
-    o = model(pb["bt"], field=pb["field"])
-    e = torch.stack([o["e_pol"], o["e_ct"]], -1).reshape(B, 7, 2)
-    return -(e[:, 1::2] + e[:, 2::2] - 2 * e[:, :1]) / D.F_SET ** 2
-
-
-def polar_loss(model, pb):
+def polar_loss(model, frames):
     """Per-ion alpha errors (bohr^3): the first slot against alpha_MI (ALMO targets) or the whole-cluster alpha
     (total targets, compared with alpha_pol + alpha_CT), the second against alpha_CT (ALMO targets only)."""
-    caches = pb["caches"]
-    a = polar_alpha(model, pb)
-    t = torch.stack([torch.as_tensor(c.labels["alpha"]) for c in caches]).to(a.device)
-    n = torch.tensor([c.species.shape[0] for c in caches], dtype=a.dtype, device=a.device)[:, None]
-    ok = torch.tensor([c.labels["ct_ok"] for c in caches], device=a.device)[:, None]
-    tot = torch.tensor([bool(c.labels.get("total", False)) for c in caches], device=a.device)[:, None]
+    a = polar_alpha(model, frames)
+    t = torch.stack([torch.as_tensor(f.labels["alpha"]) for f in frames]).to(a.device)
+    n = torch.tensor([f.n for f in frames], dtype=a.dtype, device=a.device)[:, None]
+    ok = torch.tensor([f.labels["ct_ok"] for f in frames], device=a.device)[:, None]
+    tot = torch.tensor([bool(f.labels.get("total", False)) for f in frames], device=a.device)[:, None]
     have = torch.isfinite(t[..., 0])
     t = torch.nan_to_num(t)
     z = torch.zeros_like(a[..., 0])
@@ -240,30 +228,20 @@ def polar_loss(model, pb):
             torch.where(have & ok & ~tot, (a[..., 1] - t[..., 1]) / n, z))
 
 
-def frames_batch(frames, tab, table, chan, requires_grad=False, device="cpu"):
-    """(positions, batched_precompute batch) of raw frames [(symbols, coords A, ...)]."""
-    from ..ff.cmm import batched_precompute
-    pos = torch.tensor(np.concatenate([np.asarray(X, float) for _, X, *_ in frames]), dtype=torch.float64,
-                       device=device, requires_grad=requires_grad)
-    Z = torch.tensor([ATOMIC_NUMBER[x] for sym, *_ in frames for x in sym], device=device)
-    fr = torch.cat([torch.full((len(sym),), k, dtype=torch.long) for k, (sym, *_) in enumerate(frames)]).to(device)
-    return pos, batched_precompute(pos, Z, fr, tab, table, chan, inv_form="sq")
-
-
-def force_terms(model, frames, tab, table, chan):
+def force_terms(model, frames):
     """Energy (per ion, kJ/mol) and force (per component, kJ/mol/A) errors of force frames, graph kept."""
-    dev = table.device
-    pos, bt = frames_batch(frames, tab, table, chan, requires_grad=True, device=dev)
+    pos, bt = D.batch_of(frames, model, requires_grad=True)
+    dev = pos.device
     out = model(bt)
     E = out["e_int"]
     F = -torch.autograd.grad(E.sum(), pos, create_graph=True)[0]
-    e_ref = torch.tensor([lab["int"] for _, _, lab, _ in frames], dtype=torch.float64, device=dev)
-    f_ref = torch.tensor(np.concatenate([lab["forces"] for _, _, lab, _ in frames]), dtype=torch.float64, device=dev)
-    n = torch.tensor([len(sym) for sym, *_ in frames], dtype=torch.float64, device=dev)
+    e_ref = torch.tensor([f.labels["int"] for f in frames], dtype=torch.float64, device=dev)
+    f_ref = torch.as_tensor(np.concatenate([f.labels["forces"] for f in frames]), dtype=torch.float64).to(dev)
+    n = torch.tensor([f.n for f in frames], dtype=torch.float64, device=dev)
     return (E - e_ref) * KJ / n, F * KJ - f_ref * KJ_ANG, out
 
 
-def force_metrics(model, frames, tab, table, chan, bs=16):
+def force_metrics(model, frames, bs=16):
     """Held-out energy and force errors: E/ion MAE and rms (kJ/mol), force rms, MAE and max per component
     (kJ/mol/A), and per file."""
     if not frames:
@@ -272,14 +250,14 @@ def force_metrics(model, frames, tab, table, chan, bs=16):
     es, fs, per = [], [], {}
     for k in range(0, len(frames), bs):
         chunk = frames[k:k + bs]
-        e, f, _ = force_terms(model, chunk, tab, table, chan)
+        e, f, _ = force_terms(model, chunk)
         e, f = e.detach().cpu(), f.detach().cpu()
         es.append(e)
         fs.append(f)
         off = 0
-        for (sym, _, _, meta), ek in zip(chunk, e):
-            n = len(sym)
-            d = per.setdefault(meta["file"], {"e": [], "f": []})
+        for fk, ek in zip(chunk, e):
+            n = fk.n
+            d = per.setdefault(fk.meta["file"], {"e": [], "f": []})
             d["e"].append(abs(float(ek)))
             d["f"].append(float((f[off:off + n] ** 2).mean().sqrt()))
             off += n
@@ -292,39 +270,37 @@ def force_metrics(model, frames, tab, table, chan, bs=16):
     return out
 
 
-def curvature_penalty(model, caches, tab, table, chan, delta=0.02):
+def curvature_penalty(model, frames, delta=0.02):
     """Mean squared second difference (per A^2) of every environment log-factor along one random per-atom
     displacement field (unit vectors x delta A) of the given frames."""
-    from ..ff.cmm import batched_precompute
-    dev = table.device
-    pos = torch.cat([c.pos for c in caches]).to(dev, torch.float64)
-    Z = torch.tensor([ATOMIC_NUMBER[tab.symbols[int(s)]] for c in caches for s in c.species], device=dev)
-    fr = torch.cat([torch.full((c.species.shape[0],), k, dtype=torch.long) for k, c in enumerate(caches)]).to(dev)
+    dev = next(model.parameters()).device
+    pos = torch.cat([f.pos for f in frames]).to(dev)
+    Z = torch.cat([f.Z for f in frames]).to(dev)
+    fr = torch.cat([torch.full((f.n,), k, dtype=torch.long) for k, f in enumerate(frames)]).to(dev)
     xi = torch.randn_like(pos)
     xi = xi / xi.norm(dim=1, keepdim=True).clamp(min=1e-12)
     us = []
     for sgn in (0.0, 1.0, -1.0):
-        bt = batched_precompute(pos + sgn * delta * xi, Z, fr, tab, table, chan, inv_form="sq")
+        with torch.no_grad():
+            bt = model.precompute(pos + sgn * delta * xi, Z, fr)
         us.append(dict(model.environment(bt)))
     return sum((((us[1][k] - 2 * us[0][k] + us[2][k]) / delta ** 2) ** 2).mean() for k in us[0])
 
 
-def input_matrices(model, caches, bs=128):
-    """(N, 17) raw channels and (N, 15) raw gated probe invariants (or None) of every atom of the caches."""
+def input_matrices(model, frames, bs=128):
+    """(N, 17) raw channels and (N, 15) raw gated probe invariants (or None) of every atom of the frames."""
     X, G = [], []
-    dev = next(model.parameters()).device
-    with torch.no_grad():
-        for k in range(0, len(caches), bs):
-            bt = D.to_device(collate(caches[k:k + bs]), dev)
-            X.append(model.channels_raw(bt).cpu())
-            if model.config.probes:
-                G.append(model.gated_raw(bt).cpu())
+    for k in range(0, len(frames), bs):
+        _, bt = D.batch_of(frames[k:k + bs], model)
+        X.append(bt["chan"].cpu())
+        if model.config.probes:
+            G.append(bt["gated"].cpu())
     return torch.cat(X), (torch.cat(G) if G else None)
 
 
-def set_input_scales(model, caches, env_sat):
+def set_input_scales(model, frames, env_sat):
     """The encoder inputs' training scale (std over atoms with any) and saturation (env_sat x the training max)."""
-    X, G = input_matrices(model, caches)
+    X, G = input_matrices(model, frames)
     nz = X.abs().sum(1) > 0
     model.chan_scale.copy_(X[nz].std(0).clamp(min=1e-12).to(model.chan_scale))
     if env_sat > 0:
@@ -337,14 +313,13 @@ def set_input_scales(model, caches, env_sat):
     return X
 
 
-def evaluate(model, caches, bs=64):
+def evaluate(model, frames, bs=64):
     rows = []
     model.eval()
-    dev = next(model.parameters()).device
     with torch.no_grad():
-        for k in range(0, len(caches), bs):
-            chunk = caches[k:k + bs]
-            bt, _ = D.pack_to_device(collate(chunk), dev)
+        for k in range(0, len(frames), bs):
+            chunk = frames[k:k + bs]
+            _, bt = D.batch_of(chunk, model)
             out = {k_: (v.cpu() if torch.is_tensor(v) else v) for k_, v in model(bt).items()}
             for q, f in enumerate(chunk):
                 lab = f.labels
@@ -395,26 +370,6 @@ def summarize(rows, cap=20.0):
     return res
 
 
-def radial_table(tab, params_path, cache_dir=None):
-    """The :class:`RadialTable` of the precompute for this species table, cached on disk by the table's hash."""
-    import hashlib
-    from ..ff.cmm import RadialTable
-    key = hashlib.sha1(Path(params_path).read_bytes() + b"|cmm-table-v1").hexdigest()[:16]
-    path = Path(cache_dir) / f"table_{key}.pt" if cache_dir else None
-    if path and path.exists():
-        try:
-            return torch.load(path, weights_only=False)
-        except Exception:  # noqa: BLE001 -- a truncated or stale file: rebuild
-            pass
-    t0 = time.time()
-    table = RadialTable(tab.to("cpu"))
-    print(f"radial table: {table.n_funcs} functions x {table.G} points in {time.time() - t0:.0f}s", flush=True)
-    if path:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(table, path)
-    return table
-
-
 def write_hull(out, X_train, X_held, model, k, meta):
     """out/hull.pt: the training atoms' convex hull in the encoder's channel space; never fails the run."""
     try:
@@ -445,8 +400,6 @@ def run(cfg: TrainConfig, base: Path):
     random.seed(rc.seed)
     params = P(dc.params)
     tab, chan = IonTable.load(params), ChannelTable.load(params)
-    from ..ff.cmm import PROBE_NAMES, DensityEnvironment
-    feat = DensityEnvironment(tab, probes=PROBE_NAMES, inv_form="sq")
     ct_dimers = {"all": True, "none": False, "like": "like"}[dc.ct_dimers]
     frames = D.load_frames(P(dc.ct_sets), P(dc.walk_eda) if dc.walk_eda else None, dc.ct_max_pair, dc.max_ho_ratio,
                            species=tab.symbols, ct_dimers=ct_dimers,
@@ -456,21 +409,25 @@ def run(cfg: TrainConfig, base: Path):
     print(f"ct label kept for {sum(f[2]['ct_mask'] for f in frames)} of {len(frames)} frames", flush=True)
     tags = D.split(frames, test, seed=rc.seed)
     print(f"{len(frames)} frames: " + ", ".join(f"{t} {tags.count(t)}" for t in ("train", "val", "test")), flush=True)
-    cache_path = None
-    if rc.cache_dir:
-        cache_path = Path(rc.cache_dir) / f"cache_{D.cache_key(params, frames)}.pt"
-    caches = D.build_cache(frames, tab, chan, feat, cache_path or out / "cache.pt", workers=rc.precompute_workers)
-    tr = [c for c, t in zip(caches, tags) if t == "train"]
-    va = [c for c, t in zip(caches, tags) if t == "val"]
-    te = [c for c, t in zip(caches, tags) if t == "test"]
+    frames = D.as_frames(frames)
+    tr = [f for f, t in zip(frames, tags) if t == "train"]
+    va = [f for f, t in zip(frames, tags) if t == "val"]
+    te = [f for f, t in zip(frames, tags) if t == "test"]
+    dev = torch.device(rc.device)
     model = CmmModel(tab, chan, cfg.model)
+    t1 = time.time()
+    model.table()
+    print(f"radial table: {model.table().n_funcs} functions x {model.table().G} points [{time.time() - t1:.0f}s]",
+          flush=True)
+    if dev.type != "cpu":
+        model.tab = tab = tab.to(dev)
+        model.to(dev)
     Xtr = set_input_scales(model, tr, rc.env_sat)
     if rc.init_from:
         src = load_cmm(rc.init_from, params=params)
         missing, unexpected = model.load_state_dict(src.state_dict(), strict=False)
         print(f"init from {rc.init_from}: {len(missing)} new, {len(unexpected)} dropped", flush=True)
-    dev = torch.device(rc.device)
-    polar_tr, polar_te, pb_tr, pb_all = [], [], None, None
+    polar_tr, polar_te = [], []
     if lc.w_alpha > 0:
         almo = (D.polar_targets(P(dc.ct_sets), ct_dimers=ct_dimers is True,
                                 files=("ct-polar", *[f"seed-{x}-polar" for x in dc.salts]),
@@ -478,31 +435,21 @@ def run(cfg: TrainConfig, base: Path):
         total = D.total_polar_targets([P(f) for f in dc.polar_sets], species=tab.symbols, exclude=dc.exclude_names)
         for pid, sym, X, tgt, ok, is_tot in ([(*t, False) for t in almo] + [(*t, False, True) for t in total]):
             lab = {"alpha": tgt, "ct_ok": ok, **({"total": True} if is_tot else {})}
-            c = precompute(sym, X, tab, chan, feat, lab, {"polar_id": pid})
+            c = D.as_frame(sym, X, lab, {"polar_id": pid})
             (polar_te if pid in set(dc.polar_test) else polar_tr).append(c)
         print(f"alpha targets: {len(polar_tr)} train, {len(polar_te)} held out", flush=True)
-        if polar_tr:
-            pb_tr = D.to_device(polar_batch(polar_tr), dev)
-            pb_all = D.to_device(polar_batch(polar_tr + polar_te), dev)
-    if dev.type != "cpu":
-        tab = tab.to(dev)
-        model.tab = tab
-        model.to(dev)
     force_tr, force_te = [], []
-    table = None
     if dc.force_data or dc.force_sets:
         fsets = [P(f) for f in dc.force_sets]
         mono = {**D.force_set_monomers(fsets), **D.monomer_energies([P(dc.walk_eda)] if dc.walk_eda else [])}
-        ff = D.load_force_frames([P(d) for d in dc.force_data], mono) + D.load_force_sets(fsets, mono, tab.symbols,
-                                                                                            dc.exclude_names)
+        ff = D.as_frames(D.load_force_frames([P(d) for d in dc.force_data], mono)
+                         + D.load_force_sets(fsets, mono, tab.symbols, dc.exclude_names))
         held = set(dc.force_test)
         if dc.force_test_file and P(dc.force_test_file).exists():
             held |= {x.strip() for x in P(dc.force_test_file).read_text().split() if x.strip()}
-        force_tr = [f for f in ff if f[3]["file"] not in held]
-        force_te = [f for f in ff if f[3]["file"] in held]
+        force_tr = [f for f in ff if f.meta["file"] not in held]
+        force_te = [f for f in ff if f.meta["file"] in held]
         print(f"force frames: {len(force_tr)} train, {len(force_te)} held out", flush=True)
-    if force_tr or lc.w_curv > 0:
-        table = radial_table(tab.to("cpu"), params, rc.cache_dir or None).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=rc.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(rc.epochs, 1), eta_min=rc.lr * 0.02)
     best, log, curv_log, n_bad = math.inf, [], [], 0
@@ -511,7 +458,8 @@ def run(cfg: TrainConfig, base: Path):
         random.shuffle(tr)
         tot = 0.0
         chunks = [tr[k:k + rc.batch] for k in range(0, len(tr), rc.batch)]
-        for step, bt in enumerate(D.prefetch_batches(chunks, dev)):
+        for step, chunk in enumerate(chunks):
+            _, bt = D.batch_of(chunk, model)
             o = model(bt)
             ep_, ec_ = loss_terms(o, bt)
             loss = (lc.w_pol * ep_ ** 2 + lc.w_ct * ec_ ** 2).mean()
@@ -521,20 +469,19 @@ def run(cfg: TrainConfig, base: Path):
                 loss = loss + lc.w_pauli * (term_error(o["e_pauli"], bt, "pauli") ** 2).mean()
             if lc.w_disp > 0:
                 loss = loss + lc.w_disp * (term_error(o["e_disp"], bt, "disp") ** 2).mean()
-            if pb_tr is not None and step % rc.alpha_every == 0:
-                ap_, ac_ = polar_loss(model, pb_tr)
+            if polar_tr and step % rc.alpha_every == 0:
+                ap_, ac_ = polar_loss(model, polar_tr)
                 loss = loss + rc.alpha_every * lc.w_alpha * (ap_ ** 2 + lc.w_alpha_ct * ac_ ** 2).mean()
             if lc.w_smooth > 0:
                 loss = loss + lc.w_smooth * model.smoothness_penalty(bt, rc.smooth_sigma)
             if lc.w_curv > 0 and step % rc.curv_every == 0:
-                cp = curvature_penalty(model, random.sample(tr, min(rc.curv_frames, len(tr))), tab, table, chan,
-                                       rc.curv_delta)
+                cp = curvature_penalty(model, random.sample(tr, min(rc.curv_frames, len(tr))), rc.curv_delta)
                 loss = loss + rc.curv_every * lc.w_curv * cp
                 curv_log.append(float(cp.detach()))
             if force_tr and lc.w_force > 0 and step % rc.force_every == 0:
                 fb = random.sample(force_tr, min(rc.force_batch, len(force_tr)))
                 try:
-                    fe_, ff_, _ = force_terms(model, fb, tab, table, chan)
+                    fe_, ff_, _ = force_terms(model, fb)
                     loss = loss + rc.force_every * (lc.w_fe * (fe_ ** 2).mean() + lc.w_force * (ff_ ** 2).mean())
                 except torch.linalg.LinAlgError as err:
                     print(f"ep {ep} step {step}: force step skipped ({err})", flush=True)
@@ -560,21 +507,21 @@ def run(cfg: TrainConfig, base: Path):
                 save_cmm(out / "model.pt", model, params=params, train=cfg.to_dict(), epoch=ep, val_score=score)
             log.append({"epoch": ep, "train_loss": tot / max(len(tr), 1), **{f"val_{k}": v for k, v in sv.items()}})
             msg = ""
-            if pb_all is not None:
+            if polar_tr:
                 with torch.no_grad():
-                    ap_, ac_ = polar_loss(model, pb_all)
+                    ap_, ac_ = polar_loss(model, polar_tr + polar_te)
                 msg += f" | alpha/ion |err| {ap_.abs().mean():.2f} bohr^3"
             if "pauli_mae" in sv:
                 msg += f" | pauli MAE {sv['pauli_mae']:.2f} disp MAE {sv.get('disp_mae', 0):.2f}"
             if force_te:
-                fm = force_metrics(model, force_te, tab, table, chan)
+                fm = force_metrics(model, force_te)
                 msg += f" | held-out forces: E/ion MAE {fm['e_mae']:.2f} kJ/mol, F rms {fm['f_rms']:.1f} kJ/mol/A"
                 log[-1].update({f"force_{k}": v for k, v in fm.items()})
-            if table is not None and va:
+            if va and (force_tr or lc.w_curv > 0):
                 st = torch.random.get_rng_state()
                 torch.manual_seed(1234)
                 with torch.no_grad():
-                    cv = float(curvature_penalty(model, va[:16], tab, table, chan, rc.curv_delta))
+                    cv = float(curvature_penalty(model, va[:16], rc.curv_delta))
                 torch.random.set_rng_state(st)
                 log[-1]["val_curv"] = cv
                 msg += f" | curv {cv:.3g}" + (f" (train {np.mean(curv_log):.3g})" if curv_log else "")
@@ -599,8 +546,8 @@ def run(cfg: TrainConfig, base: Path):
                     w.writeheader()
                 w.writerow({k: r.get(k) for k in w.fieldnames})
     if force_tr or force_te:
-        res["force_train"] = force_metrics(model, force_tr, tab, table, chan)
-        res["force_test"] = force_metrics(model, force_te, tab, table, chan)
+        res["force_train"] = force_metrics(model, force_tr)
+        res["force_test"] = force_metrics(model, force_te)
     json.dump({"metrics": res, "log": log, "config": cfg.to_dict()}, open(out / "metrics.json", "w"), indent=1)
     for name in ("train", "val", "test"):
         m = res[name]["all"]

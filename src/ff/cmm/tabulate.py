@@ -11,19 +11,20 @@ are not in the table: those kernels are closed-form Slater 1s and stay analytic 
 :class:`RadialTable` holds, per ordered species pair, the functions
 
     drive:{dip,quad}:{n}      c(r) = Z_j f^nuc_n - sum_t n_t f^t_n  (complement of the permanent drive; lam = q_j - c)
-    aoff:{dd,dq,qd,qq}:{n}    f_n between parent a of i and parent c of j (lam = 1 - f)
-    front:{role}:v            same complement as drive, for the frontier density of i (rank 0)
-    front:{role}:{dip,quad}:{n}   f_n between frontier of i and parent of j
-    envV:{probe}:{n}          drive-type complement for each environment probe of i
-    envS:{probe}:{0,1,2}      overlap of probe i with j's shells and its first two radial derivatives
-    ps:{dip,quad}:{n}         f^pt_n - f^sh_n, the pseudo-potential drive basis (parent of i, outer shell of j)
-    ps{t}:{dip,quad}:{n}      the same for each permanent shell t of j (zero where j has no shell t)
+    aoff:{dd,dq,qd,qq}:{n}    f_n between parent a of i and parent c of j (lam = 1 - f; dd, qd are also the CT
+                              charge slots' couplings)
+    envV:{probe}:{n}          drive-type complement for each diffuse probe of i (donor, acceptor, breath)
+    envS:{probe}:{0,1}        overlap of probe i with j's shells and its first radial derivative
 
-with n = 0..4 the five damping orders of the rank-2 tensor. All of them vanish beyond the overlap range, so the
-table ends at ``r_max`` and returns zero past it.
+with n = 0..4 the five damping orders of the rank-2 tensor; :class:`CmmTable` adds the exchange-polarization rows of
+:class:`XpolTable` and the Gram rows of :class:`rsfff.ff.cmm.gram.GramTable` on the same grid, so one lookup per
+pair serves the whole precompute. All of them vanish beyond the overlap range, so the table ends at ``r_max`` and
+returns zero past it.
 
-:func:`batched_precompute` assembles from positions (differentiable) the same batch dict ``collate`` makes from
-per-frame caches (lean + frontier + environment blocks), for :class:`rsfff.ff.cmm.CmmModel`.
+:func:`batched_precompute` assembles from positions (differentiable) everything of a batch that depends on the
+geometry alone -- the induction drive and operator, the encoder's channels and gated probe invariants, the exchange
+pairs' overlap derivatives and Gram blocks, the CT charge slots' couplings, the channel list, the frozen
+electrostatics -- for :class:`rsfff.ff.cmm.CmmModel`, whose forward then only does what depends on its parameters.
 """
 from __future__ import annotations
 
@@ -32,15 +33,21 @@ import math
 import torch
 
 from . import kernels as K
-from .batch import channel_types
-from .params import ChannelTable, IonTable, channel_taper
+from .params import IonTable
 from ..multipole import shaped_one_center_multi, shaped_two_center_damp
-from .environment import INVARIANT_NAMES, PROBE_NAMES, invariants, shaped_overlap_derivs
-from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
-                       recip_apply, smooth_switch)
+from .environment import shaped_overlap_derivs
 
-__all__ = ["FluxTable", "ProbeOverlapTable", "RadialTable", "XpolTable", "cached_table", "batched_precompute", "flux_pair_terms",
-           "shape_self_coulomb", "xpol_overlap_map"]
+__all__ = ["RadialTable", "XpolTable", "cached_table", "shape_self_coulomb", "PROBES", "GATE", "R_XPOL", "NORD", "BOHR"]
+
+#: the diffuse probes whose environment the encoder reads (gated invariants) and whose l = 0 shape is the breathing
+#: response (breath)
+PROBES = ("donor", "acceptor", "breath")
+#: the probe overlap at which a neighbour's point-charge field starts to count and counts fully (smoothstep in log10)
+GATE = (1e-7, 1e-5)
+#: exchange pairs and environment channels end here (the frozen overlaps are < 1e-9 beyond)
+R_XPOL = 10.0
+#: the overlap window over which a pair's exchange ratios and channel weights switch on (above the table's noise)
+O_ON, O_FULL = 1e-7, 1e-6
 
 NORD = 5          # damping orders of the rank-2 tensor
 BOHR = K.BOHR_ANG
@@ -107,7 +114,8 @@ def cached_table(cls, tab, **kw):
     if not d:
         return cls(tab, **kw)
     try:
-        src = Path(inspect.getsourcefile(cls)).read_bytes() + Path(__file__).read_bytes()
+        src = (Path(inspect.getsourcefile(cls)).read_bytes() + Path(__file__).read_bytes()
+               + (Path(__file__).parent / "gram.py").read_bytes())
     except (OSError, TypeError):
         return cls(tab, **kw)
     key = hashlib.sha1(cls.__name__.encode() + repr(sorted(kw.items())).encode() + _tab_fingerprint(tab) + src).hexdigest()[:16]
@@ -129,16 +137,14 @@ def cached_table(cls, tab, **kw):
     return table
 
 
-#: reach of the (retired) pseudo-potential drive rows the table still carries (their layout keys the disk cache)
-PSEUDO_CUTOFF = 6.0
-
-
 class RadialTable:
-    def __init__(self, tab: IonTable, probes=PROBE_NAMES, r_min=0.3, r_max=12.0, h=0.01, pseudo_cutoff=PSEUDO_CUTOFF,
-                 dtype=torch.float64):
+    """The precompute's radial rows (module docstring) on the grid r_min..r_max (Angstrom, step h), quintic Hermite
+    in r. Subclasses override :meth:`_functions` (the rows of one ordered species pair) and reuse the grid and the
+    evaluation."""
+
+    def __init__(self, tab: IonTable, probes=PROBES, r_min=0.3, r_max=12.0, h=0.01, dtype=torch.float64):
         self.tab, self.probes = tab, tuple(probes)
         self.r_min, self.r_max, self.h = float(r_min), float(r_max), float(h)
-        self.pseudo_cutoff = pseudo_cutoff
         G = int(round((r_max - r_min) / h)) + 1
         self.G = G
         self.r = torch.linspace(r_min, r_max, G, dtype=dtype)           # Angstrom
@@ -149,14 +155,21 @@ class RadialTable:
         for si in range(S):
             for sj in range(S):
                 rows.append(self._functions(si, sj))
+        self.names = list(rows[0])
+        self.index = {k: n for n, k in enumerate(self.names)}
         F = len(self.names)
-        vals = torch.stack([torch.stack([r[k] for k in range(F)]) for r in rows]).reshape(S, S, F, G, 3)
+        vals = torch.stack([torch.stack([r[k] for k in self.names]) for r in rows]).reshape(S, S, F, G, 3)
         # Hermite coefficients in grid units: y, h y', h^2 y''
         self.coef = torch.stack([vals[..., 0], vals[..., 1] * h, vals[..., 2] * h * h], -1).contiguous()
         self.n_funcs = F
 
     # ---- building -------------------------------------------------------------------------------------------
     def _functions(self, si, sj):
+        """{name: (G, 3)} the rows of the ordered species pair (si, sj) with their first two r-derivatives."""
+        with torch.enable_grad():
+            return self._radial_rows(si, sj)
+
+    def _radial_rows(self, si, sj):
         tab = self.tab
         r = self.r.clone().requires_grad_(True)
         rb = r / BOHR
@@ -164,7 +177,6 @@ class RadialTable:
         one = K._onehot0(G, rb)
         out: dict[str, torch.Tensor] = {}
         shells = [(tab.shell_b[sj, t], tab.shell_n[sj, t]) for t in range(tab.shell_n.shape[1]) if tab.shell_n[sj, t] > 0]
-        b_outer = min((b for b, _ in shells), default=tab.shell_b[sj, 0])
 
         def complement(bp, wp):
             """Z_j f^nuc - sum_t n_t f^t: (NORD, G)."""
@@ -180,19 +192,6 @@ class RadialTable:
             c = complement(bp, wp)
             for n in range(NORD):
                 out[f"drive:{p}:{n}"] = c[n]
-            bo = b_outer.expand(G)
-            d = shaped_one_center_multi(bp, wp, rb, 2) - shaped_two_center_damp(bp, bo, wp, one, rb, 2)
-            for n in range(NORD):
-                out[f"ps:{p}:{n}"] = d[n]
-            d_outer = d
-            for t in range(tab.shell_n.shape[1]):
-                if tab.shell_n[sj, t] > 0:
-                    bt_ = tab.shell_b[sj, t].expand(G)
-                    d = shaped_one_center_multi(bp, wp, rb, 2) - shaped_two_center_damp(bp, bt_, wp, one, rb, 2)
-                else:
-                    d = 0.0 * d_outer                          # keeps the graph to r (zero function, zero derivatives)
-                for n in range(NORD):
-                    out[f"ps{t}:{p}:{n}"] = d[n]
         for a, (ba, wa) in parents.items():
             bpa, wpa = _expand(ba, wa, G)
             for c_, (bc, wc) in parents_j.items():
@@ -200,14 +199,6 @@ class RadialTable:
                 f = shaped_two_center_damp(bpa, bpc, wpa, wpc, rb, 2)
                 for n in range(NORD):
                     out[f"aoff:{a[0]}{c_[0]}:{n}"] = f[n]
-        for role in ("donor", "acceptor"):
-            bf, wf = _expand(tab.front_b[role][si], tab.front_w[role][si], G)
-            out[f"front:{role}:v"] = complement(bf, wf)[0]
-            for p, (bc, wc) in parents_j.items():
-                bpc, wpc = _expand(bc, wc, G)
-                f = shaped_two_center_damp(bf, bpc, wf, wpc, rb, 2)
-                for n in range(NORD):
-                    out[f"front:{role}:{p}:{n}"] = f[n]
         probe_src = {"shell": None, "dip": parents["dip"], "quad": parents["quad"],
                      "donor": (tab.front_b["donor"][si], tab.front_w["donor"][si]),
                      "acceptor": (tab.front_b["acceptor"][si], tab.front_w["acceptor"][si]),
@@ -222,20 +213,16 @@ class RadialTable:
             c = complement(bp, wp)
             for n in range(NORD):
                 out[f"envV:{name}:{n}"] = c[n]
-            S0 = S1 = S2 = torch.zeros_like(rb)
+            S0 = S1 = 0.0 * rb
             for bt, nt in shells:
-                a_, da, d2a = shaped_overlap_derivs(bp, wp, bt.expand(G), one, rb)
-                S0, S1, S2 = S0 + nt * a_, S1 + nt * da, S2 + nt * d2a
-            out[f"envS:{name}:0"], out[f"envS:{name}:1"], out[f"envS:{name}:2"] = S0, S1, S2
-        if not self.names:
-            self.names = list(out)
-            self.index = {k: n for n, k in enumerate(self.names)}
-        res = []
-        for k in self.names:
-            f = out[k]
+                a_, da, _ = shaped_overlap_derivs(bp, wp, bt.expand(G), one, rb)
+                S0, S1 = S0 + nt * a_, S1 + nt * da
+            out[f"envS:{name}:0"], out[f"envS:{name}:1"] = S0, S1
+        res = {}
+        for k, f in out.items():
             d1 = torch.autograd.grad(f.sum(), r, create_graph=True)[0]
             d2 = torch.autograd.grad(d1.sum(), r, retain_graph=True)[0]
-            res.append(torch.stack([f, d1, d2], -1).detach())
+            res[k] = torch.stack([f, d1, d2], -1).detach()
         return res
 
     # ---- evaluation ------------------------------------------------------------------------------------------
@@ -305,85 +292,6 @@ class RadialTable:
         return memo[key]
 
 
-class FluxTable(RadialTable):
-    """The rows the charge-flux CT needs (``CompleteModel(ct_model="flux")``): per ordered species pair (s_i, s_j),
-
-        aoff:dd:{n}   f_n between i's dipole parent and j's dipole parent (the charge slot's shape)
-        aoff:qd:{n}   f_n between i's quadrupole parent and j's dipole parent
-
-    the same functions as the :class:`RadialTable` rows of those names, without the probes and frontier rows."""
-
-    def __init__(self, tab: IonTable, r_max=12.0, **kw):
-        with torch.enable_grad():           # built lazily by the model, possibly under no_grad (the r-derivatives)
-            super().__init__(tab, probes=(), r_max=r_max, **kw)
-
-    def _functions(self, si, sj):
-        tab = self.tab
-        r = self.r.clone().requires_grad_(True)
-        rb = r / BOHR
-        G = self.G
-        bd, wd = _expand(tab.b_dip[sj], tab.w_dip[sj], G)
-        out = {}
-        for a, (ba, wa) in (("d", (tab.b_dip[si], tab.w_dip[si])), ("q", (tab.b_quad[si], tab.w_quad[si]))):
-            bpa, wpa = _expand(ba, wa, G)
-            f = shaped_two_center_damp(bpa, bd, wpa, wd, rb, 2)
-            for n in range(NORD):
-                out[f"aoff:{a}d:{n}"] = f[n]
-        if not self.names:
-            self.names = list(out)
-            self.index = {k: n for n, k in enumerate(self.names)}
-        res = []
-        for k in self.names:
-            f = out[k]
-            d1 = torch.autograd.grad(f.sum(), r, create_graph=True)[0]
-            d2 = torch.autograd.grad(d1.sum(), r, retain_graph=True)[0]
-            res.append(torch.stack([f, d1, d2], -1).detach())
-        return res
-
-
-class ProbeOverlapTable(RadialTable):
-    """The gate of the overlap-switched environment fields (``CompleteModel(env_ct_gated=True)``): per ordered species
-    pair (s_i, s_j)
-
-        ov:{probe}    the overlap of i's probe density with j's frozen electron density, sum_t n_t <g_i | 1s_t(j)>
-
-    (the ``envS:{probe}:0`` row of :class:`RadialTable`) for the diffuse probes donor, acceptor and breath."""
-
-    PROBES = ("donor", "acceptor", "breath")
-
-    def __init__(self, tab: IonTable, r_max=12.0, h=0.02, **kw):
-        with torch.enable_grad():           # built lazily by the model, possibly under no_grad (the r-derivatives)
-            super().__init__(tab, probes=(), r_max=r_max, h=h, **kw)
-
-    def _functions(self, si, sj):
-        tab = self.tab
-        r = self.r.clone().requires_grad_(True)
-        rb = r / BOHR
-        G = self.G
-        one = K._onehot0(G, rb)
-        shells = [(tab.shell_b[sj, t], tab.shell_n[sj, t]) for t in range(tab.shell_n.shape[1]) if tab.shell_n[sj, t] > 0]
-        src = {"donor": (tab.front_b["donor"][si], tab.front_w["donor"][si]),
-               "acceptor": (tab.front_b["acceptor"][si], tab.front_w["acceptor"][si]),
-               "breath": (tab.b_breath[si], tab.w_breath[si])}
-        out = {}
-        for name in self.PROBES:
-            bp, wp = _expand(*src[name], G)
-            S0 = 0.0 * rb
-            for bt, nt in shells:
-                S0 = S0 + nt * shaped_overlap_derivs(bp, wp, bt.expand(G), one, rb)[0]
-            out[f"ov:{name}"] = S0
-        if not self.names:
-            self.names = list(out)
-            self.index = {k: n for n, k in enumerate(self.names)}
-        res = []
-        for k in self.names:
-            f = out[k]
-            d1 = torch.autograd.grad(f.sum(), r, create_graph=True)[0]
-            d2 = torch.autograd.grad(d1.sum(), r, retain_graph=True)[0]
-            res.append(torch.stack([f, d1, d2], -1).detach())
-        return res
-
-
 def shape_self_coulomb(tab: IonTable, r0: float = 1e-3) -> torch.Tensor:
     """(S,) the Coulomb self-energy (Hartree) of each species' dipole-parent shape (unit charge): the r -> 0 limit
     of (1 - f_0(r)) / r between two copies of it (converged to ~1e-9 at r0 = 1e-3 bohr)."""
@@ -394,21 +302,6 @@ def shape_self_coulomb(tab: IonTable, r0: float = 1e-3) -> torch.Tensor:
         f = shaped_two_center_damp(b, b, w, w, rb, 0)[0]
         out.append(((1 - f) / rb)[0])
     return torch.stack(out).detach()
-
-
-def flux_pair_terms(table: FluxTable, s, dp, dr):
-    """For directed pairs dp = (i <- j) (2, P), species s (N,) and dr = r_j - r_i (P, 3) bohr: the drive on i's
-    site variables (P, 8) of a unit charge in j's dipole-parent shape (dipole on i's dipole parent, quadrupole on its
-    quadrupole parent: the energy is Q_j K . z_i, as the permanent drive L) and the charge-charge Coulomb (P,) of the
-    two dipole-parent shapes."""
-    i, j = dp
-    r = dr.norm(dim=-1)
-    y = table(s[i], s[j], r * BOHR)
-    lam = 1 - table.rows(y, ["aoff:dd", "aoff:qd"])                     # (2, NORD, P)
-    T0 = _basis_tensors(dr)[:, :, 0, :]                                # (NORD, P, 10): row 0, j as a charge
-    R = torch.einsum("knp,npb->kpb", lam, T0)                          # (2, P, 10)
-    Rp = R @ K._poly_map(dr.dtype, dr.device)                          # (2, P, 8)
-    return torch.cat([Rp[0, :, :3], Rp[1, :, 3:]], 1), R[0, :, 0]
 
 
 def _sph_y(n, x):
@@ -447,10 +340,13 @@ class XpolTable(RadialTable):
     SHAPES = ("dip", "quad")
 
     def __init__(self, tab, r_max=10.0, **kw):
-        super().__init__(tab, probes=("shell",), r_max=r_max, **kw)
+        super().__init__(tab, probes=(), r_max=r_max, **kw)
+
+    def _functions(self, si, sj):
+        return self._xpol_rows(si, sj)
 
     @torch.no_grad()
-    def _functions(self, si, sj):
+    def _xpol_rows(self, si, sj):
         tab = self.tab
         rb = self.r / BOHR
         k, wk = K._ovl_grid(rb.dtype, rb.device)
@@ -492,27 +388,7 @@ class XpolTable(RadialTable):
 
         out["xp:breath"] = scalar(fp * ft(tab.b_breath[sj], tab.w_breath[sj]) * wk / (2 * math.pi ** 2))
         out["xp:ovl"] = scalar(fp * rho(sj) * wk / (2 * math.pi ** 2))
-        if not self.names:
-            self.names = list(out)
-            self.index = {kk: m for m, kk in enumerate(self.names)}
-        return [out[kk] for kk in self.names]
-
-
-def xpol_overlap_map(table: XpolTable, s, dp, dr):
-    """For directed pairs (i <- j), dr = X_j - X_i (bohr, autograd flows): the frozen overlap O_ij = <rho_i | rho_j>
-    (P,), the linear map d_ij (P, 8) from j's induced moments [dipole, spherical quadrupole] to the change of that
-    overlap (of the electron density: x is a charge-density moment, so the sign flips), and e_ij (P,) the change
-    per unit breathing amplitude of j (an electron-density amplitude)."""
-    i, j = dp
-    r = dr.norm(dim=-1)
-    y = table(s[i], s[j], r * BOHR)
-    Tb = _basis_tensors(dr)                                                   # (NORD, P, 10, 10) [j, i]
-    P = K._poly_map(dr.dtype, dr.device)
-    lam = table.rows(y, ["xp:dip", "xp:quad"])                                # (2, NORD, P)
-    Td = torch.einsum("np,npa->pa", lam[0], Tb[:, :, 1:4, 0])                 # (P, 3)
-    Tq = torch.einsum("np,npa->pa", lam[1], Tb[:, :, 4:10, 0]) @ P[4:10, 3:8]  # (P, 5)
-    cols = table.cols(("xp:ovl", "xp:breath"), y.device)
-    return y[:, cols[0]], -torch.cat([Td, Tq], -1), y[:, cols[1]]
+        return out
 
 
 def _basis_tensors_ref(dr):
@@ -573,183 +449,3 @@ def _basis_tensors_fused(dr):
     rp = dr.norm(dim=-1)[None] ** -ex[:, None]                       # (NORD, P)
     T = (_monomials(dr) @ C) * rp[:, :, None]                        # (NORD, P, 100)
     return T.reshape(NORD, dr.shape[0], 10, 10)
-
-
-def _channel_lut(tab, chan):
-    """(S, S) channel type index of each ordered species pair (-1 where the pair has no channel)."""
-    S = len(tab.symbols)
-    ctypes = channel_types(tab.symbols)
-    ch = torch.full((S, S), -1, dtype=torch.long)
-    for a in range(S):
-        for b in range(S):
-            nm = f"{tab.symbols[a]}>{tab.symbols[b]}"
-            if nm in chan.types and nm in ctypes:
-                ch[a, b] = ctypes.index(nm)
-    return ch
-
-
-def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table: RadialTable, chan: ChannelTable,
-                       labels: dict | None = None, cell=None, cutoff: float = 9.0, switch_width: float = 1.0,
-                       ewald_tol: float = 1e-10, dispersion_tail: bool = False, inv_form: str = "sq") -> dict:
-    """The collated batch of the complete model straight from positions (N, 3) Angstrom (autograd flows through),
-    atomic numbers (N,), frame index (N,) sorted by frame. ``labels``: a dict of per-frame tensors (B,) to attach.
-    Runs on the device of ``pos_ang``; ``tab`` and ``table`` must live there too (``IonTable.to``, ``RadialTable.to``).
-
-    Produces the keys ``collate`` makes that :class:`CompleteModel` reads: L, A_off, VD/KD/VA/KA (padded), mask,
-    species, feats, frame, pos, channels (index, type, r, frame, ltaper), pseudo drive (index, type, r, basis), env.
-    The damped tensors of every pair are built once as the five pure-order basis tensors and every term is a single
-    contraction of table rows against them.
-
-    ``cell`` (3, 3) or (B, 3, 3) Angstrom, rows the lattice vectors, makes the frames periodic (autograd flows
-    through it too: the stress is the derivative under a strain of positions and cell). The pairs are then every
-    pair and lattice image within ``cutoff`` (Angstrom), the table's short-range complements are switched off over
-    the last ``switch_width``, and the bare Coulomb part of every long-range quantity is the Ewald sum
-    (:mod:`rsfff.ff.cmm.periodic`, splitting from ``cutoff`` and ``ewald_tol``): the net charge q_j of each
-    pair term is screened by g_n(r), and the reciprocal part is added per atom. The induction operator is not
-    assembled (``A_off`` and ``A_pp`` are None): its real-space pair blocks and the Ewald frames go into
-    ``bt["pbc"]`` for the matrix-free solve, and the frontier potentials come as per-atom sums plus per-pair
-    couplings instead of the dense (B, n, n) blocks. Dispersion is switched off over the same last
-    ``switch_width``; ``dispersion_tail`` adds the uniform-density correction for the pairs beyond.
-
-    ``inv_form``: the environment invariants' form ("sq" squared norms, "norm" magnitudes) -- the model's own
-    (``CompleteModel.inv_form``), which callers pass through."""
-    X = pos_ang / BOHR
-    dev, dt = X.device, X.dtype
-    N = X.shape[0]
-    b_idx = torch.as_tensor(batch_idx, device=dev)
-    B = int(b_idx.max()) + 1 if N else 0
-    s = tab.species_index(torch.as_tensor(atomic_numbers, device=dev))
-    counts = torch.bincount(b_idx, minlength=B)
-    loc = torch.arange(N, device=dev) - (torch.cumsum(counts, 0) - counts)[b_idx]
-    nmax = int(counts.max()) if N else 0
-    P = K._poly_map(dt, dev)
-    periodic = cell is not None
-    if periodic:
-        cell_ang = torch.as_tensor(cell, dtype=dt, device=dev)
-        cell_ang = cell_ang.expand(B, 3, 3) if cell_ang.dim() == 2 else cell_ang
-        rc = float(cutoff)
-        if rc - switch_width < max(chan.cutoff, table.pseudo_cutoff):
-            raise ValueError(f"cutoff - switch_width = {rc - switch_width} A is inside the CT / pseudo-drive range")
-        pairs, shifts = periodic_pairs(pos_ang, cell_ang, b_idx, rc)
-        Cb = cell_ang / BOHR
-        dr_u = X[pairs[1]] - X[pairs[0]] + torch.einsum("pk,pkl->pl", shifts, Cb[b_idx[pairs[0]]])
-    else:
-        pairs = K.all_pairs(b_idx)
-        dr_u = X[pairs[1]] - X[pairs[0]]
-    dp = torch.cat([pairs, pairs.flip(0)], dim=1)                  # directed (i <- j)
-    i, j = dp
-    dr = torch.cat([dr_u, -dr_u])
-    r = dr.norm(dim=-1)
-    r_ang = r * BOHR
-    rhat = dr / r[:, None]
-    y = table(s[i], s[j], r_ang)                                     # (Pd, F)
-    qj = tab.charge[s[j]]
-    if periodic:
-        y = y * smooth_switch(r_ang, rc - switch_width, rc)[:, None]
-        alpha = ewald_alpha(rc / BOHR, ewald_tol)
-        g = erfc_screening(r, alpha)                                 # (NORD, Pd): the real-space Ewald screening
-        frames = make_ewald_frames(X, Cb, b_idx, alpha, 2.2 * alpha * math.sqrt(-math.log(ewald_tol)))
-        Mq = X.new_zeros(N, 10)
-        Mq[:, 0] = tab.charge[s]
-        out_q = recip_apply(frames, Mq)                              # (N, 10): reciprocal + self + background
-        rq = out_q @ P                                               # its drive on the site variables
-    else:
-        g = torch.ones(1, r.shape[0], dtype=dt, device=dev)          # bare tensors
-    qg = qj[None] * g                                                # (NORD or 1, Pd)
-    Tb = _basis_tensors(dr)                                          # (NORD, Pd, 10, 10)
-    T0 = Tb[:, :, 0, :]                                              # (NORD, Pd, 10): row 0, the source as a charge
-    probes = list(table.probes)
-    # all drive-type rows at once: 2 parents + the probes (complements c; lam = q_j - c)
-    drive_keys = ["drive:dip", "drive:quad"] + [f"envV:{p}" for p in probes]
-    rows = table.rows(y, drive_keys)                                 # (K, NORD, Pd)
-    lam = qg[None] - rows
-    R0 = torch.einsum("knp,npb->kpb", lam, T0)                       # (K, Pd, 10)
-    Rp = R0 @ P                                                      # (K, Pd, 8)
-    # -- induction drive ------------------------------------------------------------------------------------------
-    Lpair = torch.cat([Rp[0, :, :3], Rp[1, :, 3:]], 1)
-    Lflat = X.new_zeros(N, 8).index_add(0, i, Lpair)
-    if periodic:
-        Lflat = Lflat + rq
-    L = X.new_zeros(B, nmax, 8).index_put((b_idx, loc), Lflat)
-    # -- induced-induced coupling (undirected pairs: the first half of dp) --------------------------------------
-    nP = pairs.shape[0] and pairs.shape[1]
-    ii, jj = pairs
-    PTP = torch.einsum("ab,npbc,cd->npad", P.T, Tb[:, :nP], P)       # (NORD, nP, 8, 8) basis blocks
-    arows = table.rows(y[:nP], ["aoff:dd", "aoff:dq", "aoff:qd", "aoff:qq"])     # (4, NORD, nP)
-    blocks = torch.einsum("knp,npab->kpab", g[:, :nP] - arows, PTP)  # (4, nP, 8, 8): [a c] = dd, dq, qd, qq
-    sl = {"d": slice(0, 3), "q": slice(3, 8)}
-    Bij = X.new_zeros(nP, 8, 8)
-    for k_, (a, c) in enumerate((("d", "d"), ("d", "q"), ("q", "d"), ("q", "q"))):
-        Bij[:, sl[c], sl[a]] = blocks[k_][:, sl[c], sl[a]]
-    if periodic:                      # not assembled: the pair blocks go to the matrix-free solve
-        A_off = None
-    else:
-        ar = torch.arange(8, device=dev)
-        A = X.new_zeros(B, nmax, 8, nmax, 8)
-        fb = b_idx[ii][:, None, None]
-        A = A.index_put((fb, loc[jj][:, None, None], ar[None, :, None], loc[ii][:, None, None], ar[None, None, :]), Bij, accumulate=True)
-        A = A.index_put((fb, loc[ii][:, None, None], ar[None, :, None], loc[jj][:, None, None], ar[None, None, :]),
-                        Bij.transpose(1, 2), accumulate=True)
-        A_off = A.reshape(B, 8 * nmax, 8 * nmax)
-    # -- environment features (all probes at once) ---------------------------------------------------------------
-    nprobe = len(probes)
-    D0 = R0[2:2 + nprobe]                                             # (nprobe, Pd, 10)
-    Dp = Rp[2:2 + nprobe]
-    v0 = (D0[:, :, 0] - (qg[0] / r)[None]).T                          # (Pd, nprobe)
-    V0 = X.new_zeros(N, nprobe).index_add(0, i, v0)
-    V1 = X.new_zeros(N, nprobe, 3).index_add(0, i, -Dp[:, :, :3].permute(1, 0, 2))
-    V2 = X.new_zeros(N, nprobe, 5).index_add(0, i, Dp[:, :, 3:].permute(1, 0, 2))
-    # the penetration part alone (the complements, no point charges): short-ranged, the same in clusters and under PBC
-    Dpen = torch.einsum("knp,npb->kpb", -rows[2:2 + nprobe], T0) @ P                    # (nprobe, Pd, 8)
-    V1pen = X.new_zeros(N, nprobe, 3).index_add(0, i, -Dpen[:, :, :3].permute(1, 0, 2))
-    V2pen = X.new_zeros(N, nprobe, 5).index_add(0, i, Dpen[:, :, 3:].permute(1, 0, 2))
-    if periodic:                                                      # the reciprocal part of the point-charge field
-        V1 = V1 - rq[:, None, :3]
-        V2 = V2 + rq[:, None, 3:]
-    sidx = table.cols(tuple(f"envS:{p_}:{k}" for p_ in probes for k in range(3)), dev).reshape(nprobe, 3)
-    Sy = y[:, sidx]                                                 # (Pd, nprobe, 3)
-    S0p, S1p, S2p = Sy[..., 0], Sy[..., 1], Sy[..., 2]
-    outer = rhat[:, :, None] * rhat[:, None, :] - torch.eye(3, dtype=dt, device=dev)[None] / 3
-    S0 = X.new_zeros(N, nprobe).index_add(0, i, S0p)
-    S1 = X.new_zeros(N, nprobe, 3).index_add(0, i, -S1p[:, :, None] * rhat[:, None, :])
-    S2 = X.new_zeros(N, nprobe, 3, 3).index_add(0, i, (S2p - S1p / r[:, None])[:, :, None, None] * outer[:, None])
-    if "breath" in probes:
-        kb = probes.index("breath")
-        has = (tab.a0[s] > 0).to(dt)
-        V0[:, kb], S0[:, kb] = V0[:, kb] * has, S0[:, kb] * has
-        V1[:, kb], V2[:, kb], S1[:, kb] = V1[:, kb] * has[:, None], V2[:, kb] * has[:, None], S1[:, kb] * has[:, None]
-        V1pen[:, kb], V2pen[:, kb] = V1pen[:, kb] * has[:, None], V2pen[:, kb] * has[:, None]
-        S2[:, kb] = S2[:, kb] * has[:, None, None]
-    inv = invariants(V0, V1, V2, S0, S1, S2, inv_form)               # (N, nprobe, 7)
-    feats = inv.reshape(N, -1)                                        # probe-major, like DensityEnvironment
-    env = {}
-    for k_, name in enumerate(probes):
-        for key, val in (("V0", V0), ("V1", V1), ("V2", V2), ("S0", S0), ("S1", S1), ("S2", S2), ("V1pen", V1pen),
-                         ("V2pen", V2pen)):
-            env[f"{name}:{key}"] = val[:, k_]
-    memo = table.__dict__.setdefault("_ch_lut", {})
-    if str(dev) not in memo:
-        memo[str(dev)] = _channel_lut(tab, chan).to(dev)
-    ch_lut = memo[str(dev)]
-    # -- channels (direct CT) ----------------------------------------------------------------------------------------
-    ct = ch_lut[s[i], s[j]]
-    ck = (ct >= 0) & (r_ang < chan.cutoff)
-    ch_index = dp[:, ck]
-    ch_r = r_ang[ck]
-    ch_ltaper = torch.log(channel_taper(ch_r, chan.cutoff, chan.taper).clamp(min=1e-300))
-    pbc = None
-    if periodic:
-        pbc = {"cell": cell_ang, "volume": torch.linalg.det(Cb).abs(), "cutoff": rc, "switch_width": switch_width,
-               "alpha": alpha, "frames": frames, "A_pairs": pairs, "A_blocks": Bij, "dp": dp,
-               "e_elst_recip": 0.5 * X.new_zeros(B).index_add(0, b_idx, Mq[:, 0] * out_q[:, 0]),
-               "g0_pairs": g[0, :nP],
-               "disp_tail": dispersion_tail_integral(rc, switch_width) if dispersion_tail else None}
-    mask = torch.zeros(B, nmax, dtype=torch.bool, device=dev).index_put((b_idx, loc), torch.ones(N, dtype=torch.bool, device=dev))
-    lab = dict(labels or {})
-    lab.setdefault("n", counts.to(dt))
-    lab.setdefault("ct_mask", torch.ones(B, dtype=torch.bool, device=dev))
-    for key in ("pol", "ct", "pauli", "disp", "elec", "int"):
-        lab.setdefault(key, torch.full((B,), float("nan"), dtype=dt, device=dev))
-    return {"B": B, "nmax": nmax, "L": L, "A_off": A_off, "pbc": pbc, "pairs": pairs, "pair_dr": dr_u * BOHR, "mask": mask, "species": s, "feats": feats, "frame": b_idx, "pos": pos_ang,
-            "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]],
-            "ch_ltaper": ch_ltaper, "env": env, "labels": lab}

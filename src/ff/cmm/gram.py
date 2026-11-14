@@ -10,7 +10,7 @@ A_ij <delta n_i | rho_j> -- xpol's drive with kappa = 1/2 -- and the second-orde
     Gt_ab(R) = int d^3r  delta n_a(r) delta n_b(r) rho_j(|r - R|) / (4 rho_i(r))
 
 over i's response components z = [dipole (3, Cartesian), quadrupole (5, normalized spherical), breathing (1)] with the
-model's own induced-density conventions (checked against :func:`xpol_overlap_map`):
+model's own induced-density conventions (checked against the xpol overlap maps of the precompute):
 
     dipole a:      delta n = d_a g_dip            = g_dip'(r) r^_a
     quadrupole c:  delta n = M_c : dd g_quad,     M_c = -(1/3) Theta_cart(e_c)  (traceless)
@@ -37,7 +37,7 @@ from . import kernels as K
 from ..multipole import spherical_to_cartesian_quadrupole
 from .tabulate import RadialTable, _monomials
 
-__all__ = ["GramTable", "gram_blocks", "GRAM_TERMS", "gram_layout"]
+__all__ = ["GramTable", "gram_blocks", "gram_blocks_from_rows", "GRAM_TERMS", "gram_layout"]
 
 BOHR = K.BOHR_ANG
 #: (type a, type b, L) of the ten radial functions; types d (dipole), q (quadrupole), b (breathing)
@@ -177,7 +177,7 @@ class GramTable(RadialTable):
         xs, ws = np.polynomial.legendre.leggauss(GRAM_NS)
         self._xs, self._ws = torch.tensor(xs, dtype=f64), torch.tensor(ws, dtype=f64)
         with torch.no_grad():
-            super().__init__(tab, probes=(), r_max=r_max, **kw)
+            super().__init__(tab, **{"probes": (), "r_max": r_max, **kw})
         del self._rhoL
 
     def _rho_partial(self, sj):
@@ -203,22 +203,23 @@ class GramTable(RadialTable):
         return out
 
     def _functions(self, si, sj):
+        return self._gram_rows(si, sj)
+
+    @torch.no_grad()
+    def _gram_rows(self, si, sj):
         r = self._rq
         rho_i = _shell_density(self.tab, si, r)
         u = response_radials(self.tab, si, r, self.breath)
         wr = GRAM_R_STEP * r * r / (4 * rho_i.clamp(min=1e-300))
         RL = self._rho_partial(sj)
         h = self.h
-        if not self.names:
-            self.names = [f"gram:{a}{b}{L}" for a, b, L in self.terms]
-            self.index = {k: m for m, k in enumerate(self.names)}
-        res = []
+        res = {}
         for a, b, L in self.terms:
             f = RL[L] @ (wr * u[a] * u[b])                                                       # (G + 4,)
             f0 = f[2:-2]
             d1 = (f[:-4] - 8 * f[1:-3] + 8 * f[3:-1] - f[4:]) / (12 * h)
             d2 = (-f[:-4] + 16 * f[1:-3] - 30 * f[2:-2] + 16 * f[3:-1] - f[4:]) / (12 * h * h)
-            res.append(torch.stack([f0, d1, d2], -1))
+            res[f"gram:{a}{b}{L}"] = torch.stack([f0, d1, d2], -1)
         return res
 
 
@@ -227,7 +228,15 @@ def gram_blocks(table: GramTable, s, dp, dr):
     (the table's breathing layout)."""
     i, j = dp
     r = dr.norm(dim=-1)
-    y = table(s[i], s[j], r * BOHR)                                                             # (P, 10)
-    C = gram_angular_coef(dr.dtype, dr.device, getattr(table, "breath", "shape"))
-    mono = _monomials(dr / r[:, None])
-    return torch.einsum("pt,tabm,pm->pab", y, C, mono)
+    y = table(s[i], s[j], r * BOHR)
+    breath = getattr(table, "breath", "shape")
+    cols = table.cols(tuple(f"gram:{a}{b}{L}" for a, b, L in gram_layout(breath)[1]), y.device)
+    return gram_blocks_from_rows(y[:, cols], dr, breath)
+
+
+def gram_blocks_from_rows(yg, dr, breath="shape"):
+    """(P, D, D) Gt(i <- j) from the pairs' Gram rows ``yg`` (P, terms) (a table lookup at |dr|) and dr = X_j - X_i
+    (bohr)."""
+    C = gram_angular_coef(dr.dtype, dr.device, breath)
+    mono = _monomials(dr / dr.norm(dim=-1)[:, None])
+    return torch.einsum("pt,tabm,pm->pab", yg, C, mono)

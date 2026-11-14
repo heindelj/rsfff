@@ -9,7 +9,6 @@ import pytest
 import torch
 from numpy.polynomial.legendre import legval
 
-from rsfff.ff.cmm import DensityEnvironment, RadialTable, batched_precompute
 from rsfff.ff.cmm.channels import (CHANNEL_NAMES, THREE_BODY_COLS, TWO_BODY_COLS, channels_from_pairs,
                                         pair_electrostatics, real_harmonics)
 from rsfff.ff.cmm import params as CT

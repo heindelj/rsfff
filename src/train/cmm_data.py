@@ -1,5 +1,5 @@
-"""Data of the cmm trainer: the labelled ALMO-EDA sets, the force frames, the polarizability targets, the per-frame
-precompute cache and the batch transfer to the device.
+"""Data of the cmm trainer: the labelled ALMO-EDA sets, the force frames, the polarizability targets, and the
+batches the model takes (positions -> :meth:`rsfff.ff.cmm.CmmModel.precompute`, on the model's device).
 
 Moved from ``train_ionct`` (tag complete-explore-final). The ALMO-CTA channel sums are no longer labels; the CTA
 data still decides where a frame's E_CT is a channel quantity (``max_ho_ratio``).
@@ -9,13 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from ..ff.cmm.batch import collate, precompute
+from ..ff.cmm.params import ATOMIC_NUMBER
 
 KJ = 2625.4996
 
@@ -34,10 +34,6 @@ POLAR_CT_MAX_PAIR = 3.6
 
 # Shannon ionic radii (A, 6-coordinate): scale the Na-Cl dimer CT cut to the other salts
 IONIC_RADIUS = {"Li": 0.76, "Na": 1.02, "K": 1.38, "Rb": 1.52, "Cs": 1.67, "F": 1.33, "Cl": 1.81, "Br": 1.96, "I": 2.20}
-
-_PP = {}
-
-CACHE_VERSION = 5     # 5: the cmm FrameCache (rsfff.ff.cmm.batch)
 
 FORCE_TEST = ("nacl14", "nacl16", "nacl18", "nacl20")
 
@@ -261,69 +257,47 @@ def split(frames, test_parents, val_frac=0.1, seed=0):
     return [tag(m["parent"]) for *_, m in frames]
 
 
-def _pp_init(tab, chan, featurizer):
-    torch.set_num_threads(1)
-    _PP.update(tab=tab, chan=chan, featurizer=featurizer)
+@dataclass
+class Frame:
+    """A labelled structure: symbols, positions (N, 3) Angstrom, atomic numbers, labels (Hartree, masks), meta."""
+    symbols: tuple
+    pos: torch.Tensor
+    Z: torch.Tensor
+    labels: dict = field(default_factory=dict)
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def n(self):
+        return len(self.symbols)
 
 
-def _pp_one(item):
-    """One frame's cache, serialized with torch.save (bytes): torch's own pickling of tensors between processes
-    passes shared-memory file descriptors and runs out of them on big batches ("received 0 items of ancdata")."""
-    import io
-    k, sym, X = item
-    buf = io.BytesIO()
-    torch.save(precompute(sym, X, _PP["tab"], _PP["chan"], _PP["featurizer"]), buf)
-    return k, buf.getvalue()
+def as_frame(sym, X, labels=None, meta=None) -> Frame:
+    return Frame(tuple(sym), torch.as_tensor(np.asarray(X, float), dtype=torch.float64),
+                 torch.tensor([ATOMIC_NUMBER[x] for x in sym]), dict(labels or {}), dict(meta or {}))
 
 
-def cache_key(params_path, frames):
-    """A short hash of what the precompute depends on: the species table's contents, the cache layout version and
-    the frames' geometries (in order)."""
-    h = hashlib.sha1()
-    h.update(Path(params_path).read_bytes())
-    h.update(f"|cmm-cache-v{CACHE_VERSION}|".encode())
-    for sym, X, *_ in frames:
-        h.update(("".join(sym)).encode())
-        h.update(np.round(np.asarray(X, float), 6).tobytes())
-    return h.hexdigest()[:16]
+def as_frames(rows) -> list[Frame]:
+    """Frames of [(symbols, coords A, labels, meta)] rows (the loaders' format)."""
+    return [as_frame(sym, X, lab, meta) for sym, X, lab, meta in rows]
 
 
-def build_cache(frames, tab, chan, featurizer, path=None, workers=0):
-    """The per-frame precompute (:func:`rsfff.ff.cmm.batch.precompute`), from ``path`` when it holds a cache for
-    these frames, else computed -- in ``workers`` processes when > 0 (each single-threaded) -- and saved there.
-    Labels and masks always come from the data, never from the cache."""
-    if path and Path(path).exists():
-        caches = torch.load(path, weights_only=False)
-        if len(caches) == len(frames) and caches and hasattr(caches[0], "ch_ltaper"):
-            for c, (sym, X, lab, meta) in zip(caches, frames):
-                assert len(sym) == c.species.shape[0]
-                c.labels, c.meta = dict(lab), dict(meta)
-            return caches
-    t0 = time.time()
-    caches = [None] * len(frames)
-    if workers and workers > 1 and len(frames) > 2 * workers:
-        import io
-        import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor
-        items = [(k, sym, X) for k, (sym, X, *_rest) in enumerate(frames)]
-        with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"), initializer=_pp_init,
-                                 initargs=(tab, chan, featurizer)) as ex:
-            for done, (k, blob) in enumerate(ex.map(_pp_one, items, chunksize=8), 1):
-                caches[k] = torch.load(io.BytesIO(blob), weights_only=False)
-                if done % 500 == 0:
-                    print(f"  precomputed {done}/{len(frames)} [{time.time() - t0:.0f}s, {workers} workers]", flush=True)
-    else:
-        for k, (sym, X, *_rest) in enumerate(frames):
-            caches[k] = precompute(sym, X, tab, chan, featurizer)
-            if (k + 1) % 200 == 0:
-                print(f"  precomputed {k + 1}/{len(frames)} [{time.time() - t0:.0f}s]", flush=True)
-    for c, (sym, X, lab, meta) in zip(caches, frames):
-        c.labels, c.meta = dict(lab), dict(meta)
-    print(f"  precompute done: {len(frames)} frames in {time.time() - t0:.0f}s", flush=True)
-    if path:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(caches, path)
-    return caches
+LABEL_KEYS = ("pol", "ct", "pauli", "disp", "elec", "int")
+
+
+def batch_of(frames: list[Frame], model, requires_grad=False):
+    """(positions, batch) of frames on the model's device: the precompute of the concatenated positions (a graph
+    from the positions when ``requires_grad``, else none), with the energy labels and masks attached."""
+    dev = next(model.parameters()).device
+    pos = torch.cat([f.pos for f in frames]).to(dev).requires_grad_(requires_grad)
+    Z = torch.cat([f.Z for f in frames]).to(dev)
+    fr = torch.cat([torch.full((f.n,), k, dtype=torch.long) for k, f in enumerate(frames)]).to(dev)
+    lab = {k: torch.tensor([float(f.labels.get(k, float("nan"))) for f in frames], dtype=torch.float64, device=dev)
+           for k in LABEL_KEYS}
+    lab["ct_mask"] = torch.tensor([bool(f.labels.get("ct_mask", True)) for f in frames], device=dev)
+    lab["n"] = torch.tensor([float(f.n) for f in frames], dtype=torch.float64, device=dev)
+    with torch.set_grad_enabled(requires_grad):
+        bt = model.precompute(pos, Z, fr, labels=lab)
+    return pos, bt
 
 
 def monomer_energies(eda_dirs):
@@ -395,100 +369,6 @@ def load_force_sets(files, mono, species=("Na", "Cl"), exclude=()):
                         {"int": float(r["energy"]) - sum(mono[x] for x in sym), "forces": np.asarray(r["forces"], float)},
                         {"workflow": stem, "parent": key, "file": key, "index": 0, "n": len(sym)}))
     return out
-
-
-def to_device(obj, device):
-    """Recursively move the tensors of a batch dict / list to ``device`` (no-op on CPU)."""
-    if device is None or str(device) == "cpu":
-        return obj
-    if torch.is_tensor(obj):
-        return obj.to(device)
-    if isinstance(obj, dict):
-        return {k: to_device(v, device) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(to_device(v, device) for v in obj)
-    return obj
-
-
-def pack_to_device(obj, device, stream=None):
-    """``obj`` (a batch dict / list tree) with its tensors on ``device`` in one host-to-device copy per dtype: the
-    tensors are packed into a pinned buffer, copied (non-blocking, on ``stream`` if given) and come back as views of
-    the device buffer. Returns (tree, device buffers). On CPU: (obj, [])."""
-    if device is None or str(device) == "cpu":
-        return obj, []
-    from torch.utils._pytree import tree_flatten, tree_unflatten
-    leaves, spec = tree_flatten(obj)
-    groups = {}
-    for k, t in enumerate(leaves):
-        if torch.is_tensor(t):
-            groups.setdefault(t.dtype, []).append(k)
-    out, bufs = list(leaves), []
-    for dt, ks in groups.items():
-        host = torch.empty(sum(leaves[k].numel() for k in ks), dtype=dt, pin_memory=True)
-        torch.cat([leaves[k].reshape(-1) for k in ks], out=host)
-        with torch.cuda.stream(stream) if stream is not None else _nullctx():
-            buf = host.to(device, non_blocking=True)
-        bufs.append(buf)
-        o = 0
-        for k in ks:
-            m = leaves[k].numel()
-            out[k] = buf[o:o + m].view(leaves[k].shape)
-            o += m
-    return tree_unflatten(out, spec), bufs
-
-
-class _nullctx:
-    def __enter__(self):
-        return None
-
-    def __exit__(self, *a):
-        return False
-
-
-def prefetch_batches(chunks, device, depth=2):
-    """Yield ``collate(chunk)`` on ``device`` for each chunk. On CUDA a background thread collates up to ``depth``
-    batches ahead and copies each with :func:`pack_to_device` on a side stream; the consumer's stream waits on the
-    copy. On CPU: collate inline."""
-    if device is None or str(device) == "cpu" or not torch.cuda.is_available():
-        for c in chunks:
-            yield collate(c)
-        return
-    import queue
-    import threading
-    q, stop = queue.Queue(maxsize=depth), threading.Event()
-    side = torch.cuda.Stream(device=device)
-
-    def work():
-        try:
-            for c in chunks:
-                if stop.is_set():
-                    return
-                bt, bufs = pack_to_device(collate(c), device, side)
-                ev = torch.cuda.Event()
-                ev.record(side)
-                item = (bt, bufs, ev)
-                while not stop.is_set():
-                    try:
-                        q.put(item, timeout=0.1)
-                        break
-                    except queue.Full:
-                        continue
-        except BaseException as e:                     # re-raised in the consumer
-            q.put((e, None, None))
-    th = threading.Thread(target=work, daemon=True, name="prefetch_batches")
-    th.start()
-    try:
-        for _ in range(len(chunks)):
-            bt, bufs, ev = q.get()
-            if isinstance(bt, BaseException):
-                raise bt
-            cur = torch.cuda.current_stream(device)
-            cur.wait_event(ev)
-            for b in bufs:                              # allocated on the side stream, used on this one
-                b.record_stream(cur)
-            yield bt
-    finally:
-        stop.set()
 
 
 def _mae(d, cap):
