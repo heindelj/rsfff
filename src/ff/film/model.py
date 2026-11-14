@@ -59,13 +59,13 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ...mlip.switch import pairwise_switch
-from ...mlip.sqe import sqe_solve
+from rsfff.ff.switch import pairwise_switch
+from rsfff.ff.charge_eq.sqe import sqe_solve
 from ..damping import fermi_switch
 from .. import backend as ff_backend
 from ..backend import slater_elec_pair_energy, slater_pauli_pair_energy
 from ..coupled_solve import DEFAULT_CG_CHECK_EVERY
-from ..expert_model import ClassicalSpec
+from .spec import ClassicalSpec
 from ..fragment_state import FragmentStateEmbedding
 from ..multipole import build_polytensor, spherical_to_cartesian_quadrupole
 from ..pairs import intra_fragment_channels, union_channels, union_pairs

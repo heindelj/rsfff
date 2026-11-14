@@ -29,14 +29,14 @@ solution as the preconditioner -- with four changes:
 The change of variables
 -----------------------
 The coupled functional contains ``1/2 mu^T alpha^-1 mu``, and this codebase deliberately never
-inverts ``alpha``: :func:`rsfff.mlip.sqe.atomic_dipole_energy` evaluates the quadratic form at
+inverts ``alpha``: :func:`rsfff.ff.charge_eq.sqe.atomic_dipole_energy` evaluates the quadratic form at
 its minimum precisely to avoid it. So rescale, exactly as SQE rescales ``p = S v``::
 
     q = q0 + B S v        mu = alpha u        Theta = c w        x = (v, u, w)
 
 Every block of the **matvec** is then polynomial in ``(s, alpha, c)``, no inverse is formed,
 and the unpolarizable limits ``alpha -> 0``, ``c -> 0``, ``s -> 0`` are well-conditioned rather
-than singular -- the same argument :mod:`rsfff.mlip.sqe` records for choosing ``S`` over
+than singular -- the same argument :mod:`rsfff.ff.charge_eq.sqe` records for choosing ``S`` over
 ``S^(1/2)``, and load-bearing for force training where a channel is closed. In these variables
 the charge block is ``S L S + S``, which is **symmetric**; the asymmetric ``L S + I`` that
 ``sqe_solve`` solves is that same system left-divided by ``S``, and CG needs the symmetric one.
@@ -90,7 +90,7 @@ from dataclasses import dataclass
 import torch
 
 from ..linalg_guard import finite_or_identity
-from ..mlip.sqe import _local_index
+from rsfff.ff.charge_eq.sqe import _local_index
 from .multipole import build_polytensor, spherical_to_cartesian_quadrupole
 
 #: A CG step is refused when ``p^T A p`` is not positive: the functional has lost positive
@@ -135,7 +135,7 @@ class CoupledSystem:
     alpha: torch.Tensor | None     # (N, 3, 3) PSD
     chiquad: torch.Tensor | None   # (N, 5)
     #: (N,) isotropic ``c I5``, or (N, 5, 5) PSD -- the axially anisotropic form of
-    #: :class:`rsfff.mlip.response_heads.AxialQuadrupolePolarizabilityHead`. Both are
+    #: :class:`rsfff.ff.response_heads.AxialQuadrupolePolarizabilityHead`. Both are
     #: applied, never inverted, so the rescaling ``Theta = C w`` works unchanged.
     cquad: torch.Tensor | None     # (N,) or (N, 5, 5), PSD
     #: The pair operator, in one of two forms. **Precomputed**: the four gate-scaled
@@ -458,7 +458,7 @@ def coupled_energy(sys: CoupledSystem, x: State, d_map=None) -> torch.Tensor:
     The internal part mirrors :class:`rsfff.ff.response.FragmentResponse` term for term and
     reduces to it exactly when the coupling is absent: at the uncoupled minimum ``u = -chivec``
     gives ``mu = -alpha chivec`` and ``chivec.mu + 1/2 u.mu = -1/2 chivec^T alpha chivec``,
-    which is what :func:`rsfff.mlip.sqe.atomic_dipole_energy` returns. Pooled by **frame**, not
+    which is what :func:`rsfff.ff.charge_eq.sqe.atomic_dipole_energy` returns. Pooled by **frame**, not
     by fragment: with the coupling on, the energy is not decomposable per fragment.
 
     The pair part is deliberately *not* recomputed here -- see

@@ -89,8 +89,8 @@ import torch  # noqa: E402
 from ..ff.onebody import OneBodyEnergy  # noqa: E402
 from ..ff.onebody_elec import OneBodyElecModel  # noqa: E402
 from ..ff.units import KJMOL_PER_HARTREE  # noqa: E402
-from ..mlip.pair_heads import PairEnergyHead  # noqa: E402
-from ..mlip.reference_states import AtomicStateReference  # noqa: E402
+from rsfff.ff.pair_heads import PairEnergyHead  # noqa: E402
+from rsfff.ff.reference_states import AtomicStateReference  # noqa: E402
 from .config import Config, load_config  # noqa: E402
 from .data import (  # noqa: E402
     load_datasets,
@@ -100,7 +100,7 @@ from .data import (  # noqa: E402
 )
 from .loss import fragment_multipole_loss, onebody_anchor_loss  # noqa: E402
 from .term_loop import fit  # noqa: E402
-from .train_eem import resolve_device  # noqa: E402
+from .device import resolve_device  # noqa: E402
 from .train_elec import (  # noqa: E402
     build_featurizer,
     build_response,

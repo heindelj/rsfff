@@ -34,9 +34,9 @@ import torch
 import torch.nn as nn
 
 from bb.features import FlatLambdaSOAPFeaturizer
-from ..mlip.heads import two_slot_mlp, zero_init_readout
-from ..mlip.response_heads import voigt_vector_to_symmetric_matrix  # noqa: F401  (re-export for callers)
-from ..mlip.sqe import PairComplianceHead
+from bb.nn import two_slot_mlp, zero_init_readout
+from rsfff.ff.response_heads import voigt_vector_to_symmetric_matrix  # noqa: F401  (re-export for callers)
+from rsfff.ff.charge_eq.sqe import PairComplianceHead
 from .multipole import irrep2_to_spherical, spherical_to_cartesian_quadrupole
 from .pairs import intra_fragment_channels
 from .response import ElectrostaticParameterHeads, FragmentResponse, build_elec_priors

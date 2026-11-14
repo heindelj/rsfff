@@ -22,7 +22,7 @@ from rsfff.train.data import (
     load_cluster_datasets,
     split_indices_grouped,
 )
-from rsfff.train.train import _iter_minibatches
+from rsfff.train.term_loop import _iter_minibatches
 
 ION = [f"data/wb97mv_tzvpd/{s}_wb97mv_tzvpd.xyz" for s in
        ("w1_h3o+", "w2_h3o+", "w1_oh-", "w2_oh-")]

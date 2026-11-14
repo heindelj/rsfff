@@ -52,7 +52,7 @@ from bb.graph import config_max_num_neighbors as _max_neighbors  # noqa: E402
 
 from ..ff.onebody import OneBodyEnergy, OneBodyModel  # noqa: E402
 from ..ff.units import KJMOL_PER_HARTREE  # noqa: E402
-from ..mlip.pair_heads import PairEnergyHead  # noqa: E402
+from rsfff.ff.pair_heads import PairEnergyHead  # noqa: E402
 from .config import Config, load_config  # noqa: E402
 from .data import (  # noqa: E402
     load_datasets,
@@ -62,7 +62,7 @@ from .data import (  # noqa: E402
 )
 from .loss import onebody_anchor_loss, onebody_fit  # noqa: E402
 from .term_loop import fit  # noqa: E402
-from .train_eem import resolve_device  # noqa: E402
+from .device import resolve_device  # noqa: E402
 
 _LOG_KEYS = ("loss", "mae", "rmse", "bond", "anchor_e", "a_mae", "f_mae")
 

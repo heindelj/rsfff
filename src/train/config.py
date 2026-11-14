@@ -52,7 +52,7 @@ class DataConfig:
     # what they carry -- the bare-ion AIMD trajectories have energies and forces, while
     # `h2o_*_pol` and the `*_opt_*_pol` references add dipoles, second moments and
     # polarizabilities -- so they cannot be concatenated, and each stream draws its own
-    # minibatch. See `rsfff.train.train_expert.load_anchor_datasets`.
+    # minibatch. See `rsfff.train.data.load_anchor_datasets`.
     monomer_path: str | list[str] | None = None
     #: Cluster files trained as a **separate stream** rather than concatenated onto ``path``.
     #: They carry the same labels; what differs is how often a frame is seen. The large-water
@@ -951,7 +951,7 @@ class ExpertConfig:
     mediator_depth: int = 2
     #: The validity envelope on a contested atom's contact distance, in Angstrom. A candidate
     #: is fully open inside ``hi1`` and closed past ``hi0``, C2 at both ends
-    #: (:func:`rsfff.mlip.switch.validity_bump`). The default spans a covalent O-H to a long
+    #: (:func:`rsfff.ff.switch.validity_bump`). The default spans a covalent O-H to a long
     #: hydrogen bond, so both assignments are live through a transfer and a spectator water
     #: never enumerates one.
     mediator_bump_hi1: float = 1.50

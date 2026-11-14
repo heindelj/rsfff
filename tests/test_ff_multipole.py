@@ -24,7 +24,7 @@ from rsfff.ff.multipole import (
     slater_two_center_damp,
     spherical_to_cartesian_quadrupole,
 )
-from rsfff.mlip.response_heads import voigt_vector_to_symmetric_matrix
+from rsfff.ff.response_heads import voigt_vector_to_symmetric_matrix
 
 
 # ---------------------------------------------------------------------------

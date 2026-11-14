@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from rsfff.mlip.eem import eem_charges
-from rsfff.mlip.sqe import PairComplianceHead, sqe_solve
+from rsfff.ff.charge_eq.eem import eem_charges
+from rsfff.ff.charge_eq.sqe import PairComplianceHead, sqe_solve
 
 
 @pytest.fixture

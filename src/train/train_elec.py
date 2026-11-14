@@ -90,14 +90,14 @@ from ..ff.electrostatics import (  # noqa: E402
 )
 from ..ff.multipole import irrep2_to_spherical  # noqa: E402
 from ..ff.units import KJMOL_PER_HARTREE  # noqa: E402
-from ..mlip.pair_heads import PairEnergyHead  # noqa: E402
-from ..mlip.reference_states import AtomicStateReference  # noqa: E402
-from ..mlip.sqe import PairComplianceHead  # noqa: E402
+from rsfff.ff.pair_heads import PairEnergyHead  # noqa: E402
+from rsfff.ff.reference_states import AtomicStateReference  # noqa: E402
+from rsfff.ff.charge_eq.sqe import PairComplianceHead  # noqa: E402
 from .config import Config, load_config  # noqa: E402
 from .data import load_datasets, load_monomer_batch, split_indices  # noqa: E402
 from .loss import fragment_multipole_loss  # noqa: E402
 from .term_loop import fit  # noqa: E402
-from .train_eem import resolve_device  # noqa: E402
+from .device import resolve_device  # noqa: E402
 
 _LOG_KEYS = ("loss", "mae", "rmse", "ff_mae", "corr_share", "r0", "q_res", "qO",
              "dchi", "mu", "quad", "dip_mae", "quad_mae")

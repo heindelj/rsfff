@@ -27,7 +27,6 @@ from .loss import (
     isolated_species_loss,
     monomer_loss,
 )
-from .train import train
 
 __all__ = [
     "Config",
@@ -57,5 +56,4 @@ __all__ = [
     "monomer_loss",
     "isolated_species_loss",
     "atomic_reference_loss",
-    "train",
 ]

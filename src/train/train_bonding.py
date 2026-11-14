@@ -59,7 +59,7 @@ from .config import load_config
 from .data import load_datasets, load_reference_energies, split_indices
 from .loss import compute_forces
 from .term_loop import fit
-from .train_eem import resolve_device
+from .device import resolve_device
 
 __all__ = ["BondingWeights", "Stream", "Streams", "monomer_loss", "train"]
 

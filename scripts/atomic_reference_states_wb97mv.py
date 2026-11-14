@@ -9,7 +9,7 @@ pyscf/gpu4pyscf backend shared with the rest of the reference-data pipeline.
 own header, while every molecular label the unified model fits -- the Q-Chem ALMO-EDA clusters
 and the monomer anchor alike -- is wB97M-V/def2-TZVPD. Those states are not decoration: they
 seed the per-element ``chi_0``/``eta_0`` biases of the SQE charge solve
-(:meth:`rsfff.mlip.reference_states.AtomicStateReference.head_bias_init`), and their free-atom
+(:meth:`rsfff.ff.reference_states.AtomicStateReference.head_bias_init`), and their free-atom
 polarizabilities are the *exact* anchor for the on-site polarizability head -- a lone atom has
 an all-zero density, so every head reduces to a function of its species embedding alone and the
 anchor pins it rather than nudging it. An anchor at the wrong level of theory pins the wrong

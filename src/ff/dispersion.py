@@ -46,8 +46,8 @@ import torch.nn as nn
 
 from bb.features import LambdaFeatures
 from bb.nn import mlp, two_slot_mlp, zero_init_readout
-from ..mlip.pair_heads import PairEnergyHead
-from ..mlip.switch import pairwise_switch
+from rsfff.ff.pair_heads import PairEnergyHead
+from rsfff.ff.switch import pairwise_switch
 from .damping import fermi_switch, tang_toennies
 from .pairs import inter_fragment_pairs
 from .units import BOHR_ANG

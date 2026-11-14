@@ -9,7 +9,7 @@ from __future__ import annotations
 import torch
 
 from rsfff.linalg_guard import finite_or_identity, poison
-from rsfff.mlip.sqe import sqe_solve
+from rsfff.ff.charge_eq.sqe import sqe_solve
 
 from test_sqe import system  # noqa: F401  -- the H2O + H3O+ ragged batch
 

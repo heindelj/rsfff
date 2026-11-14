@@ -821,7 +821,7 @@ def l2_rotation_generators(dtype=None, device=None) -> torch.Tensor:
     Cartesian axis ``a``, acting on ``(q20, q21c, q21s, q22c, q22s)``. Each is real and
     antisymmetric, and ``L(n) = sum_a n_a L[a]`` for a unit ``n`` has eigenvalues
     ``0, +-i, +-2i`` -- so ``-L(n)^2`` is symmetric PSD with eigenvalues ``m^2 = 0, 1, 1, 4, 4``.
-    That spectrum is what :class:`rsfff.mlip.response_heads.AxialQuadrupolePolarizabilityHead`
+    That spectrum is what :class:`rsfff.ff.response_heads.AxialQuadrupolePolarizabilityHead`
     builds its three spectral projectors from.
 
     **Derived, not transcribed.** A Cartesian symmetric tensor rotates as ``Theta -> R Theta

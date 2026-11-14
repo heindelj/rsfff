@@ -24,7 +24,7 @@ from rsfff.ff.electrostatics import (
     SlaterElectrostatics,
     build_elec_priors,
 )
-from rsfff.ff.many_body import mbe_decompose
+from _mbe import mbe_decompose
 from rsfff.ff.multipole import (
     build_polytensor,
     damped_interaction_tensor,
@@ -36,8 +36,8 @@ from rsfff.ff.multipole import (
 )
 from rsfff.ff.pairs import inter_fragment_pairs, intra_fragment_channels
 from rsfff.ff.units import BOHR_ANG, KJMOL_PER_HARTREE
-from rsfff.mlip.pair_heads import PairEnergyHead
-from rsfff.mlip.sqe import PairComplianceHead, atomic_quadrupole_energy, sqe_solve
+from rsfff.ff.pair_heads import PairEnergyHead
+from rsfff.ff.charge_eq.sqe import PairComplianceHead, atomic_quadrupole_energy, sqe_solve
 from rsfff.train.data import load_extxyz
 
 from conftest import DATA_W2, DATA_W3, features_cfg
@@ -617,7 +617,7 @@ def test_kjmol_scale_is_sane(w2_dataset):
 
 def _axial_head(seed=0, awake=True):
     from rsfff.ff.multipole import l2_rotation_generators
-    from rsfff.mlip.response_heads import AxialQuadrupolePolarizabilityHead
+    from rsfff.ff.response_heads import AxialQuadrupolePolarizabilityHead
 
     torch.manual_seed(seed)
     head = AxialQuadrupolePolarizabilityHead(
@@ -695,7 +695,7 @@ def test_a_zeroed_channel_reduction_deadlocks_the_axis_head():
     ``response.params.cquad_axis_head.axis.equiv_reduce`` was a denormal 2e-315 in every stage
     checkpoint and its gate readout was still exactly zero after 210 epochs, so
     ``elec.anisotropic_cquad`` never produced any anisotropy at all. The guard is
-    :func:`rsfff.mlip.heads.exempt_from_weight_decay` on the head, checked in
+    :func:`bb.nn.exempt_from_weight_decay` on the head, checked in
     ``tests/test_ff_unified.py``, plus the reinitialization in
     :func:`rsfff.train.term_loop.warm_start` for checkpoints written before it.
     """

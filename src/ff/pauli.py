@@ -55,9 +55,9 @@ import torch.nn as nn
 
 from bb.features import LambdaFeatures
 from bb.nn import two_slot_mlp, zero_init_readout
-from ..mlip.pair_heads import PairEnergyHead
-from ..mlip.response_heads import AtomicQuadrupoleHead, AtomicVectorHead
-from ..mlip.switch import pairwise_switch
+from rsfff.ff.pair_heads import PairEnergyHead
+from rsfff.ff.response_heads import AtomicQuadrupoleHead, AtomicVectorHead
+from rsfff.ff.switch import pairwise_switch
 from .multipole import (
     build_polytensor,
     damped_interaction_tensor,
@@ -163,7 +163,7 @@ class PauliMultipoleHeads(nn.Module):
     repulsive by construction. Because the learnable tensors are deviations, plain
     ``weight_decay`` on them is regularization toward the pyCMM priors.
 
-    ``mu`` comes from :class:`~rsfff.mlip.response_heads.AtomicVectorHead` on the lambda=1
+    ``mu`` comes from :class:`~rsfff.ff.response_heads.AtomicVectorHead` on the lambda=1
     features, which are odd-parity (a true polar vector, verified exactly under inversion)
     and equivariant to machine precision. That head is zero-initialized, so at
     initialization ``mu`` is *exactly* zero and the rank-1 model reproduces the rank-0 model

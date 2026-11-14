@@ -39,15 +39,15 @@ import torch.nn as nn
 from bb.features import LambdaFeatures
 from bb.nn import two_slot_mlp, zero_init_readout
 
-from ..mlip.eem import atomic_dipoles, atomic_quadrupoles
-from ..mlip.response_heads import (
+from rsfff.ff.charge_eq.eem import atomic_dipoles, atomic_quadrupoles
+from rsfff.ff.response_heads import (
     AtomicAlphaHead,
     AtomicQuadrupoleHead,
     AtomicVectorHead,
     AxialQuadrupolePolarizabilityHead,
     voigt_vector_to_symmetric_matrix,
 )
-from ..mlip.sqe import (
+from rsfff.ff.charge_eq.sqe import (
     PairComplianceHead,
     atomic_dipole_energy,
     atomic_quadrupole_energy,
@@ -55,7 +55,6 @@ from ..mlip.sqe import (
 )
 from .multipole import l2_rotation_generators
 from .pairs import intra_fragment_channels
-from .slots import select_atoms
 from .units import BOHR_ANG
 
 #: Per-element ``(Z_cp [e], b_elec [1/bohr])`` charge-penetration priors from the fitted CMM
@@ -122,7 +121,7 @@ DEFAULT_ALPHA_PRIOR: dict[int, float] = {
 
 
 def alpha_scale_prior(neighbor_types, *, prior: dict[int, float] | None = None) -> torch.Tensor:
-    """Per-species multiplier on :class:`~rsfff.mlip.response_heads.AtomicAlphaHead`'s output,
+    """Per-species multiplier on :class:`~rsfff.ff.response_heads.AtomicAlphaHead`'s output,
     ordered like ``neighbor_types``: ``alpha_prior / ln 2`` for an element in
     :data:`DEFAULT_ALPHA_PRIOR` (so ``softplus(0)``, the head's attractor, lands on the prior)
     and exactly ``1`` for every other element, which leaves those species' alpha bit-identical
@@ -527,7 +526,7 @@ def fragment_polarizability(
     response it should be compared against.
 
     **Units are not uniform across the two sectors and this is where an error would hide.**
-    ``alpha_flow`` comes out of :func:`rsfff.mlip.sqe.sqe_solve`, whose positions are in
+    ``alpha_flow`` comes out of :func:`rsfff.ff.charge_eq.sqe.sqe_solve`, whose positions are in
     Angstrom, so it is ``e^2 Angstrom^2 / Hartree``. The on-site ``alpha_i`` multiplies a field
     conjugate to ``mu`` in ``e*bohr``, so it is ``a0^3 = e^2 bohr^2 / Hartree``. The factor
     below is that conversion, and getting it wrong is a 3.6x error that no symmetry or
@@ -836,3 +835,27 @@ __all__ = [
     "fragment_polarizability",
     "solve_frozen",
 ]
+
+
+def select_atoms(feats: LambdaFeatures | None, atom_index) -> LambdaFeatures | None:
+    """A view of ``feats`` holding only ``atom_index``'s rows, per lambda.
+
+    ``atom_index=None`` means "all of them" and returns ``feats`` untouched, which is what
+    keeps the whole-batch path allocation-free.
+
+    ``edge_index`` is dropped rather than renumbered: it addresses the full batch, and a
+    silently stale copy is worse than an absent one. Nothing that consumes a subset reads it.
+    """
+    if feats is None or atom_index is None:
+        return feats
+    return feats.replace(
+        inv_feats=feats.inv_feats[atom_index],
+        equiv_feats=(
+            None if feats.equiv_feats is None else feats.equiv_feats[atom_index]
+        ),
+        vec_feats=None if feats.vec_feats is None else feats.vec_feats[atom_index],
+        species_idx=feats.species_idx[atom_index],
+        batch_idx=feats.batch_idx[atom_index],
+        edge_index=None,
+    )
+

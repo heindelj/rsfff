@@ -60,7 +60,7 @@ def build(config, device):
     from rsfff.train.build_film import build_film_model
     from rsfff.train.data import (fragment_view, load_cluster_datasets,
                                   load_reference_energies, split_indices_grouped)
-    from rsfff.train.train_expert import load_anchor_datasets
+    from rsfff.train.data import load_anchor_datasets
     from rsfff.train.train_film import FilmStreams
 
     dtype = torch.float64 if config.dtype == "float64" else torch.float32

@@ -23,7 +23,7 @@ from rsfff.ff.dispersion import (
 )
 from rsfff.ff.pairs import inter_fragment_pairs
 from rsfff.ff.units import BOHR_ANG
-from rsfff.mlip.pair_heads import PairEnergyHead
+from rsfff.ff.pair_heads import PairEnergyHead
 from rsfff.train.data import load_extxyz
 
 from conftest import DATA_W2, DATA_W3, features_cfg

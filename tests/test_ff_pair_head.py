@@ -8,7 +8,7 @@ field (``docs/range_separated_mlip.md`` §7, "gauge leakage").
 import pytest
 import torch
 
-from rsfff.mlip.pair_heads import PairEnergyHead
+from rsfff.ff.pair_heads import PairEnergyHead
 from rsfff.train.data import Batch, load_extxyz
 
 from conftest import DATA_W2

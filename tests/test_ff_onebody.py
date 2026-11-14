@@ -23,8 +23,8 @@ from rsfff.ff.response import (
     FragmentResponse,
     build_elec_priors,
 )
-from rsfff.mlip.pair_heads import PairEnergyHead
-from rsfff.mlip.sqe import PairComplianceHead
+from rsfff.ff.pair_heads import PairEnergyHead
+from rsfff.ff.charge_eq.sqe import PairComplianceHead
 from rsfff.train.data import Batch
 
 torch.set_default_dtype(torch.float64)

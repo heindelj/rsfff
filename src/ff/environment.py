@@ -19,7 +19,7 @@ For each atom, the action of everybody else's multipoles on it, in atomic units:
     gradF_i  = -sum_j gate_ij (T_ij^T M_j)[4:] D^T    Hartree / (e a0^2), spherical l=2
 
 The signs are fixed by how the conjugate quantities already enter the response functional:
-:func:`rsfff.mlip.eem.atomic_dipoles` minimizes ``chivec.mu + 1/2 mu^T alpha^-1 mu - F.mu``, so
+:func:`rsfff.ff.charge_eq.eem.atomic_dipoles` minimizes ``chivec.mu + 1/2 mu^T alpha^-1 mu - F.mu``, so
 whatever multiplies ``mu`` in the coupling *is* ``-F``. Deriving them that way rather than from
 a sign convention means a field feature and the polarization solve cannot disagree about which
 direction the environment pulls.

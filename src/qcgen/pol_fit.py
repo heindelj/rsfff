@@ -31,7 +31,7 @@ so U_i = -1/2 x^T Pi_i x <= 0. ``aniso=False``: alpha_i 1_3 (+ c_i 1_5), A_i = 0
 ``aniso=True``: Pi_i = L L^T with a free lower-triangular L (3 x 3, or 8 x 8 with quadrupoles: A_i is the
 site dipole-quadrupole polarizability). ``quadrupole=False`` keeps only the dipole block.
 
-Charge flow (rsfff.mlip.sqe): split charges p_e on the bonds, q = B p, with on-site hardness eta_i and channel
+Charge flow (rsfff.ff.charge_eq.sqe): split charges p_e on the bonds, q = B p, with on-site hardness eta_i and channel
 compliance s_e = 1/kappa_e:  E(p) = sum_i [1/2 eta_i q_i^2 + q_i phi_i] + 1/2 sum_e p_e^2 / s_e, so the linear
 response to a potential phi at the sites is
 
@@ -106,7 +106,7 @@ def reference_c(rec):
 
 
 def hardness_from_ip_ea(ip_ev, ea_ev):
-    """Chemical hardness IP - EA (rsfff.mlip.reference_states convention), eV in -> Hartree out."""
+    """Chemical hardness IP - EA (rsfff.ff.reference_states convention), eV in -> Hartree out."""
     return (ip_ev - ea_ev) * EV
 
 

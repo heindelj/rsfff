@@ -77,9 +77,7 @@ qc = [
 ]
 
 [project.scripts]
-rsfff-train = "rsfff.train.train:main"
-rsfff-train-eem = "rsfff.train.train_eem:main"
-rsfff-train-monomer = "rsfff.train.train_monomer:main"
+rsfff-train-cmm = "rsfff.train.cmm:main"
 
 [tool.setuptools]
 # src/ is imported as `rsfff`, which rules out automatic discovery: setuptools can find
@@ -93,12 +91,11 @@ packages = [
     "rsfff.coverage",
     "rsfff.features",
     "rsfff.ff",
+    "rsfff.ff.charge_eq",
     "rsfff.ff.cmm",
     "rsfff.ff.film",
     "rsfff.ff.nonvariational",
-    "rsfff.ff.v1",
     "rsfff.md",
-    "rsfff.mlip",
     "rsfff.qcgen",
     "rsfff.train",
 ]

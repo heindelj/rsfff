@@ -31,7 +31,51 @@ from bb.compat import upgrade_state_dict
 from bb.nn import parameter_groups  # noqa: F401  (moved to bb; re-exported for importers)
 
 from ..ff.units import KJMOL_PER_HARTREE
-from .train import _iter_minibatches
+
+
+def _iter_minibatches(
+    indices: torch.Tensor,
+    batch_size: int,
+    *,
+    shuffle: bool,
+    seed: int,
+    group_id: torch.Tensor | None = None,
+):
+    """Minibatches of ``indices``, keeping whole ``group_id`` groups together when given.
+
+    Grouping matters for the multi-fragmentation data: the applicability term compares a
+    geometry's decompositions against each other, which it can only do if they are in the
+    same minibatch. Groups are shuffled as units and packed until the batch is full, so a
+    batch overshoots ``batch_size`` by at most one group's size -- a frame or two, which
+    ``run_epoch`` absorbs because it returns per-sample means.
+    """
+    idx = indices
+    if group_id is None:
+        if shuffle:
+            g = torch.Generator().manual_seed(seed)
+            idx = indices[torch.randperm(indices.shape[0], generator=g)]
+        for start in range(0, idx.shape[0], batch_size):
+            yield idx[start : start + batch_size]
+        return
+
+    keys = torch.as_tensor(group_id, dtype=torch.long)[idx]
+    unique, inverse = torch.unique(keys, return_inverse=True)
+    order = torch.arange(unique.shape[0])
+    if shuffle:
+        g = torch.Generator().manual_seed(seed)
+        order = torch.randperm(unique.shape[0], generator=g)
+    members = [idx[(inverse == int(k)).nonzero().squeeze(-1)] for k in order]
+
+    batch: list[torch.Tensor] = []
+    size = 0
+    for group in members:
+        if batch and size + group.shape[0] > batch_size:
+            yield torch.cat(batch)
+            batch, size = [], 0
+        batch.append(group)
+        size += group.shape[0]
+    if batch:
+        yield torch.cat(batch)
 
 
 def eda_component_fit(out, batch, cfg):
@@ -144,7 +188,7 @@ def warm_start(model, path: str | None) -> None:
 
     **An ``equiv_reduce`` at zero is refused rather than loaded.** It is not a trained
     value but a block that weight decay deleted, and loading it re-enters a deadlock that
-    training cannot leave -- see ``_DEAD_NORM`` and :func:`rsfff.mlip.heads.zero_init_readout`.
+    training cannot leave -- see ``_DEAD_NORM`` and :func:`bb.nn.zero_init_readout`.
     Every
     equivariant head now exempts itself from decay, so this only fires on checkpoints written
     before that fix; it fires loudly, because a silently dead head is what it is guarding
@@ -178,7 +222,7 @@ def warm_start(model, path: str | None) -> None:
             # `equiv_reduce`'s own gradient at zero. Loading it re-enters the deadlock, and no
             # amount of further training leaves it. Keep this stage's fresh initialization
             # instead -- the head restarts, which is strictly better than staying dead.
-            # `rsfff.mlip.heads.zero_init_readout` documents how they got there.
+            # `bb.nn.zero_init_readout` documents how they got there.
             revived.append(f"{k} (norm {float(v.norm()):.3g})")
             continue
         if want.shape == v.shape:

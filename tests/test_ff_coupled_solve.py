@@ -37,8 +37,8 @@ from rsfff.ff.multipole import (
     slater_two_center_damp,
 )
 from rsfff.ff.units import BOHR_ANG
-from rsfff.mlip.eem import atomic_dipoles, atomic_quadrupoles
-from rsfff.mlip.sqe import atomic_dipole_energy, atomic_quadrupole_energy, sqe_solve
+from rsfff.ff.charge_eq.eem import atomic_dipoles, atomic_quadrupoles
+from rsfff.ff.charge_eq.sqe import atomic_dipole_energy, atomic_quadrupole_energy, sqe_solve
 
 #: The tensors the solver treats as differentiable inputs, in the order it packs them.
 PARAMS = (

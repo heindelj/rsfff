@@ -1,4 +1,4 @@
-"""Shared fixtures for the MLIP+EEM model tests.
+"""Shared fixtures and data paths of the tests.
 
 Everything runs on CPU in float64 so analytic identities (constraint, stationarity,
 alpha cross-checks) hold to near machine precision.
@@ -19,7 +19,6 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import pytest  # noqa: E402
 import torch  # noqa: E402
 
-from rsfff.mlip import build_eem_model
 from rsfff.train.data import Batch
 
 # One level of theory in `data/` now: wB97M-V/def2-TZVPD, written by
@@ -58,41 +57,10 @@ def features_cfg(**over):
     return types.SimpleNamespace(**base)
 
 
-def mlip_cfg(**over):
-    base = dict(emb_dim=8, hidden=24, depth=1)
-    base.update(over)
-    return types.SimpleNamespace(**base)
 
 
-def eem_cfg(**over):
-    base = dict(
-        emb_dim=8, hidden=24, depth=1, equiv_channels=6,
-        eta_init=0.5, eta_floor=0.05, psd_floor=1e-4,
-    )
-    base.update(over)
-    return types.SimpleNamespace(**base)
 
 
-def make_model(features=None, mlip=None, eem=None, *, randomize=True, seed=1):
-    """Small MLIPEEMModel over H/O with (optionally) randomized readouts.
-
-    Zero-init readouts leave chi environment-independent and chivec = 0; the
-    perturbation activates every parameter pathway (chi/eta environment
-    dependence, chivec, alpha anisotropy) so tests exercise real coupling.
-    """
-    model = build_eem_model(
-        features or features_cfg(),
-        mlip or mlip_cfg(),
-        eem or eem_cfg(),
-        [1, 8],
-        torch.tensor([-0.5013, -75.0093]),
-    )
-    if randomize:
-        g = torch.Generator().manual_seed(seed)
-        with torch.no_grad():
-            for p in model.parameters():
-                p.add_(0.05 * torch.randn(p.shape, generator=g))
-    return model
 
 
 def make_batch(positions, numbers, charges) -> Batch:

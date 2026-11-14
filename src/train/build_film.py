@@ -18,7 +18,7 @@ from bb.graph import DEFAULT_MAX_NUM_NEIGHBORS
 
 from ..ff.dispersion import DispersionParameterHeads, build_log_priors
 from ..ff.coupled_solve import DEFAULT_CG_CHECK_EVERY
-from ..ff.expert_model import ClassicalSpec
+from ..ff.film.spec import ClassicalSpec
 from ..ff.film import (
     BondedParameterHead,
     ConditionedParameterNetwork,

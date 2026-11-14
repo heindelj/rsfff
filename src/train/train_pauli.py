@@ -63,11 +63,11 @@ from ..ff.pauli import (  # noqa: E402
     build_pauli_priors,
 )
 from ..ff.units import KJMOL_PER_HARTREE  # noqa: E402
-from ..mlip.pair_heads import PairEnergyHead  # noqa: E402
+from rsfff.ff.pair_heads import PairEnergyHead  # noqa: E402
 from .config import Config, load_config  # noqa: E402
 from .data import load_datasets, split_indices  # noqa: E402
 from .term_loop import fit  # noqa: E402
-from .train_eem import resolve_device  # noqa: E402
+from .device import resolve_device  # noqa: E402
 
 
 def build_pauli_model(features_cfg, pcfg, neighbor_types) -> PauliModel:

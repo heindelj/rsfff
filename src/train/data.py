@@ -590,7 +590,7 @@ def _expand_second_moments(flat: np.ndarray, n_frag: int) -> np.ndarray:
 
     The print order is ``XX XY YY XZ YZ ZZ`` -- note it is *not* the diagonal-first
     Voigt order used elsewhere in this repo, which is why this is spelled out rather
-    than routed through :func:`rsfff.mlip.response_heads.voigt_vector_to_symmetric_matrix`.
+    than routed through :func:`rsfff.ff.response_heads.voigt_vector_to_symmetric_matrix`.
     """
     u = flat.reshape(n_frag, 6)
     xx, xy, yy, xz, yz, zz = (u[:, i] for i in range(6))
@@ -835,7 +835,8 @@ def load_extxyz(
             )
 
         if library is not None:
-            from ..mlip.diabats import assign_from_headers
+            raise ValueError("load_extxyz: the diabatic state library (rsfff.mlip.diabats) was retired; load the "
+                             "fragment partition from the fragment_idx column instead")
 
             config_type = info.get("config_type")
             if config_type is None:
@@ -1262,7 +1263,7 @@ def load_isolated_species(path, dtype: torch.dtype = torch.float32) -> Batch:
 def load_atomic_reference_batch(states, neighbor_types) -> Batch:
     """Assemble the isolated-atom reference states into one ragged anchor :class:`Batch`.
 
-    ``states`` is an :class:`rsfff.mlip.reference_states.AtomicStateReference`. Each state
+    ``states`` is an :class:`rsfff.ff.reference_states.AtomicStateReference`. Each state
     becomes a one-atom system at the origin, its own fragment, carrying the state's formal
     charge and ``2S`` and **no channels** (a lone atom has nothing to transfer along). The
     model's prediction for these systems is its exact free-atom limit: zero SOAP features, so
@@ -1394,3 +1395,39 @@ def load_monomer_batch(path, dtype: torch.dtype = torch.float32, limit: int | No
     dataset = load_extxyz(path, dtype=dtype)
     n = len(dataset) if limit is None else min(int(limit), len(dataset))
     return dataset.flat_batch(range(n))
+
+
+#: The optional label fields an anchor file may or may not carry. Two files agreeing on all
+#: of these can be concatenated; disagreeing on any one of them means `concatenate_datasets`
+#: would refuse, and rightly -- it has no way to fill the gap.
+_ANCHOR_LABELS = (
+    "_forces", "_dipole", "_polarizability", "_dipole_derivatives",
+    "_fragment_energy", "_fragment_dipole", "_fragment_second_moment",
+)
+
+
+def load_anchor_datasets(paths, *, dtype) -> list:
+    """Monomer anchor files as a list of streams, one per distinct label set.
+
+    The five monomer files in ``data/wb97mv_tzvpd`` do not carry the same labels. The bare-ion
+    AIMD trajectories (``h3o+``, ``oh-``) have energies and true one-body forces and nothing
+    else -- an AIMD run prints no multipoles per step -- while ``h2o_*_pol`` and the three
+    ``*_opt_*_pol`` references add dipoles, second moments and polarizabilities. Concatenating
+    those would mean dropping a label for the frames that have it, so files are grouped by
+    what they carry and each group becomes a stream of its own.
+
+    In practice this returns two streams for that set, not five: everything with
+    polarizabilities lands together, and the two bare-ion trajectories land together.
+    """
+    if not paths:
+        return []
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+
+    by_labels: dict[tuple, list] = {}
+    for path in paths:
+        dataset = load_extxyz(path, dtype=dtype)
+        signature = tuple(getattr(dataset, name) is not None for name in _ANCHOR_LABELS)
+        by_labels.setdefault(signature, []).append(dataset)
+    return [concatenate_datasets(group) for group in by_labels.values()]
+

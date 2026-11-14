@@ -74,8 +74,8 @@ import torch
 import torch.nn as nn
 
 from bb.features import LambdaFeatures
-from ..mlip.pair_heads import PairEnergyHead
-from ..mlip.switch import pairwise_switch
+from rsfff.ff.pair_heads import PairEnergyHead
+from rsfff.ff.switch import pairwise_switch
 from .damping import fermi_switch
 from .multipole import (
     build_polytensor,

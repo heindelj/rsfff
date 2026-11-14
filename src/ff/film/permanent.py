@@ -27,7 +27,7 @@ import torch.nn as nn
 
 from bb.features import LambdaFeatures
 from bb.nn import mlp, zero_init_readout
-from ...mlip.response_heads import AtomicQuadrupoleHead, AtomicVectorHead
+from rsfff.ff.response_heads import AtomicQuadrupoleHead, AtomicVectorHead
 from .state import StateDescriptor
 
 __all__ = ["PermanentMultipoleHeads"]

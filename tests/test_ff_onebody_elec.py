@@ -13,7 +13,7 @@ import torch
 
 from bb.features import FlatLambdaSOAPFeaturizer
 from rsfff.ff.electrostatics import SlaterElectrostatics
-from rsfff.ff.many_body import mbe_decompose
+from _mbe import mbe_decompose
 from rsfff.ff.multipole import irrep2_to_spherical
 from rsfff.ff.onebody import OneBodyEnergy
 from rsfff.ff.onebody_elec import OneBodyElecModel
@@ -23,8 +23,8 @@ from rsfff.ff.response import (
     build_elec_priors,
 )
 from rsfff.ff.units import KJMOL_PER_HARTREE
-from rsfff.mlip.pair_heads import PairEnergyHead
-from rsfff.mlip.sqe import PairComplianceHead
+from rsfff.ff.pair_heads import PairEnergyHead
+from rsfff.ff.charge_eq.sqe import PairComplianceHead
 from rsfff.train.data import Batch
 
 torch.set_default_dtype(torch.float64)

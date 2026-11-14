@@ -68,8 +68,8 @@ from .loss import (
     onebody_anchor_loss,
 )
 from .term_loop import fit
-from .train_eem import resolve_device
-from .train_expert import load_anchor_datasets
+from .data import load_anchor_datasets
+from .device import resolve_device
 
 #: Channel -> the ``eda_*`` header it is fitted against. Identical to v4's mapping.
 _TARGETS = {"elst": "cls_elec", "pauli": "mod_pauli", "disp": "disp"}

@@ -22,8 +22,8 @@ import torch.nn as nn
 
 from bb.features import LambdaFeatures
 from bb.nn import mlp, zero_init_readout
-from ...mlip.response_heads import AtomicAlphaHead, voigt_vector_to_symmetric_matrix
-from ...mlip.sqe import PairComplianceHead
+from rsfff.ff.response_heads import AtomicAlphaHead, voigt_vector_to_symmetric_matrix
+from rsfff.ff.charge_eq.sqe import PairComplianceHead
 
 __all__ = ["FilmResponseHeads", "ResponseFamily"]
 
