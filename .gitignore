@@ -5,7 +5,6 @@ data/
 benchmarks/results
 # chemlab/ holds the package's worker definitions (chemlab.pkg.toml [provides] workers): versioned;
 # only ChemLab's local state under it stays out
-chemlab/*
 !chemlab/workers/
 qchem_roundtrip/train/runs/
 # profiler traces are large; commit the .txt op tables and the .md/.json summaries instead
@@ -13,3 +12,6 @@ benchmarks/profile/results/*_trace.json.gz
 benchmarks/profile/results/*_forward.json
 benchmarks/profile/results/slurm-*.out
 theory
+qchem_roundtrip/
+Claude outputs/
+chemlab/

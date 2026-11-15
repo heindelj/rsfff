@@ -414,6 +414,10 @@ def solve_cmm_periodic(op: CmmOperator, rhs_z, rhs_q, h=None, guess=None, rtol=1
         z_pol = z_pol.view(N, D)
         if C:
             gz, gq = guess.get("z", z_pol), guess.get("q")
+            if guess.get("qb") is not None:      # q (b + h) carried over: smooth where b = 1 / s^2 is huge (weak channels);
+                qb = guess["qb"]                 # a channel new to the list (NaN) starts at its Jacobi value V / (b + h)
+                qb = torch.where(torch.isnan(qb), rhs_q.detach(), qb)
+                gq = qb / (d.b + (h.detach() if h is not None else 0.0))
             x0 = torch.cat([gz.reshape(-1), gq if gq is not None else rhs_q.new_zeros(C)])
             y, it2 = _cg(mv_j, torch.cat([rhs_z.detach().reshape(-1), rhs_q.detach()]), pre_j, x0, rtol, maxiter)
             z, q = y[:N * D].view(N, D), y[N * D:]

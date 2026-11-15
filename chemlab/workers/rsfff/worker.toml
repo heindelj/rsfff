@@ -29,3 +29,8 @@ timeout_minutes = 2880
 [run."train.bonding"]
 command = "bash {worker}/bin/bonding_worker.sh run {workdir}"
 timeout_minutes = 2880
+# Condensed-phase runs of a cmm model (rsfff.md.cmm_md_worker): benchmarks, crystal and melt MD. The model comes as
+# the job's input (a run tarball); `task` picks the rsfff.md program, `args` its command line.
+[run."md.cmm"]
+command = "bash {worker}/bin/cmm_md_worker.sh run {workdir}"
+timeout_minutes = 1440

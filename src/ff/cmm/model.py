@@ -442,7 +442,8 @@ class CmmModel(nn.Module):
         """The periodic forward: the same terms, the joint (z, q) minimum by matrix-free CG
         (:func:`rsfff.ff.cmm.periodic.solve_cmm_periodic`); the energies are the quadratic forms at the (detached)
         solutions with the live operator, so their first derivatives (forces, stress, parameter gradients) are exact.
-        ``bt["guess"]``: the previous call's ``out["guess"]`` (warm start; channels matched by ``ch_key``)."""
+        ``bt["guess"]``: the previous call's ``out["guess"]`` (warm start; channels matched by ``ch_key``);
+        ``bt["cg_rtol"]``: the CG tolerance (default 1e-10; MD is fine with ~1e-7)."""
         sp = bt["species"]
         self.environment(bt)
         B, D, mask, fr = bt["B"], bt["D"], bt["mask"], bt["frame"]
@@ -461,7 +462,7 @@ class CmmModel(nn.Module):
         e_c, V, s = self.channel_drives(bt, sp, self._q, h)
         op = CmmOperator(on, self.slot_eta(sp), pb["A_pairs"], pb["blocks9"], pb["frames"], ci, cj, 1.0 / (s * s))
         guess, info = self._guess(bt), {}
-        z_pol, z, q = solve_cmm_periodic(op, -(Lz + g), V, h, guess, info=info)
+        z_pol, z, q = solve_cmm_periodic(op, -(Lz + g), V, h, guess, info=info, rtol=float(bt.get("cg_rtol") or 1e-10))
         zero = Lz.new_zeros(n)
         # E_pol at q = 0, the joint energy, both stationary
         psi0, oz0 = op.apply(zero, z_pol)
@@ -484,6 +485,7 @@ class CmmModel(nn.Module):
                 "e_kernel": e_c, "x": pad(z[:, :8]), "x_pol": pad(z_pol[:, :8]), "z_pol": pad(z_pol),
                 "dq": op.charges(q), "q_ct": self._q, "frozen_params": frz, "cg_iters": info.get("cg_iters", 0),
                 "guess": {"z_pol": z_pol.detach(), "z": z.detach(), "q": q.detach(), "ch_key": bt["ch_key"],
+                          "qb": (q * (op.b + h)).detach(),
                           "n": n}}
 
     @staticmethod
@@ -499,6 +501,8 @@ class CmmModel(nn.Module):
             pos = torch.searchsorted(srt, key).clamp(max=okey.shape[0] - 1)
             hit = srt[pos] == key
             out["q"] = torch.where(hit, gs["q"][order[pos]], torch.zeros_like(key, dtype=gs["q"].dtype))
+            if gs.get("qb") is not None:
+                out["qb"] = torch.where(hit, gs["qb"][order[pos]], torch.full_like(key, float("nan"), dtype=gs["qb"].dtype))
         return out
 
     # -- regularizers ------------------------------------------------------------------------------------------

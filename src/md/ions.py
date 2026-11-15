@@ -42,14 +42,16 @@ class CmmPotential:
     """Energies, forces and virials of a batch of structures (same or different atoms, clusters or periodic).
 
     ``cutoff`` / ``switch_width`` (Angstrom; ``cutoff`` None: the model's short-range reach plus the switch width),
-    ``ewald_tol`` and ``dispersion_tail`` are the periodic path's settings. Periodic batches warm-start the solve from the
+    ``ewald_tol``, ``dispersion_tail`` and ``cg_rtol`` (the joint solve's tolerance) are the periodic path's settings. Periodic batches warm-start the solve from the
     previous call's moments when the atoms are the same (MD steps, or the same beads)."""
 
-    def __init__(self, model, *, cutoff=None, switch_width=1.0, ewald_tol=1e-10, dispersion_tail=True, warm_start=True):
+    def __init__(self, model, *, cutoff=None, switch_width=1.0, ewald_tol=1e-10, dispersion_tail=True, warm_start=True,
+                 cg_rtol=None):
         self.model = model
         self.cutoff = None if cutoff is None else float(cutoff)
         self.switch_width, self.ewald_tol = float(switch_width), float(ewald_tol)
         self.dispersion_tail, self.warm_start = bool(dispersion_tail), bool(warm_start)
+        self.cg_rtol = cg_rtol          # the joint solve's CG tolerance (None: the model's 1e-10)
         self.device = next(model.parameters()).device
         self._x = None
         self._key = None
@@ -88,6 +90,8 @@ class CmmPotential:
         key = (tuple(Z.tolist()), B)
         if periodic and self.warm_start and self._x is not None and key == self._key:
             bt["guess"] = self._x
+        if periodic and self.cg_rtol:
+            bt["cg_rtol"] = self.cg_rtol
         out = self.model(bt)
         E = out["e_int"]
         grads = torch.autograd.grad(E.sum(), leaves)
