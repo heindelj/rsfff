@@ -1,8 +1,15 @@
 """Saving and loading cmm models.
 
 A cmm checkpoint is a dict ``{"format": "cmm", "config": CmmConfig.to_dict(), "state": state_dict, "symbols": [...],
-"params": <species table path>, ...}``; :func:`load_cmm` also opens complete-model checkpoints of the converged
-configuration (``legacy.load_legacy``) and run tarballs (``run.tar.gz`` holding run/model.pt and the table).
+"params": <species table path>, "table": {pair key: coefficients}, ...}``; :func:`load_cmm` also opens complete-model
+checkpoints of the converged configuration (``legacy.load_legacy``) and run tarballs (``run.tar.gz`` holding
+run/model.pt, the species table and table.pt).
+
+The radial table ships with the model: ``save_cmm(..., table=True)`` embeds the built pairs, :func:`save_table` writes
+them to a ``table.pt`` beside it (the trainer does, once), and :func:`load_cmm` collects the pairs from the checkpoint,
+the tarball's table.pt or a table.pt next to the checkpoint. The pairs are keyed by the two ions' parameter values and
+the table version, so a shipped pair is used only for exactly the ions it was computed for -- a model and its table
+cannot fall out of sync; a pair it does not have is built (or found in the disk cache) on first use.
 """
 from __future__ import annotations
 
@@ -14,21 +21,46 @@ import torch
 
 from .config import CmmConfig
 
-__all__ = ["save_cmm", "load_cmm", "resolve_params"]
+__all__ = ["save_cmm", "save_table", "load_cmm", "resolve_params"]
 
 REPO = Path(__file__).resolve().parents[3]
 
 
-def save_cmm(path, model, *, params=None, **extra):
-    """Write ``model`` (state on the CPU) with its config and species list; ``extra`` keys are stored alongside."""
+def _table_entries(model, which):
+    t = model.table()
+    if which == "all":
+        t.build_all()
+    return t.built_entries()
+
+
+def save_cmm(path, model, *, params=None, table=False, **extra):
+    """Write ``model`` (state on the CPU) with its config and species list; ``extra`` keys are stored alongside.
+    ``table``: True embeds the radial-table pairs built so far, "all" builds every pair of the species table first."""
     ck = {"format": "cmm", "config": model.config.to_dict(),
           "state": {k: v.detach().cpu() for k, v in model.state_dict().items()},
           "symbols": list(model.tab.symbols), "params": str(params) if params else None, **extra}
+    if table:
+        ck["table"] = _table_entries(model, table)
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(ck, tmp)
     tmp.replace(path)
     return path
+
+
+def save_table(path, model, which=True):
+    """Write the model's radial-table pairs (built so far; "all": every pair) to ``path`` (table.pt)."""
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save({"format": "cmm-table", "entries": _table_entries(model, which)}, tmp)
+    tmp.replace(path)
+    return path
+
+
+def _table_file(blob_or_path):
+    d = torch.load(io.BytesIO(blob_or_path) if isinstance(blob_or_path, bytes) else blob_or_path, map_location="cpu",
+                   weights_only=True)
+    return d.get("entries", {}) if isinstance(d, dict) else {}
 
 
 def _open(path, map_location):
@@ -97,4 +129,10 @@ def load_cmm(path, params=None, map_location="cpu", tab=None, chan=None):
         except FileNotFoundError:
             ppath = None
     m.params_path = ppath
+    store = dict(ck.get("table") or {})
+    if "table.pt" in files:
+        store.update(_table_file(files["table.pt"]))
+    elif not files and (Path(path).parent / "table.pt").exists():
+        store.update(_table_file(Path(path).parent / "table.pt"))
+    m.table_store.update(store)
     return m.eval()

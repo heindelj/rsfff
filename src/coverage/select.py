@@ -76,8 +76,8 @@ class _ChannelFeaturizer:
 
     def __init__(self, tab):
         from ..ff.cmm.channels import R_MAX
-        from ..ff.cmm.tabulate import XpolTable, cached_table
-        self.tab, self.table = tab, cached_table(XpolTable, tab, r_max=R_MAX)
+        from ..ff.cmm.tabulate import XpolTable
+        self.tab, self.table = tab, XpolTable(tab, r_max=R_MAX)
 
     def __call__(self, positions, atomic_numbers, batch_idx):
         from types import SimpleNamespace

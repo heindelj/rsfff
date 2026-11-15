@@ -43,7 +43,8 @@ from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, ma
 from .table import CmmTable, cmm_table
 from .tabulate import BOHR, GATE, NORD, O_ON, PROBES, R_XPOL, _basis_tensors
 
-__all__ = ["CmmTable", "batched_precompute", "default_cutoff", "hyperpolarization", "cmm_table", "smoothstep_log"]
+__all__ = ["CmmTable", "batched_precompute", "default_cutoff", "hyperpolarization", "cmm_table", "smoothstep_log",
+           "short_range_reach"]
 
 
 def smoothstep_log(O, on, full):
@@ -107,28 +108,39 @@ def _channel_lut(tab, chan):
     return ch
 
 
-def _reach(table, names, thr) -> float:
+def _species(table, species):
+    S = table.built.shape[0]
+    sp = range(S) if species is None else sorted({int(x) for x in torch.as_tensor(species).reshape(-1).tolist()})
+    table.ensure_species(sp)
+    return torch.tensor(list(sp), dtype=torch.long)
+
+
+def _reach(table, names, thr, species=None) -> float:
+    sp = _species(table, species)
     cols = [table.index[k] for k in names]
-    on = table.coef[:, :, cols, :, 0].cpu() > thr
+    on = table.coef[sp.to(table.device)][:, sp.to(table.device)][:, :, cols, :, 0].cpu() > thr
     hit = on.any(0).any(0).any(0)
     return float(table.r.cpu()[hit].max()) if bool(hit.any()) else 0.0
 
 
-def gate_reach(table: CmmTable, gate=GATE) -> float:
-    """(A) the largest distance at which any probe's overlap with any species reaches the gate's on-value."""
-    return _reach(table, [f"envS:{p}:0" for p in PROBES], gate[0])
+def gate_reach(table: CmmTable, gate=GATE, species=None) -> float:
+    """(A) the largest distance at which any probe's overlap with any of the species (indices; None: all) reaches
+    the gate's on-value."""
+    return _reach(table, [f"envS:{p}:0" for p in PROBES], gate[0], species)
 
 
-def short_range_reach(table: CmmTable, chan: ChannelTable, gate=GATE) -> float:
-    """(A) the largest distance at which a short-range term of the model is on: the CT channels, the probe gates
-    and the density overlap of the channels and the exchange pairs (above its switch-on value)."""
-    return max(chan.cutoff, gate_reach(table, gate), _reach(table, ["xp:ovl"], O_ON))
+def short_range_reach(table: CmmTable, chan: ChannelTable, gate=GATE, species=None) -> float:
+    """(A) the largest distance at which a short-range term of the model is on among the species (indices; None:
+    all): the CT channels, the probe gates and the density overlap of the channels and the exchange pairs (above its
+    switch-on value)."""
+    return max(chan.cutoff, gate_reach(table, gate, species), _reach(table, ["xp:ovl"], O_ON, species))
 
 
-def default_cutoff(table: CmmTable, chan: ChannelTable, gate=GATE, switch_width=1.0) -> float:
-    """The periodic pair cutoff (A): the short-range reach plus the switch width, rounded up to 0.5 A, so the
-    switch-off of the table's complements leaves every short-range term exactly as in a cluster."""
-    return math.ceil(2 * (short_range_reach(table, chan, gate) + switch_width)) / 2
+def default_cutoff(table: CmmTable, chan: ChannelTable, gate=GATE, switch_width=1.0, species=None) -> float:
+    """The periodic pair cutoff (A) for the species (indices; None: all): the short-range reach plus the switch
+    width, rounded up to 0.5 A, so the switch-off of the table's complements leaves every short-range term exactly
+    as in a cluster."""
+    return math.ceil(2 * (short_range_reach(table, chan, gate, species) + switch_width)) / 2
 
 
 def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table: CmmTable, chan: ChannelTable,
@@ -165,7 +177,9 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     if periodic:
         cell_ang = torch.as_tensor(cell, dtype=dt, device=dev)
         cell_ang = cell_ang.expand(B, 3, 3) if cell_ang.dim() == 2 else cell_ang
-        reach = _memo(table, ("reach", tuple(gate), chan.cutoff), "cpu", lambda: short_range_reach(table, chan, gate))
+        spk = tuple(sorted(set(s.tolist())))
+        reach = _memo(table, ("reach", tuple(gate), chan.cutoff, spk), "cpu",
+                      lambda: short_range_reach(table, chan, gate, spk))
         rc = float(cutoff) if cutoff is not None else math.ceil(2 * (reach + switch_width)) / 2
         if rc - switch_width < reach:
             raise ValueError(f"cutoff - switch_width = {rc - switch_width} A is inside the short-range terms' reach "

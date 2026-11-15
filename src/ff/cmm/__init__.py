@@ -9,7 +9,7 @@
     tabulate.py   the radial-table machinery (quintic Hermite lookup, damped-tensor bases); batch.py: channel types
     environment.py, channels.py   the encoder's inputs; elst.py, gram.py, periodic.py, species.py: term pieces
     io.py         save_cmm / load_cmm; legacy.py: complete-model checkpoints
-    frozen_fit.py, solvent.py     the frozen-level fit for new ion tables; the C-PCM terms (not wired into the model)
+    frozen_fit.py                 the frozen-level fit for new ion tables
 
 See :mod:`rsfff.ff.cmm.model` for the functional form.
 """

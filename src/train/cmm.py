@@ -40,7 +40,7 @@ import numpy as np
 import torch
 
 from ..ff.cmm import CmmConfig, CmmModel
-from ..ff.cmm.io import load_cmm, save_cmm
+from ..ff.cmm.io import load_cmm, save_cmm, save_table
 from ..ff.cmm.params import ChannelTable, IonTable
 from . import cmm_data as D
 
@@ -415,10 +415,6 @@ def run(cfg: TrainConfig, base: Path):
     te = [f for f, t in zip(frames, tags) if t == "test"]
     dev = torch.device(rc.device)
     model = CmmModel(tab, chan, cfg.model)
-    t1 = time.time()
-    model.table()
-    print(f"radial table: {model.table().n_funcs} functions x {model.table().G} points [{time.time() - t1:.0f}s]",
-          flush=True)
     if dev.type != "cpu":
         model.tab = tab = tab.to(dev)
         model.to(dev)
@@ -450,6 +446,15 @@ def run(cfg: TrainConfig, base: Path):
         force_tr = [f for f in ff if f.meta["file"] not in held]
         force_te = [f for f in ff if f.meta["file"] in held]
         print(f"force frames: {len(force_tr)} train, {len(force_te)} held out", flush=True)
+    # the radial table: every species pair of the data, built (or taken from the disk cache) now and shipped as
+    # table.pt with the run
+    t1 = time.time()
+    allf = tr + va + te + force_tr + force_te + polar_tr + polar_te
+    used = torch.unique(torch.cat([tab.species_index(f.Z.to(tab.Z.device)).cpu() for f in allf]))
+    model.table().ensure_species(used)
+    save_table(out / "table.pt", model)
+    print(f"radial table: {len(used) ** 2} species pairs x {model.table().n_funcs} functions x {model.table().G} "
+          f"points [{time.time() - t1:.0f}s]", flush=True)
     opt = torch.optim.Adam(model.parameters(), lr=rc.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(rc.epochs, 1), eta_min=rc.lr * 0.02)
     best, log, curv_log, n_bad = math.inf, [], [], 0

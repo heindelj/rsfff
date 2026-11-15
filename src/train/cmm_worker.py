@@ -11,8 +11,9 @@ Settings (:data:`DEFAULTS`; the job's ``in/settings``, or ``--set``): latent, pa
 probes, film, epochs, seed, lr, batch, force_batch, w_force, device (auto | cuda | cpu), and ``overrides``: further
 ``table.key=value`` settings of the training config (e.g. "loss.w_curv=0 train.alpha_every=2").
 
-Outputs (``out/`` of the job; the run directory locally): ``run.tar.gz`` (model.pt, metrics.json, predictions.csv,
-hull.pt, train.log, config.json and the species table: :func:`rsfff.ff.cmm.load_cmm` opens it), ``metrics.json``,
+Outputs (``out/`` of the job; the run directory locally): ``run.tar.gz`` (model.pt, table.pt, metrics.json,
+predictions.csv, hull.pt, train.log, config.json and the species table: :func:`rsfff.ff.cmm.load_cmm` opens it),
+``metrics.json``,
 ``train.log``; the report carries the validation / test errors.
 """
 from __future__ import annotations

@@ -176,9 +176,16 @@ class GramTable(RadialTable):
         self._rq = torch.arange(GRAM_R_STEP / 2, GRAM_R_END, GRAM_R_STEP, dtype=f64)          # bohr
         xs, ws = np.polynomial.legendre.leggauss(GRAM_NS)
         self._xs, self._ws = torch.tensor(xs, dtype=f64), torch.tensor(ws, dtype=f64)
-        with torch.no_grad():
-            super().__init__(tab, **{"probes": (), "r_max": r_max, **kw})
-        del self._rhoL
+        super().__init__(tab, **{"probes": (), "r_max": r_max, **kw})
+
+    def _key_extra(self):
+        return f"{super()._key_extra()}|{self.breath}|{GRAM_R_STEP}|{GRAM_R_END}|{GRAM_NS}"
+
+    def _gram_names(self):
+        return [f"gram:{a}{b}{L}" for a, b, L in self.terms]
+
+    def _names(self):
+        return self._gram_names()
 
     def _rho_partial(self, sj):
         """(5, G + 4, Nr): rho_j^(L)(r; R) for L = 0..4 on the padded R grid (two extra points each side)."""

@@ -1,5 +1,10 @@
 # ALMO-EDA in a polarizable continuum, and the same continuum in the force field
 
+> 2026-11-14: the continuum's coupling inside the ion model (`ff/complete/solvent.py`, later `ff/cmm/solvent.py`)
+> and `scripts/pcm_consistency.py` were removed in the cmm cleanup -- a PCM is paired with the model, not part of
+> it. The general `src/ff/cpcm.py` and the pyscf ALMO-in-PCM remain; the removed code is at tag
+> `complete-explore-final`.
+
 Branch `main`. Code: `src/qcgen/almo.py` (pyscf ALMO-EDA: fragments → frozen → SCF-MI → full, with a uniform field
 and C-PCM), `src/ff/cpcm.py` (the force-field C-PCM, point for point pyscf's), `src/ff/complete/solvent.py` (the
 continuum inside the complete model's induction solve), `scripts/almo_pcm_scan.py` (the NaCl scan),

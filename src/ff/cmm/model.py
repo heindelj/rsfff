@@ -149,15 +149,17 @@ class CmmModel(nn.Module):
         self.encoder = Encoder(n_ch + n_g, latent=cfg.latent, hidden=cfg.hidden, depth=cfg.depth,
                                cond_dim=cfg.species_dim if cfg.film else 0)
         self._table = None
+        self.table_store = {}            # pair key -> coefficients: shipped with the checkpoint (io.load_cmm)
         self._u = None
         self.double()
 
     # -- geometry ----------------------------------------------------------------------------------------------
     def table(self, device=None) -> CmmTable:
-        """The precompute's radial table of this species table (built once, cached on disk under
-        ``RSFFF_TABLE_CACHE``), on ``device``."""
+        """The precompute's radial table of this species table on ``device``. Its species pairs are filled on first
+        use from :attr:`table_store` (the pairs shipped with the checkpoint), the disk cache, or built; each pair is
+        keyed by the two ions' parameter values (:meth:`rsfff.ff.cmm.tabulate.RadialTable.pair_key`)."""
         if self._table is None:
-            self._table = cmm_table(self.tab.to("cpu"))
+            self._table = cmm_table(self.tab.to("cpu"), store=self.table_store)
         if device is not None and self._table.device != torch.device(device):
             self._table.to(device)
         return self._table

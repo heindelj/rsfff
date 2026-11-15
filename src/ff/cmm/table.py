@@ -1,10 +1,11 @@
-"""The one radial table of the cmm precompute (its own module: the disk cache of the table is keyed by the source of
-the table code -- this module, ``tabulate.py`` and ``gram.py`` -- so edits of the precompute keep the cached tables)."""
+"""The one radial table of the cmm precompute. Its pairs are keyed by the ions' parameter values and
+:attr:`CmmTable.VERSION` (:meth:`rsfff.ff.cmm.tabulate.RadialTable.pair_key`): bump the version whenever an integral
+of this module, ``tabulate.py`` or ``gram.py`` changes."""
 from __future__ import annotations
 
 from .gram import GramTable
 from .params import IonTable
-from .tabulate import PROBES, RadialTable, XpolTable, cached_table, shape_self_coulomb
+from .tabulate import PROBES, RadialTable, XpolTable, shape_self_coulomb
 
 __all__ = ["CmmTable", "cmm_table"]
 
@@ -16,9 +17,14 @@ class CmmTable(GramTable):
     :class:`rsfff.ff.cmm.gram.GramTable`; 0.3 .. 12 A at 0.01 A. ``jself`` (S,): the Coulomb self-energy of each
     species' charge-slot shape."""
 
+    VERSION = 1
+
     def __init__(self, tab: IonTable, r_max=12.0, h=0.01, **kw):
         super().__init__(tab, r_max=r_max, breath="shape", probes=PROBES, h=h, **kw)
-        self.jself = shape_self_coulomb(tab)
+        self.jself = shape_self_coulomb(self.tab)
+
+    def _names(self):
+        return RadialTable._names(self) + XpolTable._xpol_names() + self._gram_names()
 
     def _functions(self, si, sj):
         out = RadialTable._functions(self, si, sj)
@@ -32,6 +38,7 @@ class CmmTable(GramTable):
         return self
 
 
-def cmm_table(tab: IonTable) -> CmmTable:
-    """The :class:`CmmTable` of a species table, kept on disk under ``RSFFF_TABLE_CACHE`` (:func:`cached_table`)."""
-    return cached_table(CmmTable, tab)
+def cmm_table(tab: IonTable, store=None) -> CmmTable:
+    """The :class:`CmmTable` of a species table; its pairs come from ``store``, the disk cache or are built on
+    first use."""
+    return CmmTable(tab, store=store)

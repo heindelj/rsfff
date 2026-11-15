@@ -5,7 +5,9 @@ species pair (s_i, s_j) times an angular tensor in r_hat. The radial functions a
 complements and overlaps of the fixed parameter table (closed forms and k-space quadrature, the whole cost); the
 angular parts are polynomials. So the radial functions are tabulated once per species pair on a fine grid, with
 their first two derivatives, and evaluated by quintic Hermite interpolation -- exact in the sense that the force is
-the derivative of the interpolated energy, and smooth (C^2). The learnable exponents (direct CT, Pauli, dispersion)
+the derivative of the interpolated energy, and smooth (C^2). A species pair is built the first time it is needed and
+kept under a key of the two ions' parameter values (:meth:`RadialTable.pair_key`), in memory, on disk and in a
+model's checkpoint. The learnable exponents (direct CT, Pauli, dispersion)
 are not in the table: those kernels are closed-form Slater 1s and stay analytic in the model.
 
 :class:`RadialTable` holds, per ordered species pair, the functions
@@ -37,7 +39,8 @@ from .params import IonTable
 from ..multipole import shaped_one_center_multi, shaped_two_center_damp
 from .environment import shaped_overlap_derivs
 
-__all__ = ["RadialTable", "XpolTable", "cached_table", "shape_self_coulomb", "PROBES", "GATE", "R_XPOL", "NORD", "BOHR"]
+__all__ = ["RadialTable", "XpolTable", "shape_self_coulomb", "species_params", "table_cache_dir", "PROBES", "GATE",
+           "R_XPOL", "NORD", "BOHR", "TABLE_FIELDS"]
 
 #: the diffuse probes whose environment the encoder reads (gated invariants) and whose l = 0 shape is the breathing
 #: response (breath)
@@ -81,99 +84,178 @@ def _expand(b, w, G):
     return b[None].expand(G, -1), w[None].expand(G, -1, -1)
 
 
-def _tab_fingerprint(tab) -> bytes:
-    """Bytes that change whenever the ion table's content does (every tensor and string field, by name)."""
-    import dataclasses
-    import hashlib
-    h = hashlib.sha1()
-
-    def feed(name, v):
-        if isinstance(v, torch.Tensor):
-            h.update(name.encode() + str(tuple(v.shape)).encode() + v.detach().cpu().double().contiguous().numpy().tobytes())
-        elif isinstance(v, dict):
-            for k in sorted(v):
-                feed(f"{name}.{k}", v[k])
-        elif isinstance(v, (str, int, float, tuple, list)):
-            h.update(name.encode() + repr(v).encode())
-
-    for f in dataclasses.fields(tab):
-        feed(f.name, getattr(tab, f.name))
-    return h.digest()
+#: the ion-table fields the tabulated integrals read (per species); a pair's table is a function of these alone
+TABLE_FIELDS = ("Z", "shell_n", "shell_b", "b_dip", "w_dip", "b_quad", "w_quad", "b_breath", "w_breath", "a0")
 
 
-def cached_table(cls, tab, **kw):
-    """``cls(tab, **kw)``, kept on disk when the environment names a directory (``RSFFF_TABLE_CACHE``; the trainer
-    sets it to its --cache-dir): the pair tables the model builds lazily (overlap, Gram, flux, probe) take minutes
-    and depend only on the ion table. The key is the class, its arguments, the ion table's content and the source of
-    the module that defines the class, so an edit of the table code or of the ion table makes a new entry."""
-    import hashlib
-    import inspect
+def species_params(tab: IonTable, s: int) -> bytes:
+    """The values the tables depend on for species s (not its name): :data:`TABLE_FIELDS` and the frontier shapes,
+    shells with zero occupation dropped (so the padding of a table with more shells does not matter)."""
+    occ = tab.shell_n[s] > 0
+    vals = []
+    for f in TABLE_FIELDS:
+        v = getattr(tab, f, None)
+        if v is None:
+            continue
+        v = v[s]
+        if f in ("shell_n", "shell_b"):
+            v = v[occ]
+        vals.append((f, v))
+    for role in sorted(tab.front_b):
+        vals += [(f"front_b.{role}", tab.front_b[role][s]), (f"front_w.{role}", tab.front_w[role][s])]
+    out = b""
+    for name, v in vals:
+        v = torch.as_tensor(v).detach().to("cpu", torch.float64).reshape(-1)
+        out += name.encode() + b":" + str(v.numel()).encode() + b":" + v.numpy().tobytes()
+    return out
+
+
+def table_cache_dir():
+    """The directory of the per-pair disk cache: ``RSFFF_TABLE_CACHE`` (empty or "off": none), else
+    ~/.cache/rsfff/tables."""
     import os
     from pathlib import Path
     d = os.environ.get("RSFFF_TABLE_CACHE")
-    if not d:
-        return cls(tab, **kw)
-    try:
-        src = (Path(inspect.getsourcefile(cls)).read_bytes() + Path(__file__).read_bytes()
-               + (Path(__file__).parent / "gram.py").read_bytes())
-    except (OSError, TypeError):
-        return cls(tab, **kw)
-    key = hashlib.sha1(cls.__name__.encode() + repr(sorted(kw.items())).encode() + _tab_fingerprint(tab) + src).hexdigest()[:16]
-    path = Path(d) / f"pair_{cls.__name__}_{key}.pt"
-    if path.exists():
-        try:
-            return torch.load(path, weights_only=False, map_location="cpu")
-        except Exception:  # noqa: BLE001 -- a truncated file: rebuild
-            pass
-    cpu = tab.to("cpu") if hasattr(tab, "to") else tab
-    table = cls(cpu, **kw)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".tmp{os.getpid()}")
-        torch.save(table, tmp)
-        tmp.replace(path)
-    except OSError:
-        pass
-    return table
+    if d is None:
+        return Path.home() / ".cache" / "rsfff" / "tables"
+    return None if d in ("", "off") else Path(d)
 
 
 class RadialTable:
     """The precompute's radial rows (module docstring) on the grid r_min..r_max (Angstrom, step h), quintic Hermite
-    in r. Subclasses override :meth:`_functions` (the rows of one ordered species pair) and reuse the grid and the
-    evaluation."""
+    in r. Subclasses override :meth:`_names` and :meth:`_functions` (the rows of one ordered species pair) and reuse
+    the grid, the storage and the evaluation.
 
-    def __init__(self, tab: IonTable, probes=PROBES, r_min=0.3, r_max=12.0, h=0.01, dtype=torch.float64):
-        self.tab, self.probes = tab, tuple(probes)
+    Pairs are built when first needed (a lookup or :meth:`ensure_species`) and identified by :meth:`pair_key`: a
+    hash of the class, its :attr:`VERSION`, the grid and options and the two species' parameter values (not their
+    names). A built pair is taken, in order, from ``store`` (a dict key -> coefficients, e.g. shipped with a model),
+    from the disk cache (:func:`table_cache_dir`), or computed and then written to both. A key encodes everything
+    the integrals depend on, so a stored pair can never be applied to a different pair of ions; bump
+    :attr:`VERSION` whenever the integrals themselves change."""
+
+    VERSION = 1
+
+    def __init__(self, tab: IonTable, probes=PROBES, r_min=0.3, r_max=12.0, h=0.01, dtype=torch.float64, store=None):
+        self.tab, self.probes = tab.to("cpu"), tuple(probes)
         self.r_min, self.r_max, self.h = float(r_min), float(r_max), float(h)
         G = int(round((r_max - r_min) / h)) + 1
         self.G = G
         self.r = torch.linspace(r_min, r_max, G, dtype=dtype)           # Angstrom
-        self.names: list[str] = []
-        self.index: dict[str, int] = {}
-        S = len(tab.symbols)
-        rows = []
-        for si in range(S):
-            for sj in range(S):
-                rows.append(self._functions(si, sj))
-        self.names = list(rows[0])
+        self.names = list(self._names())
         self.index = {k: n for n, k in enumerate(self.names)}
-        F = len(self.names)
-        vals = torch.stack([torch.stack([r[k] for k in self.names]) for r in rows]).reshape(S, S, F, G, 3)
-        # Hermite coefficients in grid units: y, h y', h^2 y''
-        self.coef = torch.stack([vals[..., 0], vals[..., 1] * h, vals[..., 2] * h * h], -1).contiguous()
-        self.n_funcs = F
+        self.n_funcs = F = len(self.names)
+        S = len(tab.symbols)
+        self.coef = torch.zeros(S, S, F, G, 3, dtype=dtype)               # Hermite coefficients: y, h y', h^2 y''
+        self.built = torch.zeros(S, S, dtype=torch.bool)
+        self.store = store if store is not None else {}
+        self._spkey = {}
+
+    # ---- identity, storage -----------------------------------------------------------------------------------
+    def _key_extra(self):
+        return repr(self.probes)
+
+    def pair_key(self, si: int, sj: int) -> str:
+        import hashlib
+        for s in (si, sj):
+            if s not in self._spkey:
+                self._spkey[s] = species_params(self.tab, s)
+        h = hashlib.sha256()
+        h.update(f"{type(self).__name__}|v{self.VERSION}|{self.r_min!r}|{self.r_max!r}|{self.h!r}|{self.G}|"
+                 f"{self.coef.dtype}|{self._key_extra()}|".encode())
+        h.update(self._spkey[si] + b"||" + self._spkey[sj])
+        return h.hexdigest()[:32]
+
+    def ensure_species(self, species):
+        """Build (or fetch) every ordered pair among the species indices ``species``."""
+        sp = sorted({int(s) for s in torch.as_tensor(species).reshape(-1).tolist()})
+        for a in sp:
+            for b in sp:
+                if not bool(self.built[a, b]):
+                    self._fill(a, b)
+
+    def ensure(self, si, sj):
+        """Build (or fetch) the ordered pairs (si, sj) of a lookup."""
+        if bool(self.built.all()):
+            return
+        S = self.built.shape[0]
+        codes = torch.unique(si.reshape(-1) * S + sj.reshape(-1)).cpu().tolist()
+        for c in codes:
+            a, b = divmod(int(c), S)
+            if not bool(self.built[a, b]):
+                self._fill(a, b)
+
+    def build_all(self):
+        self.ensure_species(range(self.built.shape[0]))
+        return self
+
+    def built_entries(self) -> dict:
+        """{key: coefficients (F, G, 3)} of the pairs built so far (what a model ships)."""
+        S = self.built.shape[0]
+        return {self.pair_key(a, b): self.coef[a, b].detach().cpu().clone()
+                for a in range(S) for b in range(S) if bool(self.built[a, b])}
+
+    def _fill(self, a, b):
+        key = self.pair_key(a, b)
+        v = self.store.get(key)
+        d = table_cache_dir()
+        path = d / type(self).__name__ / f"{key}.pt" if d is not None else None
+        if v is None and path is not None and path.exists():
+            try:
+                v = torch.load(path, map_location="cpu", weights_only=True)
+            except Exception:  # noqa: BLE001 -- a truncated file: rebuild
+                v = None
+        if v is None or tuple(v.shape) != (self.n_funcs, self.G, 3):
+            v = self._compute(a, b)
+            if path is not None:
+                import os
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = path.with_suffix(f".tmp{os.getpid()}")
+                    torch.save(v, tmp)
+                    tmp.replace(path)
+                except OSError:
+                    pass
+        self.store[key] = v
+        self.coef[a, b] = v.to(self.coef.device, self.coef.dtype)
+        self.built[a, b] = True
+
+    def _compute(self, a, b):
+        out = self._functions(a, b)
+        if set(out) != set(self.names):
+            raise RuntimeError(f"{type(self).__name__}: built rows {sorted(set(out) ^ set(self.names))} mismatch")
+        v = torch.stack([out[k] for k in self.names]).to(torch.float64)          # (F, G, 3): y, y', y''
+        return torch.stack([v[..., 0], v[..., 1] * self.h, v[..., 2] * self.h ** 2], -1).contiguous()
 
     # ---- building -------------------------------------------------------------------------------------------
-    def _functions(self, si, sj):
-        """{name: (G, 3)} the rows of the ordered species pair (si, sj) with their first two r-derivatives."""
-        with torch.enable_grad():
-            return self._radial_rows(si, sj)
+    def _names(self):
+        out = [f"drive:{p}:{n}" for p in ("dip", "quad") for n in range(NORD)]
+        out += [f"aoff:{a}{c}:{n}" for a in "dq" for c in "dq" for n in range(NORD)]
+        for name in self.probes:
+            out += [f"envV:{name}:{n}" for n in range(NORD)] + [f"envS:{name}:0", f"envS:{name}:1"]
+        return out
 
-    def _radial_rows(self, si, sj):
+    #: the step (Angstrom) of the five-point derivative stencil of the closed-form rows
+    FD_STEP = 2e-3
+
+    def _functions(self, si, sj):
+        """{name: (G, 3)} the rows of the ordered species pair (si, sj) with their first two r-derivatives: the closed
+        forms evaluated once on the grid shifted by 0, +-d, +-2d and differentiated by the five-point stencil (errors
+        ~1e-10 in y', ~1e-8 in y'' relative to the row's scale; y'' only shapes the interpolation inside a cell)."""
+        d = self.FD_STEP
+        with torch.no_grad():
+            o = self._radial_values(si, sj, torch.cat([self.r + k * d for k in (-2, -1, 0, 1, 2)]))
+        res = {}
+        for k, f in o.items():
+            f = f.reshape(5, -1)
+            d1 = (f[0] - 8 * f[1] + 8 * f[3] - f[4]) / (12 * d)
+            d2 = (-f[0] + 16 * f[1] - 30 * f[2] + 16 * f[3] - f[4]) / (12 * d * d)
+            res[k] = torch.stack([f[2], d1, d2], -1)
+        return res
+
+    def _radial_values(self, si, sj, r):
         tab = self.tab
-        r = self.r.clone().requires_grad_(True)
         rb = r / BOHR
-        G = self.G
+        G = r.shape[0]
         one = K._onehot0(G, rb)
         out: dict[str, torch.Tensor] = {}
         shells = [(tab.shell_b[sj, t], tab.shell_n[sj, t]) for t in range(tab.shell_n.shape[1]) if tab.shell_n[sj, t] > 0]
@@ -218,17 +300,11 @@ class RadialTable:
                 a_, da, _ = shaped_overlap_derivs(bp, wp, bt.expand(G), one, rb)
                 S0, S1 = S0 + nt * a_, S1 + nt * da
             out[f"envS:{name}:0"], out[f"envS:{name}:1"] = S0, S1
-        res = {}
-        for k, f in out.items():
-            d1 = torch.autograd.grad(f.sum(), r, create_graph=True)[0]
-            d2 = torch.autograd.grad(d1.sum(), r, retain_graph=True)[0]
-            res[k] = torch.stack([f, d1, d2], -1).detach()
-        return res
+        return out
 
     # ---- evaluation ------------------------------------------------------------------------------------------
     def to(self, device):
         self.coef = self.coef.to(device)
-        self.r = self.r.to(device)
         return self
 
     @property
@@ -241,6 +317,7 @@ class RadialTable:
 
         Vectorized: both grid nodes' coefficients in one gather, the six Hermite basis functions as
         [1, t, .., t^5] @ M, and one contraction -- ~15 kernels; equal to the transcription ``_call_ref``."""
+        self.ensure(si, sj)
         x = (r_ang - self.r_min) / self.h
         G = self.G
         inside = (x < G - 1) & (x >= 0)
@@ -258,6 +335,7 @@ class RadialTable:
 
     def _call_ref(self, si, sj, r_ang):
         """The per-term transcription of :meth:`__call__`, kept for the tests."""
+        self.ensure(si, sj)
         x = (r_ang - self.r_min) / self.h
         G = self.G
         inside = (x < G - 1) & (x >= 0)
@@ -340,7 +418,14 @@ class XpolTable(RadialTable):
     SHAPES = ("dip", "quad")
 
     def __init__(self, tab, r_max=10.0, **kw):
-        super().__init__(tab, probes=(), r_max=r_max, **kw)
+        super().__init__(tab, **{"probes": (), "r_max": r_max, **kw})
+
+    @staticmethod
+    def _xpol_names():
+        return [f"xp:{q}:{n}" for q in ("dip", "quad") for n in range(NORD)] + ["xp:breath", "xp:ovl"]
+
+    def _names(self):
+        return self._xpol_names()
 
     def _functions(self, si, sj):
         return self._xpol_rows(si, sj)
