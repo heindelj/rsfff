@@ -44,3 +44,28 @@ def test_worker_config(tmp_path):
     cfg = TrainConfig.from_dict(c)
     assert cfg.model.latent == 8 and cfg.model.pairs == ("ww", "ws") and not cfg.model.probes
     assert cfg.loss.w_curv == 0 and cfg.data.salts == ("lif", "kbr") and cfg.data.root == str(tmp_path.resolve())
+
+
+def test_vacuum_gap_mask(tmp_path):
+    """The geometric ct mask: a compact Na-Cl-Na keeps its label; two Cl- with the Na+ 6.6 A away (the ionic state is
+    not the vacuum ground state) loses it, with no ALMO-CTA in the record."""
+    from pathlib import Path
+    from rsfff.ff.cmm import IonTable
+    from rsfff.train import cmm_data as D
+    tab = IonTable.load(Path(__file__).parent / "cmm_golden" / "ions_golden.json")
+    ions = D.gap_ions(tab)
+    near = (["Na", "Cl", "Na"], [[-2.6, 0, 0], [0, 0, 0], [2.6, 0, 0]])
+    far = (["Cl", "Cl", "Na"], [[0, 0, 0], [3.8, 0, 0], [1.9, 6.4, 0]])
+    assert D.vacuum_gap(*near, ions) > 0.15 and D.vacuum_gap(*far, ions) < 0.0
+    assert D.vacuum_gap(["Cl", "Cl"], [[0, 0, 0], [3, 0, 0]], ions) == float("inf")
+    d = tmp_path / "ct_sets"
+    d.mkdir()
+    rec = lambda k, f: json.dumps({"stage": "label", "symbols": f[0], "coords": f[1], "tags": {"source": f"s{k}"},
+                                   "eda": {"pol": -1.0, "ct": -2.0}})
+    (d / "ct-mbe.jsonl").write_text("\n".join(rec(k, f) for k, f in enumerate((near, far))) + "\n")
+    kw = dict(species=tab.symbols, max_ho_ratio=float("inf"))
+    assert [f[2]["ct_mask"] for f in D.load_frames(str(d), **kw)] == [True, True]
+    out = D.load_frames(str(d), ct_min_gap=0.04, ions=ions, **kw)
+    assert [f[2]["ct_mask"] for f in out] == [True, False] and out[1][3]["vacuum_gap"] < 0
+    cfg, _ = load_config(None)
+    assert cfg.data.ct_min_gap == 0.0 and cfg.model.ct_model == "flux"

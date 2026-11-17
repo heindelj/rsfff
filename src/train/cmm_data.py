@@ -143,9 +143,38 @@ def _ho_ratio(r):
     return r["eda"]["ct"] / pct if pct < 0 else float("inf")
 
 
+def vacuum_gap(symbols, coords, ions) -> float:
+    """The smallest vacuum gap (Hartree) to moving an electron from an anion i to a cation j of the frame, with the
+    other ions as point charges: I[i] - A[j] + phi(i) - phi(j) - 1 / r_ij. ``ions``: {symbol: (charge, I, A)}
+    (Hartree; :func:`gap_ions`). Near or below zero the all-ionic state is not the vacuum ground state (the
+    ionic / radical crossing), and the EDA's CT there is state mixing, not a channel quantity. inf without such a pair."""
+    X = np.asarray(coords, float) / 0.529177210903
+    q = np.array([ions[a][0] for a in symbols])
+    don, acc = np.nonzero(q < 0)[0], np.nonzero(q > 0)[0]
+    if not len(don) or not len(acc):
+        return float("inf")
+    d = np.linalg.norm(X[:, None] - X[None], axis=-1)
+    np.fill_diagonal(d, np.inf)
+    phi = (q[None, :] / d).sum(1)
+    I = np.array([ions[symbols[i]][1] for i in don])
+    A = np.array([ions[symbols[j]][2] for j in acc])
+    return float((I[:, None] - A[None, :] + phi[don][:, None] - phi[acc][None, :] - 1.0 / d[np.ix_(don, acc)]).min())
+
+
+def gap_ions(tab) -> dict:
+    """{symbol: (charge, I_donor, A_acceptor)} of a species table, for :func:`vacuum_gap`."""
+    return {a: (float(tab.charge[k]), float(tab.I_donor[k]), float(tab.A_acceptor[k])) for k, a in enumerate(tab.symbols)}
+
+
 def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 3.6, max_ho_ratio: float = 1.4,
-                species=("Na", "Cl"), ct_dimers=True, extra_sets=(), extra_files=(), exclude=()):
+                species=("Na", "Cl"), ct_dimers=True, extra_sets=(), extra_files=(), exclude=(), ct_min_gap=0.0,
+                ions=None):
     """[(symbols, coords A, labels, meta)], deduplicated.
+
+    ``ct_min_gap`` > 0 (Hartree, with ``ions`` = :func:`gap_ions` of the species table) drops the ct label of every
+    frame whose :func:`vacuum_gap` is below it: a geometric criterion for the ionic / radical crossing region that
+    needs no ALMO-CTA (0.04 drops the anion-rich fragments with a distant cation and the long unlike pairs). It adds
+    to the two criteria below; ``max_ho_ratio=inf``, ``ct_dimers=True`` and a large ``ct_max_pair`` leave it alone.
 
     The ct label is kept only where ALMO's E_CT is a channel quantity: unlike pairs within ``dimer_ct_cut`` (``ct_max_pair`` for Na-Cl) and, for
     every frame with CTA, E_CT / sum PCT <= ``max_ho_ratio``. Above that the higher-order relaxation dominates --
@@ -178,10 +207,15 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
         whole = bool(meta.get("full")) and n >= 4
         if (np.isfinite(ho) or ho == float("inf")) and not whole:
             ct_mask = ct_mask and ho <= max_ho_ratio
+        gap = vacuum_gap(symbols, coords, ions) if ions is not None else float("nan")
+        if ct_min_gap > 0:
+            if ions is None:
+                raise ValueError("ct_min_gap needs ions (gap_ions(tab))")
+            ct_mask = ct_mask and gap >= ct_min_gap
         out.append((list(symbols), np.asarray(coords, float),
                     {"pol": pol / KJ, "ct": ct / KJ, "ct_mask": ct_mask,
                      "pauli": pauli / KJ, **{k: v / KJ for k, v in (extra or {}).items()}},
-                    {**meta, "n": n, "ho_ratio": ho}))
+                    {**meta, "n": n, "ho_ratio": ho, "vacuum_gap": gap}))
 
     sets_ = [(wf, Path(ct_sets) / f"{wf}.jsonl", False) for wf in ("ct-walk", "ct-mbe", "ct-sat", "ct-scan", *extra_sets)]
     sets_ += [(Path(f).stem, Path(f), True) for f in extra_files]

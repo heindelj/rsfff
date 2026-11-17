@@ -10,6 +10,8 @@ derivative maps) and the Gram rows of :class:`rsfff.ff.cmm.gram.GramTable`, on o
 
     A (B, nmax D, nmax D)  the induction operator: damped parent-parent couplings plus the on-site blocks (the
                            hyperpolarized dipole response alpha(E_p)^-1, 1 / C, 1 / a0), identity on padding
+    phi_front (N, 2)       the other ions' frozen potential at each atom averaged over its donor / acceptor frontier
+                           shape (point charges + penetration; the Ewald sum in a cell): the CT gap's electrostatics
     Lz (B, nmax, D)        the drive: the permanent field (and gradient) minus the Legendre offset h, the breathing
                            drive -V0_pen of the breath probe; e_hyp (B,) the Legendre constants
     chan (N, 17)           the encoder's raw two- and three-body channels
@@ -269,6 +271,14 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     S0p = y[:, table.cols(tuple(f"envS:{p}:0" for p in PROBES), dev)]                  # (Pd, 3)
     S1p = y[:, table.cols(tuple(f"envS:{p}:1" for p in PROBES), dev)]
     V0 = X.new_zeros(N, G_).index_add(0, i, v0)
+    # the other ions' frozen potential at every atom, averaged over its donor / acceptor frontier shape: the point
+    # charges (bare in a cluster, the Ewald sum in a cell) plus the probes' penetration potentials (the CT gap)
+    phi_pt = X.new_zeros(N).index_add(0, i, qg[0] / r)
+    if pf.numel():
+        phi_pt = phi_pt.index_add(0, di, tab.charge[s[dj]] / drf.norm(dim=-1))
+    if periodic:
+        phi_pt = phi_pt + out_q[:, 0]
+    phi_front = phi_pt[:, None] + V0[:, [PROBES.index("donor"), PROBES.index("acceptor")]]
     S0 = X.new_zeros(N, G_).index_add(0, i, S0p)
     S1 = X.new_zeros(N, G_, 3).index_add(0, i, -S1p[:, :, None] * rhat[:, None, :])
     Dq = (qj[:, None] * T0u) @ P                                     # the neighbour's bare point-charge drive
@@ -329,8 +339,15 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     bt = {"B": B, "nmax": nmax, "D": D, "mask": mask, "species": s, "frame": b_idx, "pos": pos_ang, "pairs": pairs,
           "pair_dr": dr_u * BOHR, "Lz": Lz, "e_hyp": e_hyp, "chan": chan_raw, "gated": gated, "gate": tuple(gate),
           "x_sel": pn[xs], "x_rel": x_rel, "x_swO": swO[:Px], "x_Gi": x_Gi, "x_Gj": x_Gj,
+          # the exchange pairs' acceptor-probe overlaps: [:Px] i's probe with j, [Px:] j's probe with i
+          "x_Sa": S0p[dsel, PROBES.index("acceptor")],
           "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]], "ch_rev": ch_rev,
-          "ch_J": ch_J, "ch_key": ch_key,
+          "ch_J": ch_J, "ch_key": ch_key, "ch_rhat": dr[ck] / r[ck][:, None],     # unit vector donor -> acceptor
+          # the channel partner's share of the donor (i) / acceptor (j) probe overlaps, and the atoms' totals: the
+          # confinement of a channel by everything but its own partner is S0_atom[i, 0] - ch_Sd (donor side) and
+          # S0_atom[j, 1] - ch_Sa (acceptor side)
+          "ch_Sd": S0p[kk, PROBES.index("donor")], "ch_Sa": S0p[(kk + nP) % max(2 * nP, 1), PROBES.index("acceptor")],
+          "S0_atom": S0[:, [PROBES.index("donor"), PROBES.index("acceptor")]], "phi_front": phi_front,
           "ch_ltaper": torch.log(channel_taper(ch_r, chan.cutoff, chan.taper).clamp(min=1e-300)), "labels": lab}
     if periodic:
         bt.update(A=None, Ca=None, Jq=None, pbc={

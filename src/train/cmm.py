@@ -4,9 +4,11 @@
 
 The config has four tables, every key optional (the defaults are the complete.default run of 2026-11-13):
 
-    [model]   CmmConfig: hidden, depth, latent, pairs, probes, film, species_dim, env_cap, ct_q_cap, env_gate
+    [model]   CmmConfig: hidden, depth, latent, pairs, probes, film, species_dim, env_cap, ct_q_cap, ct_model,
+              ct_gap_overlap, ct_gap_w0, ct_q_onesided, ct_floor, ct_relay, env_gate
     [data]    params (species table), ct_sets, walk_eda, salts, extra_sets, force_sets, force_data, force_test,
-              polar_sets, polar_test, polar_almo, exclude_names, ct_max_pair, max_ho_ratio, ct_dimers, test
+              polar_sets, polar_test, polar_almo, exclude_names, ct_max_pair, max_ho_ratio, ct_dimers, ct_min_gap,
+              test
     [loss]    w_pol, w_ct, w_pauli, w_disp, w_alpha, w_alpha_ct, w_force, w_fe, w_smooth, w_curv, w_env_mid
     [train]   out, epochs, batch, lr, seed, device, cache_dir, force_batch, force_every,
               alpha_every, curv_every, curv_frames, curv_delta, smooth_sigma, env_mid_scale, env_sat, val_cap,
@@ -72,6 +74,7 @@ class DataConfig:
     ct_max_pair: float = 3.6
     max_ho_ratio: float = 1.4
     ct_dimers: str = "like"           # all | none | like: which two-ion frames keep their ct label
+    ct_min_gap: float = 0.0           # Hartree; > 0 drops the ct label of frames whose vacuum gap is below it (0.04)
     test: tuple = D.DEFAULT_TEST      # test parents (the salts' 6_03, 8_07, 9_09 clusters are added)
 
 
@@ -402,11 +405,14 @@ def run(cfg: TrainConfig, base: Path):
     tab, chan = IonTable.load(params), ChannelTable.load(params)
     ct_dimers = {"all": True, "none": False, "like": "like"}[dc.ct_dimers]
     frames = D.load_frames(P(dc.ct_sets), P(dc.walk_eda) if dc.walk_eda else None, dc.ct_max_pair, dc.max_ho_ratio,
-                           species=tab.symbols, ct_dimers=ct_dimers,
+                           species=tab.symbols, ct_dimers=ct_dimers, ct_min_gap=dc.ct_min_gap, ions=D.gap_ions(tab),
                            extra_sets=[f"seed-{x}-{k}" for x in dc.salts for k in ("scan", "mbe", "sat")],
                            extra_files=[P(f) for f in dc.extra_sets], exclude=dc.exclude_names)
     test = list(dc.test) + [f"{x}{n}" for x in dc.salts for n in ("6_03", "8_07", "9_09")]
     print(f"ct label kept for {sum(f[2]['ct_mask'] for f in frames)} of {len(frames)} frames", flush=True)
+    if dc.ct_min_gap > 0:
+        print(f"  vacuum gap below {dc.ct_min_gap} Hartree in {sum(f[3]['vacuum_gap'] < dc.ct_min_gap for f in frames)} frames",
+              flush=True)
     tags = D.split(frames, test, seed=rc.seed)
     print(f"{len(frames)} frames: " + ", ".join(f"{t} {tags.count(t)}" for t in ("train", "val", "test")), flush=True)
     frames = D.as_frames(frames)

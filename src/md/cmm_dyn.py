@@ -15,6 +15,7 @@ volume (A^3), pressure (GPa), cell lengths.
 from __future__ import annotations
 
 import time
+from collections import deque
 
 import numpy as np
 from ase import units
@@ -52,15 +53,54 @@ class BatchMD:
         self.steps = 0
         self.wall = 0.0
         self.cg_iters = []
+        self.history = deque(maxlen=self.history_len)
         self._forces()
 
     # -- forces --------------------------------------------------------------------------------------------------
+    dump_path = None          # on a failed force call: write the replicas here (extxyz) before re-raising
+    history_len = 50          # ... together with this many preceding steps of each replica
+
     def _forces(self):
-        E, F, vir = self.pot.evaluate(self.Z, self.X, self.C, stress=True)
+        try:
+            E, F, vir = self.pot.evaluate(self.Z, self.X, self.C, stress=True)
+        except Exception as e:
+            raise type(e)(f"{e} [step {self.steps}; {self._contacts()}]") from e
         self.E = E * HEV
         self.F = [f * HEV for f in F]
         self.vir = vir * HEV                              # eV, -dE/d strain
         self.cg_iters.append(int(self.pot.last.get("cg_iters", 0)))
+
+    def _contacts(self):
+        """Closest pair distance per species pair and replica (and the replicas dumped to ``dump_path``)."""
+        from ase.neighborlist import neighbor_list
+        parts = []
+        try:
+            ats = [self.atoms(r) for r in range(self.R)]
+            for r, at in enumerate(ats):
+                i, j, d = neighbor_list("ijd", at, 3.0)
+                sym = np.array(at.get_chemical_symbols())
+                best = {}
+                for a_, b_, x in zip(sym[i], sym[j], d):
+                    k = "-".join(sorted((a_, b_)))
+                    best[k] = min(best.get(k, 9.9), x)
+                parts.append(f"replica {r} T={self.T[r]:.0f}: " + ", ".join(f"{k} {v:.2f}" for k, v in sorted(best.items())))
+            if self.dump_path:
+                from ase import Atoms
+                from ase.io import write
+                frames = []
+                for st, X, V, C, E in getattr(self, "history", []):      # oldest first, then the failed state
+                    for r in range(self.R):
+                        a = Atoms(numbers=self.Z[r], positions=X[r], cell=C[r], pbc=True)
+                        a.set_velocities(V[r])
+                        a.info.update(step=st, replica=r, T_target=float(self.T[r]), epot_eV=float(E[r]))
+                        frames.append(a)
+                for r, a in enumerate(ats):
+                    a.info.update(step=self.steps + 1, replica=r, T_target=float(self.T[r]), failed=True)
+                write(self.dump_path, frames + ats, format="extxyz")
+                parts.append(f"wrote {self.dump_path} ({len(self.history)} steps of history)")
+        except Exception as e2:          # the diagnosis must not hide the original error
+            parts.append(f"(contact report failed: {e2})")
+        return "; ".join(parts)
 
     def volume(self, r):
         return abs(np.linalg.det(self.C[r]))
@@ -116,6 +156,9 @@ class BatchMD:
         for r in range(self.R):
             self.V[r] = self.V[r] + 0.5 * dt * self.F[r] / self.M[r]
         self.steps += 1
+        if self.history_len:
+            self.history.append((self.steps, [x.copy() for x in self.X], [v.copy() for v in self.V],
+                                 [c.copy() for c in self.C], self.E.copy()))
 
     def run(self, n, callback=None, every=1):
         t0 = time.perf_counter()

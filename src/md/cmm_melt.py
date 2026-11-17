@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 
 import numpy as np
@@ -80,6 +81,20 @@ def order_profile(atoms, nbins=8, salt=None):
     return [float(q4[(z >= edges[b]) & (z < edges[b + 1])].mean()) for b in range(nbins)]
 
 
+def finish(out, sim, a, t0, partial=False):
+    out["wall_s"] = round(time.time() - t0, 1)
+    out["s_per_step"] = round(sim.wall / max(sim.steps, 1), 4)
+    out["partial"] = partial
+    keys = ("rho_mean", "rho_std", "epot_mean", "rdf_first_peak", "prod_ps") if a.mode == "liquid" else \
+        ("lattice", "epot_slope_eV_atom_ps", "verdict")
+    out["summary"] = {k: {kk: v.get(kk) for kk in keys} for k, v in out["temps"].items()}
+    if a.json:
+        tmp = a.json + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(out, f)
+        os.replace(tmp, a.json)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("model")
@@ -106,10 +121,16 @@ def main(argv=None):
     ap.add_argument("--table-cache", default=None)
     ap.add_argument("--json", default=None)
     ap.add_argument("--xyz", default=None)
+    ap.add_argument("--premelt-dt", type=float, default=None, help="time step of the pre-melt (default --dt)")
+    ap.add_argument("--block-ps", type=float, default=2.5, help="liquid: production block; --json rewritten after each")
+    ap.add_argument("--wall-h", type=float, default=None,
+                    help="stop production at the first block boundary past this many hours (results kept)")
     a = ap.parse_args(argv)
     from .ions import CmmPotential
     pot = CmmPotential.from_checkpoint(a.model, a.params, a.device, a.table_cache, ewald_tol=a.ewald_tol,
                                        cg_rtol=a.cg_rtol)
+    if a.json:
+        BatchMD.dump_path = os.path.join(os.path.dirname(os.path.abspath(a.json)), "failed_frames.xyz")
     t0 = time.time()
     rows, out = [], {"salt": a.salt, "mode": a.mode, "args": vars(a), "temps": {}}
     log = lambda *x: print(*x, flush=True)   # noqa: E731
@@ -119,7 +140,7 @@ def main(argv=None):
     if a.mode == "liquid":
         base = crystal(a.salt, a.rep)
         base.set_cell(base.cell * a.expand ** (1 / 3), scale_atoms=True)
-        liq = premelt(pot, base, a.t_melt, a.premelt_ps, a.dt, a.seed, log=log)
+        liq = premelt(pot, base, a.t_melt, a.premelt_ps, a.premelt_dt or a.dt, a.seed, log=log)
         sim = BatchMD(pot, [liq.copy() for _ in T], dt_fs=a.dt, T=T, gamma_ps=a.gamma, P_GPa=0.0, baro="iso",
                       tau_p_ps=a.tau_p, compressibility_GPa=a.beta, seed=a.seed + 1)
         sim.run(nstep(a.equil_ps))
@@ -140,18 +161,33 @@ def main(argv=None):
                 for k, v in g.items():
                     rdf_sum[r][k] += v
             nrdf += 1
-        sim.run(nstep(a.ps), callback=sample, every=a.every)
-        for r, t in enumerate(T):
-            s = series[r]
-            rho = np.array([x["rho"] for x in s])
-            ep = np.array([x["epot_eV_atom"] for x in s])
-            rdf = {k: (v / nrdf).tolist() if k != "r" else v for k, v in rdf_sum[r].items()}
-            peaks = {k: rdf["r"][int(np.argmax(v))] for k, v in rdf.items() if k != "r"}
-            out["temps"][str(t)] = {"rho_mean": float(rho.mean()), "rho_std": float(rho.std()),
-                                    "epot_mean": float(ep.mean()), "T_mean": float(np.mean([x["T"] for x in s])),
-                                    "P_mean": float(np.mean([x["P_GPa"] for x in s])), "rdf": rdf,
-                                    "rdf_first_peak": peaks, "series": s}
-            log(f"T {t:.0f}: rho {rho.mean():.4f} +- {rho.std():.4f} g/cm3, E_pot {ep.mean():.4f} eV/atom, peaks {peaks}")
+        def summarise():
+            for r, t in enumerate(T):
+                s = series[r]
+                if not s:
+                    continue
+                rho = np.array([x["rho"] for x in s])
+                ep = np.array([x["epot_eV_atom"] for x in s])
+                rdf = {k: (v / nrdf).tolist() if k != "r" else v for k, v in rdf_sum[r].items()}
+                peaks = {k: rdf["r"][int(np.argmax(v))] for k, v in rdf.items() if k != "r"}
+                out["temps"][str(t)] = {"rho_mean": float(rho.mean()), "rho_std": float(rho.std()),
+                                        "epot_mean": float(ep.mean()), "T_mean": float(np.mean([x["T"] for x in s])),
+                                        "P_mean": float(np.mean([x["P_GPa"] for x in s])), "rdf": rdf,
+                                        "rdf_first_peak": peaks, "prod_ps": s[-1]["t_ps"] - s[0]["t_ps"], "series": s}
+        nblk = max(1, int(round(a.ps / a.block_ps)))
+        for b in range(nblk):
+            sim.run(nstep(a.ps / nblk), callback=sample, every=a.every)
+            summarise()
+            finish(out, sim, a, t0, partial=b + 1 < nblk)
+            log(f"prod {(b + 1) * a.ps / nblk:.1f} ps: rho {[round(v['rho_mean'], 4) for v in out['temps'].values()]}  "
+                f"({sim.wall / sim.steps:.3f} s/step)")
+            if a.wall_h and time.time() - t0 > a.wall_h * 3600 and b + 1 < nblk:
+                log(f"wall limit {a.wall_h} h reached after {(b + 1) * a.ps / nblk:.1f} ps of production")
+                out["stopped_early"] = True
+                break
+        for t, v in out["temps"].items():
+            log(f"T {float(t):.0f}: rho {v['rho_mean']:.4f} +- {v['rho_std']:.4f} g/cm3, E_pot {v['epot_mean']:.4f} "
+                f"eV/atom, peaks {v['rdf_first_peak']}")
     else:
         # the crystal's lattice at each temperature (bulk NPT), then the two-phase cell on that lattice
         base = crystal(a.salt, a.rep)
@@ -177,7 +213,7 @@ def main(argv=None):
             stretch = 1 + 0.5 * (a.expand - 1)
             slab.set_cell(np.diag([slab.cell[0, 0], slab.cell[1, 1], Lz * stretch]), scale_atoms=False)
             slab.positions[top, 2] = Lz / 2 + (slab.positions[top, 2] - Lz / 2) * (1 + (a.expand - 1))
-            liq = premelt(pot, slab, a.t_melt, a.premelt_ps, a.dt, a.seed + 10 + r, fixed=np.where(~top)[0], log=log)
+            liq = premelt(pot, slab, a.t_melt, a.premelt_ps, a.premelt_dt or a.dt, a.seed + 10 + r, fixed=np.where(~top)[0], log=log)
             reps.append(liq)
         sim = BatchMD(pot, reps, dt_fs=a.dt, T=T, gamma_ps=a.gamma, P_GPa=0.0, baro="z", tau_p_ps=a.tau_p,
                       compressibility_GPa=a.beta, seed=a.seed + 2)
@@ -205,13 +241,7 @@ def main(argv=None):
                                     "series": s}
             log(f"T {t:.0f}: dE_pot/dt {slope * 1e3:+.4f} meV/atom/ps -> {out['temps'][str(t)]['verdict']}; "
                 f"q4 per slab {[round(x, 2) for x in prof[r][-1]]}")
-    out["wall_s"] = round(time.time() - t0, 1)
-    out["s_per_step"] = round(sim.wall / max(sim.steps, 1), 4)
-    out["summary"] = {k: ({kk: v[kk] for kk in ("rho_mean", "rho_std", "epot_mean", "rdf_first_peak")} if a.mode == "liquid"
-                          else {kk: v[kk] for kk in ("lattice", "epot_slope_eV_atom_ps", "verdict")})
-                      for k, v in out["temps"].items()}
-    if a.json:
-        json.dump(out, open(a.json, "w"))
+    finish(out, sim, a, t0)
     if a.xyz:
         from ase.io import write
         write(a.xyz, [sim.atoms(r) for r in range(sim.R)])

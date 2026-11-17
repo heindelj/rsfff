@@ -24,6 +24,39 @@ frontier exponents and the channel cutoff / taper.
   polarization); E_CT = E_joint - E_pol (the CT-induced repolarization is CT). One Cholesky factorization of A + H
   serves both, and the polarizability (the energy is quadratic in a uniform field: exact, three more right-hand sides).
 
+  Two optional terms stiffen the flows that move no net charge (ring currents: G q = 0, invisible to H_Q and to the
+  induction, so held by b_c alone, which vanishes as |e_c| grows):
+      + sum_c 1/2 b_min q_c^2                       ``config.ct_floor``: b_c -> b_c + b_min, every channel
+      + sum_i 1/2 tau_i T_i^2,  T = |G| q           ``config.ct_relay``: tau_i = kappa eta_i on the site's throughput
+  T_i = D_i + A_i with D_i the charge i donates (channels out of i) and A_i the charge it accepts (Q_i = D_i - A_i):
+  per site 1/2 (eta + tau)(D^2 + A^2) - (eta - tau) D A, a donor and an acceptor slot whose mutual cancellation is
+  incomplete. A relay site (D = A) is cooperative for kappa < 1 and neutral at kappa = 1. The drives are calibrated
+  with both terms, so a lone pair still gives exactly e_c + e_c'; the ring enhancement is bounded by 1 + h_c / b_min.
+
+``config.ct_model = "gap"`` replaces the flux's channels by two-state channels with an explicit gap (no pair
+calibration, no v0; the charges are one-sided, so the environment can only lower them):
+
+      W_c^2    = qD_i qA_j f(bD_i, bA_j; r) / r (taper)                the coupling
+      Delta_c  = I[s_i] - A[s_j] + phi_D(i) - phi_A(j) - J_ij + kappa[s_j] P_j
+      a_c      = sqrt(Delta^2 / 4 + W^2) - Delta / 2                   the lone channel's CT energy (E = -a)
+      q*_c     = 1/2 (1 - Delta / sqrt(Delta^2 + 4 W^2))               its charge, = dE / dDelta
+      k_c      = (Delta^2 + 4 W^2)^(3/2) / (2 W^2)                     its stiffness at q*, = 1 / (dq* / dDelta)
+
+  phi_D(i), phi_A(j): the other ions' frozen potential (partner included) averaged over the donor frontier shape of
+  i / the acceptor frontier shape of j (``bt["phi_front"]``: point charges + penetration); J_ij the slots' Coulomb;
+  kappa[s_j] P_j the Pauli shift of the acceptor level by its neighbours' closed shells (:meth:`acceptor_shift`):
+  by default kappa[s_j] sum_k (E0_jk / O_jk) S_A(j <- k), the acceptor probe's overlap with each neighbour times
+  that pair's frozen Pauli energy per unit density overlap, kappa a learned dimensionless constant per acceptor
+  species, bounded to within a factor 5 of 1 (:meth:`overlap_strength`) (``ct_gap_overlap = "probe"``: kappa times the probe's total overlap instead); A of an anion is
+  I - GAP_ANION_J J_self (twice the Coulomb cost of a second electron in the same shape: anion -> anion gaps stay
+  open between differently coordinated anions). The channels
+  enter the joint quadratic expanded about their two-state minima,
+      sum_c [-a_c + 1/2 k_c (q_c - q*_c)^2] + sum_{c < c'} (G^T H_Q G)_cc' q_c q_c' + Q^T C^T z,
+  so a lone channel is exact in energy, charge and susceptibility (of the two-state form broadened to the least
+  crossing width ``ct_gap_w0``, :meth:`gap_channels`) and the site hardness only couples different
+  channels (a channel's own charging cost is in I - A - J). k_c - h_c may be small or negative: such channels are
+  kept explicit in the cluster solve instead of being eliminated (:meth:`_flux_solve_mixed`).
+
 The environment factors u (``encoder.READOUTS``) are decoded from one latent per atom (:class:`Encoder`) whose inputs
 are the overlap-weighted two- and three-body channels (``channels.py``) and the overlap-gated diffuse-probe
 invariants. Everything that depends on the geometry alone (A, L, h, c, the encoder's inputs, the exchange pairs'
@@ -67,6 +100,15 @@ PAULI_SHELL_INIT = {"Na": ([8.856], 0.871), "Cl": ([9.78, 0.302], 0.893)}
 DISP_INIT = {"Na": (3.41, 3.872), "Cl": (554.7, 1.130)}
 DISP_FALLBACK = (10.0, 2.0)
 FLUX_V0_INIT = 0.025
+#: gap model: start values of the acceptors' overlap strength ("probe": Hartree per unit probe overlap, about what
+#: cancels the pair's penetration at contact; "pauli": dimensionless, on the pair Pauli energy per density overlap) and of the CT charges (W of a few 0.01 Hartree at contact), and the channel stiffness
+#: k_c - h_c below which a channel is solved explicitly instead of being eliminated onto the atomic charges
+GAP_KOV_INIT = {"probe": 10.0, "pauli": 1.5}
+GAP_KOV_REF = {"probe": 10.0, "pauli": 1.0}     # the overlap strength stays within a factor GAP_KOV_CAP of this
+GAP_KOV_CAP = 5.0
+GAP_Q0_INIT = 0.5
+GAP_B_EPS = 0.05
+GAP_ANION_J = 2.0           # an anion's acceptor level: A = I - GAP_ANION_J J_self
 
 
 def _saturate(x, m):
@@ -134,6 +176,15 @@ class CmmModel(nn.Module):
         self.register_buffer("ct_jself", js, persistent=False)
         eta0 = (tab.I_donor - torch.nan_to_num(tab.A_acceptor, nan=0.0) - js).clamp(min=0.01)
         self.ct_eta_raw = nn.Parameter(torch.log(torch.expm1(eta0)).to(**f64))  # softplus: on-site hardness
+        self.gap = cfg.ct_model == "gap"
+        if self.gap:
+            with torch.no_grad():
+                self.ct_ln_q0.fill_(math.log(GAP_Q0_INIT))
+            c, u0 = math.log(GAP_KOV_CAP), math.log(GAP_KOV_INIT[cfg.ct_gap_overlap] / GAP_KOV_REF[cfg.ct_gap_overlap])
+            self.ct_ln_kov = nn.Parameter(torch.full((S,), c * math.atanh(u0 / c), **f64))   # per acceptor species, raw
+            A = torch.where(torch.isnan(tab.A_acceptor), tab.I_donor - GAP_ANION_J * js, tab.A_acceptor)
+            self.register_buffer("ct_gap_I", tab.I_donor.to(torch.float64).clone(), persistent=False)
+            self.register_buffer("ct_gap_A", A.to(torch.float64), persistent=False)
         # -- encoder
         sel = {g for t in cfg.pairs for g in PAIR_GROUPS[t]}
         keep = [(nm in sel) if nm.startswith("S^") else (nm[2:4] in sel) for nm in CHANNEL_NAMES]
@@ -207,9 +258,14 @@ class CmmModel(nn.Module):
         return self.ct_b_donor, acc
 
     def ct_charges(self, sp):
+        """(N, 2) qD, qA = q0[s] e^{f}, f = c tanh(u / c); with ``config.ct_q_onesided`` f is clipped at 0, so the
+        isolated-species charges q0 are a ceiling and the pair kernels of any geometry are bounded by the bare ones."""
         u = torch.stack([self._u["qD"], self._u["qA"]], 1)
         c = self.config.ct_q_cap
-        return torch.exp(self.ct_ln_q0[sp] + c * torch.tanh(u / c))
+        f = c * torch.tanh(u / c)
+        if self.config.ct_q_onesided or self.gap:
+            f = torch.where(f > 0, torch.zeros_like(f), f)      # not clamp: its gradient is 0 at u = 0, the start
+        return torch.exp(self.ct_ln_q0[sp] + f)
 
     def disp_range(self):
         S = self.outer_shell.shape[0]
@@ -283,6 +339,11 @@ class CmmModel(nn.Module):
         """(N,) the slots' self-energy + hardness."""
         return self.ct_jself[sp] + nn.functional.softplus(self.ct_eta_raw[sp])
 
+    def slot_tau(self, sp):
+        """(N,) the throughput hardness tau_i = kappa eta_i (``config.ct_relay``), or None when it is off."""
+        k = self.config.ct_relay
+        return k * self.slot_eta(sp) if k > 0 else None
+
     def channel_curvature(self, bt, sp):
         """(C,) h_c = (G^T H_Q G)_cc of each channel's own pair: eta_i + eta_j - 2 J_ij (the slots' Coulomb at the
         channel's distance, unscreened -- a local quantity, the same in a cluster and in a cell)."""
@@ -290,9 +351,18 @@ class CmmModel(nn.Module):
         eta = self.slot_eta(sp)
         return eta[i] + eta[j] - 2 * bt["ch_J"]
 
+    def channel_throughput(self, bt, sp):
+        """(C,) tau_i + tau_j of each channel's pair (zeros when ``config.ct_relay`` is 0)."""
+        i, j = bt["ch_index"]
+        tau = self.slot_tau(sp)
+        return bt["ch_J"].new_zeros(i.shape[0]) if tau is None else tau[i] + tau[j]
+
     def channel_drives(self, bt, sp, q, h):
-        """Per channel, given h_c = (G^T H_Q G)_cc: the kernel energy e_c <= 0, the drive V_c and s_c = 1 / sqrt(b_c).
-        The two directions of a pair share the factor t_p that makes the pair's own minimum exactly e_c + e_c'."""
+        """Per channel, given h_c = (G^T H_Q G)_cc: the kernel energy e_c <= 0, the drive V_c and s_c = 1 / sqrt(b_c),
+        b_c = V0_c^2 / (2|e_c|) + b_min. A lone channel's stiffness is b_c + h_c + tau_i + tau_j and V_c is set so that
+        its minimum is e_c; the two directions of a pair couple by -(h_c - tau_i - tau_j) (counter-flow cancels the
+        net charge, not the throughput) and share the factor t_p that makes the pair's own minimum exactly
+        e_c + e_c'."""
         i, j = bt["ch_index"]
         bD, bA = self.ct_exponents()
         rb = bt["ch_r"] / K.BOHR_ANG
@@ -301,7 +371,10 @@ class CmmModel(nn.Module):
         ae = (-e_c).clamp(min=0.0)
         v0 = torch.exp(self.ct_ln_v0)
         V0 = v0[sp[i]] + v0[sp[j]]
-        Vh2 = V0 * V0 + 2 * ae * h
+        bf = self.config.ct_floor
+        tij = self.channel_throughput(bt, sp)
+        hd, ho = h + tij + bf, h - tij                  # the pair's 2x2 curvature beyond b: diagonal, -(off-diagonal)
+        Vh2 = V0 * V0 + 2 * ae * hd
         cc = 2 * ae / Vh2
         rev = bt["ch_rev"]
         has = rev >= 0
@@ -309,9 +382,10 @@ class CmmModel(nn.Module):
         ae2 = torch.where(has, ae[rv], torch.zeros_like(ae))
         cc2 = torch.where(has, cc[rv], torch.zeros_like(cc))
         S_ = ae + ae2
-        t2 = S_ * (1 - h * h * cc * cc2) / (S_ + 2 * h * torch.sqrt(ae * cc * ae2 * cc2 + 1e-300) + 1e-300)
+        t2 = S_ * (1 - ho * ho * cc * cc2) / (S_ + 2 * ho * torch.sqrt(ae * cc * ae2 * cc2 + 1e-300) + 1e-300)
         t2 = torch.where(has, t2, torch.ones_like(t2))
-        return e_c, torch.sqrt(t2 * Vh2), torch.sqrt(2 * ae + 1e-30) / V0
+        s = torch.sqrt(2 * ae + 1e-30) / (V0 if bf == 0 else torch.sqrt(V0 * V0 + 2 * ae * bf))
+        return e_c, torch.sqrt(t2 * Vh2), s
 
     def solve(self, bt, sp, Lz, rhs_extra):
         """The minimum of 1/2 z (A + H) z + (Lz + g) z over z = (dipole, quadrupole, breathing): one Cholesky
@@ -343,6 +417,8 @@ class CmmModel(nn.Module):
     def charge_flux(self, bt, sp, Ca, Hq, z_pol, W, phi_ext, dpsi=None):
         """The joint minimum with the channels eliminated: K = G diag(s^2) G^T, u = G s^2 V, (1 + K S) Q = u - K psi0
         with S = H_Q - C^T W and psi0 = phi_ext + C^T z_pol; q_c = s_c^2 (V_c - (psi_i - psi_j)), z* = z_pol - W Q.
+        With the throughput hardness the elimination is onto each site's donated and accepted charge instead
+        (:meth:`_flux_solve_relay`, 2N unknowns per frame).
         Returns E_CT (B,), per channel 1/2 b~_c q_c (C,), q (C,), z* (B, nmax D), Q (B, nmax), e_c (C,) and, for
         ``dpsi`` (B, nmax, k) derivatives of psi0, the derivatives of Q (B, nmax, k) (else None)."""
         B, N = Hq.shape[0], Hq.shape[1]
@@ -352,24 +428,194 @@ class CmmModel(nn.Module):
         li, lj = loc[i], loc[j]
         e_c, V, s = self.channel_drives(bt, sp, self._q, self.channel_curvature(bt, sp))
         w = s * s
-        Kl = Hq.new_zeros(B, N, N)
-        Kl = Kl.index_put((cf, li, li), w, accumulate=True).index_put((cf, lj, lj), w, accumulate=True)
-        Kl = Kl.index_put((cf, li, lj), -w, accumulate=True).index_put((cf, lj, li), -w, accumulate=True)
-        wV = w * V
-        u = Hq.new_zeros(B, N).index_put((cf, li), wV, accumulate=True).index_put((cf, lj), -wV, accumulate=True)
         psi0 = Hq.new_zeros(B, N).index_put((fr, loc), phi_ext) + torch.einsum("bnk,bn->bk", Ca, z_pol)
         S = Hq - Ca.transpose(1, 2) @ W
-        Mq = torch.eye(N, dtype=Hq.dtype, device=Hq.device) + Kl @ S
-        rhs = (u - (Kl @ psi0[..., None])[..., 0])[..., None]
-        if dpsi is not None:
-            rhs = torch.cat([rhs, -(Kl @ dpsi)], 2)
-        Ys = torch.linalg.solve(Mq, rhs)
-        Q = Ys[..., 0]
-        psi = psi0 + (S @ Q[..., None])[..., 0]
-        qc = w * (V - (psi[cf, li] - psi[cf, lj]))
+        tau = self.slot_tau(sp)
+        if tau is not None:
+            Q, dQ, qc = self._flux_solve_relay(B, N, cf, li, lj, w, V, psi0, S, Hq.new_zeros(B, N).index_put((fr, loc), tau), dpsi)
+        else:
+            Kl = Hq.new_zeros(B, N, N)
+            Kl = Kl.index_put((cf, li, li), w, accumulate=True).index_put((cf, lj, lj), w, accumulate=True)
+            Kl = Kl.index_put((cf, li, lj), -w, accumulate=True).index_put((cf, lj, li), -w, accumulate=True)
+            wV = w * V
+            u = Hq.new_zeros(B, N).index_put((cf, li), wV, accumulate=True).index_put((cf, lj), -wV, accumulate=True)
+            Mq = torch.eye(N, dtype=Hq.dtype, device=Hq.device) + Kl @ S
+            rhs = (u - (Kl @ psi0[..., None])[..., 0])[..., None]
+            if dpsi is not None:
+                rhs = torch.cat([rhs, -(Kl @ dpsi)], 2)
+            Ys = torch.linalg.solve(Mq, rhs)
+            Q = Ys[..., 0]
+            dQ = Ys[..., 1:] if dpsi is not None else None
+            psi = psi0 + (S @ Q[..., None])[..., 0]
+            qc = w * (V - (psi[cf, li] - psi[cf, lj]))
         e_ch = 0.5 * (-V + psi0[cf, li] - psi0[cf, lj]) * qc
         z = z_pol - (W @ Q[..., None])[..., 0]
-        return Hq.new_zeros(B).index_add(0, cf, e_ch), e_ch, qc, z, Q, e_c, (Ys[..., 1:] if dpsi is not None else None)
+        return Hq.new_zeros(B).index_add(0, cf, e_ch), e_ch, qc, z, Q, e_c, dQ
+
+    @staticmethod
+    def _flux_solve_relay(B, N, cf, li, lj, w, V, psi0, S, tau, dpsi=None):
+        """The flux minimum with the throughput hardness, the channels eliminated onto y = (D, A): D_i the charge i
+        donates (its channels out), A_i the charge it accepts (its channels in), Q = D - A, T = D + A.
+
+            q_c = w_c (V_c - mu^D_i - mu^A_j),    mu^D = S Q + psi0 + tau T,    mu^A = -(S Q + psi0) + tau T
+            (1 + K2 S2) y = u2 - K2 [psi0, -psi0],    K2 = [[diag(sum_out w), w_ij], [w_ij^T, diag(sum_in w)]],
+            S2 = [[S + tau, -S + tau], [-S + tau, S + tau]],    u2 = (sum_out w V, sum_in w V).
+
+        Returns Q (B, N), dQ (B, N, k) for ``dpsi`` (else None) and the channel charges q (C,)."""
+        K2 = S.new_zeros(B, 2 * N, 2 * N)
+        K2 = K2.index_put((cf, li, li), w, accumulate=True).index_put((cf, N + lj, N + lj), w, accumulate=True)
+        K2 = K2.index_put((cf, li, N + lj), w, accumulate=True).index_put((cf, N + lj, li), w, accumulate=True)
+        wV = w * V
+        u2 = S.new_zeros(B, 2 * N).index_put((cf, li), wV, accumulate=True).index_put((cf, N + lj), wV, accumulate=True)
+        Td = torch.diag_embed(tau)
+        S2 = torch.cat([torch.cat([S + Td, Td - S], 2), torch.cat([Td - S, S + Td], 2)], 1)
+        psi2 = torch.cat([psi0, -psi0], 1)
+        M2 = torch.eye(2 * N, dtype=S.dtype, device=S.device) + K2 @ S2
+        rhs = (u2 - (K2 @ psi2[..., None])[..., 0])[..., None]
+        if dpsi is not None:
+            rhs = torch.cat([rhs, -(K2 @ torch.cat([dpsi, -dpsi], 1))], 2)
+        Ys = torch.linalg.solve(M2, rhs)
+        y = Ys[..., 0]
+        mu = psi2 + (S2 @ y[..., None])[..., 0]
+        qc = w * (V - mu[cf, li] - mu[cf, N + lj])
+        dQ = (Ys[:, :N, 1:] - Ys[:, N:, 1:]) if dpsi is not None else None
+        return y[:, :N] - y[:, N:], dQ, qc
+
+    # -- the gap model's channels -----------------------------------------------------------------------------
+    def acceptor_shift(self, bt, sp):
+        """(N,) the Pauli shift of each atom's acceptor level by its neighbours' closed shells.
+        ``ct_gap_overlap = "pauli"`` (default): c[s_j] sum_k (E0_jk / O_jk) S_A(j <- k) over the exchange pairs --
+        S_A(j <- k) the overlap of j's normalized acceptor probe with k's electron density, O_jk the overlap of the
+        two ions' electron densities and E0_jk the pair's frozen Pauli energy (with its environment factors), so
+        E0 / O is that pair's Pauli energy per unit overlap (the xpol anchoring, with its overlap switch) and the
+        shift is the Pauli energy the pair would have with one electron in j's acceptor shape in place of j's
+        density, times c. :meth:`frozen_terms` comes first.
+        ``"probe"``: kappa[s_j] S_A(j), the probe's overlap with all neighbours (Hartree per unit overlap)."""
+        k = self.overlap_strength()[sp]
+        if self.config.ct_gap_overlap == "probe":
+            return k * bt["S0_atom"][:, 1]
+        xs = bt["x_sel"]
+        pi, pj = bt["pairs"][:, xs]
+        ratio = self._pauli_pairs[1][xs] * bt["x_swO"]
+        Px = xs.shape[0]
+        Sa = bt["x_Sa"]
+        return k * ratio.new_zeros(sp.shape[0]).index_add(0, pi, ratio * Sa[:Px]).index_add(0, pj, ratio * Sa[Px:])
+
+    def overlap_strength(self):
+        """(S,) the acceptor shift's strength per acceptor species: GAP_KOV_REF exp(c tanh(ct_ln_kov / c)),
+        c = ln GAP_KOV_CAP, so within a factor GAP_KOV_CAP of the reference whatever the fit does (free, it trades
+        the shift against the CT charges until the channel is a rigid W^2 / Delta term)."""
+        c = math.log(GAP_KOV_CAP)
+        return GAP_KOV_REF[self.config.ct_gap_overlap] * torch.exp(c * torch.tanh(self.ct_ln_kov / c))
+
+    def gap_channels(self, bt, sp):
+        """Per channel c = i -> j of the gap model: the coupling W2 = W^2, the gap Delta, the lone channel's a = -E
+        and charge qs = q* = -da/dDelta, and den = rt^3 - 2 W^2 h = 2 W^2 (k - h) with h the channel's own share of
+        G^T H_Q G (so w = 2 W^2 / den is 1 / (k - h), finite as W -> 0). The crossing has the width
+        W_b^2 = W^2 + W0^2 (``ct_gap_w0``) and the amplitude lam = W^2 / W_b^2:
+
+            a = lam [sqrt(Delta^2 / 4 + W_b^2) - Delta / 2],   rt = sqrt(Delta^2 + 4 W_b^2),   k = rt^3 / (2 W^2),
+
+        the two-state channel at W0 = 0 and W^2 / Delta at a large gap for any W0; a channel transfers at most lam
+        and responds with at most W^2 / (4 W_b^3), so one whose gap closes where W is small stays inert."""
+        i, j = bt["ch_index"]
+        q = self._q
+        bD, bA = self.ct_exponents()
+        rb = bt["ch_r"] / K.BOHR_ANG
+        f = slater_two_center_damp_unequal(bD[sp[i]], bA[sp[j]], rb, 0)[0]
+        W2 = (q[i, 0] * q[j, 1] * f / rb * torch.exp(bt["ch_ltaper"])).clamp(min=0.0)
+        phi = bt["phi_front"]
+        Delta = (self.ct_gap_I[sp[i]] - self.ct_gap_A[sp[j]] + phi[i, 0] - phi[j, 1] - bt["ch_J"]
+                 + self.acceptor_shift(bt, sp)[j])
+        w02 = self.config.ct_gap_w0 ** 2
+        Wb2 = W2 + w02
+        rt = torch.sqrt(Delta * Delta + 4 * Wb2 + 1e-60)
+        pos = Delta > 0
+        dp = torch.where(pos, rt + Delta, torch.ones_like(rt))            # the unselected branch stays finite
+        lam = W2 / Wb2 if w02 > 0 else torch.ones_like(W2)
+        a = torch.where(pos, 2 * W2 / dp, lam * 0.5 * (rt - Delta))
+        qs = torch.where(pos, 2 * W2 / (rt * dp), lam * 0.5 * (1 - Delta / rt))
+        h = self.channel_curvature(bt, sp)
+        return {"W2": W2, "Delta": Delta, "a": a, "qs": qs, "h": h, "den": rt ** 3 - 2 * W2 * h}
+
+    def charge_flux_gap(self, bt, sp, Ca, Hq, z_pol, W, phi_ext, dpsi=None):
+        """The joint minimum of the gap model, solved for the channels' departures d = q - q* from their two-state
+        charges. With Q* = G q*, S = H_Q - C^T W, psi0 = phi_ext + C^T z_pol and psi* = psi0 + S Q*, the energy is
+
+            E* + sum_c [1/2 (k_c - h_c) d_c^2 - V_c d_c] + 1/2 dQ^T S dQ,     V_c = h_c q*_c - (psi*_i - psi*_j),
+            E* = sum_c (-a_c - 1/2 h_c q*_c^2) + 1/2 Q*^T S Q* + Q*^T psi0,
+
+        which is the flux's problem with compliance k - h, drive V and no psi0 (:meth:`_flux_solve_mixed`).
+        Returns as :meth:`charge_flux`; e_kernel is the lone channels' -a_c."""
+        B, N = Hq.shape[0], Hq.shape[1]
+        fr, loc = self._local(bt)
+        i, j = bt["ch_index"]
+        cf = bt["ch_frame"]
+        li, lj = loc[i], loc[j]
+        g = self.gap_channels(bt, sp)
+        self._gap = g
+        a, qs, h, W2, den = g["a"], g["qs"], g["h"], g["W2"], g["den"]
+        psi0 = Hq.new_zeros(B, N).index_put((fr, loc), phi_ext) + torch.einsum("bnk,bn->bk", Ca, z_pol)
+        S = Hq - Ca.transpose(1, 2) @ W
+        Qs = Hq.new_zeros(B, N).index_put((cf, li), qs, accumulate=True).index_put((cf, lj), -qs, accumulate=True)
+        SQs = (S @ Qs[..., None])[..., 0]
+        psis = psi0 + SQs
+        V = h * qs - (psis[cf, li] - psis[cf, lj])
+        good = den > 2 * W2 * GAP_B_EPS                                   # k - h > GAP_B_EPS (W = 0: rigid, w = 0)
+        w = torch.where(good, 2 * W2 / torch.where(good, den, torch.ones_like(den)), torch.zeros_like(den))
+        b_bad = den / (2 * W2).clamp(min=1e-300)
+        Vc = V[:, None] if dpsi is None else torch.cat([V[:, None], -(dpsi[cf, li] - dpsi[cf, lj])], 1)
+        dQ, d = self._flux_solve_mixed(B, N, cf, li, lj, w, ~good, b_bad, Vc, S)
+        dlt = d[:, 0]
+        e_ch = (-a - 0.5 * h * qs * qs + qs * (0.5 * (SQs[cf, li] - SQs[cf, lj]) + psi0[cf, li] - psi0[cf, lj])
+                - 0.5 * V * dlt)
+        Q = Qs + dQ[..., 0]
+        z = z_pol - (W @ Q[..., None])[..., 0]
+        return (Hq.new_zeros(B).index_add(0, cf, e_ch), e_ch, qs + dlt, z, Q, -a,
+                (dQ[..., 1:] if dpsi is not None else None))
+
+    @staticmethod
+    def _flux_solve_mixed(B, N, cf, li, lj, w, bad, b_bad, V, S):
+        """The minimum of sum_c [1/2 b_c q_c^2 - V_c q_c] + 1/2 Q^T S Q (Q = G q) for right-hand sides V (C, m).
+        The channels with ``bad`` False are eliminated onto the atomic charges with w = 1 / b (K = G w G^T); the
+        ``bad`` ones (b = ``b_bad`` small, zero or negative, where 1 / b is not usable) stay explicit:
+
+            (1 + K S) Q - G_b q_b = G w V,        G_b^T S Q + b_b q_b = V_b.
+
+        Exact for any split; N + (the largest number of explicit channels in a frame) unknowns per frame.
+        Returns Q (B, N, m) and q (C, m)."""
+        m = V.shape[1]
+        Kl = S.new_zeros(B, N, N)
+        Kl = Kl.index_put((cf, li, li), w, accumulate=True).index_put((cf, lj, lj), w, accumulate=True)
+        Kl = Kl.index_put((cf, li, lj), -w, accumulate=True).index_put((cf, lj, li), -w, accumulate=True)
+        wV = w[:, None] * V
+        u = S.new_zeros(B, N, m).index_put((cf, li), wV, accumulate=True).index_put((cf, lj), -wV, accumulate=True)
+        M = torch.eye(N, dtype=S.dtype, device=S.device) + Kl @ S
+        nb = int(bad.sum())
+        if nb == 0:
+            Q = torch.linalg.solve(M, u)
+            SQ = S @ Q
+            return Q, wV - w[:, None] * (SQ[cf, li] - SQ[cf, lj])
+        ib = bad.nonzero().squeeze(1)
+        fb, lib, ljb = cf[ib], li[ib], lj[ib]
+        order = torch.argsort(fb, stable=True)
+        counts = torch.bincount(fb, minlength=B)
+        rank = torch.empty_like(ib)
+        rank[order] = torch.arange(nb, device=ib.device) - (torch.cumsum(counts, 0) - counts)[fb[order]]
+        nm = int(counts.max())
+        T = S.new_zeros(B, N + nm, N + nm)
+        T[:, :N, :N] = M
+        T = T.index_put((fb, lib, N + rank), -torch.ones_like(b_bad[ib]), accumulate=True)
+        T = T.index_put((fb, ljb, N + rank), torch.ones_like(b_bad[ib]), accumulate=True)
+        rows = S.new_zeros(B, nm, N).index_put((fb, rank), S[fb, lib] - S[fb, ljb])
+        diag = S.new_ones(B, nm).index_put((fb, rank), b_bad[ib])
+        T = torch.cat([T[:, :N], torch.cat([rows, torch.diag_embed(diag)], 2)], 1)
+        rhs = torch.cat([u, S.new_zeros(B, nm, m).index_put((fb, rank), V[ib])], 1)
+        Y = torch.linalg.solve(T, rhs)
+        Q = Y[:, :N]
+        SQ = S @ Q
+        q = wV - w[:, None] * (SQ[cf, li] - SQ[cf, lj])
+        return Q, q.index_put((ib,), Y[:, N:][fb, rank])
 
     # -- the model ---------------------------------------------------------------------------------------------
     def forward(self, bt: dict, field=None, alpha: bool = False) -> dict:
@@ -420,7 +666,8 @@ class CmmModel(nn.Module):
             out["alpha_pol"] = out["alpha"] = a_pol
             dpsi = -Xb + Ca.transpose(1, 2) @ Zf
         if nC:
-            e_ct, e_ch, qc, zj, Qd, e_c, dQ = self.charge_flux(bt, sp, Ca, Hq, z_pol.reshape(B, -1), W, phi_ext, dpsi)
+            solve_ct = self.charge_flux_gap if self.gap else self.charge_flux
+            e_ct, e_ch, qc, zj, Qd, e_c, dQ = solve_ct(bt, sp, Ca, Hq, z_pol.reshape(B, -1), W, phi_ext, dpsi)
             e_type = e_ch.new_zeros(B * self.nT).index_add(0, bt["ch_frame"] * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT)
             x = zj.reshape(B, nmax, -1)[..., :8]
             Q = Qd[fr, loc]
@@ -436,6 +683,8 @@ class CmmModel(nn.Module):
                     "e_ct": e_ct, "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct, "e_ch": e_ch, "e_type": e_type,
                     "q_ch": qc, "e_kernel": e_c, "x": x, "x_pol": z_pol[..., :8], "z_pol": z_pol, "dq": Q,
                     "q_ct": self._q, "frozen_params": frz})
+        if self.gap and nC:
+            out.update(ct_gap=self._gap["Delta"], q_star=self._gap["qs"])
         return out
 
     def _forward_pbc(self, bt: dict) -> dict:
@@ -458,9 +707,13 @@ class CmmModel(nn.Module):
         Lz = bt["Lz"][mask]
         ci, cj = bt["ch_index"]
         cf = bt["ch_frame"]
+        if self.gap:
+            return self._forward_pbc_gap(bt, sp, on, Lz, g, Gi, Gj, i, j, e_pauli, e_disp, frz)
         h = self.channel_curvature(bt, sp)
         e_c, V, s = self.channel_drives(bt, sp, self._q, h)
-        op = CmmOperator(on, self.slot_eta(sp), pb["A_pairs"], pb["blocks9"], pb["frames"], ci, cj, 1.0 / (s * s))
+        op = CmmOperator(on, self.slot_eta(sp), pb["A_pairs"], pb["blocks9"], pb["frames"], ci, cj, 1.0 / (s * s),
+                         tau=self.slot_tau(sp))
+        h = h + self.channel_throughput(bt, sp)          # a lone channel's curvature beyond b (b holds the floor)
         guess, info = self._guess(bt), {}
         z_pol, z, q = solve_cmm_periodic(op, -(Lz + g), V, h, guess, info=info, rtol=float(bt.get("cg_rtol") or 1e-10))
         zero = Lz.new_zeros(n)
@@ -487,6 +740,52 @@ class CmmModel(nn.Module):
                 "guess": {"z_pol": z_pol.detach(), "z": z.detach(), "q": q.detach(), "ch_key": bt["ch_key"],
                           "qb": (q * (op.b + h)).detach(),
                           "n": n}}
+
+    def _forward_pbc_gap(self, bt, sp, on, Lz, g, Gi, Gj, i, j, e_pauli, e_disp, frz):
+        """The gap model's periodic solve: CG on (z, d), d = q - q* (:meth:`charge_flux_gap`'s problem, the two-state
+        charges' potential C Q* added to the drive of z); the energies at the solution with the live operator."""
+        B, mask, fr, pb = bt["B"], bt["mask"], bt["frame"], bt["pbc"]
+        n = sp.shape[0]
+        ci, cj = bt["ch_index"]
+        cf = bt["ch_frame"]
+        gc = self.gap_channels(bt, sp)
+        self._gap = gc
+        a, qs, h, W2 = gc["a"], gc["qs"], gc["h"], gc["W2"]
+        b = (gc["den"] / (2 * W2).clamp(min=1e-30)).clamp(max=1e12)        # k - h (a channel without coupling is rigid)
+        op = CmmOperator(on, self.slot_eta(sp), pb["A_pairs"], pb["blocks9"], pb["frames"], ci, cj, b)
+        zero_Q, zero_z = Lz.new_zeros(n), torch.zeros_like(Lz)
+        with torch.no_grad():
+            Qs_d = op.charges(qs)
+            psi_s, oz_s = op.detach().apply(Qs_d, zero_z)
+            rhs_q = h * qs - (psi_s[ci] - psi_s[cj])
+        guess, info = self._guess(bt), {}
+        z_pol, z, d = solve_cmm_periodic(op, -(Lz + g), rhs_q, h, guess, info=info, rtol=float(bt.get("cg_rtol") or 1e-10),
+                                         rhs_z_joint=-(Lz + g) - oz_s)
+        per = lambda v, idx: Lz.new_zeros(B).index_add(0, idx, v)                         # noqa: E731
+        _, oz0 = op.apply(zero_Q, z_pol)
+        zHz = (torch.einsum("pa,pab,pb->p", z_pol[i], Gi, z_pol[i]) + torch.einsum("pa,pab,pb->p", z_pol[j], Gj, z_pol[j]))
+        e_quad = per(0.5 * (z_pol * oz0).sum(1) + ((Lz + g) * z_pol).sum(1), fr)
+        e_x = per((g * z_pol).sum(1), fr) + 0.5 * per(zHz, fr[i])
+        e_pol = e_quad + bt["e_hyp"]
+        q = qs + d
+        Q = op.charges(q)
+        pQ, oz = op.apply(Q, z)
+        e_joint = (per(0.5 * (z * oz).sum(1) + ((Lz + g) * z).sum(1) + 0.5 * Q * pQ, fr)
+                   + per(-a - 0.5 * h * qs * qs - h * qs * d + 0.5 * b * d * d, cf))
+        e_ct = e_joint - e_quad
+        with torch.no_grad():
+            e_ch = -a
+            e_type = e_ch.new_zeros(B * self.nT).index_add(0, cf * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT)
+        nmax = bt["nmax"]
+        pad = lambda v: v.new_zeros(B, nmax, v.shape[1]).masked_scatter(mask[..., None].expand(B, nmax, v.shape[1]), v)  # noqa: E731
+        e_elst = bt["e_elst"]
+        return {"e_elst": e_elst, "e_pauli": e_pauli, "e_disp": e_disp, "e_pol": e_pol, "e_xpol": e_x, "e_ct": e_ct,
+                "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct, "e_ch": e_ch, "e_type": e_type, "q_ch": q,
+                "e_kernel": -a, "x": pad(z[:, :8]), "x_pol": pad(z_pol[:, :8]), "z_pol": pad(z_pol),
+                "dq": Q, "q_ct": self._q, "frozen_params": frz, "cg_iters": info.get("cg_iters", 0),
+                "ct_gap": gc["Delta"], "q_star": qs,
+                "guess": {"z_pol": z_pol.detach(), "z": z.detach(), "q": d.detach(), "ch_key": bt["ch_key"],
+                          "qb": (d * (b + h)).detach(), "n": n}}
 
     @staticmethod
     def _guess(bt):
@@ -533,5 +832,6 @@ class CmmModel(nn.Module):
         rows = [f"{x:>3}: W1 {w1[k, 0]:.3f}/{w1[k, 1]:.3f}/{w1[k, 2]:.3f}  W2 {self.ln_w2[k].exp():.3f}  "
                 f"qD0 {self.ct_ln_q0[k, 0].exp():.3f} qA0 {self.ct_ln_q0[k, 1].exp():.3f}  "
                 f"C6 {self.disp_ln_c6[k].exp():.1f}  v0 {self.ct_ln_v0[k].exp():.4f}  "
-                f"eta {nn.functional.softplus(self.ct_eta_raw[k]):.3f}" for k, x in enumerate(sym)]
+                f"eta {nn.functional.softplus(self.ct_eta_raw[k]):.3f}"
+                + (f"  kov {self.overlap_strength()[k]:.2f}" if self.gap else "") for k, x in enumerate(sym)]
         return "\n".join(rows)

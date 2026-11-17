@@ -347,20 +347,22 @@ class CmmOperator:
         pairs, blocks9       the real-space pair blocks (P, 9, 9) of [Q, z_1..8] between every pair and image within the
                              cutoff (rows the source j, columns the receiver i): screened damped tensors
         frames               the Ewald reciprocal part of the same sources (points)
-        b (C,)               the channels' compliance 1 / s_c^2
+        b (C,)               the channels' compliance 1 / s_c^2 (the stiffness floor included)
+        tau (N,) or None     the throughput hardness: + tau_i T_i, T = |G| q, on both ends of every channel
 
     ``apply(Q, z)`` returns (H_Q Q + C^T z, A z + C Q): the slots' potential and the drive on z; ``joint(z, q)`` the
-    product with the joint Hessian [[A + H, C G], [G^T C^T, b + G^T H_Q G]]."""
+    product with the joint Hessian [[A + H, C G], [G^T C^T, b + G^T H_Q G + |G|^T tau |G|]]."""
 
-    def __init__(self, onsite, eta, pairs, blocks9, frames, ch_i, ch_j, b):
+    def __init__(self, onsite, eta, pairs, blocks9, frames, ch_i, ch_j, b, tau=None):
         self.onsite, self.eta, self.pairs, self.B9, self.frames = onsite, eta, pairs, blocks9, frames
-        self.ci, self.cj, self.b = ch_i, ch_j, b
+        self.ci, self.cj, self.b, self.tau = ch_i, ch_j, b, tau
         self.P9 = poly_map9(onsite.dtype, onsite.device)
         self.D = onsite.shape[1]
 
     def detach(self):
         return CmmOperator(self.onsite.detach(), self.eta.detach(), self.pairs, self.B9.detach(),
-                           [f.detach() for f in self.frames], self.ci, self.cj, self.b.detach())
+                           [f.detach() for f in self.frames], self.ci, self.cj, self.b.detach(),
+                           None if self.tau is None else self.tau.detach())
 
     def apply(self, Q, z):
         y = torch.cat([Q[:, None], z[:, :8]], 1)                                        # (N, 9)
@@ -377,16 +379,28 @@ class CmmOperator:
         n = self.onsite.shape[0]
         return q.new_zeros(n).index_add(0, self.ci, q).index_add(0, self.cj, -q)
 
+    def throughput(self, q):
+        """T = |G| q (N,): the charge each site donates plus the charge it accepts."""
+        n = self.onsite.shape[0]
+        return q.new_zeros(n).index_add(0, self.ci, q).index_add(0, self.cj, q)
+
     def joint(self, z, q):
         oQ, oz = self.apply(self.charges(q), z)
-        return oz, self.b * q + oQ[self.ci] - oQ[self.cj]
+        oq = self.b * q + oQ[self.ci] - oQ[self.cj]
+        if self.tau is not None:
+            tT = self.tau * self.throughput(q)
+            oq = oq + tT[self.ci] + tT[self.cj]
+        return oz, oq
 
 
-def solve_cmm_periodic(op: CmmOperator, rhs_z, rhs_q, h=None, guess=None, rtol=1e-10, maxiter=1000, info=None):
+def solve_cmm_periodic(op: CmmOperator, rhs_z, rhs_q, h=None, guess=None, rtol=1e-10, maxiter=1000, info=None,
+                       rhs_z_joint=None):
     """The CT-free minimum z_pol of 1/2 z (A + H) z - rhs_z . z and the joint minimum (z, q) of the full quadratic
     with linear term -(rhs_z, rhs_q), by CG preconditioned with the on-site blocks and 1 / (b_c + h_c) (``h`` the
     channels' local charge curvature). No graph: the energies are evaluated at the solutions with the live operator
-    (stationary, so their first derivatives are exact). ``guess``: {"z_pol", "z", "q"} starting points."""
+    (stationary, so their first derivatives are exact). ``guess``: {"z_pol", "z", "q"} starting points.
+    ``rhs_z_joint``: the joint problem's own linear term on z when it differs from the CT-free one (the gap model's
+    channels are expanded about their two-state charges, whose potential then drives z)."""
     guess = guess or {}
     with torch.no_grad():
         d = op.detach()
@@ -419,7 +433,8 @@ def solve_cmm_periodic(op: CmmOperator, rhs_z, rhs_q, h=None, guess=None, rtol=1
                 qb = torch.where(torch.isnan(qb), rhs_q.detach(), qb)
                 gq = qb / (d.b + (h.detach() if h is not None else 0.0))
             x0 = torch.cat([gz.reshape(-1), gq if gq is not None else rhs_q.new_zeros(C)])
-            y, it2 = _cg(mv_j, torch.cat([rhs_z.detach().reshape(-1), rhs_q.detach()]), pre_j, x0, rtol, maxiter)
+            rzj = rhs_z if rhs_z_joint is None else rhs_z_joint
+            y, it2 = _cg(mv_j, torch.cat([rzj.detach().reshape(-1), rhs_q.detach()]), pre_j, x0, rtol, maxiter)
             z, q = y[:N * D].view(N, D), y[N * D:]
         else:
             z, q, it2 = z_pol, rhs_q.new_zeros(0), 0
