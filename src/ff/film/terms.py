@@ -10,6 +10,7 @@ torsion                sum_n K_n (1 + cos n phi)                   a-b-c-d
 bond-bond              K y_1 y_2                                   each angle's two legs
 bond-angle             K_l y_l dc            (l = both legs)       each angle
 angle-angle            K dc_1 dc_2                                 angle pairs sharing apex+leg
+opposite bond-angle    K y_s dc_xy           (``opposite=True``)    a leg and the angle of two other legs
 torsion-bond           sum_n K_{b,n} y_b (1 + cos n phi)            ab, bc, cd of a torsion
 torsion-angle          sum_n K_{t,n} dc_t (1 + cos n phi)           abc, bcd of a torsion
 torsion-angle-angle    K dc_abc dc_bcd cos phi                      a torsion
@@ -22,6 +23,12 @@ with ``y = 1 - exp(-beta (r - r_eq))`` the Morse coordinate of the bond's own Mo
   paper's, but a stretched bond saturates (``y -> 1``) instead of driving a bilinear term to
   minus infinity. pyCMM floors such terms with a hard ``minv``; that is not smooth and is not
   used here.
+* **Opposite bond-angle (opt-in).** At an apex with three or more neighbours a bond ``apex-s``
+  also couples to every angle ``x-apex-y`` it is not a leg of. A pyramidal XY3 has six
+  independent quadratic force constants (f_r, f_rr, f_a, f_aa, f_ra, f_ra'); the terms above
+  give five, and this is the sixth. Constant-parameter fits of H3O+ need it together with the
+  angle-angle term (``scripts/fit_constant_monomers.py``). Its instances are the angle pairs'
+  own triples ``[apex, s, x, y]``, so it shares their head.
 * **Positive-definite by construction (bond/angle couplings).** In those coordinates the
   diagonal terms are ``D y^2`` (Morse) and ``(k_theta/2) dc^2`` (angle), so a coupling between
   two of them is emitted as ``K = 2 rho sqrt(a_1 a_2)`` with ``rho = 0.95 tanh(raw)`` and
@@ -78,6 +85,7 @@ class TermParameters:
     bb_rho: torch.Tensor | None = None        # (Na,)
     ba_rho: torch.Tensor | None = None        # (Na, 2), slots [leg (i, apex), leg (apex, k)]
     aa_rho: torch.Tensor | None = None        # (Naa,)
+    bo_rho: torch.Tensor | None = None        # (Naa,) opposite bond-angle, same instances as aa
     delta_iso: torch.Tensor | None = None     # flat feature-dependent deviations (theta_0)
 
 
@@ -128,7 +136,8 @@ class TermParameterHead(nn.Module):
 
     Tables: torsion series per unordered pair of central-atom types ``(n_types, n_types, M)``
     (M = all torsion outputs), angle couplings per apex type ``(n_types, 3)``, angle-angle per
-    apex type ``(n_types, 1)``. All zero-initialized.
+    apex type ``(n_types, 1)``, or ``(n_types, 2)`` = [angle-angle, opposite bond-angle] with
+    ``opposite=True`` (needs ``couplings``). All zero-initialized.
     """
 
     def __init__(
@@ -138,6 +147,7 @@ class TermParameterHead(nn.Module):
         *,
         torsions: bool = True,
         couplings: bool = False,
+        opposite: bool = False,
         n_max: int = 4,
         hidden: int = 32,
         depth: int = 1,
@@ -155,6 +165,9 @@ class TermParameterHead(nn.Module):
         nbf = self.bond_feat_dim
         self.torsions = bool(torsions)
         self.couplings = bool(couplings)
+        self.opposite = bool(opposite)
+        if self.opposite and not self.couplings:
+            raise ValueError("opposite=True needs couplings=True (it shares the angle-pair head)")
         self.n_max = int(n_max)
         self.torsion_scale = float(torsion_scale)
         self.type_emb = nn.Embedding(int(n_types), emb_dim)
@@ -175,10 +188,12 @@ class TermParameterHead(nn.Module):
             self.angle_mlp = _OrbitMLP(3, latent_dim, emb_dim, hidden, depth, 3, [0, 2, 1],
                                        n_bond_members=2, bond_feat_dim=nbf)
             self.angle_table = nn.Parameter(torch.zeros(int(n_types), 3))
-            # per angle pair [apex, s, x, y]: x <-> y
-            self.pair_mlp = _OrbitMLP(4, latent_dim, emb_dim, hidden, depth, 1, [0],
-                                      n_bond_members=3, bond_feat_dim=nbf)
-            self.pair_table = nn.Parameter(torch.zeros(int(n_types), 1))
+            # per angle pair [apex, s, x, y]: x <-> y. Outputs [aa] or [aa, bo]; both are
+            # symmetric under the exchange (bo couples the leg s to the angle x-apex-y).
+            n_pair = 2 if self.opposite else 1
+            self.pair_mlp = _OrbitMLP(4, latent_dim, emb_dim, hidden, depth, n_pair,
+                                      list(range(n_pair)), n_bond_members=3, bond_feat_dim=nbf)
+            self.pair_table = nn.Parameter(torch.zeros(int(n_types), n_pair))
 
     @property
     def active(self) -> bool:
@@ -234,7 +249,10 @@ class TermParameterHead(nn.Module):
                 pbonds = [lookup_bonds(topo.bond_index, n, pa, q) for q in (ps, px, py)]
             raw, d_iso = self.pair_mlp(z_iso, z_joined, gate, emb, [pa, ps, px, py], [0, 1, 3, 2],
                                        bond_feat, pbonds, [0, 2, 1])
-            out.aa_rho = RHO_MAX * torch.tanh(self.pair_table[type_idx[pa]] + raw).squeeze(-1)
+            rho = RHO_MAX * torch.tanh(self.pair_table[type_idx[pa]] + raw)
+            out.aa_rho = rho[:, 0]
+            if self.opposite:
+                out.bo_rho = rho[:, 1]
             deltas.append(d_iso.reshape(-1))
         if deltas:
             out.delta_iso = torch.cat(deltas)
@@ -251,7 +269,7 @@ def term_energies(
     """``[(energies, owning fragment)]`` per active family, co-membership weighted, Hartree."""
     r, cos_t = topo.geometry(positions_ang) if geometry is None else geometry
     out = []
-    need_y = tp.tb_k is not None or tp.bb_rho is not None
+    need_y = tp.tb_k is not None or tp.bb_rho is not None or tp.bo_rho is not None
     if need_y:
         beta = torch.sqrt(bp.k / (2.0 * bp.d))
         y = 1.0 - torch.exp(-beta * (r - bp.r_eq))                    # (Nb,)
@@ -282,5 +300,10 @@ def term_energies(
         a0, a1 = topo.angle_pair_angles[0], topo.angle_pair_angles[1]
         k0, k1 = 0.5 * bp.k_theta[a0], 0.5 * bp.k_theta[a1]
         e = 2.0 * tp.aa_rho * torch.sqrt(k0 * k1) * dc[a0] * dc[a1]
+        out.append((topo.angle_pair_weight * e, topo.angle_pair_frag))
+
+    if tp.bo_rho is not None and topo.n_angle_pairs:
+        b, a = topo.angle_pair_bond, topo.angle_pair_opposite
+        e = 2.0 * tp.bo_rho * torch.sqrt(bp.d[b] * 0.5 * bp.k_theta[a]) * y[b] * dc[a]
         out.append((topo.angle_pair_weight * e, topo.angle_pair_frag))
     return out

@@ -43,15 +43,18 @@ class CmmPotential:
 
     ``cutoff`` / ``switch_width`` (Angstrom; ``cutoff`` None: the model's short-range reach plus the switch width),
     ``ewald_tol``, ``dispersion_tail`` and ``cg_rtol`` (the joint solve's tolerance) are the periodic path's settings. Periodic batches warm-start the solve from the
-    previous call's moments when the atoms are the same (MD steps, or the same beads)."""
+    previous call's moments when the atoms are the same (MD steps, or the same beads). ``total_only`` (default):
+    periodic batches skip the CT-free solve (one CG, the same energies and forces; ``last["terms"]`` then has e_polct
+    = E_pol + E_CT and NaN for the two apart)."""
 
     def __init__(self, model, *, cutoff=None, switch_width=1.0, ewald_tol=1e-10, dispersion_tail=True, warm_start=True,
-                 cg_rtol=None):
+                 cg_rtol=None, total_only=True):
         self.model = model
         self.cutoff = None if cutoff is None else float(cutoff)
         self.switch_width, self.ewald_tol = float(switch_width), float(ewald_tol)
         self.dispersion_tail, self.warm_start = bool(dispersion_tail), bool(warm_start)
         self.cg_rtol = cg_rtol          # the joint solve's CG tolerance (None: the model's 1e-10)
+        self.total_only = bool(total_only)
         self.device = next(model.parameters()).device
         self._x = None
         self._key = None
@@ -92,13 +95,15 @@ class CmmPotential:
             bt["guess"] = self._x
         if periodic and self.cg_rtol:
             bt["cg_rtol"] = self.cg_rtol
+        if periodic and self.total_only:
+            bt["total_only"] = True
         out = self.model(bt)
         E = out["e_int"]
         grads = torch.autograd.grad(E.sum(), leaves)
         if periodic:
             self._x, self._key = out.get("guess"), key
         self.last = {"cg_iters": out.get("cg_iters", 0), "terms": {k: out[k].detach().cpu().numpy() for k in
-                     ("e_elst", "e_pauli", "e_disp", "e_pol", "e_ct")}}
+                     ("e_elst", "e_pauli", "e_disp", "e_pol", "e_ct", "e_polct") if k in out}}
         forces = (-grads[0]).detach().cpu().numpy()
         split = np.cumsum([len(z) for z in numbers])[:-1]
         vir = None

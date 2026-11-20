@@ -1047,6 +1047,9 @@ class FilmConfig:
     #: The coupling family: bond-bond, bond-angle, angle-angle, torsion-bond, torsion-angle,
     #: torsion-angle-angle (rsfff.ff.film.terms). The "with/without couplings" switch.
     couplings: bool = False
+    #: The opposite bond-angle coupling at apexes with three or more neighbours (a leg with the
+    #: angle of two other legs; rsfff.ff.film.terms). Needs ``couplings``.
+    opposite_coupling: bool = False
     torsion_nmax: int = 4
     torsion_scale: float = 1.0e-3
     term_hidden: int = 32

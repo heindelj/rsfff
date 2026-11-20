@@ -94,6 +94,7 @@ packages = [
     "rsfff.ff.charge_eq",
     "rsfff.ff.cmm",
     "rsfff.ff.film",
+    "rsfff.ff.bonded",
     "rsfff.ff.nonvariational",
     "rsfff.md",
     "rsfff.qcgen",

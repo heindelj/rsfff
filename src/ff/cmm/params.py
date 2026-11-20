@@ -144,12 +144,18 @@ class ChannelTable:
     """Which directed pairs 'D>A' are CT channels, the channel cutoff (Angstrom) and the width of its taper.
 
     Every ordered species pair is a channel type; a table's ``channels`` section may set ``cutoff`` and ``taper``
-    (its calibrated pair functions, from the channel CT model, are not read any more)."""
+    (its calibrated pair functions, from the channel CT model, are not read any more). A type's value in ``types``
+    may be its own cutoff in Angstrom (at most ``cutoff``; None: ``cutoff``): the model's frontier kernel sets each
+    pair's R_off there, so that channels beyond their pair's cutoff are not listed."""
 
     types: dict = field(default_factory=dict)
     cutoff: float = 8.0
     taper: float = 1.0
     meta: dict = field(default_factory=dict)
+
+    def type_cutoff(self, name: str) -> float:
+        v = self.types.get(name)
+        return self.cutoff if v is None else min(float(v), self.cutoff)
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_PARAMS, dtype=torch.float64) -> "ChannelTable":

@@ -5,8 +5,9 @@
 
 Collects (symlinks followed): research/rsfff train/salts/data/ct_sets, train/nacl/ionct/data/{walk_eda,force},
 train/salts/data/force_test.txt, train/salts/params/{ions_salts8_cpksb.json,wself.json}; research/ct_model
-data/ct_sets/{al-nacl-r0,al-nacl-r1,al-nacl-lin,al-nacl-holes,nacl-compressed}.jsonl. MANIFEST.json lists every file
-with its sha256.
+data/ct_sets/{al-nacl-r0,al-nacl-r1,al-nacl-lin,al-nacl-holes,nacl-compressed}.jsonl and the trainer's default table,
+train/cmm_salts_data/params/ions_salts8_cpksb_dipresp.json (the response-density dipole parents,
+scripts/cmm_response_parents.py). MANIFEST.json lists every file with its sha256.
 """
 import argparse, hashlib, io, json, tarfile, time
 from pathlib import Path
@@ -32,6 +33,7 @@ for n in CT_FILES:
     items.append((f"ct/{n}.jsonl", C / "data/ct_sets" / f"{n}.jsonl"))
 for n in ("ions_salts8_cpksb.json", "wself.json"):
     items.append((f"params/{n}", R / "train/salts/params" / n))
+items.append(("params/ions_salts8_cpksb_dipresp.json", C / "train/cmm_salts_data/params/ions_salts8_cpksb_dipresp.json"))
 items.append(("force_test.txt", R / "train/salts/data/force_test.txt"))
 manifest = {"made": time.strftime("%Y-%m-%d %H:%M:%S"), "files": {}}
 a.out.parent.mkdir(parents=True, exist_ok=True)

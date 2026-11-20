@@ -26,9 +26,10 @@ def tables():
     return IonTable.load(PARAMS), ChannelTable.load(PARAMS)
 
 
-def _model(tables, q_boost=0.0, gap_shift=0.0, overlap="probe", w0=0.0):
+def _model(tables, q_boost=0.0, gap_shift=0.0, overlap="probe", w0=0.0, predict=1):
     torch.manual_seed(5)
-    m = CmmModel(*tables, CmmConfig(film=False, ct_model="gap", ct_gap_overlap=overlap, ct_gap_w0=w0))
+    m = CmmModel(*tables, CmmConfig(film=False, ct_model="gap", ct_gap_overlap=overlap, ct_gap_w0=w0,
+                                    ct_gap_predict=predict))
     with torch.no_grad():                       # an environment that does something: random readouts and constants
         m.encoder.readout.weight.copy_(0.3 * torch.randn_like(m.encoder.readout.weight))
         for p in (m.ln_w1, m.ln_w2, m.ct_ln_q0, m.ct_acc_raw, m.ct_ln_kov):
@@ -83,13 +84,14 @@ def test_gap_electrostatics_are_the_frontier_potentials(tables):
         assert torch.allclose(bt["phi_front"][:, col], ref, rtol=1e-6, atol=1e-8), role
 
 
-@pytest.mark.parametrize("gap_shift", [0.0, 0.19])
-def test_joint_solution_is_the_dense_minimum(tables, gap_shift):
+@pytest.mark.parametrize("gap_shift,predict", [(0.0, 1), (0.19, 0), (0.19, 1)])
+def test_joint_solution_is_the_dense_minimum(tables, gap_shift, predict):
     """With the moments decoupled (Ca = 0) the channel charges are the stationary point of
-    sum_c [-a + 1/2 k (q - q*)^2] + 1/2 Q H_Q Q - 1/2 sum_c h_c q_c^2; with every gap lowered by 0.19 Hartree some
-    channels have k - h below the elimination threshold (here negative) and go through the explicit block."""
+    sum_c [-a - delta q + 1/2 k (q - q*)^2] + 1/2 Q H_Q Q - 1/2 sum_c h_c q_c^2 (q*, a, k at the predicted gap); with every gap lowered by 0.19 Hartree some
+    channels have k - h below the elimination threshold (here negative) and go through the explicit block -- at the
+    frozen gap (predict 0); the predicted gap keeps them stiff."""
     from rsfff.ff.cmm.model import GAP_B_EPS
-    m = _model(tables, 0.0, gap_shift)
+    m = _model(tables, 0.0, gap_shift, predict=predict)
     bt = _batch(m, [RING])
     with torch.no_grad():
         o = m({**bt, "Ca": torch.zeros_like(bt["Ca"])})
@@ -104,11 +106,13 @@ def test_joint_solution_is_the_dense_minimum(tables, gap_shift):
         k = g["den"] / (2 * g["W2"]) + g["h"]
         b = k - g["h"]
         n_bad = int((b < GAP_B_EPS).sum())
-        assert (n_bad > 0) == (gap_shift > 0)
+        assert (n_bad > 0) == (gap_shift > 0 and predict == 0)
         Hc = torch.diag(b) + G.T @ Hq @ G
         assert torch.allclose(torch.diagonal(G.T @ Hq @ G), g["h"], rtol=1e-10)          # h is the channel's own share
-        q = torch.linalg.solve(Hc, k * g["qs"])
-        E = (-g["a"] + 0.5 * k * (q - g["qs"]) ** 2).sum() + 0.5 * (G @ q) @ Hq @ (G @ q) - 0.5 * (g["h"] * q * q).sum()
+        dl = g.get("delta", torch.zeros_like(g["qs"]))       # the predictor's shift: F'(q0) = -delta
+        q = torch.linalg.solve(Hc, k * g["qs"] + dl)
+        E = ((-g["a"] - dl * q + 0.5 * k * (q - g["qs"]) ** 2).sum() + 0.5 * (G @ q) @ Hq @ (G @ q)
+             - 0.5 * (g["h"] * q * q).sum())
         assert torch.allclose(o["q_ch"], q, rtol=1e-8, atol=1e-12)
         assert float(o["e_ct"][0]) == pytest.approx(float(E), rel=1e-9)
         assert float(o["e_ch"].sum()) == pytest.approx(float(o["e_ct"][0]), rel=1e-12)
@@ -130,7 +134,8 @@ def test_stationary_with_the_moments(tables):
         q, Q = o["q_ch"], o["dq"]
         zf = torch.cat([o["x"], torch.zeros(1, bt["nmax"], bt["D"] - 8, dtype=f64)], -1).reshape(1, -1)
         psi = Hq @ Q + torch.einsum("bnk,bn->bk", bt["Ca"], zf)[0, :n]
-        grad = k * (q - g["qs"]) - g["h"] * q + psi[i] - psi[j]
+        dl = g.get("delta", torch.zeros_like(g["qs"]))
+        grad = k * (q - g["qs"]) - dl - g["h"] * q + psi[i] - psi[j]
         assert float(grad.abs().max()) < 1e-9 * float((k * g["qs"]).abs().max())
 
 
@@ -275,7 +280,8 @@ def test_broadened_crossing(tables):
         Hq = bt["Jq"][0, :n, :n] + torch.diag(torch.nn.functional.softplus(m.ct_eta_raw[sp]))
         zf = torch.cat([o["x"], torch.zeros(1, bt["nmax"], bt["D"] - 8, dtype=f64)], -1).reshape(1, -1)
         psi = Hq @ o["dq"] + torch.einsum("bnk,bn->bk", bt["Ca"], zf)[0, :n]
-        grad = k * (o["q_ch"] - g["qs"]) - g["h"] * o["q_ch"] + psi[i] - psi[j]
+        dl = g.get("delta", torch.zeros_like(g["qs"]))
+        grad = k * (o["q_ch"] - g["qs"]) - dl - g["h"] * o["q_ch"] + psi[i] - psi[j]
         assert float(grad.abs().max()) < 1e-9 * float((k * g["qs"]).abs().max())
         # a large gap: the same W^2 / Delta as the exact form, to relative order W_b^2 / Delta^2
         m.ct_gap_I.add_(0.6 + 3.0)
@@ -345,3 +351,96 @@ def test_pauli_anchored_overlap(tables):
         p = {L: m(_batch(m, [(sym2, X2 + L / 2)], cell=torch.eye(3, dtype=f64) * L, dispersion_tail=False)) for L in (30., 40.)}
         w = 40.0 ** 5 / (40.0 ** 5 - 30.0 ** 5)
         assert float((p[30.]["e_ct"] + w * (p[40.]["e_ct"] - p[30.]["e_ct"]) - c["e_ct"]).abs()) < 3e-7
+
+
+@pytest.mark.parametrize("predict", [0, 1, 2])
+def test_predictor_shift(tables, predict):
+    """``ct_gap_predict``: each pass sets delta = (psi_i - psi_j) - h q0 from the previous q0 (psi = psi0 + S Q0), so
+    the residual drive V = h q0 - (psi*_i - psi*_j) + delta is that of one pass's change in q0; with the gaps lowered
+    (soft channels) the joint charges stay near q0 and in [0, lam] where the frozen-gap expansion (predict 0) does not."""
+    m = _model(tables, 0.3, 0.19, predict=predict)
+    bt = _batch(m, [RING])
+    with torch.no_grad():
+        o = m(bt)
+    g = m._gap
+    if predict == 0:
+        assert "delta" not in g
+        return
+    assert torch.allclose(g["Delta"], g["Delta0"] + g["delta"])
+    dev = (o["q_ch"] - g["qs"]).abs().max()
+    m0 = _model(tables, 0.3, 0.19, predict=0)
+    with torch.no_grad():
+        o0 = m0(bt)
+    dev0 = (o0["q_ch"] - m0._gap["qs"]).abs().max()
+    assert float(dev) < 0.5 * float(dev0)
+
+
+@pytest.mark.parametrize("predict", [1, 2])
+def test_predictor_forces(tables, predict):
+    """Forces through the predicted gap (delta keeps its graph) against finite differences, soft channels included;
+    under PBC through the adjoint of the response solves."""
+    m = _model(tables, 0.3, 0.19, predict=predict)
+    sym, X = RING
+    pos = X.clone().requires_grad_(True)
+    F = -torch.autograd.grad(m(_batch(m, [RING], pos))["e_int"].sum(), pos)[0]
+    h = 1e-4
+    with torch.no_grad():
+        for a, k in ((0, 0), (3, 1), (5, 2)):
+            e = []
+            for sg in (1, -1):
+                Xp = X.clone()
+                Xp[a, k] += sg * h
+                e.append(float(m(_batch(m, [(sym, Xp)]))["e_int"]))
+            assert float(F[a, k]) == pytest.approx(-(e[0] - e[1]) / (2 * h), rel=2e-6, abs=1e-9)
+    g = torch.Generator().manual_seed(1)
+    a = 5.6
+    base = torch.tensor([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0]], dtype=f64) * a
+    X = torch.cat([base, base + torch.tensor([a / 2, 0, 0], dtype=f64)]) + 0.15 * torch.randn(8, 3, generator=g, dtype=f64)
+    sym, cell = ["Na"] * 4 + ["Cl"] * 4, torch.eye(3, dtype=f64) * a
+    pos = X.clone().requires_grad_(True)
+    F = -torch.autograd.grad(m(_batch(m, [(sym, X)], pos, cell=cell))["e_int"].sum(), pos)[0]
+    with torch.no_grad():
+        for at, k in ((0, 0), (5, 2)):
+            e = []
+            for sg in (1, -1):
+                Xp = X.clone()
+                Xp[at, k] += sg * h
+                e.append(float(m(_batch(m, [(sym, Xp)], cell=cell))["e_int"]))
+            assert float(F[at, k]) == pytest.approx(-(e[0] - e[1]) / (2 * h), rel=5e-5, abs=1e-8)
+
+
+@pytest.mark.parametrize("ct_model", ["gap", "flux"])
+def test_total_only_is_one_solve(tables, ct_model):
+    """``bt["total_only"]`` (MD): the CT-free solve skipped, the same E_int, forces and stress-free virial inputs,
+    e_polct = E_pol + E_CT, fewer CG iterations, and the split terms NaN."""
+    if ct_model == "gap":
+        m = _model(tables, 0.3, 0.19)
+    else:
+        torch.manual_seed(5)
+        m = CmmModel(*tables, CmmConfig(film=False)).eval()
+    g = torch.Generator().manual_seed(1)
+    a = 5.6
+    base = torch.tensor([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0]], dtype=f64) * a
+    X = torch.cat([base, base + torch.tensor([a / 2, 0, 0], dtype=f64)]) + 0.15 * torch.randn(8, 3, generator=g, dtype=f64)
+    sym, cell = ["Na"] * 4 + ["Cl"] * 4, torch.eye(3, dtype=f64) * a
+    res = {}
+    for flag in (False, True):
+        pos = X.clone().requires_grad_(True)
+        bt = _batch(m, [(sym, X)], pos, cell=cell)
+        bt["total_only"] = flag
+        o = m(bt)
+        F = -torch.autograd.grad(o["e_int"].sum(), pos)[0]
+        res[flag] = (o, F)
+    (o0, F0), (o1, F1) = res[False], res[True]
+    assert float((o1["e_int"] - o0["e_int"]).detach().abs()) < 1e-10
+    assert torch.allclose(F1, F0, atol=1e-8)
+    assert torch.allclose(o0["e_polct"], o0["e_pol"] + o0["e_ct"], atol=1e-12)
+    assert torch.allclose(o1["e_polct"], o0["e_polct"], atol=1e-10)
+    assert bool(torch.isnan(o1["e_pol"]).all()) and bool(torch.isnan(o1["e_ct"]).all())
+    assert o1["cg_iters"] < o0["cg_iters"]
+    assert o1["guess"]["z_pol"] is None
+    bt = _batch(m, [(sym, X)], cell=cell)                 # a warm start from a total_only call
+    bt.update(guess=o1["guess"])
+    with torch.no_grad():
+        o2 = m(bt)
+    assert float((o2["e_int"] - o0["e_int"]).detach().abs()) < 1e-9

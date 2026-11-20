@@ -339,6 +339,10 @@ class BondedTopology:
     angle_pair_angles: torch.Tensor | None = None
     angle_pair_frag: torch.Tensor | None = None
     angle_pair_weight: torch.Tensor | None = None
+    #: (Naa,) bond column of the shared leg ``apex-s``; (Naa,) angle column of ``(x, apex, y)``, the angle
+    #: opposite that leg -- the same triples carry the opposite bond-angle coupling.
+    angle_pair_bond: torch.Tensor | None = None
+    angle_pair_opposite: torch.Tensor | None = None
 
     @property
     def n_impropers(self) -> int:
@@ -434,6 +438,11 @@ class BondedTopology:
             lookup_angles(angle_index, n_atoms, ps, pa, px),
             lookup_angles(angle_index, n_atoms, ps, pa, py),
         )) if angle_pair_index.shape[1] else angle_pair_index.new_zeros(2, 0)
+        if angle_pair_index.shape[1]:
+            angle_pair_bond = lookup_bonds(bond_index, n_atoms, pa, ps)
+            angle_pair_opposite = lookup_angles(angle_index, n_atoms, px, pa, py)
+        else:
+            angle_pair_bond = angle_pair_opposite = angle_pair_index.new_zeros(0)
 
         return cls(
             bond_index=bond_index,
@@ -456,6 +465,8 @@ class BondedTopology:
             angle_pair_angles=angle_pair_angles,
             angle_pair_frag=angle_pair_frag,
             angle_pair_weight=angle_pair_weight,
+            angle_pair_bond=angle_pair_bond,
+            angle_pair_opposite=angle_pair_opposite,
         )
 
     def separation(self, pair_index: torch.Tensor, n_atoms: int, max_sep: int = 3) -> torch.Tensor:

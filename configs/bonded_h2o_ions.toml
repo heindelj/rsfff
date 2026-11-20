@@ -1,0 +1,66 @@
+# Bonded model of H2O, H3O+ and OH- (rsfff.ff.bonded.BondedConfig). Every key is optional; the values
+# written here are the defaults, except tables.init.
+
+[terms]
+# The term set the constant-parameter fits ask for (scripts/fit_constant_monomers.py): H2O needs bond_angle,
+# H3O+ needs angle_angle and opposite_bond_angle together and then no improper, OH- is a Morse.
+# Also available: "improper", "torsion".
+bonded = ["morse", "angle", "bond_bond", "bond_angle", "angle_angle", "opposite_bond_angle"]
+charges = "sqe"                    # permanent charges and charge-flow response from one split-charge model
+dipoles = true
+quadrupoles = true
+polarizability = "anisotropic"     # none | isotropic | anisotropic
+quadrupole_polarizability = true
+
+[tables]
+init = "params/bonded_monomers_wb97mv_tzvpd.json"
+learn = true
+
+[encoder]
+latent = 8
+hidden = 64
+depth = 2
+param_cap = 1.0
+r_cap = 0.2
+odd = "symmetrize"
+compress = "asinh"
+n_max = 6
+l_max = 3
+channels = 16
+species_dim = 4
+morse_a = 2.0
+conditioning = "film"
+condition_on = ["elements", "degrees", "charge", "multiplicity"]
+condition_dim = 8
+
+# The trainer's tables (python -m rsfff.train.bonded configs/bonded_h2o_ions.toml).
+[data]
+# The H2O frames carry dipoles, second moments and polarizabilities. The ions' sampled frames carry energies and
+# forces only; their optimized structures (one frame each) are the only electrical labels the ions have so far.
+train = ["data/wb97mv_tzvpd/h2o_wb97mv_tzvpd_pol.xyz", "data/wb97mv_tzvpd/h3o+_wb97mv_tzvpd.xyz",
+         "data/wb97mv_tzvpd/oh-_wb97mv_tzvpd.xyz", "data/wb97mv_tzvpd/h3o+_opt_wb97mv_tzvpd_pol.xyz",
+         "data/wb97mv_tzvpd/oh-_opt_wb97mv_tzvpd_pol.xyz"]
+reference = ["data/wb97mv_tzvpd/h2o_opt_wb97mv_tzvpd_pol.xyz", "data/wb97mv_tzvpd/h3o+_opt_wb97mv_tzvpd_pol.xyz",
+             "data/wb97mv_tzvpd/oh-_opt_wb97mv_tzvpd_pol.xyz"]
+val_fraction = 0.2
+
+[loss]
+energy = 1.0
+forces = 1.0
+sigma_energy = 0.1      # kcal/mol
+sigma_force = 1.0       # kcal/mol/A
+dipole = 1.0
+quadrupole = 1.0
+polarizability = 1.0
+sigma_dipole = 0.005            # e bohr
+sigma_quadrupole = 0.02         # e bohr^2
+sigma_polarizability = 0.05     # bohr^3
+
+[train]
+out = "runs/bonded_h2o_ions"
+epochs = 300
+batch = 64
+lr = 2e-3
+table_lr = 2e-4
+table_prefit = true
+seed = 0

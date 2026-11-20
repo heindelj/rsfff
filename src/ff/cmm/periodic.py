@@ -349,20 +349,24 @@ class CmmOperator:
         frames               the Ewald reciprocal part of the same sources (points)
         b (C,)               the channels' compliance 1 / s_c^2 (the stiffness floor included)
         tau (N,) or None     the throughput hardness: + tau_i T_i, T = |G| q, on both ends of every channel
+        ch_hess, ch_diag     a further symmetric channel-channel block as a product v -> (C,) (no graph) and its
+                             diagonal (C,) for the preconditioner: the exclusion functional's Hessian
 
     ``apply(Q, z)`` returns (H_Q Q + C^T z, A z + C Q): the slots' potential and the drive on z; ``joint(z, q)`` the
     product with the joint Hessian [[A + H, C G], [G^T C^T, b + G^T H_Q G + |G|^T tau |G|]]."""
 
-    def __init__(self, onsite, eta, pairs, blocks9, frames, ch_i, ch_j, b, tau=None):
+    def __init__(self, onsite, eta, pairs, blocks9, frames, ch_i, ch_j, b, tau=None, ch_hess=None, ch_diag=None):
         self.onsite, self.eta, self.pairs, self.B9, self.frames = onsite, eta, pairs, blocks9, frames
         self.ci, self.cj, self.b, self.tau = ch_i, ch_j, b, tau
+        self.ch_hess, self.ch_diag = ch_hess, ch_diag
         self.P9 = poly_map9(onsite.dtype, onsite.device)
         self.D = onsite.shape[1]
 
     def detach(self):
         return CmmOperator(self.onsite.detach(), self.eta.detach(), self.pairs, self.B9.detach(),
                            [f.detach() for f in self.frames], self.ci, self.cj, self.b.detach(),
-                           None if self.tau is None else self.tau.detach())
+                           None if self.tau is None else self.tau.detach(), self.ch_hess,
+                           None if self.ch_diag is None else self.ch_diag.detach())
 
     def apply(self, Q, z):
         y = torch.cat([Q[:, None], z[:, :8]], 1)                                        # (N, 9)
@@ -390,24 +394,27 @@ class CmmOperator:
         if self.tau is not None:
             tT = self.tau * self.throughput(q)
             oq = oq + tT[self.ci] + tT[self.cj]
+        if self.ch_hess is not None:
+            oq = oq + self.ch_hess(q)
         return oz, oq
 
 
 def solve_cmm_periodic(op: CmmOperator, rhs_z, rhs_q, h=None, guess=None, rtol=1e-10, maxiter=1000, info=None,
-                       rhs_z_joint=None):
+                       rhs_z_joint=None, free=True):
     """The CT-free minimum z_pol of 1/2 z (A + H) z - rhs_z . z and the joint minimum (z, q) of the full quadratic
     with linear term -(rhs_z, rhs_q), by CG preconditioned with the on-site blocks and 1 / (b_c + h_c) (``h`` the
     channels' local charge curvature). No graph: the energies are evaluated at the solutions with the live operator
     (stationary, so their first derivatives are exact). ``guess``: {"z_pol", "z", "q"} starting points.
     ``rhs_z_joint``: the joint problem's own linear term on z when it differs from the CT-free one (the gap model's
-    channels are expanded about their two-state charges, whose potential then drives z)."""
+    channels are expanded about their two-state charges, whose potential then drives z). ``free`` False: skip the
+    CT-free solve (z_pol is returned as None; the joint solve starts from ``guess["z"]`` or zero)."""
     guess = guess or {}
     with torch.no_grad():
         d = op.detach()
         N, D = d.onsite.shape[:2]
         C = d.b.shape[0]
         oinv = torch.linalg.inv(d.onsite)
-        pq = 1.0 / (d.b + (h.detach() if h is not None else 0.0))
+        pq = 1.0 / (d.b + (h.detach() if h is not None else 0.0) + (d.ch_diag if d.ch_diag is not None else 0.0))
         zero_Q = rhs_z.new_zeros(N)
 
         def mv_z(v):
@@ -423,11 +430,19 @@ def solve_cmm_periodic(op: CmmOperator, rhs_z, rhs_q, h=None, guess=None, rtol=1
         def pre_j(v):
             return torch.cat([pre_z(v[:N * D]), pq * v[N * D:]])
 
-        g0 = guess.get("z_pol")
-        z_pol, it1 = _cg(mv_z, rhs_z.detach().reshape(-1), pre_z, None if g0 is None else g0.reshape(-1), rtol, maxiter)
-        z_pol = z_pol.view(N, D)
-        if C:
+        if free:
+            g0 = guess.get("z_pol")
+            z_pol, it1 = _cg(mv_z, rhs_z.detach().reshape(-1), pre_z, None if g0 is None else g0.reshape(-1), rtol,
+                             maxiter)
+            z_pol = z_pol.view(N, D)
+        else:
+            z_pol, it1 = None, 0
+        if C or not free:
             gz, gq = guess.get("z", z_pol), guess.get("q")
+            if gz is None:
+                gz = torch.zeros(N, D, dtype=rhs_z.dtype, device=rhs_z.device)
+            if not C:
+                gq = rhs_q.new_zeros(0)
             if guess.get("qb") is not None:      # q (b + h) carried over: smooth where b = 1 / s^2 is huge (weak channels);
                 qb = guess["qb"]                 # a channel new to the list (NaN) starts at its Jacobi value V / (b + h)
                 qb = torch.where(torch.isnan(qb), rhs_q.detach(), qb)
@@ -457,13 +472,15 @@ def dispersion_switch(r_ang, cutoff, width):
     return smooth_switch(r_ang, cutoff - width, cutoff)
 
 
-def dispersion_tail_integral(cutoff_ang, width_ang, n=4000):
-    """I = int_0^inf (1 - S(r)) r^-4 dr (bohr^-3) for the switched dispersion: the tail energy of the missing pairs
-    is -2 pi / V (sum_i sqrt(C6_i))^2 I (Tang-Toennies damping taken as 1 out there)."""
+def dispersion_tail_integral(cutoff_ang, width_ang, n=4000, power=4):
+    """I = int_0^inf (1 - S(r)) r^-power dr (bohr^(1 - power)) for the switched dispersion: the tail energy of the
+    missing pairs is -2 pi / V (sum_i sqrt(C6_i))^2 I (Tang-Toennies damping taken as 1 out there). ``power`` 4:
+    the r^-6 term; 6: the r^-8 term (-2 pi / V sum_ij C8_ij I)."""
     r_on, r_off = (cutoff_ang - width_ang) / BOHR, cutoff_ang / BOHR
+    tail = 1.0 / ((power - 1) * r_off ** (power - 1))
     if r_off <= r_on:
-        return 1.0 / (3 * r_off ** 3)
+        return tail
     r = torch.linspace(r_on, r_off, n + 1, dtype=torch.float64)
     S = smooth_switch(r, r_on, r_off)
-    inner = torch.trapezoid((1 - S) * r ** -4, r)
-    return float(inner) + 1.0 / (3 * r_off ** 3)
+    inner = torch.trapezoid((1 - S) * r ** -power, r)
+    return float(inner) + tail

@@ -25,6 +25,8 @@ def test_defaults_are_the_converged_run():
         (1.0, 1.0, 1.0, 1.0, 0.2, 0.1, 0.003, 2e-3, 0.1)
     assert (t.batch, t.force_batch, t.lr, t.force_every, t.alpha_every, t.env_sat) == (128, 64, 1e-3, 5, 4, 1.2)
     assert not hasattr(l, "w_chan")                               # the ALMO-CTA channel sums are not labels
+    assert cfg.data.params == "params/ions_salts8_cpksb_dipresp.json"     # dipole parents from the response density
+    assert cfg.data.pair_weight == 1.5 and m.ct_kernel == "slater"          # the weights act with the frontier kernel only
 
 
 def test_overrides_and_roundtrip(tmp_path):
@@ -69,3 +71,42 @@ def test_vacuum_gap_mask(tmp_path):
     assert [f[2]["ct_mask"] for f in out] == [True, False] and out[1][3]["vacuum_gap"] < 0
     cfg, _ = load_config(None)
     assert cfg.data.ct_min_gap == 0.0 and cfg.model.ct_model == "flux"
+
+
+def test_frozen_and_total_losses():
+    """The EDA-free targets: E_Pauli + E_disp against the frozen energy minus electrostatics (the model's own or the
+    EDA's), the total with the model's own electrostatics; the score follows the fitted terms."""
+    from pathlib import Path
+    import torch
+    from rsfff.ff.cmm import ChannelTable, CmmConfig, CmmModel, IonTable
+    from rsfff.train import cmm_data as D
+    from rsfff.train.cmm import LossConfig, evaluate, frozen_error, summarize, term_error, val_score
+    P = Path(__file__).parent / "cmm_golden" / "ions_golden.json"
+    m = CmmModel(IonTable.load(P), ChannelTable.load(P), CmmConfig(film=False, disp_model="response")).eval()
+    sym = ["Na", "Cl", "Na", "Cl"]
+    X = [[0.0, 0, 0], [2.7, 0.1, 0], [2.8, 2.6, 0.2], [0.1, 2.7, -0.1]]
+    with torch.no_grad():
+        _, bt0 = D.batch_of([D.as_frame(sym, X)], m)
+        o = m(bt0)
+    d_el = 3e-4                                             # the EDA's cls_elec differs from the model's electrostatics
+    lab = {"pol": float(o["e_pol"]), "ct": float(o["e_ct"]), "ct_mask": True, "pauli": float(o["e_pauli"]) + 1e-3 - d_el,
+           "disp": float(o["e_disp"]), "elec": float(o["e_elst"]) + d_el,
+           "int": float(o["e_int"]) + 2e-3}
+    fr = D.as_frame(sym, X, lab, {"full": True, "n": 4})
+    with torch.no_grad():
+        _, bt = D.batch_of([fr], m)
+        o = m(bt)
+        KJ = D.KJ
+        assert float(frozen_error(o, bt, "model")) == pytest.approx(-1e-3 * KJ / 4, rel=1e-9)     # elec + pauli + disp - e_elst
+        assert float(frozen_error(o, bt, "eda")) == pytest.approx(-(1e-3 - d_el) * KJ / 4, rel=1e-9)
+        assert float(term_error(o["e_int"], bt, "int")) == pytest.approx(-2e-3 * KJ / 4, rel=1e-9)
+        with pytest.raises(ValueError):
+            frozen_error(o, bt, "none")
+    sv = summarize(evaluate(m, [fr], frz_elst="model"))["all"]
+    assert sv["frz_mae"] == pytest.approx(1e-3 * KJ, rel=1e-6) and sv["etot_mae"] == pytest.approx(2e-3 * KJ, rel=1e-6)
+    assert summarize(evaluate(m, [fr], frz_elst="eda"))["all"]["frz_mae"] == pytest.approx((1e-3 - d_el) * KJ, rel=1e-6)
+    free = LossConfig(w_pol=0, w_ct=0, w_pauli=0, w_disp=0, w_frz=1.0, w_int=1.0)
+    assert val_score(sv, free) == pytest.approx(sv["frz_mae"] + sv["etot_mae"])
+    assert val_score(sv, LossConfig()) == pytest.approx(sv["pol_mae"] + sv["ct_mae"] + sv["pauli_mae"] + sv["disp_mae"])
+    cfg, _ = load_config(None, ["loss.w_frz=1", "loss.w_int=1", "loss.frz_elst=eda", "model.disp_model=response"])
+    assert cfg.loss.w_frz == 1 and cfg.loss.frz_elst == "eda" and cfg.model.disp_model == "response"

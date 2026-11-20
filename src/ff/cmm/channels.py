@@ -49,11 +49,37 @@ THREE_BODY_COLS = tuple(range(2, len(CHANNEL_NAMES)))
 O_ON, O_FULL = 1e-7, 1e-6
 
 
-def overlap_switch(O, o_on=O_ON, o_full=O_FULL):
-    """Smoothstep in log10 O from 0 at o_on to 1 at o_full (a negative O, table noise, counts as 0)."""
+#: the step functions of the overlap windows (``CmmConfig.env_switch``)
+SWITCHES = ("cubic", "quintic", "smooth")
+
+
+def switch_step(t, kind="cubic"):
+    """The step from 0 at t <= 0 to 1 at t >= 1.
+
+    ``"cubic"``    t^2 (3 - 2 t): C^1. Its second derivative jumps by 6 at both ends, a jump in the curvature of
+                   everything it switches (the force constants).
+    ``"quintic"``  t^3 (10 - 15 t + 6 t^2): C^2, the third derivative jumps by 60 at the ends (the form of the
+                   channel taper and the periodic switch); largest |s''| 5.8.
+    ``"smooth"``   1 / (1 + exp((1 - 2 t) / (t (1 - t)))): every derivative zero at both ends (C^infinity), at the
+                   price of a steeper middle: slope 2 at t = 1/2 (cubic 1.5, quintic 1.9), largest |s''| 9.8."""
+    if kind not in SWITCHES:
+        raise ValueError(f"switch {kind!r}: one of {SWITCHES}")
+    t = t.clamp(0.0, 1.0)
+    if kind == "cubic":
+        return t * t * (3 - 2 * t)
+    if kind == "quintic":
+        return t * t * t * (10 - 15 * t + 6 * t * t)
+    eps = 1e-3                                             # exp(-1 / eps) = 0 in double precision: exact ends
+    mid = (t > eps) & (t < 1 - eps)
+    ts = torch.where(mid, t, torch.full_like(t, 0.5))      # the unselected branch stays finite (and so its gradient)
+    s = torch.sigmoid((2 * ts - 1) / (ts * (1 - ts)))
+    return torch.where(mid, s, (t >= 0.5).to(t.dtype))
+
+
+def overlap_switch(O, o_on=O_ON, o_full=O_FULL, kind="cubic"):
+    """:func:`switch_step` in log10 O from 0 at o_on to 1 at o_full (a negative O, table noise, counts as 0)."""
     lo, hi = math.log10(o_on), math.log10(o_full)
-    t = ((torch.log10(O.clamp(min=1e-300)) - lo) / (hi - lo)).clamp(0.0, 1.0)
-    return t * t * (3 - 2 * t)
+    return switch_step((torch.log10(O.clamp(min=1e-300)) - lo) / (hi - lo), kind)
 
 
 def pair_electrostatics(si, sj, r_bohr, tab):

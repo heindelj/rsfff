@@ -123,6 +123,7 @@ def load_cmm(path, params=None, map_location="cpu", tab=None, chan=None):
     else:
         m = CmmModel(tab, chan, CmmConfig.from_dict(ck["config"]))
         m.load_state_dict(ck["state"])
+        m.sync_channels()
     if ppath is None and pname:
         try:
             ppath = resolve_params(pname, near=path)

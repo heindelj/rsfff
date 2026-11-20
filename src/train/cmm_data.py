@@ -37,7 +37,9 @@ IONIC_RADIUS = {"Li": 0.76, "Na": 1.02, "K": 1.38, "Rb": 1.52, "Cs": 1.67, "F": 
 
 FORCE_TEST = ("nacl14", "nacl16", "nacl18", "nacl20")
 
-KJ_ANG = KJ / 0.529177210903          # Hartree/bohr -> kJ/mol/A
+BOHR = 0.529177210903
+KJ_ANG = KJ / BOHR                    # Hartree/bohr -> kJ/mol/A
+DEBYE = 2.541746473                   # e bohr -> Debye
 
 
 def dimer_ct_cut(symbols, na_cl_cut):
@@ -168,8 +170,14 @@ def gap_ions(tab) -> dict:
 
 def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 3.6, max_ho_ratio: float = 1.4,
                 species=("Na", "Cl"), ct_dimers=True, extra_sets=(), extra_files=(), exclude=(), ct_min_gap=0.0,
-                ions=None):
+                ions=None, dipole_charged=True):
     """[(symbols, coords A, labels, meta)], deduplicated.
+
+    Dipole labels (:func:`dipole_label`) are kept on every frame by default. A charged system's dipole depends on its
+    origin, which the records carry (``dipole_origin``), and :func:`induced_dipole` takes the ions' point charges off
+    about that origin, so the label is origin-independent. ``dipole_charged=False`` keeps them on neutral frames only
+    (the dipole of every frame with a net charge dropped, ``meta["dipole_dropped"]``). The charge is the record's
+    ``charge`` (else the sum of its ``fragment_charges``, else of the ions' formal charges).
 
     ``ct_min_gap`` > 0 (Hartree, with ``ions`` = :func:`gap_ions` of the species table) drops the ct label of every
     frame whose :func:`vacuum_gap` is below it: a geometric criterion for the ionic / radical crossing region that
@@ -193,12 +201,14 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
     train / val split takes them one by one."""
     out, seen = [], set()
 
-    def add(symbols, coords, pol, ct, meta, ho=float("nan"), pauli=float("nan"), extra=None):
+    def add(symbols, coords, pol, ct, meta, ho=float("nan"), pauli=float("nan"), extra=None, dipole=None, charge=None):
         key = _geom_key(symbols, coords)
         if key in seen:
             return
         seen.add(key)
         n = len(symbols)
+        if dipole and not dipole_charged and _net_charge(symbols, charge) != 0:
+            dipole, meta = None, {**meta, "dipole_dropped": True}
         ct_mask = True
         if n == 2 and (not ct_dimers or (ct_dimers == "like" and symbols[0] != symbols[1])):
             ct_mask = False
@@ -214,7 +224,7 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
             ct_mask = ct_mask and gap >= ct_min_gap
         out.append((list(symbols), np.asarray(coords, float),
                     {"pol": pol / KJ, "ct": ct / KJ, "ct_mask": ct_mask,
-                     "pauli": pauli / KJ, **{k: v / KJ for k, v in (extra or {}).items()}},
+                     "pauli": pauli / KJ, **{k: v / KJ for k, v in (extra or {}).items()}, **(dipole or {})},
                     {**meta, "n": n, "ho_ratio": ho, "vacuum_gap": gap}))
 
     sets_ = [(wf, Path(ct_sets) / f"{wf}.jsonl", False) for wf in ("ct-walk", "ct-mbe", "ct-sat", "ct-scan", *extra_sets)]
@@ -245,7 +255,10 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
                 {"workflow": wf, "parent": parent, "order": int(t.get("mbe_order", len(r["symbols"]))),
                  "full": t.get("mbe_order") == t.get("mbe_n") if "mbe_set" in t else True}, _ho_ratio(r),
                 r["eda"].get("mod_pauli", float("nan")),
-                {k: r["eda"].get(e, float("nan")) for k, e in (("disp", "disp"), ("elec", "cls_elec"), ("int", "int"))})
+                {k: r["eda"].get(e, float("nan")) for k, e in (("disp", "disp"), ("elec", "cls_elec"), ("int", "int"))},
+                dipole_label(r.get("dipole"), r.get("dipole_origin")),
+                r["charge"] if r.get("charge") is not None else
+                (sum(r["fragment_charges"]) if r.get("fragment_charges") else None))
     if walk_eda:
         from ase.io import read
         for f in sorted(Path(walk_eda).glob("*.xyz")):
@@ -258,7 +271,95 @@ def load_frames(ct_sets: str, walk_eda: str | None = None, ct_max_pair: float = 
                     {"workflow": "walk-eda", "parent": parent, "order": len(sym), "full": True},
                     pauli=a.info.get("eda_mod_pauli", float("nan")) * KJ,
                     extra={k: a.info.get(e, float("nan")) * KJ for k, e in (("disp", "eda_disp"), ("elec", "eda_cls_elec"),
-                                                                             ("int", "eda_int"))})
+                                                                             ("int", "eda_int"))},
+                    dipole=dipole_label(_extxyz_dipole(a), a.info.get("dipole_origin"),
+                                        "au" if a.info.get("units") == "atomic" else "debye"),
+                    charge=a.info.get("charge"))
+    return out
+
+
+FORMAL_CHARGE = {"Li": 1, "Na": 1, "K": 1, "Rb": 1, "Cs": 1, "F": -1, "Cl": -1, "Br": -1, "I": -1}
+
+
+def _extxyz_dipole(a):
+    """An extxyz frame's ``dipole``: ase's reader moves it from the comment line onto the frame's calculator."""
+    if a.info.get("dipole") is not None:
+        return a.info["dipole"]
+    return (getattr(a.calc, "results", None) or {}).get("dipole")
+
+
+def _net_charge(symbols, charge=None):
+    """The frame's net charge: ``charge`` when given, else the sum of the ions' formal charges (None if a species has
+    none -- treated as charged, so its dipole is dropped unless charged frames are asked for)."""
+    if charge is not None:
+        return int(round(float(charge)))
+    if not set(symbols) <= set(FORMAL_CHARGE):
+        return None
+    return sum(FORMAL_CHARGE[s] for s in symbols)
+
+
+def dipole_label(dipole, origin=None, unit="debye") -> dict:
+    """The labels of a record's total SCF dipole moment, {} without one. Convention of the sets: ``dipole`` = three
+    components in Debye in the frame of the record's coordinates, taken about ``dipole_origin`` (Angstrom; the
+    coordinate origin when absent -- the dipole of a charged system depends on it). ``unit="au"`` for a dipole in
+    e bohr (the extxyz frames of rsfff_al.store_io, ``units=atomic``: Q-Chem's standard orientation, about its origin,
+    the frame of their own positions). Stored as ``dipole`` (e bohr) and ``dipole_origin`` (Angstrom); the loss uses
+    :func:`induced_dipole`."""
+    if dipole is None:
+        return {}
+    if unit not in ("debye", "au"):
+        raise ValueError(f"dipole unit {unit!r}: 'debye' or 'au'")
+    mu = np.asarray(dipole, float).reshape(-1) / (1.0 if unit == "au" else DEBYE)
+    o = np.zeros(3) if origin is None else np.asarray(origin, float).reshape(-1)
+    if mu.shape != (3,) or o.shape != (3,) or not np.isfinite(mu).all():
+        raise ValueError(f"dipole {dipole!r} (origin {origin!r}): three finite components each")
+    return {"dipole": mu, "dipole_origin": o}
+
+
+def induced_dipole(f, tab) -> np.ndarray:
+    """(3,) e bohr: the frame's dipole label minus the dipole of its ions' point charges about the same origin,
+    mu - sum_i Q_i (r_i - o) -- independent of the origin, and what the model's -dE/dF is (the induced dipoles plus
+    the transferred charges times their positions). nan without a label."""
+    if "dipole" not in f.labels or f.labels.get("dipole_off", False):
+        return np.full(3, np.nan)
+    Q = tab.charge[tab.species_index(f.Z.to(tab.Z.device))].cpu().numpy()
+    return f.labels["dipole"] - (Q[:, None] * (f.pos.numpy() - f.labels["dipole_origin"])).sum(0) / BOHR
+
+
+def mask_dipoles(frames, min_gap: float) -> int:
+    """Take the dipole labels of the frames whose :func:`vacuum_gap` (``meta["vacuum_gap"]``) is below ``min_gap``
+    (Hartree) out of the loss and the metrics, in place (``labels["dipole_off"]``); the number taken out. Near and
+    beyond the ionic / radical crossing the SCF state has moved a large part of an electron, and its dipole (errors of
+    1 - 2 D per ion in a model that is fine elsewhere) would be most of a squared dipole loss. Frames without an
+    anion - cation pair (gap inf) and frames without a gap keep theirs."""
+    n = 0
+    for f in frames:
+        if "dipole" not in f.labels:
+            continue
+        g = f.meta.get("vacuum_gap")
+        off = min_gap > 0 and g is not None and np.isfinite(g) and g < min_gap
+        f.labels["dipole_off"] = bool(off)
+        n += bool(off)
+    return n
+
+
+def dipole_report(frames, tab) -> dict:
+    """Checks of the dipole labels that need no reference: {"n": frames with one, "pairs": two-ion frames among
+    them, "off_axis": the largest component of a pair's induced dipole perpendicular to its axis (Debye; zero by
+    symmetry, so anything else is a dipole given in another frame or about another origin), "per_ion": the largest
+    |induced dipole| per ion (Debye)}."""
+    out = {"n": 0, "pairs": 0, "off_axis": 0.0, "per_ion": 0.0}
+    for f in frames:
+        if "dipole" not in f.labels or f.labels.get("dipole_off", False):
+            continue
+        mu = induced_dipole(f, tab) * DEBYE
+        out["n"] += 1
+        out["per_ion"] = max(out["per_ion"], float(np.linalg.norm(mu)) / f.n)
+        if f.n == 2:
+            ax = (f.pos[1] - f.pos[0]).numpy()
+            ax = ax / np.linalg.norm(ax)
+            out["pairs"] += 1
+            out["off_axis"] = max(out["off_axis"], float(np.linalg.norm(mu - (mu @ ax) * ax)))
     return out
 
 
@@ -328,10 +429,69 @@ def batch_of(frames: list[Frame], model, requires_grad=False):
     lab = {k: torch.tensor([float(f.labels.get(k, float("nan"))) for f in frames], dtype=torch.float64, device=dev)
            for k in LABEL_KEYS}
     lab["ct_mask"] = torch.tensor([bool(f.labels.get("ct_mask", True)) for f in frames], device=dev)
+    lab["weight"] = frame_weights(frames, dev)
+    if any("dipole" in f.labels and not f.labels.get("dipole_off", False) for f in frames):
+        # (B, 3) the induced dipoles (e bohr), nan without a label
+        lab["dip"] = torch.as_tensor(np.stack([induced_dipole(f, model.tab) for f in frames]), dtype=torch.float64,
+                                     device=dev)
     lab["n"] = torch.tensor([float(f.n) for f in frames], dtype=torch.float64, device=dev)
     with torch.set_grad_enabled(requires_grad):
         bt = model.precompute(pos, Z, fr, labels=lab)
     return pos, bt
+
+
+def frame_weights(frames, device=None):
+    """(B,) the frames' loss weights (``labels["weight"]``, 1 where there is none)."""
+    return torch.tensor([float(f.labels.get("weight", 1.0)) for f in frames], dtype=torch.float64, device=device)
+
+
+def set_pair_weights(model, frames, ratio=1.5) -> dict:
+    """Loss weights of the two-ion frames for a model whose CT channels end with each pair's own overlap switch (the
+    frontier kernel, ``ct_cut = "overlap"``), in place (``labels["weight"]``).
+
+    A pair's coupling is complete inside R_on, where its switch starts (the outermost distance at which the overlap
+    is s_on, ``ct_overlap_window``); between R_on and R_off the model has only part of the pair's charge transfer,
+    beyond none, while the reference has all of it. So the frame counts fully while the overlap is at least
+    ``ratio`` x s_on (R <= R_w), not at all from R_on on, and with a C-infinity step in between: every frame with
+    weight has its full coupling, and no fitted quantity is asked to stand in for the truncated part. Only channels
+    out of an anion count: a cation's donor is a core shell more than 0.8 Hartree down, its channels carry almost
+    no charge (0.04 - 0.17 kJ/mol in the cation pairs of the salts data) and their overlap is inside the window at
+    every distance, so cation-cation pairs keep their weight. Of an anion-anion pair's two directions the one whose
+    switch starts further out decides. No labels are used. Frames of more than two ions and models without the
+    kernel are left alone. Returns {"pairs", "reduced", "dropped"} counts (pairs: those with an anion)."""
+    from ..ff.cmm.channels import switch_step
+    from ..ff.cmm.ct_overlap import switch_radii
+    out = {"pairs": 0, "reduced": 0, "dropped": 0}
+    if not getattr(model, "overlap_cut", False) or ratio <= 0:
+        return out
+    if ratio <= 1:
+        raise ValueError(f"pair weight ratio {ratio}: > 1 (the weight ends where the switch starts), or 0 for none")
+    sym = list(model.tab.symbols)
+    s_on = model.config.ct_overlap_window[0]
+    grid, coef = model.ctk_grid.cpu().numpy(), model.ctk_coef.cpu().numpy()
+    r = grid[0] + grid[1] * np.arange(coef.shape[2])
+    memo = {}
+
+    def radii(a, b):                    # (R_w, R_on) of the direction a -> b
+        if (a, b) not in memo:
+            on = float(model.ctk_ron[a, b])
+            memo[a, b] = (min(switch_radii(coef[a, b, :, 0], r, ratio * s_on, s_on)[0], on), on)
+        return memo[a, b]
+    for f in frames:
+        if f.n != 2:
+            continue
+        a, b = sym.index(f.symbols[0]), sym.index(f.symbols[1])
+        dirs = [radii(d, c) for d, c in ((a, b), (b, a)) if bool(model.ct_anion[d])]
+        if not dirs:
+            continue
+        rw, on = max(dirs, key=lambda v: v[1])
+        R = float((f.pos[0] - f.pos[1]).norm())
+        w = 1.0 if R <= rw else 0.0 if R >= on else float(1 - switch_step(torch.tensor((R - rw) / (on - rw)), "smooth"))
+        f.labels["weight"] = w * float(f.labels.get("weight", 1.0))
+        out["pairs"] += 1
+        out["reduced"] += 0 < w < 1
+        out["dropped"] += w == 0
+    return out
 
 
 def monomer_energies(eda_dirs):
@@ -405,6 +565,11 @@ def load_force_sets(files, mono, species=("Na", "Cl"), exclude=()):
     return out
 
 
-def _mae(d, cap):
+def _mae(d, cap, w=None):
+    """Mean |d|, each capped at ``cap`` (> 0); with weights w, their weighted mean (0 if they are all zero)."""
     d = np.abs(d)
-    return float((np.minimum(d, cap) if cap > 0 else d).mean())
+    d = np.minimum(d, cap) if cap > 0 else d
+    if w is None:
+        return float(d.mean())
+    w = np.asarray(w, float)
+    return float((w * d).sum() / w.sum()) if w.sum() > 0 else 0.0

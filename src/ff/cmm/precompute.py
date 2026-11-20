@@ -36,24 +36,25 @@ import torch
 
 from . import kernels as K
 from .batch import channel_types
-from .channels import channels_from_pairs, overlap_switch, pair_electrostatics
+from .channels import channels_from_pairs, overlap_switch, pair_electrostatics, switch_step
 from .elst import permanent_electrostatics
 from .gram import gram_blocks_from_rows, gram_layout
 from .params import ChannelTable, IonTable, channel_taper
 from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
                        recip_apply, smooth_switch)
 from .table import CmmTable, cmm_table
-from .tabulate import BOHR, GATE, NORD, O_ON, PROBES, R_XPOL, _basis_tensors
+from .tabulate import BOHR, GATE, NORD, O_FULL, O_ON, PROBES, R_XPOL, _basis_tensors
 
-__all__ = ["CmmTable", "batched_precompute", "default_cutoff", "hyperpolarization", "cmm_table", "smoothstep_log",
+__all__ = ["CmmTable", "batched_precompute", "default_cutoff", "hyperpolarization", "saturating_hyperpolarization",
+           "dipole_self_coulomb", "cmm_table", "smoothstep_log",
            "short_range_reach"]
 
 
-def smoothstep_log(O, on, full):
-    """Smoothstep in log10 O from 0 at ``on`` to 1 at ``full`` (O <= 0 counts as 0)."""
+def smoothstep_log(O, on, full, kind="cubic"):
+    """The step (:func:`rsfff.ff.cmm.channels.switch_step`) in log10 O from 0 at ``on`` to 1 at ``full`` (O <= 0
+    counts as 0)."""
     lo, hi = math.log10(on), math.log10(full)
-    t = ((torch.log10(O.clamp(min=1e-300)) - lo) / (hi - lo)).clamp(0.0, 1.0)
-    return t * t * (3 - 2 * t)
+    return switch_step((torch.log10(O.clamp(min=1e-300)) - lo) / (hi - lo), kind)
 
 
 def _hyper_ET(Lp):
@@ -84,6 +85,71 @@ def hyperpolarization(Lp, sp, tab: IonTable):
         + (2 * bb)[:, None, None] * T
     mu = (a @ E[:, :, None])[..., 0] + (g / 6 * e2)[:, None] * E + (2 * bb)[:, None] * TE
     W = -0.5 * (E * (a @ E[:, :, None])[..., 0]).sum(-1) - g * e2 * e2 / 24 - bb * (E * TE).sum(-1)
+    ainvE = torch.linalg.inv(aE)
+    aimu = (ainvE @ mu[:, :, None])[..., 0]
+    return ainvE, aimu - E, W + 0.5 * (mu * aimu).sum(-1)
+
+
+def dipole_self_coulomb(tab: IonTable, kmax: float = 400.0, n: int = 80000) -> torch.Tensor:
+    """(S,) u1: the Coulomb self-energy per unit dipole^2 of each species' dipole response shape, (4 pi / 3) <g|g>
+    with g the normalized parent density (b^3 / 48 for a 1s Slater parent) -- the r -> 0 limit of the dipole-dipole
+    block between two ions of the species, and the largest value that block takes. alpha u1 < 1 is the Coulomb Gram
+    certificate: the induction operator is then positive definite at any geometry."""
+    from .kernels import shaped_density_ft
+    k = torch.linspace(kmax / n, kmax, n, dtype=torch.float64)
+    f = shaped_density_ft(tab.b_dip.to("cpu", torch.float64), tab.w_dip.to("cpu", torch.float64), k)
+    return (2 / (3 * math.pi) * torch.trapezoid(f * f * k * k, k, dim=1)).detach()
+
+
+#: saturating hyperpolarization: the floor of alpha(E; T) as a fraction of the free-ion alpha (the field gradient can
+#: lower one eigenvalue: not below this), and the size |k T| at which the gradient term saturates
+HYPER_FLOOR = 0.5
+HYPER_KT_CAP = 12.0
+
+
+def saturating_hyperpolarization(Lp, alpha, kappa, gamma, b):
+    """The Legendre step of :func:`hyperpolarization` with a bounded field energy in place of the polynomial one.
+    Per atom: ``alpha`` the free-ion polarizability, ``kappa`` >= 0 the room above it (the ceiling is c = alpha +
+    kappa), ``gamma``, ``b`` the free-ion hyperpolarizabilities. With the floor a_lo = HYPER_FLOOR alpha,
+    p = kappa / (c - a_lo) and Es^2 = 3 kappa / gamma,
+
+        -W(E; T) = c |E|^2 / 2 - kappa Es^2 (s - 1),    s = sqrt(1 + E M E / Es^2),
+        M(T) = sigma(x0 - k T) / p,    x0 = logit(p),    k = 2 b / ((c - a_lo) p (1 - p))
+
+    (sigma the logistic function of a symmetric matrix; M = 1 without a field gradient; k T is capped smoothly at
+    HYPER_KT_CAP in norm), so that
+
+        mu_p = c E - kappa M E / s,        alpha(E; T) = c - kappa [M / s - (M E)(M E)^T / (Es^2 s^3)].
+
+    At small field and gradient this is the polynomial form, alpha + gamma / 6 (|E|^2 + 2 E E^T) + 2 b T, and at any
+    field and gradient every eigenvalue of alpha(E; T) lies in (a_lo, c): the field can only raise the response, up
+    to the ceiling; the gradient moves it either way, within the window. An atom with kappa = 0 or gamma <= 0
+    responds linearly (alpha, no gradient term). Returns as :func:`hyperpolarization`: alpha(E; T)^-1 (N, 3, 3), the
+    field offset h (N, 3), the constant c (N,)."""
+    E, T = _hyper_ET(Lp)
+    eye = torch.eye(3, dtype=E.dtype, device=E.device)
+    on = (kappa > 1e-10 * alpha) & (gamma > 0)
+    kap = torch.where(on, kappa, torch.ones_like(kappa))
+    gam = torch.where(on, gamma, torch.ones_like(gamma))
+    c = alpha + kap
+    span = c - HYPER_FLOOR * alpha
+    p = kap / span
+    Es2 = 3 * kap / gam
+    kT = (2 * b / (span * p * (1 - p)))[:, None, None] * T
+    nrm = torch.sqrt((kT * kT).sum((-1, -2)) + 1e-30)
+    kT = kT * (torch.tanh(nrm / HYPER_KT_CAP) * HYPER_KT_CAP / nrm)[:, None, None]
+    # sigma(x0 - kT) = (1 + e^{-x0} e^{kT})^-1, e^{-x0} = (1 - p) / p
+    M = torch.linalg.inv(eye + ((1 - p) / p)[:, None, None] * torch.linalg.matrix_exp(kT)) / p[:, None, None]
+    ME = (M @ E[:, :, None])[..., 0]
+    s = torch.sqrt(1 + (E * ME).sum(-1) / Es2)
+    e2 = (E * E).sum(-1)
+    W = -0.5 * c * e2 + kap * Es2 * (s - 1)
+    mu = c[:, None] * E - (kap / s)[:, None] * ME
+    aE = c[:, None, None] * eye - kap[:, None, None] * (M / s[:, None, None]
+                                                        - ME[:, :, None] * ME[:, None, :] / (Es2 * s ** 3)[:, None, None])
+    aE = torch.where(on[:, None, None], aE, alpha[:, None, None] * eye)
+    mu = torch.where(on[:, None], mu, alpha[:, None] * E)
+    W = torch.where(on, W, -0.5 * alpha * e2)
     ainvE = torch.linalg.inv(aE)
     aimu = (ainvE @ mu[:, :, None])[..., 0]
     return ainvE, aimu - E, W + 0.5 * (mu * aimu).sum(-1)
@@ -147,7 +213,8 @@ def default_cutoff(table: CmmTable, chan: ChannelTable, gate=GATE, switch_width=
 
 def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table: CmmTable, chan: ChannelTable,
                        labels: dict | None = None, cell=None, cutoff: float | None = None, switch_width: float = 1.0,
-                       ewald_tol: float = 1e-10, dispersion_tail: bool = False, gate=GATE) -> dict:
+                       ewald_tol: float = 1e-10, dispersion_tail: bool = False, gate=GATE,
+                       switch: str = "cubic", overlap=(O_ON, O_FULL)) -> dict:
     """The batch of :class:`rsfff.ff.cmm.CmmModel` from positions (N, 3) Angstrom (autograd flows through), atomic
     numbers (N,) and the frame index (N,) sorted by frame (module docstring). ``labels``: per-frame tensors (B,) to
     attach. Runs on the device of ``pos_ang``; ``tab`` and ``table`` must live there too.
@@ -159,7 +226,12 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     operator is then not assembled: the on-site blocks, the real-space pair blocks of [slot charge, dipole,
     quadrupole] and the Ewald frames go into ``bt["pbc"]`` for the matrix-free joint solve
     (:class:`rsfff.ff.cmm.periodic.CmmOperator`). ``gate``: the probe overlap window of the gated invariants (the
-    model's ``env_gate``)."""
+    model's ``env_gate``). ``switch``: the step function of that window and of the exchange pairs' overlap window
+    (the model's ``env_switch``; "cubic" is C^1, "quintic" C^2, "smooth" C^infinity). ``overlap``: the density overlap at which an
+    exchange pair's overlap ratios and channel weights start to count and count fully (the model's ``env_overlap``;
+    not below the table's O_ON)."""
+    if not O_ON <= overlap[0] < overlap[1]:
+        raise ValueError(f"overlap window {tuple(overlap)}: needs {O_ON} <= on < full")
     if tuple(table.probes) != PROBES:
         raise ValueError(f"the table's probes {table.probes} are not the cmm probes {PROBES}")
     X = pos_ang / BOHR
@@ -282,7 +354,7 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     S0 = X.new_zeros(N, G_).index_add(0, i, S0p)
     S1 = X.new_zeros(N, G_, 3).index_add(0, i, -S1p[:, :, None] * rhat[:, None, :])
     Dq = (qj[:, None] * T0u) @ P                                     # the neighbour's bare point-charge drive
-    sig = smoothstep_log(S0p, *gate)                                 # (Pd, 3)
+    sig = smoothstep_log(S0p, *gate, kind=switch)                    # (Pd, 3)
     Vg = X.new_zeros(N, G_, 8).index_add(0, i, sig[:, :, None] * torch.cat([-Dq[:, :3], Dq[:, 3:]], 1)[:, None, :])
     has = torch.ones(N, G_, dtype=dt, device=dev)
     has[:, PROBES.index("breath")] = has_b.to(dt)
@@ -307,9 +379,9 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     Tx = Tb[:, dsel]
     Td = torch.einsum("np,npa->pa", lam[0], Tx[:, :, 1:4, 0])
     Tq = torch.einsum("np,npa->pa", lam[1], Tx[:, :, 4:10, 0]) @ P[4:10, 3:8]
-    sw = overlap_switch(O)
+    sw = overlap_switch(O, overlap[0], overlap[1], kind=switch)
     eb = yx[:, table.index["xp:breath"]] - O / tab.shell_n.sum(1)[s[j[dsel]]]   # the breathing density has no monopole
-    swO = sw / O.clamp(min=O_ON)
+    swO = sw / O.clamp(min=overlap[0])
     x_rel = (torch.cat([-Td, -Tq, eb[:, None]], 1)[:, :D]) * swO[:, None]
     gcols = table.cols(tuple(f"gram:{a}{b}{L}" for a, b, L in gram_layout("shape")[1]), dev)
     x_Gi = gram_blocks_from_rows(yx[:Px, gcols], dr[xs])[:, :D, :D]
@@ -320,7 +392,13 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     # -- CT channels -------------------------------------------------------------------------------------------
     lut = _memo(table, ("lut", tuple(chan.types)), dev, lambda: _channel_lut(tab, chan).to(dev))
     ct = lut[s[i], s[j]]
-    ck = (ct >= 0) & (r_ang < chan.cutoff)
+    if any(v is not None for v in chan.types.values()):              # a cutoff per channel type
+        cut = _memo(table, ("lutcut", tuple(chan.types.items()), chan.cutoff), dev,
+                    lambda: torch.tensor([[chan.type_cutoff(f"{a}>{b}") for b in tab.symbols] for a in tab.symbols],
+                                         dtype=r_ang.dtype, device=dev))
+        ck = (ct >= 0) & (r_ang < cut[s[i], s[j]])
+    else:
+        ck = (ct >= 0) & (r_ang < chan.cutoff)
     ch_index = dp[:, ck]
     ch_r = r_ang[ck]
     kk = ck.nonzero().squeeze(1)
@@ -338,6 +416,10 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     mask = torch.zeros(B, nmax, dtype=torch.bool, device=dev).index_put((b_idx, loc), torch.ones(N, dtype=torch.bool, device=dev))
     bt = {"B": B, "nmax": nmax, "D": D, "mask": mask, "species": s, "frame": b_idx, "pos": pos_ang, "pairs": pairs,
           "pair_dr": dr_u * BOHR, "Lz": Lz, "e_hyp": e_hyp, "chan": chan_raw, "gated": gated, "gate": tuple(gate),
+          "switch": switch, "overlap": tuple(float(v) for v in overlap),
+          # the Legendre step's inputs and outputs per atom (permanent drive (N, 8), alpha(E)^-1, h, c): what a model
+          # with its own hyperpolarization form replaces (CmmConfig.hyperpol = "saturating")
+          "hyp_L": Lflat, "hyp_ainv": ainv, "hyp_h": hyp_h, "hyp_c": hyp_c,
           "x_sel": pn[xs], "x_rel": x_rel, "x_swO": swO[:Px], "x_Gi": x_Gi, "x_Gj": x_Gj,
           # the exchange pairs' acceptor-probe overlaps: [:Px] i's probe with j, [Px:] j's probe with i
           "x_Sa": S0p[dsel, PROBES.index("acceptor")],

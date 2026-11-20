@@ -154,6 +154,7 @@ def build_film_model(
             hidden, len(bonded_head.types),
             torsions=bool(_get(film_cfg, "torsions", False)),
             couplings=bool(_get(film_cfg, "couplings", False)),
+            opposite=bool(_get(film_cfg, "opposite_coupling", False)),
             n_max=int(_get(film_cfg, "torsion_nmax", 4)),
             hidden=int(_get(film_cfg, "term_hidden", 32)),
             depth=int(_get(film_cfg, "term_depth", 1)),
