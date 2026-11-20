@@ -159,7 +159,10 @@ class BondedConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "BondedConfig":
-        import tomllib
+        try:
+            import tomllib
+        except ModuleNotFoundError:             # Python 3.10
+            import tomli as tomllib
         return cls.from_dict(tomllib.loads(Path(path).read_text()))
 
     def to_dict(self) -> dict:

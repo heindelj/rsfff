@@ -1,4 +1,4 @@
-"""scripts/bonded_data.py: the finite-field labels are the derivatives they claim to be, the sampler has the right
+"""rsfff.bonded_data: the finite-field labels are the derivatives they claim to be, the sampler has the right
 widths, and the files it writes are the ones rsfff.ff.bonded reads. Hartree-Fock in a small basis, for speed."""
 import importlib.util
 import sys
@@ -8,11 +8,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("pyscf")
-ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("bonded_data", ROOT / "scripts" / "bonded_data.py")
-B = importlib.util.module_from_spec(spec)
-sys.modules["bonded_data"] = B
-spec.loader.exec_module(B)
+from rsfff import bonded_data as B  # noqa: E402
 
 SYM = ["O", "H", "H"]
 POS = np.array([[0.02, 0.01, 0.12], [-0.78, 0.03, -0.45], [0.75, -0.02, -0.49]])

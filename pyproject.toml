@@ -16,17 +16,19 @@ requires-python = ">=3.10"
 # for a large periodic box, where the compiled cell list wins. Install it for that case -- see
 # [neighbors] below.
 dependencies = [
-    # bb ("Black Box", ~/dev/bb): the features, neighbor lists, readouts and NN building blocks.
-    # Not on PyPI -- install it first: `pip install -e ~/dev/bb` (or pin a tag on a cluster,
-    # `pip install "bb-black-box @ git+...@<tag>"`). The distribution is named `bb-black-box`
-    # because PyPI's `bb` is an unrelated project; the import name is `bb`.
-    "bb-black-box",
+    # bb ("Black Box"): the features, neighbor lists, readouts and NN building blocks. Not on
+    # PyPI, so pip fetches it from GitHub (main; append @<tag-or-commit> to pin). To develop
+    # both side by side, `pip install -e ~/dev/bb` first: pip keeps an installed bb-black-box.
+    # The distribution is named `bb-black-box` because PyPI's `bb` is an unrelated project; the
+    # import name is `bb`.
+    "bb-black-box @ git+https://github.com/heindelj/bb.git",
     "numpy",
     "pyyaml",
     "torch",
     "e3nn",
     "ase",
     "scipy",
+    "tomli; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -59,6 +61,11 @@ neighbors = [
 # CUDA ops ship per CUDA major version (Linux only), so pick the extra matching
 # `python -c "import torch; print(torch.version.cuda)"` -- scripts/make_env.sh does this.
 # The backend lives in bb, so these defer to bb's extras.
+# The bonded-model example (examples/bonded): reference data with pyscf, figures with matplotlib.
+example = [
+    "pyscf>=2.5",
+    "matplotlib",
+]
 cue = ["bb-black-box[cue]"]
 cue-cu12 = ["bb-black-box[cue-cu12]"]
 cue-cu13 = ["bb-black-box[cue-cu13]"]
@@ -78,6 +85,8 @@ qc = [
 
 [project.scripts]
 rsfff-train-cmm = "rsfff.train.cmm:main"
+rsfff-train-bonded = "rsfff.train.bonded:main"
+rsfff-bonded-data = "rsfff.bonded_data:main"
 
 [tool.setuptools]
 # src/ is imported as `rsfff`, which rules out automatic discovery: setuptools can find

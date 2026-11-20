@@ -209,7 +209,10 @@ def load_config(path=None, sets=()) -> tuple[TrainConfig, Path]:
         p = Path(path)
         base = p.resolve().parent
         if p.suffix == ".toml":
-            import tomllib
+            try:
+                import tomllib
+            except ModuleNotFoundError:             # Python 3.10
+                import tomli as tomllib
             d = tomllib.loads(p.read_text())
         elif p.suffix in (".yaml", ".yml"):
             import yaml

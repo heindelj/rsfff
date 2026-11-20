@@ -77,7 +77,10 @@ def _set(d: dict, dotted: str, value: str) -> None:
 
 
 def load_config(path, overrides=()):
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:             # Python 3.10
+        import tomli as tomllib
     raw = tomllib.loads(Path(path).read_text())
     for item in overrides:
         k, v = item.split("=", 1)

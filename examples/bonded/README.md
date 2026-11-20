@@ -10,9 +10,16 @@ into an 8-number latent, and every parameter is a bounded linear readout of thos
 
 ## Install
 
-    pip install -e ~/dev/bb            # the network building blocks (import name: bb)
-    pip install -e ~/dev/rsfff
-    pip install pyscf matplotlib
+    git clone https://github.com/heindelj/rsfff.git
+    cd rsfff
+    pip install -e ".[example]"
+
+That is everything: pip fetches `bb` (the network building blocks) from GitHub, and the `example` extra adds pyscf
+and matplotlib. Python 3.10 or newer. To use the code without the example files, no clone is needed:
+
+    pip install "rsfff[example] @ git+https://github.com/heindelj/rsfff.git"
+
+Either way two commands are installed: `rsfff-bonded-data` (reference data) and `rsfff-train-bonded` (the fit).
 
 ## Run (from the rsfff checkout)
 
@@ -21,19 +28,18 @@ into an 8-number latent, and every parameter is a bounded linear readout of thos
 or step by step:
 
     # 1. data: optimize, sample and label H2O, H3O+, OH- and H2O2
-    python scripts/bonded_data.py all --species h2o h3o+ oh- h2o2 --out examples/bonded/data \
+    rsfff-bonded-data all --species h2o h3o+ oh- h2o2 --out examples/bonded/data \
         --xc wb97x --basis def2-svp --grid 75 302 --wigner 40 --points 7 --raman --analytic-hessian --workers 8
     # 2. fit
-    python -m rsfff.train.bonded examples/bonded/config.toml
+    rsfff-train-bonded examples/bonded/config.toml
     # 3. look
     python examples/bonded/analysis.py examples/bonded/run        # or open analysis.ipynb
 
 The labelled data this produced is in `data/` already, so steps 2 and 3 run without step 1.
-Measured on 2 cores: step 1 about 1 hour (290 frames, 13 SCF + gradient each), step 2 about 9 minutes.
 
 ## What each step does
 
-1. **Data** (`scripts/bonded_data.py`, pyscf only). Per species: optimize; Hessian and frequencies; 40 normal-mode
+1. **Data** (`rsfff-bonded-data`, pyscf only). Per species: optimize; Hessian and frequencies; 40 normal-mode
    samples from the harmonic Wigner distribution at 600 K; rigid scans of every bond (0.75-1.6 r_e), every angle
    (+-35 degrees), the H3O+ umbrella and the H2O2 torsion. Each frame gets energy, forces, dipole, second moment,
    polarizability, dipole derivatives and polarizability derivatives, all from finite fields. `data/<name>.xyz` is
@@ -75,9 +81,9 @@ near the minimum, so the barrier is not in the training data. With the scans in 
 
 ## Your own molecule
 
-    python scripts/bonded_data.py reference --xyz mol.xyz --name mol --charge 0 --out mydata --xc wb97x --basis def2-svp --analytic-hessian
-    python scripts/bonded_data.py sample mydata/mol_opt.xyz --out mydata/mol_geoms.xyz --wigner 100 --scans
-    python scripts/bonded_data.py label mydata/mol_geoms.xyz --out mydata/mol.xyz --raman --workers 8 --xc wb97x --basis def2-svp
+    rsfff-bonded-data reference --xyz mol.xyz --name mol --charge 0 --out mydata --xc wb97x --basis def2-svp --analytic-hessian
+    rsfff-bonded-data sample mydata/mol_opt.xyz --out mydata/mol_geoms.xyz --wigner 100 --scans
+    rsfff-bonded-data label mydata/mol_geoms.xyz --out mydata/mol.xyz --raman --workers 8 --xc wb97x --basis def2-svp
 
 The reference stage perceives the covalent bonds once, from your starting structure, and writes them into every
 file; nothing later guesses bonds from distances. Then copy `config.toml`, point `[data]` at the new files, and add
@@ -89,8 +95,6 @@ file; nothing later guesses bonds from distances. Then copy `config.toml`, point
   anything larger than ethane- or methanol-sized is missing physics.
 - Closed shells only have been run. Atom types are (element, number of neighbours): water's and peroxide's O-H share
   a table and are told apart by the network alone.
-- OH- in def2-SVP has no diffuse functions: 46 of its 47 frames have a positive HOMO energy. Fine for an example;
-  use a diffuse basis (the script's default is wB97M-V/def2-TZVPD) for real work.
 - The split between charge-flow and atomic polarizability is constrained by the derivative labels but not pinned:
   no electrostatic-potential labels are fitted yet.
-- `--backend gpu4pyscf` exists and has never been run.
+- `--backend gpu4pyscf` exists but has never been run.

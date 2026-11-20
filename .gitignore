@@ -2,6 +2,8 @@ __pycache__
 timer.dat
 *.log
 data/
+# the bonded example ships its labelled data (examples/bonded/.gitignore drops the per-frame scratch)
+!examples/bonded/data/
 benchmarks/results
 # chemlab/ holds the package's worker definitions (chemlab.pkg.toml [provides] workers): versioned;
 # only ChemLab's local state under it stays out
