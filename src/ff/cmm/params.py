@@ -18,6 +18,11 @@ Every per-ion quantity is indexed by a species index ``s`` (the order of ``IonTa
     A_acceptor (S,)             electron-attachment energy as an acceptor (Hartree; NaN where unbound, e.g. Cl-)
     pauli_w, pauli_s (S, M), (S,)   the frozen fit's Pauli charge per permanent shell and exponent scale (the shells
                                 form of the CP Pauli kernel; ions[s]['pauli'] = {w, s}); NaN where the ion has none
+    pauli_site_a, pauli_site_s (S, M), (S,)   the site-potential form of the Pauli term (config.pauli_form = "site";
+                                ions[s]['pauli_site'] = {a, s}): amplitude per permanent shell and exponent scale of
+                                v_s(r) = sum_t a[t] e^{-beta_t r} (1 / r + beta_t / 2), beta_t = s shell_b[t]; NaN if absent
+    disp_b (S,)                 starting value of the dispersion damping exponent (ions[s]['disp_range'], bohr^-1) for the
+                                site form, whose potential scale is not a density range; NaN if absent
 
 Units: atomic.
 """
@@ -69,6 +74,9 @@ class IonTable:
     A_acceptor: torch.Tensor
     pauli_w: torch.Tensor | None = None
     pauli_s: torch.Tensor | None = None
+    pauli_site_a: torch.Tensor | None = None
+    pauli_site_s: torch.Tensor | None = None
+    disp_b: torch.Tensor | None = None
     hyper_gamma: torch.Tensor | None = None
     hyper_b: torch.Tensor | None = None
 
@@ -110,6 +118,12 @@ class IonTable:
             raise ValueError("ions[s]['pauli']['w'] needs one charge per permanent shell")
         pauli_w = t([w + [nan] * (M - len(w)) for w in pw])
         pauli_s = t([float((ions[s].get("pauli") or {}).get("s", nan)) for s in symbols])
+        pa = [list((ions[s].get("pauli_site") or {}).get("a") or [nan] * len(ions[s]["shells"])) for s in symbols]
+        if any(len(a) != len(ions[s]["shells"]) for a, s in zip(pa, symbols)):
+            raise ValueError("ions[s]['pauli_site']['a'] needs one amplitude per permanent shell")
+        pauli_site_a = t([a + [nan] * (M - len(a)) for a in pa])
+        pauli_site_s = t([float((ions[s].get("pauli_site") or {}).get("s", nan)) for s in symbols])
+        disp_b = t([float(ions[s].get("disp_range") or nan) for s in symbols])
         return cls(
             symbols=symbols, numbers=torch.tensor([ATOMIC_NUMBER[s] for s in symbols]),
             charge=t([ions[s]["charge"] for s in symbols]), Z=t([ions[s]["Z"] for s in symbols]),
@@ -118,7 +132,8 @@ class IonTable:
             b_dip=b_dip, w_dip=w_dip, b_quad=b_quad, w_quad=w_quad, b_breath=b_breath, w_breath=w_breath, a0=a0,
             front_b=front_b, front_w=front_w, I_donor=t([ions[s]["I_donor"] for s in symbols]),
             A_acceptor=t([float("nan") if ions[s]["A_acceptor"] is None else ions[s]["A_acceptor"] for s in symbols]),
-            pauli_w=pauli_w, pauli_s=pauli_s, hyper_gamma=hyper_gamma, hyper_b=hyper_b,
+            pauli_w=pauli_w, pauli_s=pauli_s, pauli_site_a=pauli_site_a, pauli_site_s=pauli_site_s, disp_b=disp_b,
+            hyper_gamma=hyper_gamma, hyper_b=hyper_b,
         )
 
     def to(self, device) -> "IonTable":

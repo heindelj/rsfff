@@ -7,14 +7,22 @@
 
 Needs only numpy, scipy and pyscf. Default level: wB97M-V/def2-TZVPD (``--xc``, ``--basis``).
 
+``--backend gpu4pyscf`` runs every SCF, gradient and Hessian on a GPU with gpu4pyscf (same protocol, same labels;
+``--gpus N`` spreads the ``--workers`` over N devices). ``--analytic-hessian`` (either backend) takes the Hessian
+from the program's analytic code instead of differences of gradients, and for a closed shell also the dipole
+derivatives, from the same coupled-perturbed solution (gpu4pyscf's own IR code does this; its Raman code takes
+the polarizability derivatives from finite fields, as here). When both exist the finite-field dipole derivatives
+are kept as a check: the largest difference is written as ``dipole_derivatives_check`` and reported.
+
 Stages
 ------
 ``reference``  optimize (BFGS on analytic gradients), Hessian by central differences of gradients, harmonic
                frequencies; writes ``<name>_opt.xyz`` with every label below plus ``hessian`` and ``frequencies``.
 ``sample``     geometries from a reference file: ``--wigner N`` normal-mode samples from the harmonic Wigner
                distribution at ``--temperature`` (``--classical``: Boltzmann), and ``--scans``: rigid scans of every
-               bond stretch (``--stretch`` x r_e), every angle (``--bend`` degrees either way) and, for a centre
-               with three neighbours, the umbrella through planar to the inverted structure. Scan frames carry
+               bond stretch (``--stretch`` x r_e), every angle (``--bend`` degrees either way), for a centre
+               with three neighbours the umbrella through planar to the inverted structure, and a full turn about
+               every rotatable bond. Scan frames carry
                ``config_type=scan_*`` so that they can be held out.
 ``label``      labels for every frame of an extxyz file; resumable (one part file per frame in ``<out>.parts/``),
                ``--workers`` frames in parallel.
@@ -34,7 +42,8 @@ functional pyscf has gradients for (VV10 included):
     --field-gradient     12 at +-G for the six symmetric field-gradient components (energy +1/2 r.G.r per electron):
         quadrupole_polarizability (81)          d M2_ab / d G_cd (G symmetric), layout [ab, cd]
         quadrupole_derivatives (N*3*9)          d M2_ab / d R_ai, layout [atom, i, ab]
-    --hessian            6N gradients: hessian ((3N)^2, [atom a, i], [atom b, j]) and frequencies (cm^-1)
+    --hessian            6N gradients (or --analytic-hessian): hessian ((3N)^2, [atom a, i], [atom b, j]) and
+                         frequencies (cm^-1)
     --esp                the electrostatic potential on shells around the molecule, at zero field and its
                          response to each field component, in ``<out>.esp.npz``: points_<frame> (P, 3) bohr,
                          esp_<frame> (P,), esp_response_<frame> (3, P) = d V / d F_k   (needs --fields)
@@ -67,7 +76,9 @@ SPECIES = {      # starting geometries (Angstrom), charge, multiplicity
     "h3o+": (["O", "H", "H", "H"], [[0.0, 0.0, 0.075], [0.941, 0.0, -0.201], [-0.470, 0.815, -0.201],
                                     [-0.470, -0.815, -0.201]], 1, 1),
     "oh-": (["O", "H"], [[0.0, 0.0, -0.107], [0.0, 0.0, 0.858]], -1, 1),
+    "h2o2": (["O", "O", "H", "H"], [[0.0, 0.725, -0.055], [0.0, -0.725, -0.055], [0.78, 0.89, 0.44], [-0.78, -0.89, 0.44]], 0, 1),
 }
+COVALENT = {"H": 0.31, "C": 0.76, "N": 0.71, "O": 0.66, "F": 0.57, "P": 1.07, "S": 1.05, "Cl": 1.02}      # Angstrom
 SYM_G = [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)]
 
 
@@ -79,6 +90,14 @@ def default_bonds(sym):
     if len(heavy) != 1:
         raise ValueError("a frame without bonds=... needs exactly one heavy atom; give the covalent topology otherwise")
     return [(heavy[0], i) for i in range(len(sym)) if i != heavy[0]]
+
+
+def perceive_bonds(sym, pos_ang, scale=1.25):
+    """Bonds of ONE reference structure from covalent radii. Used only where a starting structure comes without a
+    topology; every later frame carries the bonds it was given, so a stretched bond never drops out."""
+    pos = np.asarray(pos_ang)
+    return [(i, j) for i in range(len(sym)) for j in range(i + 1, len(sym))
+            if np.linalg.norm(pos[i] - pos[j]) < scale * (COVALENT[sym[i]] + COVALENT[sym[j]])]
 
 
 def read_frames(path):
@@ -105,7 +124,13 @@ def read_frames(path):
 
 def frame_meta(fr):
     info = fr["info"]
-    bonds = (np.array(info["bonds"].split(), dtype=int).reshape(-1, 2).tolist() if "bonds" in info else default_bonds(fr["sym"]))
+    if "bonds" in info:
+        bonds = np.array(info["bonds"].split(), dtype=int).reshape(-1, 2).tolist()
+    elif sum(s != "H" for s in fr["sym"]) <= 1:
+        bonds = default_bonds(fr["sym"])
+    else:
+        raise ValueError("this frame has several heavy atoms and no bonds=...: run the reference stage on it first "
+                         "(it perceives the topology once and writes it), or add bonds=\"i j i j ...\"")
     return int(float(info.get("charge", 0))), int(float(info.get("multiplicity", 1))), [tuple(b) for b in bonds]
 
 
@@ -135,8 +160,12 @@ def write_frames(path, frames):
 
 # ---- electronic structure ---------------------------------------------------------------------------------------
 class Level:
-    def __init__(self, xc="wb97m-v", basis="def2-tzvpd", grid=(99, 590), conv=1e-11, threads=None):
+    def __init__(self, xc="wb97m-v", basis="def2-tzvpd", grid=(99, 590), conv=1e-11, threads=None, backend="pyscf",
+                 analytic_hessian=False):
+        if backend not in ("pyscf", "gpu4pyscf"):
+            raise ValueError(f"backend {backend!r}: pyscf or gpu4pyscf")
         self.xc, self.basis, self.grid, self.conv, self.threads = xc, basis, tuple(grid), conv, threads
+        self.backend, self.analytic_hessian = backend, bool(analytic_hessian)
 
     def mol(self, sym, pos_ang, charge, mult):
         from pyscf import gto
@@ -144,14 +173,32 @@ class Level:
                      spin=mult - 1, unit="Angstrom", verbose=0)
 
 
+def _np(x):
+    """A numpy array from a numpy or cupy array (or a tuple of them)."""
+    if isinstance(x, (tuple, list)):
+        return np.stack([_np(v) for v in x])
+    return x.get() if hasattr(x, "get") else np.asarray(x)
+
+
 class State:
-    """One SCF of a molecule in a uniform field F and field gradient G (zero by default), with its gradient."""
+    """One SCF of a molecule in a uniform field F and field gradient G (zero by default), with its gradient.
+
+    The field enters the SCF through the core Hamiltonian. Its nuclear energy and its part of the gradient are added
+    here, from the density, so the same code serves pyscf and gpu4pyscf (whose gradient objects do not see it)."""
 
     def __init__(self, level: Level, mol, F=None, G=None, dm0=None):
-        from pyscf import dft, lib, scf
+        from pyscf import lib
         if level.threads:
             lib.num_threads(level.threads)
-        self.mol = mol
+        self.mol, self.level = mol, level
+        self.gpu = level.backend == "gpu4pyscf"
+        if self.gpu:
+            import cupy
+            from gpu4pyscf import dft, scf
+            to_dev = cupy.asarray
+        else:
+            from pyscf import dft, scf
+            to_dev = np.asarray
         self.F = np.zeros(3) if F is None else np.asarray(F, dtype=float)
         self.G = np.zeros((3, 3)) if G is None else np.asarray(G, dtype=float)
         hf = level.xc.lower() == "hf"
@@ -167,20 +214,22 @@ class State:
             with mol.with_common_orig((0.0, 0.0, 0.0)):
                 r = mol.intor("int1e_r")
                 rr = mol.intor("int1e_rr").reshape(3, 3, mol.nao, mol.nao)
-            h = mf.get_hcore() + np.einsum("k,kij->ij", self.F, r) + 0.5 * np.einsum("ab,abij->ij", self.G, rr)
-            e_nuc = mol.energy_nuc() - float(self.Z @ (self.R @ self.F + 0.5 * np.einsum("na,ab,nb->n", self.R, self.G, self.R)))
+            h = to_dev(_np(mf.get_hcore()) + np.einsum("k,kij->ij", self.F, r) + 0.5 * np.einsum("ab,abij->ij", self.G, rr))
             mf.get_hcore = lambda *a, **k: h
-            mf.energy_nuc = lambda *a, **k: e_nuc
-        mf.kernel(dm0=dm0)
-        if not mf.converged:
-            mf = mf.newton()
-            mf.kernel(dm0=mf.make_rdm1())
+        mf.kernel(dm0=None if dm0 is None else to_dev(dm0))
+        if not mf.converged and hasattr(mf, "newton"):
+            try:
+                mf = mf.newton()
+                mf.kernel(dm0=mf.make_rdm1())
+            except Exception:                                    # no second-order solver for this object
+                pass
         if not mf.converged:
             raise RuntimeError("SCF did not converge")
-        self.mf, self.energy = mf, float(mf.e_tot)
-        dm = mf.make_rdm1()
-        self.dm_spin = dm
-        self.dm = dm if dm.ndim == 2 else dm[0] + dm[1]
+        # the nuclei in the field: -Z (F.R + 1/2 R.G.R)
+        e_nuc_field = -float(self.Z @ (self.R @ self.F + 0.5 * np.einsum("na,ab,nb->n", self.R, self.G, self.R)))
+        self.mf, self.energy = mf, float(mf.e_tot) + e_nuc_field
+        self.dm_spin = _np(mf.make_rdm1())
+        self.dm = self.dm_spin if self.dm_spin.ndim == 2 else self.dm_spin[0] + self.dm_spin[1]
 
     def moments(self):
         """(dipole (3,), primitive second moment (3, 3)) about the coordinate origin."""
@@ -198,17 +247,54 @@ class State:
         g = self.mf.nuc_grad_method()
         if hasattr(g, "grid_response"):
             g.grid_response = True
+        grad = _np(g.kernel()).copy()
         if self.field_on:
             with mol.with_common_orig((0.0, 0.0, 0.0)):
                 irp = mol.intor("int1e_irp").reshape(3, 3, mol.nao, mol.nao)           # <mu| r_k d_x nu>
                 irrp = mol.intor("int1e_irrp").reshape(3, 3, 3, mol.nao, mol.nao)      # <mu| r_a r_b d_x nu>
             o_ip = np.einsum("k,kxij->xij", self.F, irp) + 0.5 * np.einsum("ab,abxij->xij", self.G, irrp)
-            extra = -o_ip.transpose(0, 2, 1)                                           # -<d_x mu| O |nu>
-            base_h, base_n = g.get_hcore, g.grad_nuc
-            g.get_hcore = lambda mol=None: base_h(mol) + extra
-            nuc = -self.Z[:, None] * (self.F[None, :] + self.R @ self.G)
-            g.grad_nuc = lambda mol=None, atmlst=None: base_n(mol, atmlst) + (nuc if atmlst is None else nuc[atmlst])
-        return -np.asarray(g.kernel())
+            for a, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
+                # d<mu|O|nu>/dR_a = -<mu|O d nu> (nu on a) - its transpose; the density is symmetric
+                grad[a] -= 2.0 * np.einsum("xij,ij->x", o_ip[:, :, p0:p1], self.dm[:, p0:p1])
+            grad -= self.Z[:, None] * (self.F[None, :] + self.R @ self.G)
+        return -grad
+
+    def analytic_hessian(self):
+        """((3N, 3N) Hessian, dipole derivatives (N, 3, 3) [atom, i, k] or None) from the program's analytic
+        second derivatives, at zero field. The dipole derivatives (closed shells only) reuse the Hessian's
+        coupled-perturbed orbitals: d mu_k / d R_ai = Z_a delta_ik - Tr[dD/dR_ai r_k] - Tr[D d r_k / d R_ai]."""
+        if self.field_on:
+            raise ValueError("the analytic Hessian is for the zero-field state")
+        mol, mf, n = self.mol, self.mf, self.mol.natm
+        hobj = mf.Hessian()
+        hess = _np(hobj.kernel()).transpose(0, 2, 1, 3).reshape(3 * n, 3 * n)
+        hess = 0.5 * (hess + hess.T)
+        if mol.spin != 0:
+            return hess, None
+        mo_coeff, mo_occ, mo_energy = mf.mo_coeff, mf.mo_occ, mf.mo_energy
+        atmlst = range(n)
+        h1ao = hobj.make_h1(mo_coeff, mo_occ, None, atmlst)
+        if self.gpu:
+            fx = hobj.gen_vind(mo_coeff, mo_occ)
+            mo1, _ = hobj.solve_mo1(mo_energy, mo_coeff, mo_occ, h1ao, fx, atmlst, hobj.max_memory, None)
+            c = _np(mo_coeff)
+            mo1 = [np.einsum("up,ypi->yui", c, _np(mo1[a])) for a in atmlst]          # gpu4pyscf: mo1 in the MO basis
+        else:
+            mo1, _ = hobj.solve_mo1(mo_energy, mo_coeff, mo_occ, h1ao, None, atmlst)
+            mo1 = [np.asarray(mo1[a]) for a in atmlst]                                # pyscf: already AO x occupied
+        c, occ = _np(mo_coeff), _np(mo_occ)
+        mocc = c[:, occ > 0]
+        with mol.with_common_orig((0.0, 0.0, 0.0)):
+            r = mol.intor("int1e_r")
+            irp = mol.intor("int1e_irp").reshape(3, 3, mol.nao, mol.nao)
+        apt = np.zeros((n, 3, 3))
+        for a, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
+            dm1 = 2.0 * np.einsum("xui,vi->xuv", mo1[a], mocc)
+            dm1 = dm1 + dm1.transpose(0, 2, 1)
+            apt[a] = -np.einsum("kuv,xvu->xk", r, dm1)
+            apt[a] += 2.0 * np.einsum("kxij,ij->xk", irp[:, :, :, p0:p1], self.dm[:, p0:p1])
+            apt[a] += self.Z[a] * np.eye(3)
+        return hess, apt
 
     def esp(self, points):
         """(P,) electrostatic potential of the molecule's own charge distribution at ``points`` (bohr)."""
@@ -218,7 +304,7 @@ class State:
         return v
 
     def homo(self):
-        mo_e, occ = np.asarray(self.mf.mo_energy), np.asarray(self.mf.mo_occ)
+        mo_e, occ = _np(self.mf.mo_energy), _np(self.mf.mo_occ)
         return float(mo_e[occ > 0].max())
 
 
@@ -264,7 +350,7 @@ def numerical_hessian(level, sym, pos_ang, charge, mult, step=0.005, dm0=None):
 
 
 def label_frame(level, sym, pos_ang, charge, mult, fields=True, raman=False, field_gradient=False, hessian=False,
-                esp=False, f=0.003, g=0.002):
+                esp=False, f=0.002, g=0.002):
     """Every requested label of one geometry: {key: array} (atomic units)."""
     n = len(sym)
     mol = level.mol(sym, pos_ang, charge, mult)
@@ -310,7 +396,14 @@ def label_frame(level, sym, pos_ang, charge, mult, fields=True, raman=False, fie
         out["quadrupole_polarizability"] = c.reshape(9, 9)
         out["quadrupole_derivatives"] = dq.reshape(n, 3, 9)
     if hessian:
-        h = numerical_hessian(level, sym, pos_ang, charge, mult, dm0=s0.dm_spin)
+        if level.analytic_hessian:
+            h, apt = s0.analytic_hessian()
+            if apt is not None:
+                if "dipole_derivatives" in out:
+                    out["dipole_derivatives_check"] = float(np.abs(out["dipole_derivatives"] - apt).max())
+                out["dipole_derivatives"] = apt
+        else:
+            h = numerical_hessian(level, sym, pos_ang, charge, mult, dm0=s0.dm_spin)
         out["hessian"], out["frequencies"] = h, frequencies(h, sym)[0]
     return out
 
@@ -351,7 +444,8 @@ def _rotate(v, axis, angle):
 
 
 def scans(sym, pos_ang, bonds, stretch=(0.75, 1.6), bend=35.0, points=13):
-    """[(config_type, positions)]: rigid scans about ``pos_ang`` of every bond, every angle and every umbrella."""
+    """[(config_type, positions)]: rigid scans about ``pos_ang`` of every bond, every angle, every umbrella and every
+    rotatable bond (a full turn)."""
     pos, out = np.asarray(pos_ang, dtype=float), []
     nbr = {a: [] for a in range(len(sym))}
     for i, j in bonds:
@@ -385,11 +479,28 @@ def scans(sym, pos_ang, bonds, stretch=(0.75, 1.6), bend=35.0, points=13):
                     p = pos.copy()
                     p[a] = pos[a] + (t - 1.0) * h0 * normal
                     out.append((f"scan_umbrella_{a}", p))
+    for b, c in bonds:                                         # torsion: rotate c's side about b-c, if it is not a ring
+        if len(nbr[b]) < 2 or len(nbr[c]) < 2:
+            continue
+        side, stack = {c}, [c]
+        while stack:
+            for x in nbr[stack.pop()]:
+                if x not in side and x != b:
+                    side.add(x)
+                    stack.append(x)
+        if any(b in nbr[x] for x in side if x != c):           # the bond is in a ring
+            continue
+        axis = pos[c] - pos[b]
+        for ang in np.radians(np.linspace(0.0, 360.0, 2 * points - 1, endpoint=False)[1:]):
+            p = pos.copy()
+            for x in side:
+                p[x] = pos[c] + _rotate(pos[x] - pos[c], axis, ang)
+            out.append((f"scan_torsion_{b}_{c}", p))
     return out
 
 
 # ---- stages -----------------------------------------------------------------------------------------------------
-SCALAR = ("energy", "homo")
+SCALAR = ("energy", "homo", "dipole_derivatives_check")
 
 
 def _record(sym, pos, charge, mult, bonds, lab, extra):
@@ -399,6 +510,11 @@ def _record(sym, pos, charge, mult, bonds, lab, extra):
         if k not in ("energy", "forces", "esp", "esp_points", "esp_response"):
             info[k] = float(v) if k in SCALAR else np.asarray(v)
     return {"sym": sym, "pos": np.asarray(pos), "forces": lab["forces"], "info": info}
+
+
+def _pick_gpu(queue):
+    """Worker initializer: bind this process to one GPU before anything imports cupy."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(queue.get())
 
 
 def _label_one(job):
@@ -413,7 +529,7 @@ def _label_one(job):
     return idx, time.time() - t0
 
 
-def label_file(geoms, out, level_kw, flags, workers=1, threads=None, method=""):
+def label_file(geoms, out, level_kw, flags, workers=1, threads=None, method="", gpus=1):
     frames = read_frames(geoms)
     out = Path(out)
     parts = Path(str(out) + ".parts")
@@ -426,7 +542,13 @@ def label_file(geoms, out, level_kw, flags, workers=1, threads=None, method=""):
     t0 = time.time()
     if workers > 1:
         import multiprocessing as mp
-        with ProcessPoolExecutor(workers, mp_context=mp.get_context("spawn")) as pool:
+        ctx, init = mp.get_context("spawn"), {}
+        if level_kw.get("backend") == "gpu4pyscf":
+            queue = ctx.Queue()
+            for w in range(workers):
+                queue.put(w % max(gpus, 1))
+            init = {"initializer": _pick_gpu, "initargs": (queue,)}
+        with ProcessPoolExecutor(workers, mp_context=ctx, **init) as pool:
             for k, (i, dt) in enumerate(pool.map(_label_one, jobs)):
                 if dt:
                     print(f"  frame {i} done in {dt:.0f} s ({k + 1}/{len(jobs)}, {time.time() - t0:.0f} s elapsed)", flush=True)
@@ -447,6 +569,9 @@ def label_file(geoms, out, level_kw, flags, workers=1, threads=None, method=""):
     write_frames(out, records)
     if esp:
         np.savez(Path(str(out).rsplit(".", 1)[0] + ".esp.npz"), **esp)
+    checks = [r["info"]["dipole_derivatives_check"] for r in records if "dipole_derivatives_check" in r["info"]]
+    if checks:
+        print(f"  analytic against finite-field dipole derivatives: largest difference {max(checks):.1e} e over {len(checks)} frames")
     unbound = [r["info"]["frame"] for r in records if r["info"]["homo"] > 0]
     if unbound:
         print(f"  warning: {len(unbound)} frames have a positive HOMO energy (an unbound electron): frames {' '.join(unbound[:20])}")
@@ -458,10 +583,15 @@ def reference(name, level_kw, out_dir, flags, xyz=None, charge=0, mult=1, method
     if xyz:
         fr = read_frames(xyz)[0]
         sym, pos = fr["sym"], fr["pos"]
-        charge, mult, bonds = frame_meta(fr) if fr["info"] else (charge, mult, default_bonds(sym))
+        if "bonds" in fr["info"]:
+            bonds = frame_meta(fr)[2]
+        else:
+            bonds = perceive_bonds(sym, pos)
+        charge = int(float(fr["info"].get("charge", charge)))
+        mult = int(float(fr["info"].get("multiplicity", mult)))
     else:
         sym, pos, charge, mult = SPECIES[name]
-        bonds = default_bonds(sym)
+        bonds = perceive_bonds(sym, pos)
     t0 = time.time()
     pos = optimize(level, sym, pos, charge, mult)
     lab = label_frame(level, sym, pos, charge, mult, **{**flags, "hessian": True})
@@ -470,7 +600,9 @@ def reference(name, level_kw, out_dir, flags, xyz=None, charge=0, mult=1, method
     if "esp" in lab:
         np.savez(Path(out_dir) / f"{name}_opt.esp.npz", points_0=lab["esp_points"], esp_0=lab["esp"],
                  **({"esp_response_0": lab["esp_response"]} if "esp_response" in lab else {}))
-    print(f"{name}: optimized and labelled in {time.time() - t0:.0f} s; frequencies " + " ".join(f"{w:.0f}" for w in lab["frequencies"]))
+    print(f"{name}: optimized and labelled in {time.time() - t0:.0f} s; frequencies " + " ".join(f"{w:.0f}" for w in lab["frequencies"])
+          + (f"; analytic against finite-field dipole derivatives {lab['dipole_derivatives_check']:.1e} e"
+             if "dipole_derivatives_check" in lab else ""))
     return path
 
 
@@ -508,8 +640,12 @@ def main(argv=None):
         p.add_argument("--raman", action="store_true")
         p.add_argument("--field-gradient", action="store_true")
         p.add_argument("--hessian", action="store_true")
+        p.add_argument("--analytic-hessian", action="store_true",
+                       help="Hessians (and closed-shell dipole derivatives) from the analytic code, not from gradients")
+        p.add_argument("--backend", choices=("pyscf", "gpu4pyscf"), default="pyscf")
+        p.add_argument("--gpus", type=int, default=1, help="gpu4pyscf: devices to spread the workers over")
         p.add_argument("--esp", action="store_true")
-        p.add_argument("--field", type=float, default=0.003, help="field strength, atomic units")
+        p.add_argument("--field", type=float, default=0.002, help="field strength, atomic units")
         p.add_argument("--gradient", type=float, default=0.002, help="field-gradient strength, atomic units")
 
     def sampling(p):
@@ -524,7 +660,8 @@ def main(argv=None):
 
     p = sub.add_parser("reference")
     p.add_argument("--species", nargs="+", default=[], help=f"built in: {' '.join(SPECIES)}")
-    p.add_argument("--xyz", help="or one molecule from an (ext)xyz file; --name, --charge, --multiplicity")
+    p.add_argument("--xyz", help="or one molecule from an (ext)xyz file; --name, --charge, --multiplicity. Without "
+                                 "bonds=... in the file its topology is perceived once, from this structure")
     p.add_argument("--name")
     p.add_argument("--charge", type=int, default=0)
     p.add_argument("--multiplicity", type=int, default=1)
@@ -550,7 +687,8 @@ def main(argv=None):
     if a.stage == "sample":
         sample(a.reference, a.out, a.wigner, a.temperature, a.classical, a.scans, tuple(a.stretch), a.bend, a.points, a.seed)
         return
-    level_kw = {"xc": a.xc, "basis": a.basis, "grid": tuple(a.grid)}
+    level_kw = {"xc": a.xc, "basis": a.basis, "grid": tuple(a.grid), "backend": a.backend,
+                "analytic_hessian": a.analytic_hessian}
     flags = {"fields": not a.no_fields, "raman": a.raman, "field_gradient": a.field_gradient, "hessian": a.hessian,
              "esp": a.esp, "f": a.field, "g": a.gradient}
     if a.esp and a.no_fields:
@@ -563,13 +701,13 @@ def main(argv=None):
         for name in a.species:
             reference(name, kw, a.out, flags, method=method)
     elif a.stage == "label":
-        label_file(a.geometries, a.out, level_kw, flags, a.workers, a.threads, method)
+        label_file(a.geometries, a.out, level_kw, flags, a.workers, a.threads, method, a.gpus)
     else:
         for name in a.species:
             ref = reference(name, {**level_kw, "threads": a.threads}, a.out, flags, method=method)
             geoms = sample(ref, Path(a.out) / f"{name}_geoms.xyz", a.wigner, a.temperature, a.classical, True,
                            tuple(a.stretch), a.bend, a.points, a.seed)
-            label_file(geoms, Path(a.out) / f"{name}.xyz", level_kw, flags, a.workers, a.threads, method)
+            label_file(geoms, Path(a.out) / f"{name}.xyz", level_kw, flags, a.workers, a.threads, method, a.gpus)
 
 
 if __name__ == "__main__":

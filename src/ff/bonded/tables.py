@@ -6,6 +6,8 @@ and impropers are typed by their apex. The tables hold unconstrained variables (
     bond  (T, T, 3)   ln r_eq [bohr], ln D, ln k                        (symmetrized over the two orders)
     apex  (T, 8)      atanh cos(theta_eq), ln k_theta, raw rho_bb, rho_ba, rho_aa, rho_bo, c_chi, ln k_chi
     e0    (T,)        reference energy of an atom of this type (Hartree; fitted to the data, see the trainer)
+    torsion (T, T, T, T, N)   K_n of a-b-c-d in units of 1e-3 Hartree, by the four atoms' types (symmetrized over
+                      the reversal d-c-b-a); zero to start with
     atom  (T, 5)      chi, ln eta, ln alpha [bohr^3], ln c_quad, trace of the atomic second moment
     link  (T, T, 2)   ln s (bond compliance; symmetrized), bond flow (antisymmetrized; ``charges = "flow"``)
 
@@ -52,7 +54,7 @@ def atom_types_of(batch) -> list[tuple[int, int]]:
 
 
 class BondedTables(nn.Module):
-    def __init__(self, atom_types, init: str | Path = "", learn: bool = True):
+    def __init__(self, atom_types, init: str | Path = "", learn: bool = True, torsion_order: int = 0):
         super().__init__()
         self.atom_types = [(int(z), int(d)) for z, d in atom_types]
         T = len(self.atom_types)
@@ -85,6 +87,8 @@ class BondedTables(nn.Module):
         self.bond = nn.Parameter(bond, requires_grad=bool(learn))
         self.apex = nn.Parameter(apex, requires_grad=bool(learn))
         self.e0 = nn.Parameter(torch.zeros(T, dtype=torch.float64))
+        self.torsion = (nn.Parameter(torch.zeros(T, T, T, T, int(torsion_order), dtype=torch.float64), requires_grad=bool(learn))
+                        if torsion_order else None)
         atom = torch.tensor([[0.0, math.log(0.5), math.log(0.6 * FREE_ATOM_ALPHA.get(z, 10.0)), 0.0, 0.0]
                              for z, _ in self.atom_types], dtype=torch.float64)
         link = torch.zeros(T, T, 2, dtype=torch.float64)
@@ -105,6 +109,10 @@ class BondedTables(nn.Module):
 
     def apex_rows(self, t: torch.Tensor) -> torch.Tensor:
         return self.apex[t]
+
+    def torsion_rows(self, ta, tb, tc, td) -> torch.Tensor:
+        """(Nt, N) raw K_n rows of the torsions a-b-c-d (the same for d-c-b-a)."""
+        return 0.5 * (self.torsion[ta, tb, tc, td] + self.torsion[td, tc, tb, ta])
 
     def link_rows(self, ta: torch.Tensor, tb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """(ln s (Nb,), flow (Nb,) from the first atom to the second) of the bonds ta-tb."""

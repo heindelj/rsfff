@@ -116,7 +116,94 @@ def test_term_switches_and_reference_fit():
     comp = torch.zeros(b.n_mol, 4, dtype=torch.float64).index_put(
         (b.mol_idx, m.tables.type_index(b.z, b.topo.degree)), torch.ones(len(b.z), dtype=torch.float64), accumulate=True)
     assert (comp.T @ resid).abs().max() < 1e-8            # least squares: residual orthogonal to the composition
-    with pytest.raises(NotImplementedError):
-        BondedModel(BondedConfig(bonded=("morse", "torsion")), [(1, 1), (8, 2)])
     mi, _ = build(bonded=("morse", "angle", "improper"))
     assert mi(b)["bonded"].c_chi.shape == (3,)
+
+
+def peroxide_and_methanol(seed=0, noise=0.05):
+    rng = np.random.default_rng(seed)
+    h2o2 = np.array([[0.0, 0.70, -0.05], [0.0, -0.70, -0.05], [0.80, 0.90, 0.45], [-0.80, -0.90, 0.45]])
+    meoh = np.array([[0.0, 0.0, 0.0], [1.43, 0.0, 0.0], [1.75, 0.90, 0.10], [-0.36, 1.03, 0.0], [-0.36, -0.51, 0.89],
+                     [-0.36, -0.51, -0.89]])
+    return [Molecule(z=np.array([8, 8, 1, 1]), pos=h2o2 + noise * rng.normal(size=h2o2.shape), bonds=np.array([[0, 1], [0, 2], [1, 3]])),
+            Molecule(z=np.array([6, 8, 1, 1, 1, 1]), pos=meoh + noise * rng.normal(size=meoh.shape),
+                     bonds=np.array([[0, 1], [1, 2], [0, 3], [0, 4], [0, 5]]))]
+
+
+def torsion_model(randomize=True):
+    torch.manual_seed(0)
+    cfg = BondedConfig(bonded=("morse", "angle", "bond_bond", "bond_angle", "angle_angle", "opposite_bond_angle", "torsion"),
+                       torsion_order=3, n_max=3, l_max=2, channels=4, hidden=16, latent=4, charges="none", dipoles=False,
+                       quadrupoles=False, polarizability="none", quadrupole_polarizability=False)
+    b = collate(peroxide_and_methanol())
+    m = BondedModel(cfg, atom_types_of(b))
+    m.set_statistics(b)
+    if randomize:
+        g = torch.Generator().manual_seed(3)
+        with torch.no_grad():
+            for n, p in m.named_parameters():
+                if not n.startswith("tables.") or n == "tables.torsion":
+                    p.add_(0.3 * torch.randn(p.shape, generator=g, dtype=p.dtype))
+    return m, b
+
+
+def test_torsions_are_enumerated_and_start_at_zero():
+    m, b = torsion_model(randomize=False)
+    assert b.topo.n_torsions == 1 + 3 and m.tables.torsion.shape[-1] == 3
+    out = m(b)
+    assert out["terms"].torsion_k.shape == (4, 3) and float(out["terms"].torsion_k.abs().max()) == 0.0
+    plain = BondedModel(BondedConfig(bonded=("morse", "angle"), n_max=3, l_max=2, channels=4, hidden=16, latent=4, charges="none",
+                                     dipoles=False, quadrupoles=False, polarizability="none", quadrupole_polarizability=False),
+                        atom_types_of(b))
+    assert plain.tables.torsion is None and plain(b)["terms"].torsion_k is None
+
+
+def test_constant_torsion_energy_is_the_cosine_series():
+    m, _ = torsion_model(randomize=False)
+    with torch.no_grad():
+        m.tables.torsion.fill_(0.0)
+        t = m.tables.type_index(torch.tensor([8, 1]), torch.tensor([2, 1]))
+        m.tables.torsion[t[1], t[0], t[0], t[1]] = torch.tensor([2.0, -1.0, 0.5])
+    mol = peroxide_and_methanol(noise=0.0)[0]
+    e = {}
+    for phi in (0.0, 60.0, 115.0, 180.0):
+        p = mol.pos.copy()
+        a = np.radians(phi)
+        p[2] = p[0] + np.array([0.9 * np.cos(0.0), 0.2, 0.9 * np.sin(0.0)])
+        p[3] = p[1] + np.array([0.9 * np.cos(a), -0.2, 0.9 * np.sin(a)])
+        bb = collate([Molecule(z=mol.z, pos=p, bonds=mol.bonds)])
+        with_t = float(m.bonded_energy(bb, constant=True)[0])
+        with torch.no_grad():
+            keep = m.tables.torsion.clone()
+            m.tables.torsion.zero_()
+            without = float(m.bonded_energy(bb, constant=True)[0])
+            m.tables.torsion.copy_(keep)
+        e[phi] = with_t - without
+        ref = 1e-3 * sum(k * (1 + np.cos(n * a)) for n, k in zip((1, 2, 3), (2.0, -1.0, 0.5)))
+        assert abs(e[phi] - ref) < 1e-12
+
+
+def test_trained_torsions_are_invariant_and_conservative():
+    m, b = torsion_model()
+    out = m(b)
+    assert out["terms"].torsion_k.abs().max() > 1e-5
+    e = out["energy"]
+    th = 0.7
+    rot = torch.tensor([[1.0, 0.0, 0.0], [0.0, math.cos(th), -math.sin(th)], [0.0, math.sin(th), math.cos(th)]], dtype=torch.float64)
+    for op in (rot, -rot):
+        assert torch.allclose(m(b, b.positions @ op.T)["energy"], e, atol=1e-10)
+    mols = peroxide_and_methanol()
+    perm = [1, 0, 3, 2]                                     # relabel the peroxide end for end
+    h = mols[0]
+    mols[0] = Molecule(z=h.z[perm], pos=h.pos[perm], bonds=np.array([[perm.index(a), perm.index(c)] for a, c in h.bonds]))
+    assert torch.allclose(m(collate(mols))["energy"], e, atol=1e-10)
+    _, f = m.energy_forces(b)
+    hstep = 1e-5
+    for atom, comp in ((2, 1), (0, 2), (6, 0)):
+        en = []
+        for s in (1, -1):
+            x = b.positions.clone()
+            x[atom, comp] += s * hstep
+            en.append(float(m(b, x)["energy"].sum()))
+        fd = -(en[0] - en[1]) / (2 * hstep) * BOHR_ANG
+        assert abs(fd - float(f[atom, comp])) < 1e-7 * max(1.0, abs(fd))

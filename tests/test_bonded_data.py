@@ -107,3 +107,53 @@ def test_pipeline_writes_what_the_model_reads(tmp_path):
     before = sorted(p.stat().st_mtime_ns for p in (tmp_path / "oh-.xyz.parts").iterdir())
     B.main(["label", str(tmp_path / "oh-_geoms.xyz"), "--out", str(tmp_path / "oh-.xyz"), "--xc", "hf", "--basis", "sto-3g", "--esp"])
     assert before == sorted(p.stat().st_mtime_ns for p in (tmp_path / "oh-.xyz.parts").iterdir())   # resumed, not redone
+
+
+def test_analytic_hessian_and_dipole_derivatives_match_the_finite_differences():
+    fd = B.label_frame(B.Level(**LEVEL), SYM, POS, 0, 1, hessian=True)
+    an = B.label_frame(B.Level(**LEVEL, analytic_hessian=True), SYM, POS, 0, 1, hessian=True)
+    assert np.abs(an["hessian"] - fd["hessian"]).max() < 5e-5
+    assert np.abs(an["frequencies"] - fd["frequencies"]).max() < 1.0
+    assert an["dipole_derivatives_check"] < 2e-4                     # analytic against the finite-field tensors
+    assert abs(np.abs(an["dipole_derivatives"] - fd["dipole_derivatives"]).max() - an["dipole_derivatives_check"]) < 1e-9
+    assert "dipole_derivatives_check" not in fd
+    only = B.label_frame(B.Level(**LEVEL, analytic_hessian=True), SYM, POS, 0, 1, fields=False, hessian=True)
+    assert np.allclose(only["dipole_derivatives"], an["dipole_derivatives"]) and "polarizability" not in only
+    with pytest.raises(ValueError, match="backend"):
+        B.Level(backend="qchem")
+
+
+def test_gpu_backend_matches_the_cpu_backend():
+    """Runs only where gpu4pyscf and a CUDA device exist (e.g. a Perlmutter GPU node)."""
+    cupy = pytest.importorskip("cupy")
+    pytest.importorskip("gpu4pyscf")
+    try:
+        cupy.cuda.Device(0).compute_capability
+    except Exception:
+        pytest.skip("no CUDA device")
+    kw = dict(xc="b3lyp", basis="def2-svp", grid=(75, 302))
+    cpu = B.label_frame(B.Level(**kw, analytic_hessian=True), SYM, POS, 0, 1, raman=True, field_gradient=True, hessian=True, esp=True)
+    gpu = B.label_frame(B.Level(**kw, analytic_hessian=True, backend="gpu4pyscf"), SYM, POS, 0, 1, raman=True,
+                        field_gradient=True, hessian=True, esp=True)
+    tol = {"energy": 1e-7, "forces": 1e-6, "dipole": 1e-6, "quadrupole": 1e-6, "polarizability": 1e-4,
+           "dipole_derivatives": 1e-4, "polarizability_derivatives": 5e-2, "quadrupole_polarizability": 1e-3,
+           "quadrupole_derivatives": 1e-3, "hessian": 1e-4, "esp": 1e-6, "esp_response": 1e-4,
+           "dipole_quadrupole_polarizability": 1e-3}
+    for key, t in tol.items():
+        assert np.abs(np.asarray(gpu[key]) - np.asarray(cpu[key])).max() < t, key
+    assert gpu["dipole_derivatives_check"] < 5e-4
+
+
+def test_topology_perception_and_torsion_scan():
+    sym, pos, _, _ = B.SPECIES["h2o2"]
+    pos = np.array(pos)
+    bonds = B.perceive_bonds(sym, pos)
+    assert bonds == [(0, 1), (0, 2), (1, 3)]
+    tor = [p for t, p in B.scans(sym, pos, bonds, points=5) if t == "scan_torsion_0_1"]
+    assert len(tor) == 8
+    for p in tor:                                             # a rigid rotation: every bond length and angle is kept
+        assert np.allclose([np.linalg.norm(p[i] - p[j]) for i, j in bonds], [np.linalg.norm(pos[i] - pos[j]) for i, j in bonds])
+        assert abs(np.linalg.norm(p[3] - p[0]) - np.linalg.norm(pos[3] - pos[0])) < 1e-12
+    assert not any(t.startswith("scan_torsion") for t, _ in B.scans(*B.SPECIES["h2o"][:2], [(0, 1), (0, 2)], points=3))
+    with pytest.raises(ValueError, match="several heavy atoms"):
+        B.frame_meta({"sym": sym, "info": {}})

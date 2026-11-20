@@ -15,6 +15,7 @@ bond-bond              z[a->i] + z[a->k]                               rho_bb
 bond-angle (per leg)   z[a->leg], z[a->other]   (two rows)             rho_ba
 angle-angle, opposite  z[a->s], z[a->x] + z[a->y]   (two rows)         rho_aa, rho_bo
 improper (per leg)     z[c->leg], z[c->j] + z[c->k]   (two rows)       c_chi + cap(u), k_chi e^{cap(u)}
+torsion a-b-c-d        z[b->c] + z[c->b], z[b->a] + z[c->d]  (two rows)  K_n = 1e-3 (table + cap(u)) Hartree
 =====================  ==============================================  ==========================================
 
 cap(u) = c tanh(u / c) with c = ``param_cap`` (``r_cap`` for bond lengths); rho = 0.95 tanh(raw + cap(u)). Every
@@ -68,6 +69,7 @@ ELEMENT_DESCRIPTORS = {
     8: (0.860, 0.66, 0.750, 0.50), 9: (0.995, 0.57, 0.875, 0.50), 15: (0.548, 1.07, 0.625, 0.75),
     16: (0.645, 1.05, 0.750, 0.75), 17: (0.790, 1.02, 0.875, 0.75),
 }
+TORSION_SCALE = 1.0e-3            # Hartree per unit of the torsion tables and readouts
 _A = {n: i for i, n in enumerate(APEX)}
 _T = {n: i for i, n in enumerate(ATOM)}
 
@@ -78,15 +80,14 @@ class BondedModel(nn.Module):
     def __init__(self, config: BondedConfig, atom_types, table_root: str = ""):
         super().__init__()
         self.config = cfg = config
-        if cfg.has("torsion"):
-            raise NotImplementedError("the torsion term is not wired into BondedModel yet")
         self.atom_types = [(int(z), int(d)) for z, d in atom_types]
         elements = sorted({z for z, _ in self.atom_types})
         missing = [z for z in elements if z not in ELEMENT_DESCRIPTORS]
         if missing:
             raise ValueError(f"no element descriptors for Z = {missing}")
         init = cfg.table_init and str((__import__("pathlib").Path(table_root) / cfg.table_init))
-        self.tables = BondedTables(self.atom_types, init=init, learn=cfg.table_learn)
+        self.tables = BondedTables(self.atom_types, init=init, learn=cfg.table_learn,
+                                   torsion_order=cfg.torsion_order if cfg.has("torsion") else 0)
 
         elut = torch.full((120,), -1, dtype=torch.long)
         elut[torch.tensor(elements)] = torch.arange(len(elements))
@@ -120,6 +121,8 @@ class BondedModel(nn.Module):
             self.dec["pair"] = LinearDecoder(L, 2, slots=2)
         if cfg.has("improper"):
             self.dec["improper"] = LinearDecoder(L, 2, slots=2)
+        if cfg.has("torsion"):
+            self.dec["torsion"] = LinearDecoder(L, cfg.torsion_order, slots=2)
 
         # ---- electrical head ----
         self.aniso = cfg.polarizability == "anisotropic"
@@ -228,6 +231,10 @@ class BondedModel(nn.Module):
             u = self.dec["improper"](edge(c, leg), edge(c, j) + edge(c, l))
             bp.c_chi = irow[:, _A["c_chi"]] + self._cap(u[:, 0])
             bp.k_chi = torch.exp(irow[:, _A["k_chi"]] + self._cap(u[:, 1]))
+        if "torsion" in self.dec and topo.n_torsions:
+            a_, b_, c_, d_ = topo.torsion_index
+            u = self.dec["torsion"](edge(b_, c_) + edge(c_, b_), edge(b_, a_) + edge(c_, d_))
+            tp.torsion_k = TORSION_SCALE * (tab.torsion_rows(t[a_], t[b_], t[c_], t[d_]) + self._cap(u))
         return bp, tp
 
     # ---- energy ----------------------------------------------------------------------------------------------

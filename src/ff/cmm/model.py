@@ -15,8 +15,12 @@ frontier exponents and the channel cutoff / taper.
 
 * **E_elst**: frozen densities, penetration included (no parameters).
 * **E_Pauli** = sum_{i<j} sum_{t,u} w_it w_ju f(b_it, b_ju; r) / r, w_it = w0[s,t] e^{cap(u_pauli)}, b_it = b_shell[s,t] e^{lnbs[s]}.
+  ``config.pauli_form = "site"``: E_Pauli = sum_{i<j} e^{cap(u_i) + cap(u_j)} [<n_i | v_j> + <n_j | v_i>], n_i the
+  permanent shells (the electrostatics' own density) and v_j(r) = sum_t a[s,t] e^{-beta r} (1 / r + beta / 2),
+  beta = b_shell[s,t] e^{lnbs[s]}: the electrons of one ion in a short-ranged site potential of the other
+  (:func:`site_pauli_kernel`; ``pauli_ln_w`` then holds ln a and ``pauli_ln_bscale`` the potential's exponent scale).
 * **E_disp** = -sum_{i<j} f6(sqrt(b_i b_j) r) sqrt(C6_i C6_j) / r^6, C6_i = C60[s] e^{cap(u_disp)}, b_i = the Pauli range of
-  the outermost shell.
+  the outermost shell (``pauli_form = "site"``: the outermost shell's exponent times its own learned scale).
   ``config.disp_model = "response"``: no learned coefficient and no environment factor. The free-ion C6_ab and
   C8_ab = C8dq_ab + C8dq_ba of every species pair come from the ions' response spectra (``disp_table.py``), and each
   is scaled by the confinement of the two ions' own polarizabilities, rho_l,i = alpha_l,i^eff / alpha_l^free
@@ -162,6 +166,16 @@ GAP_B_EPS = 0.05
 GAP_ANION_J = 2.0           # an anion's acceptor level: A = I - GAP_ANION_J J_self
 
 
+def site_pauli_kernel(b, beta, rb):
+    """<rho_b | v_beta>(R): a normalized Slater 1s density of exponent ``b`` in the unit site potential
+    v(r) = e^{-beta r} (1 / r + beta / 2) centred a distance ``rb`` away (bohr; broadcast). v is 1 / r minus the
+    potential of a 1s cloud of exponent beta, so the integral is the cloud-cloud overlap complement minus the
+    point-cloud one: f(b, beta; R) / R - e^{-b R} (1 / R + b / 2)."""
+    b, beta, rb = torch.broadcast_tensors(b, beta, rb)
+    f = slater_two_center_damp_unequal(b, beta, rb, 0)[0]
+    return f / rb - torch.exp(-b * rb) * (1.0 / rb + 0.5 * b)
+
+
 def _saturate(x, m):
     """m tanh(x / m) per column where m > 0 (the training range's bound), x elsewhere."""
     if not bool((m > 0).any()):
@@ -188,9 +202,15 @@ class CmmModel(nn.Module):
         outer = torch.tensor([max(t for t in range(T) if occ[k, t]) for k in range(S)])
         lnw = torch.full((S, T), -30.0, **f64)
         lnbs = torch.zeros(S, **f64)
+        self.pauli_site = cfg.pauli_form == "site"
         for k, x in enumerate(sym):
             occ_k = [t for t in range(T) if occ[k, t]]
-            if tab.pauli_s is not None and math.isfinite(float(tab.pauli_s[k])):      # the frozen fit
+            if self.pauli_site:                 # ln a per shell and the potential's exponent scale (table: pauli_site)
+                if tab.pauli_site_s is None or not math.isfinite(float(tab.pauli_site_s[k])):
+                    raise ValueError(f"pauli_form = 'site': the species table has no pauli_site entry for {x}")
+                lnw[k] = torch.where(occ[k], torch.log(tab.pauli_site_a[k].to(lnw).clamp(min=1e-13)), lnw[k])
+                lnbs[k] = math.log(float(tab.pauli_site_s[k]))
+            elif tab.pauli_s is not None and math.isfinite(float(tab.pauli_s[k])):      # the frozen fit
                 lnw[k] = torch.where(occ[k], torch.log(tab.pauli_w[k].to(lnw)), lnw[k])
                 lnbs[k] = math.log(float(tab.pauli_s[k]))
             elif x in PAULI_SHELL_INIT:
@@ -208,13 +228,21 @@ class CmmModel(nn.Module):
         c6 = [DISP_INIT.get(x, DEFAULT_C6_PRIOR.get(int(z), DISP_FALLBACK))[0] for x, z in zip(sym, tab.Z.tolist())]
         self.disp_ln_c6 = nn.Parameter(torch.log(torch.tensor(c6, **f64)))
         self.disp_response = cfg.disp_model == "response"
+        if self.pauli_site:           # the damping range starts from the table's disp_range (else the outermost shell's
+            ob = tab.shell_b[torch.arange(S), outer].to(**f64)           # exponent): the potential's scale is not a density range
+            db = tab.disp_b.to(**f64) if tab.disp_b is not None else torch.full((S,), float("nan"), **f64)
+            lnbs_disp = torch.where(torch.isfinite(db), torch.log(db.clamp(min=1e-6) / ob), torch.zeros(S, **f64))
+            if not self.disp_response:
+                self.disp_ln_bscale = nn.Parameter(lnbs_disp.clone())
+        else:
+            lnbs_disp = lnbs
         if self.disp_response:
             from .io import resolve_params
             dtab = load_disp_table(resolve_params(cfg.disp_table), sym)
             self.register_buffer("disp_c6", dtab["c6"])              # persistent: a checkpoint carries its table
             self.register_buffer("disp_c8", dtab["c8"])
             self.register_buffer("disp_w", dtab["w"])
-            self.disp_ln_bscale = nn.Parameter(lnbs.clone())         # the damping range, per species
+            self.disp_ln_bscale = nn.Parameter(lnbs_disp.clone())    # the damping range, per species
             Cq = tab.C.to(torch.float64)
             inv = [1.0 / tab.alpha.to(torch.float64), torch.where(Cq > 0, 1.0 / Cq.clamp(min=1e-30), torch.full_like(Cq, 1e12)),
                    torch.where(tab.a0 > 0, 1.0 / tab.a0.clamp(min=1e-30), torch.ones_like(tab.a0)).to(torch.float64)]
@@ -417,11 +445,13 @@ class CmmModel(nn.Module):
         """(S,) the dispersion damping exponent per species: the outermost shell's, times the Pauli range scale
         (emitted dispersion) or its own learned scale (response dispersion)."""
         S = self.outer_shell.shape[0]
-        ln = self.disp_ln_bscale if self.disp_response else self.pauli_ln_bscale
+        ln = self.disp_ln_bscale if (self.disp_response or self.pauli_site) else self.pauli_ln_bscale
         return self.tab.shell_b[torch.arange(S, device=self.outer_shell.device), self.outer_shell] * ln.exp()
 
     def frozen_params(self, sp):
-        """Per atom: Pauli shell weights and exponents (N, T), C6 (N,), dispersion exponent (N,)."""
+        """Per atom: Pauli shell weights and exponents (N, T), C6 (N,), dispersion exponent (N,). With
+        ``pauli_form = "site"`` the weights are the site potential's amplitudes a_it e^{cap(u_i)} and the exponents
+        its beta_it."""
         w = torch.exp(self.pauli_ln_w[sp] + self.cap(self._u["pauli"])[:, None]) * self.shell_mask[sp]
         b = self.tab.shell_b[sp] * self.pauli_ln_bscale.exp()[sp][:, None]
         if self.disp_response:              # the free like-pair coefficient (the pair values: response_dispersion)
@@ -465,8 +495,15 @@ class CmmModel(nn.Module):
         (i, j), dr = bt["pairs"], bt["pair_dr"]
         r_ang = dr.norm(dim=-1)
         rb = r_ang / K.BOHR_ANG
-        f = slater_two_center_damp_unequal(b[i][:, :, None], b[j][:, None, :], rb[:, None, None], 0)[0]
-        e_p = torch.einsum("pt,ptu,pu->p", w[i], f, w[j]) / rb
+        if self.pauli_site:           # e^{u_i + u_j} [<n_i | v_j> + <n_j | v_i>]: w carries a e^{u} of the potential's owner
+            n, bn = self.tab.shell_n[sp], self.tab.shell_b[sp]
+            env = torch.exp(self.cap(self._u["pauli"]))
+            kij = site_pauli_kernel(bn[i][:, :, None], b[j][:, None, :], rb[:, None, None])      # i's shells in v_j
+            kji = site_pauli_kernel(bn[j][:, :, None], b[i][:, None, :], rb[:, None, None])
+            e_p = env[i] * torch.einsum("pt,ptu,pu->p", n[i], kij, w[j]) + env[j] * torch.einsum("pt,ptu,pu->p", n[j], kji, w[i])
+        else:
+            f = slater_two_center_damp_unequal(b[i][:, :, None], b[j][:, None, :], rb[:, None, None], 0)[0]
+            e_p = torch.einsum("pt,ptu,pu->p", w[i], f, w[j]) / rb
         self._pauli_pairs = ((i, j), e_p)
         fr = bt["frame"][i]
         if self.disp_response:
@@ -1794,6 +1831,7 @@ class CmmModel(nn.Module):
               for k in range(len(sym))]
         rows = [f"{x:>3}: W1 {w1[k, 0]:.3f}/{w1[k, 1]:.3f}/{w1[k, 2]:.3f}  {g2[k]}  "
                 f"qD0 {self.ct_ln_q0[k, 0].exp():.3f} qA0 {self.ct_ln_q0[k, 1].exp():.3f}  "
+                + (f"site potential scale {self.pauli_ln_bscale[k].exp():.3f}  " if self.pauli_site else "")
                 + (f"disp range x{self.disp_ln_bscale[k].exp():.3f}" if self.disp_response
                    else f"C6 {self.disp_ln_c6[k].exp():.1f}") + f"  v0 {self.ct_ln_v0[k].exp():.4f}  "
                 f"eta {nn.functional.softplus(self.ct_eta_raw[k]):.3f}"

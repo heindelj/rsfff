@@ -36,6 +36,13 @@ class CmmConfig:
     species_hidden: int = 16          # species embedding MLP width (descriptor -> embedding)
     env_cap: float = 3.0              # |ln factor| bound of the Pauli, C6, W1, W2 environment factors
     ct_q_cap: float = 1.5             # |ln factor| bound of the CT charges' environment factors
+    pauli_form: str = "shells"        # the frozen Pauli energy. "shells": the pair kernel between Pauli charges on the
+                                      # permanent shells, sum_tu w_it w_ju f(b_it s_i, b_ju s_j; r) / r (table: pauli).
+                                      # "site": each ion's electrons in a short-ranged potential of the other,
+                                      # E_ij = e^{u_i + u_j} [<n_i | v_j> + <n_j | v_i>], n the permanent shells,
+                                      # v_j(r) = sum_t a_jt e^{-beta r} (1 / r + beta / 2), beta = s_j b_jt (table:
+                                      # pauli_site). One-body in the partner's density: the form a QM region can take
+                                      # (claude/qm_embedding_pauli.md)
     xpol_bound: str = "off"           # exchange polarization, the bound that keeps a pair's Pauli wall
                                       # (theory/response_functional.tex, the Pauli-wall proposition). "off": W1 per
                                       # rank on the drive, W2 on the Gram blocks, independent. "rank": the rank
@@ -141,6 +148,8 @@ class CmmConfig:
             raise ValueError(f"ct_model {self.ct_model!r}: 'flux' or 'gap'")
         if self.ct_gap_overlap not in ("probe", "pauli"):
             raise ValueError(f"ct_gap_overlap {self.ct_gap_overlap!r}: 'probe' or 'pauli'")
+        if self.pauli_form not in ("shells", "site"):
+            raise ValueError(f"pauli_form {self.pauli_form!r}: 'shells' or 'site'")
         if self.xpol_bound not in ("off", "rank", "scalar"):
             raise ValueError(f"xpol_bound {self.xpol_bound!r}: 'off', 'rank' or 'scalar'")
         if self.disp_model not in ("emitted", "response"):

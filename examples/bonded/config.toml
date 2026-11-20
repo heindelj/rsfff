@@ -1,0 +1,48 @@
+# Bonded model of H2O, H3O+, OH- and H2O2 on the example data (wB97X/def2-SVP; see README.md).
+#   python -m rsfff.train.bonded examples/bonded/config.toml
+
+[terms]
+bonded = ["morse", "angle", "bond_bond", "bond_angle", "angle_angle", "opposite_bond_angle", "torsion"]
+torsion_order = 3
+charges = "sqe"                    # permanent charges and charge-flow response from one split-charge model
+dipoles = true
+quadrupoles = true
+polarizability = "anisotropic"
+quadrupole_polarizability = false  # the example data has no field-gradient labels to pin it
+
+[tables]
+init = ""                          # no constant-parameter fit: the trainer's bonded_prefit makes one
+learn = true
+
+[encoder]
+latent = 8
+hidden = 64
+depth = 2
+param_cap = 1.0
+r_cap = 0.2
+
+[data]
+root = "examples/bonded"
+train = ["data/h2o.xyz", "data/h3o+.xyz", "data/oh-.xyz", "data/h2o2.xyz",
+         "data/h2o_opt.xyz", "data/h3o+_opt.xyz", "data/oh-_opt.xyz", "data/h2o2_opt.xyz"]
+reference = ["data/h2o_opt.xyz", "data/h3o+_opt.xyz", "data/oh-_opt.xyz", "data/h2o2_opt.xyz"]
+holdout = "scan"                   # every scan frame is test data: never trained on, never used for model selection
+val_fraction = 0.2
+
+[loss]
+energy = 1.0
+forces = 1.0
+dipole = 1.0
+quadrupole = 1.0
+polarizability = 1.0
+dipole_derivatives = 1.0
+polarizability_derivatives = 1.0
+hessian = 1.0                      # only the optimized structures carry a Hessian here
+
+[train]
+out = "examples/bonded/run"
+epochs = 300
+batch = 32
+lr = 2e-3
+table_lr = 2e-4
+seed = 0

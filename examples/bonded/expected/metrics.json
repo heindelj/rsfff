@@ -1,0 +1,285 @@
+{
+ "validation": {
+  "h2o": {
+   "n": 8,
+   "e_mae": 0.01968658078309629,
+   "e_max": 0.07677321992217123,
+   "f_rmse": 0.6219859868290182,
+   "dipole_derivatives_rmse": 0.008010731191572187,
+   "polarizability_derivatives_rmse": 0.046768144303943354,
+   "dipole_rmse": 0.0008475843603882937,
+   "quadrupole_rmse": 0.01098297123598176,
+   "polarizability_rmse": 0.014497919271611296
+  },
+  "h3o+": {
+   "n": 8,
+   "e_mae": 0.026720163513114927,
+   "e_max": 0.04687614906010875,
+   "f_rmse": 0.5943907557879448,
+   "dipole_derivatives_rmse": 0.0065576172788827936,
+   "polarizability_derivatives_rmse": 0.06661372304953685,
+   "dipole_rmse": 0.0008662526624386012,
+   "quadrupole_rmse": 0.010315373969605622,
+   "polarizability_rmse": 0.008489629771905916
+  },
+  "oh-": {
+   "n": 8,
+   "e_mae": 0.012257889514157697,
+   "e_max": 0.02353378016282497,
+   "f_rmse": 0.3607303274492461,
+   "dipole_derivatives_rmse": 0.009114518424974828,
+   "polarizability_derivatives_rmse": 0.09428418054446636,
+   "dipole_rmse": 0.00287272979664551,
+   "quadrupole_rmse": 0.05797191742974627,
+   "polarizability_rmse": 0.008046940484783872
+  },
+  "h2o2": {
+   "n": 8,
+   "e_mae": 0.08706663593731209,
+   "e_max": 0.2788386674270689,
+   "f_rmse": 1.1227611535295348,
+   "dipole_derivatives_rmse": 0.010461343905494193,
+   "polarizability_derivatives_rmse": 0.15908258649921872,
+   "dipole_rmse": 0.00146323600634465,
+   "quadrupole_rmse": 0.018755986570137172,
+   "polarizability_rmse": 0.03625482494694311
+  }
+ },
+ "constant": {
+  "h2o": {
+   "n": 8,
+   "e_mae": 0.7456784688776823,
+   "e_max": 1.3466286081518382,
+   "f_rmse": 5.064944628604176,
+   "dipole_derivatives_rmse": 0.07753925941111563,
+   "polarizability_derivatives_rmse": 2.4865188236697793,
+   "dipole_rmse": 0.06390388716464439,
+   "quadrupole_rmse": 0.2017619970258231,
+   "polarizability_rmse": 0.34573389023902273
+  },
+  "h3o+": {
+   "n": 8,
+   "e_mae": 0.22460805839061634,
+   "e_max": 0.3868198841116252,
+   "f_rmse": 1.6304585638392455,
+   "dipole_derivatives_rmse": 0.07347846650989902,
+   "polarizability_derivatives_rmse": 1.7120165681397013,
+   "dipole_rmse": 0.034927175450849134,
+   "quadrupole_rmse": 0.2075730887292877,
+   "polarizability_rmse": 0.21908333167057917
+  },
+  "oh-": {
+   "n": 8,
+   "e_mae": 0.8623264622439065,
+   "e_max": 0.9288508336096817,
+   "f_rmse": 1.253407779122507,
+   "dipole_derivatives_rmse": 0.2543040885020342,
+   "polarizability_derivatives_rmse": 2.3920320047174575,
+   "dipole_rmse": 0.054237221973141896,
+   "quadrupole_rmse": 0.14280002849320642,
+   "polarizability_rmse": 0.1878950635601038
+  },
+  "h2o2": {
+   "n": 8,
+   "e_mae": 0.563394268296466,
+   "e_max": 1.2604555058404256,
+   "f_rmse": 6.905127527695017,
+   "dipole_derivatives_rmse": 0.08379353673631866,
+   "polarizability_derivatives_rmse": 2.87625119927244,
+   "dipole_rmse": 0.03768629802467106,
+   "quadrupole_rmse": 0.24664454506244154,
+   "polarizability_rmse": 0.35514853952836184
+  }
+ },
+ "holdout": {
+  "h2o": {
+   "n": 21,
+   "e_mae": 0.9042897917388582,
+   "e_max": 4.752864962134348,
+   "f_rmse": 6.595764461734217,
+   "dipole_derivatives_rmse": 0.03453479465171695,
+   "polarizability_derivatives_rmse": 0.6850070854272133,
+   "dipole_rmse": 0.017024119866540354,
+   "quadrupole_rmse": 0.0700808631322523,
+   "polarizability_rmse": 0.18145720681656444
+  },
+  "h3o+": {
+   "n": 55,
+   "e_mae": 0.8620867451726479,
+   "e_max": 7.521367336904188,
+   "f_rmse": 4.514311230548051,
+   "dipole_derivatives_rmse": 0.025414716717653614,
+   "polarizability_derivatives_rmse": 0.3947256509374714,
+   "dipole_rmse": 0.01621497432552278,
+   "quadrupole_rmse": 0.04566968540542913,
+   "polarizability_rmse": 0.10472135834687513
+  },
+  "oh-": {
+   "n": 7,
+   "e_mae": 0.32469545749071027,
+   "e_max": 0.7554499773214874,
+   "f_rmse": 7.403778386539022,
+   "dipole_derivatives_rmse": 0.11334827713726861,
+   "polarizability_derivatives_rmse": 1.5481754397549738,
+   "dipole_rmse": 0.08658742503496358,
+   "quadrupole_rmse": 0.1633522860305408,
+   "polarizability_rmse": 0.40552935592514916
+  },
+  "h2o2": {
+   "n": 47,
+   "e_mae": 1.474745895552655,
+   "e_max": 14.069501228239734,
+   "f_rmse": 10.255435064776277,
+   "dipole_derivatives_rmse": 0.07065442189720497,
+   "polarizability_derivatives_rmse": 1.4696814464294643,
+   "dipole_rmse": 0.036650250148395194,
+   "quadrupole_rmse": 0.15660023306771248,
+   "polarizability_rmse": 0.4090290044378176
+  }
+ },
+ "holdout_constant": {
+  "h2o": {
+   "n": 21,
+   "e_mae": 2.054815646801726,
+   "e_max": 5.819694813815047,
+   "f_rmse": 10.883386962716912,
+   "dipole_derivatives_rmse": 0.09934838570597847,
+   "polarizability_derivatives_rmse": 2.9858492091828923,
+   "dipole_rmse": 0.07521180276579541,
+   "quadrupole_rmse": 0.21421276517653987,
+   "polarizability_rmse": 0.8474858740262463
+  },
+  "h3o+": {
+   "n": 55,
+   "e_mae": 0.863334964689449,
+   "e_max": 7.07762275295629,
+   "f_rmse": 5.119253913200301,
+   "dipole_derivatives_rmse": 0.07622494013217203,
+   "polarizability_derivatives_rmse": 1.7094126126001612,
+   "dipole_rmse": 0.06436681867860049,
+   "quadrupole_rmse": 0.23780968059487453,
+   "polarizability_rmse": 0.4900387571731833
+  },
+  "oh-": {
+   "n": 7,
+   "e_mae": 0.9273076700385341,
+   "e_max": 2.8644943039712962,
+   "f_rmse": 12.047520666266186,
+   "dipole_derivatives_rmse": 0.2895451561723831,
+   "polarizability_derivatives_rmse": 1.991229577040036,
+   "dipole_rmse": 0.28224777790319394,
+   "quadrupole_rmse": 0.41644929399822145,
+   "polarizability_rmse": 0.6357693345858523
+  },
+  "h2o2": {
+   "n": 47,
+   "e_mae": 2.725623533043325,
+   "e_max": 13.341153461754375,
+   "f_rmse": 16.72297248004865,
+   "dipole_derivatives_rmse": 0.11225355243106762,
+   "polarizability_derivatives_rmse": 3.1104687618129376,
+   "dipole_rmse": 0.07540114287684958,
+   "quadrupole_rmse": 0.2772853592993066,
+   "polarizability_rmse": 1.202629005525089
+  }
+ },
+ "minima": {
+  "h2o_opt": {
+   "bond_lengths": [
+    0.9621809617560435,
+    0.9621809617560435
+   ],
+   "frequencies": [
+    1642.4142130349621,
+    3891.444386386292,
+    3988.5870848244886
+   ],
+   "reference_frequencies": [
+    1643.653818,
+    3893.3183777,
+    3992.4855421
+   ],
+   "constant_frequencies": [
+    1802.5515546365802,
+    3875.79236750541,
+    3998.200116924371
+   ]
+  },
+  "h3o+_opt": {
+   "bond_lengths": [
+    0.9813358375637192,
+    0.9813358799022118,
+    0.9813358799022118
+   ],
+   "frequencies": [
+    755.0552407279298,
+    1622.5049927090533,
+    1622.5054552003717,
+    3623.198872976637,
+    3735.320670468325,
+    3735.320968578139
+   ],
+   "reference_frequencies": [
+    766.9770312,
+    1622.4849061,
+    1622.6785149,
+    3620.3918697,
+    3730.7192466,
+    3730.883455
+   ],
+   "constant_frequencies": [
+    803.6196085253301,
+    1653.2195461931533,
+    1653.2200490684959,
+    3628.960162022901,
+    3757.5346222629037,
+    3757.534974788087
+   ]
+  },
+  "oh-_opt": {
+   "bond_lengths": [
+    0.9789877394221836
+   ],
+   "frequencies": [
+    3563.547798813329
+   ],
+   "reference_frequencies": [
+    3565.0241515
+   ],
+   "constant_frequencies": [
+    3606.409286644104
+   ]
+  },
+  "h2o2_opt": {
+   "bond_lengths": [
+    1.4161303270724923,
+    0.9663812903752879,
+    0.9663812921045799
+   ],
+   "frequencies": [
+    369.6537285892539,
+    1038.2970003187513,
+    1360.0911459486977,
+    1494.085533435545,
+    3853.7601246694644,
+    3854.563184005761
+   ],
+   "reference_frequencies": [
+    353.20053782,
+    1041.7214169,
+    1355.2685516,
+    1493.5969595,
+    3853.7672861,
+    3855.6688392
+   ],
+   "constant_frequencies": [
+    270.97980697328785,
+    967.6054629548098,
+    1294.310800857523,
+    1337.0784794754175,
+    3938.5723159567915,
+    3939.048875241414
+   ]
+  }
+ }
+}

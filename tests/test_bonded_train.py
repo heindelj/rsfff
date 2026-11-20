@@ -66,3 +66,86 @@ batch = 8
     assert saved["atom_types"] == [(1, 1), (8, 1), (8, 2)] and saved["config"]["encoder"]["latent"] == 3
     assert json.loads((tmp_path / "out" / "metrics.json").read_text())["constant"]["h2o"]["n"] == 3
     assert load_config(cfg, ["encoder.latent=5", "train.constant_only=true"])[0].latent == 5
+
+
+def test_derivative_residuals_vanish_on_the_models_own_derivatives():
+    """Labels built from the model's own Jacobians and Hessian: every residual is zero, in the labels' layout and
+    units (per bohr); a changed model has non-zero residuals."""
+    import dataclasses
+
+    from rsfff.ff.bonded import collate
+    from rsfff.ff.units import BOHR_ANG
+    from rsfff.train.bonded import derivative_residuals
+
+    from test_bonded_electrical import _electrical_model
+
+    m, b = _electrical_model()
+    n = b.z.shape[0]
+    pos = b.positions.clone().requires_grad_(True)
+    out = m(b, pos)
+    (g,) = torch.autograd.grad(out["energy"].sum(), pos, create_graph=True)
+    dmu = torch.stack([torch.autograd.grad(out["dipole"][:, k].sum(), pos, retain_graph=True)[0] for k in range(3)], -1) * BOHR_ANG
+    dal = torch.stack([torch.autograd.grad(out["polarizability"][:, j, k].sum(), pos, retain_graph=True)[0]
+                       for j in range(3) for k in range(3)], -1) * BOHR_ANG
+    hess = torch.stack([torch.autograd.grad(g.reshape(-1)[i], pos, retain_graph=True)[0].reshape(-1) for i in range(3 * n)]) * BOHR_ANG ** 2
+    off = np.cumsum([0] + np.bincount(b.mol_idx.numpy()).tolist())
+    hs = tuple(hess[3 * off[i]:3 * off[i + 1], 3 * off[i]:3 * off[i + 1]].detach() if i != 1 else None for i in range(b.n_mol))
+    dmu = dmu.detach().clone()
+    dmu[b.mol_idx == 3] = float("nan")                           # the last molecule has no dipole derivatives
+    lab = dataclasses.replace(b, dipole_derivatives=dmu, polarizability_derivatives=dal.detach(), hessians=hs)
+    assert lab.labelled("dipole_derivatives").tolist() == [True, True, True, False]
+    assert lab.labelled("hessians").tolist() == [True, False, True, True]
+
+    def residuals(model):
+        p = lab.positions.clone().requires_grad_(True)
+        o = model(lab, p)
+        (gr,) = torch.autograd.grad(o["energy"].sum(), p, create_graph=True)
+        return derivative_residuals(model, lab, o, p, gr, 3, torch.Generator().manual_seed(0), True)
+
+    res = residuals(m)
+    assert set(res) == {"dipole_derivatives", "polarizability_derivatives", "hessian"}
+    assert res["dipole_derivatives"].shape[0] == int((b.mol_idx != 3).sum()) and res["hessian"].shape[0] == int((b.mol_idx != 1).sum())
+    for r in res.values():
+        assert float(r.abs().max()) < 1e-9
+    sum(float((r ** 2).sum()) for r in res.values())
+    (sum((r ** 2).sum() for r in res.values())).backward()        # the loss trains through the derivatives
+    with torch.no_grad():
+        for p in m.dec.values():
+            p.weight.mul_(1.5)
+    assert all(float(r.abs().max()) > 1e-6 for r in residuals(m).values())
+
+
+def test_holdout_by_config_type(tmp_path):
+    water = np.array([[0.0, 0.0, 0.117], [-0.763, 0.0, -0.468], [0.763, 0.0, -0.468]])
+    write(tmp_path / "a.xyz", water, 0, n=10)
+    text = (tmp_path / "a.xyz").read_text().splitlines()
+    for i in range(0, len(text), 5):                              # frames 0-3 become scan frames
+        text[i + 1] += " config_type=" + ("scan_stretch_0_1" if i // 5 < 4 else "wigner")
+    (tmp_path / "a.xyz").write_text("\n".join(text) + "\n")
+    cfg = tmp_path / "run.toml"
+    cfg.write_text(f'''
+[terms]
+charges = "none"
+dipoles = false
+quadrupoles = false
+polarizability = "none"
+quadrupole_polarizability = false
+[encoder]
+latent = 2
+hidden = 8
+n_max = 3
+l_max = 2
+channels = 4
+[data]
+root = "{tmp_path}"
+train = ["a.xyz"]
+holdout = "scan"
+val_fraction = 0.5
+[train]
+out = "{tmp_path / "out"}"
+epochs = 1
+''')
+    report = main([str(cfg)])
+    assert report["holdout"]["a"]["n"] == 4 and report["validation"]["a"]["n"] == 3
+    rows = (tmp_path / "out" / "holdout.csv").read_text().splitlines()
+    assert len(rows) == 5 and rows[1].split(",")[1] == "scan_stretch_0_1"

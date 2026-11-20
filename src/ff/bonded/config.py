@@ -9,6 +9,7 @@ The file has three model tables (every key optional; the defaults are the datacl
       bonded = ["morse", "angle", "bond_bond", "bond_angle", "angle_angle", "opposite_bond_angle"]
                also: "improper", "torsion". A term with no instance in a molecule (an angle in OH-) is simply absent
                there. Forms: rsfff.ff.film.bonded / rsfff.ff.film.terms.
+      torsion_order = 4          the torsion series sum_n K_n (1 + cos n phi), n = 1 .. torsion_order
       charges = "sqe"            "sqe": the permanent charges are the zero-field solution of the split-charge model
                                  that also gives the charge-flow response (one eta, one compliance per bond);
                                  "flow": emitted bond flows, no charge-flow response; "none": Q / n on every atom
@@ -55,7 +56,7 @@ _CHARGES = ("sqe", "flow", "none")
 _ALPHA = ("none", "isotropic", "anisotropic")
 _CONDITIONING = ("film", "concatenate", "none")
 _CONDITION_ON = ("elements", "degrees", "charge", "multiplicity")
-_TABLES = {"terms": ("bonded", "charges", "dipoles", "quadrupoles", "polarizability", "quadrupole_polarizability"),
+_TABLES = {"terms": ("bonded", "torsion_order", "charges", "dipoles", "quadrupoles", "polarizability", "quadrupole_polarizability"),
            "tables": ("init", "learn"),
            "encoder": ("latent", "hidden", "depth", "param_cap", "r_cap", "odd", "compress", "n_max", "l_max", "channels",
                        "species_dim", "morse_a", "conditioning", "condition_on", "condition_dim")}
@@ -66,6 +67,7 @@ _RENAME = {("tables", "init"): "table_init", ("tables", "learn"): "table_learn"}
 class BondedConfig:
     # [terms]
     bonded: tuple = ("morse", "angle", "bond_bond", "bond_angle", "angle_angle", "opposite_bond_angle")
+    torsion_order: int = 4
     charges: str = "sqe"
     dipoles: bool = True
     quadrupoles: bool = True
@@ -117,6 +119,8 @@ class BondedConfig:
         for name in ("latent", "hidden", "depth", "n_max", "channels", "species_dim", "condition_dim"):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"encoder.{name} must be >= 1")
+        if int(self.torsion_order) < 1:
+            raise ValueError("terms.torsion_order must be >= 1")
         if self.l_max < 0 or self.param_cap <= 0 or self.r_cap <= 0 or self.morse_a <= 0:
             raise ValueError("encoder: l_max >= 0, param_cap > 0, r_cap > 0 and morse_a > 0 are required")
         if "torsion" in self.bonded and self.l_max < 1:
