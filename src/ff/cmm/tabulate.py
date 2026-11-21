@@ -131,9 +131,9 @@ class RadialTable:
     names). A built pair is taken, in order, from ``store`` (a dict key -> coefficients, e.g. shipped with a model),
     from the disk cache (:func:`table_cache_dir`), or computed and then written to both. A key encodes everything
     the integrals depend on, so a stored pair can never be applied to a different pair of ions; bump
-    :attr:`VERSION` whenever the integrals themselves change."""
+    :attr:`VERSION` whenever the integrals themselves change (2: the overlaps on :func:`K.table_ovl_grid`)."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, tab: IonTable, probes=PROBES, r_min=0.3, r_max=12.0, h=0.01, dtype=torch.float64, store=None):
         self.tab, self.probes = tab.to("cpu"), tuple(probes)
@@ -152,7 +152,7 @@ class RadialTable:
 
     # ---- identity, storage -----------------------------------------------------------------------------------
     def _key_extra(self):
-        return repr(self.probes)
+        return f"{self.probes!r}|ovl{K.TABLE_OVL_KMAX!r},{K.TABLE_OVL_N!r}"
 
     def pair_key(self, si: int, sj: int) -> str:
         import hashlib
@@ -297,7 +297,9 @@ class RadialTable:
                 out[f"envV:{name}:{n}"] = c[n]
             S0 = S1 = 0.0 * rb
             for bt, nt in shells:
-                a_, da, _ = shaped_overlap_derivs(bp, wp, bt.expand(G), one, rb)
+                # one transform per shape (the rows are the same at every r), broadcast over the grid
+                a_, da, _ = shaped_overlap_derivs(bp[:1], wp[:1], bt.reshape(1), one[:1], rb,
+                                                  grid=K.table_ovl_grid(rb.dtype, rb.device))
                 S0, S1 = S0 + nt * a_, S1 + nt * da
             out[f"envS:{name}:0"], out[f"envS:{name}:1"] = S0, S1
         return out
@@ -434,7 +436,7 @@ class XpolTable(RadialTable):
     def _xpol_rows(self, si, sj):
         tab = self.tab
         rb = self.r / BOHR
-        k, wk = K._ovl_grid(rb.dtype, rb.device)
+        k, wk = K.table_ovl_grid(rb.dtype, rb.device)
         one_s = torch.zeros(4, dtype=rb.dtype)
         one_s[0] = 1.0
 
@@ -450,29 +452,39 @@ class XpolTable(RadialTable):
             return out
 
         fp = rho(si)
-        x = k[None, :] * rb[:, None]
-        ys = torch.stack([_sph_y(n, x) for n in range(NORD + 2)])                 # (NORD + 2, G, K)
         kp = torch.stack([k ** (2 * n + 2) for n in range(NORD + 2)])            # (NORD + 2, K)
+        c2 = 1.0 / (2 * math.pi ** 2)
+        Fs = {q: fp * ft(bq, wq) * wk * c2 for q, (bq, wq) in
+              {"dip": (tab.b_dip[sj], tab.w_dip[sj]), "quad": (tab.b_quad[sj], tab.w_quad[sj])}.items()}
+        Fsc = {"xp:breath": fp * ft(tab.b_breath[sj], tab.w_breath[sj]) * wk * c2, "xp:ovl": fp * rho(sj) * wk * c2}
+        # every Bessel sum of the pair in one pass over the grid (the (NORD + 2, g, K) stack is made once per chunk):
+        # for dip / quad sum_k y_n(kr) k^(2n+2) F (n = 0..NORD+1); for the scalars sum_k y_0 k^2 F, y_1 k^4 F, y_0 k^4 F
+        z = torch.zeros_like(k)
+        W = [kp * Fs["dip"][None], kp * Fs["quad"][None]]
+        for F in Fsc.values():
+            W.append(torch.stack([k * k * F, k ** 4 * F] + [z] * NORD))
+            W.append(torch.stack([k ** 4 * F] + [z] * (NORD + 1)))
+        W = torch.stack(W)                                                        # (6, NORD + 2, K)
+        CH = 128                                                                  # grid points per Bessel stack
+        sums = []
+        for a in range(0, rb.shape[0], CH):
+            x = k[None, :] * rb[a:a + CH, None]
+            ys = torch.stack([_sph_y(n, x) for n in range(NORD + 2)])             # (NORD + 2, g, K)
+            sums.append(torch.einsum("ngk,snk->sng", ys, W))
+        sums = torch.cat(sums, 2)                                                 # (6, NORD + 2, G)
         pre = torch.stack([rb ** (2 * n + 1) / math.prod(range(1, 2 * n, 2)) for n in range(NORD + 2)])
         n_ = torch.arange(NORD + 1, dtype=rb.dtype)[:, None]
         out = {}
-        for q, (bq, wq) in {"dip": (tab.b_dip[sj], tab.w_dip[sj]), "quad": (tab.b_quad[sj], tab.w_quad[sj])}.items():
-            F = fp * ft(bq, wq) * wk / (2 * math.pi ** 2)
-            lam = pre * torch.einsum("ngk,nk->ng", ys, kp * F[None])                # (NORD + 2, G)
+        for m, q in enumerate(("dip", "quad")):
+            lam = pre * sums[m]                                                   # (NORD + 2, G)
             # lam_n' = (2n+1)(lam_n - lam_n+1) / r (from g_n+1 = g_n' / r), lam_n'' from the same twice
             d1 = (2 * n_ + 1) * (lam[:-1] - lam[1:]) / rb
             d2 = (2 * n_[:-1] + 1) * ((d1[:-1] - d1[1:]) / rb - (lam[:-2] - lam[1:-1]) / rb ** 2)
             for n in range(NORD):           # derivatives in r (Angstrom), like the rest of the table
                 out[f"xp:{q}:{n}"] = torch.stack([lam[n], d1[n] / BOHR, d2[n] / BOHR ** 2], -1)
-
-        def scalar(F):                      # O(r) = int F k^2 j0(kr) and its r-derivatives (Angstrom)
-            O = (ys[0] * (k * k * F)[None]).sum(-1)
-            O1 = -rb * (ys[1] * (k ** 4 * F)[None]).sum(-1)
-            O2 = ((2 * ys[1] - ys[0]) * (k ** 4 * F)[None]).sum(-1)
-            return torch.stack([O, O1 / BOHR, O2 / BOHR ** 2], -1)
-
-        out["xp:breath"] = scalar(fp * ft(tab.b_breath[sj], tab.w_breath[sj]) * wk / (2 * math.pi ** 2))
-        out["xp:ovl"] = scalar(fp * rho(sj) * wk / (2 * math.pi ** 2))
+        for m, name in enumerate(Fsc):      # O(r) = int F k^2 j0(kr) and its r-derivatives (Angstrom)
+            O, Y1, Y0 = sums[2 + 2 * m, 0], sums[2 + 2 * m, 1], sums[3 + 2 * m, 0]
+            out[name] = torch.stack([O, -rb * Y1 / BOHR, (2 * Y1 - Y0) / BOHR ** 2], -1)
         return out
 
 

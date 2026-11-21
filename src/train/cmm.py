@@ -16,7 +16,7 @@ The config has four tables, every key optional (the defaults are the complete.de
               w_env_mid, w_dip
     [train]   out, epochs, batch, lr, seed, device, cache_dir, force_batch, force_every, dip_every,
               alpha_every, curv_every, curv_frames, curv_delta, smooth_sigma, env_mid_scale, env_sat, val_cap,
-              log_every, init_from, hull_k
+              log_every, init_from, hull_k, threads, dump_bad, drop_negative_gap
 
 Relative data paths are taken relative to ``data.root`` (default: the config file's directory).
 
@@ -151,6 +151,15 @@ class RunConfig:
     log_every: int = 25
     init_from: str = ""
     hull_k: int = 6
+    threads: int = 0                  # torch intra-op threads (0: torch's default, every core; several runs on one
+                                      # machine at once each want cores / runs)
+    drop_negative_gap: bool = True    # gap model: a training frame whose polarized gap (the model's frozen gap plus the
+                                      # CT-free potentials, on any channel) is negative is out of the model's scope (a
+                                      # reaction): not iterated and left out of every loss for this epoch (energy,
+                                      # forces, alpha); re-tested the next epoch, as training may reopen its gap
+    dump_bad: bool = True             # a step with a non-finite loss or gradient writes out/bad_steps/ep{E}_step{S}.pt:
+                                      # the model and optimizer state before the step, the batch's frames and the RNG
+                                      # states at its start (the step's force / curvature samples follow from them)
 
 
 @dataclass
@@ -302,18 +311,27 @@ def dipole_error(mu, bt):
     return torch.where(torch.isfinite(y), (mu - torch.nan_to_num(y)) * D.DEBYE / lab["n"][:, None], torch.zeros_like(y))
 
 
-def polar_alpha(model, frames):
-    """(B, 3, 2) the model's [alpha_pol, alpha_CT] per axis (the diagonal of its exact polarizabilities)."""
+def kept(out, B, device):
+    """(B,) 1 for the frames the forward did not skip for a negative polarized gap (``model.skip_negative_gap``),
+    0 for those it did."""
+    d = out.get("ct_gap_dropped")
+    return torch.ones(B, dtype=torch.float64, device=device) if d is None else (~d).to(torch.float64)
+
+
+def polar_alpha(model, frames, keep=False):
+    """(B, 3, 2) the model's [alpha_pol, alpha_CT] per axis (the diagonal of its exact polarizabilities); with
+    ``keep`` also the frames' :func:`kept` mask."""
     _, bt = D.batch_of(frames, model)
     o = model(bt, alpha=True)
     ap = torch.diagonal(o["alpha_pol"], dim1=1, dim2=2)
-    return torch.stack([ap, torch.diagonal(o["alpha"], dim1=1, dim2=2) - ap], -1)
+    a = torch.stack([ap, torch.diagonal(o["alpha"], dim1=1, dim2=2) - ap], -1)
+    return (a, kept(o, a.shape[0], a.device)) if keep else a
 
 
 def polar_loss(model, frames):
     """Per-ion alpha errors (bohr^3): the first slot against alpha_MI (ALMO targets) or the whole-cluster alpha
     (total targets, compared with alpha_pol + alpha_CT), the second against alpha_CT (ALMO targets only)."""
-    a = polar_alpha(model, frames)
+    a, k = polar_alpha(model, frames, keep=True)
     t = torch.stack([torch.as_tensor(f.labels["alpha"]) for f in frames]).to(a.device)
     n = torch.tensor([f.n for f in frames], dtype=a.dtype, device=a.device)[:, None]
     ok = torch.tensor([f.labels["ct_ok"] for f in frames], device=a.device)[:, None]
@@ -322,7 +340,7 @@ def polar_loss(model, frames):
     t = torch.nan_to_num(t)
     z = torch.zeros_like(a[..., 0])
     first = torch.where(tot, a[..., 0] + a[..., 1], a[..., 0])
-    sw = D.frame_weights(frames, a.device).sqrt()[:, None]            # the errors enter squared
+    sw = (D.frame_weights(frames, a.device) * k).sqrt()[:, None]      # the errors enter squared
     return (sw * torch.where(have, (first - t[..., 0]) / n, z),
             sw * torch.where(have & ok & ~tot, (a[..., 1] - t[..., 1]) / n, z))
 
@@ -337,7 +355,7 @@ def force_terms(model, frames):
     e_ref = torch.tensor([f.labels["int"] for f in frames], dtype=torch.float64, device=dev)
     f_ref = torch.as_tensor(np.concatenate([f.labels["forces"] for f in frames]), dtype=torch.float64).to(dev)
     n = torch.tensor([f.n for f in frames], dtype=torch.float64, device=dev)
-    sw = D.frame_weights(frames, dev).sqrt()                          # the errors enter squared
+    sw = (D.frame_weights(frames, dev) * kept(out, len(frames), dev)).sqrt()     # the errors enter squared
     return (sw * (E - e_ref) * KJ / n, sw.repeat_interleave(n.long())[:, None] * (F * KJ - f_ref * KJ_ANG), out)
 
 
@@ -447,7 +465,8 @@ def evaluate(model, frames, bs=64, frz_elst="model"):
                              "elst_ref": el_ref * KJ, "elst": el * KJ,
                              "frz_ref": frz_ref * KJ, "frz": (out["e_pauli"][q].item() + out["e_disp"][q].item()) * KJ,
                              "etot_ref": lab.get("int", nan) * KJ, "etot": out["e_int"][q].item() * KJ,
-                             "ct_mask": bool(lab["ct_mask"]), "weight": float(lab.get("weight", 1.0)), **dp})
+                             "ct_mask": bool(lab["ct_mask"]), "weight": float(lab.get("weight", 1.0)),
+                             "gap_min": (out["ct_gap_min"][q].item() * KJ if "ct_gap_min" in out else nan), **dp})
     model.train()
     return rows
 
@@ -524,6 +543,8 @@ def run(cfg: TrainConfig, base: Path):
     (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=1))
     if rc.cache_dir:
         os.environ.setdefault("RSFFF_TABLE_CACHE", str(rc.cache_dir))
+    if rc.threads > 0:
+        torch.set_num_threads(rc.threads)
     torch.manual_seed(rc.seed)
     random.seed(rc.seed)
     params = P(dc.params)
@@ -610,13 +631,18 @@ def run(cfg: TrainConfig, base: Path):
     for ep in range(1, rc.epochs + 1):
         random.shuffle(tr)
         tot = 0.0
+        dropped, dropped_f = set(), set()           # this epoch's frames with a negative polarized gap (ids)
         chunks = [tr[k:k + rc.batch] for k in range(0, len(tr), rc.batch)]
         for step, chunk in enumerate(chunks):
+            rng0 = (random.getstate(), torch.random.get_rng_state()) if rc.dump_bad else None
+            model.skip_negative_gap = rc.drop_negative_gap
             _, bt = D.batch_of(chunk, model)
             dip = lc.w_dip > 0 and "dip" in bt["labels"] and step % rc.dip_every == 0
             o, mu = model_dipole(model, bt, create_graph=True) if dip else (model(bt), None)
             ep_, ec_ = loss_terms(o, bt)
-            fw = bt["labels"]["weight"]
+            fw = bt["labels"]["weight"] * kept(o, len(chunk), bt["labels"]["weight"].device)
+            if "ct_gap_dropped" in o:
+                dropped.update(id(f) for f, d in zip(chunk, o["ct_gap_dropped"].tolist()) if d)
             loss = wmean(lc.w_pol * ep_ ** 2 + lc.w_ct * ec_ ** 2, fw)
             if dip:
                 loss = loss + rc.dip_every * lc.w_dip * wmean((dipole_error(mu, bt) ** 2).sum(1), fw)
@@ -640,12 +666,16 @@ def run(cfg: TrainConfig, base: Path):
                 loss = loss + rc.curv_every * lc.w_curv * cp
                 curv_log.append(float(cp.detach()))
             if force_tr and lc.w_force > 0 and step % rc.force_every == 0:
-                fb = random.sample(force_tr, min(rc.force_batch, len(force_tr)))
+                pool = [f for f in force_tr if id(f) not in dropped_f] if dropped_f else force_tr
+                fb = random.sample(pool, min(rc.force_batch, len(pool)))
                 try:
-                    fe_, ff_, _ = force_terms(model, fb)
+                    fe_, ff_, fo_ = force_terms(model, fb)
+                    if "ct_gap_dropped" in fo_:
+                        dropped_f.update(id(f) for f, d in zip(fb, fo_["ct_gap_dropped"].tolist()) if d)
                     loss = loss + rc.force_every * (lc.w_fe * (fe_ ** 2).mean() + lc.w_force * (ff_ ** 2).mean())
                 except torch.linalg.LinAlgError as err:
                     print(f"ep {ep} step {step}: force step skipped ({err})", flush=True)
+            model.skip_negative_gap = False
             opt.zero_grad()
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
@@ -653,6 +683,11 @@ def run(cfg: TrainConfig, base: Path):
                 n_bad += 1
                 print(f"ep {ep} step {step}: non-finite loss / gradient (|g| {float(gn):.3g}); step skipped", flush=True)
                 opt.zero_grad()
+                if rc.dump_bad:             # the step was not taken: the model and optimizer are as before it
+                    (out / "bad_steps").mkdir(exist_ok=True)
+                    torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "chunk": chunk, "ep": ep,
+                                "step": step, "rng": rng0, "lr": sched.get_last_lr()},
+                               out / "bad_steps" / f"ep{ep}_step{step}.pt")
                 if n_bad > 50:
                     raise RuntimeError("more than 50 non-finite steps: giving up")
                 continue
@@ -665,8 +700,9 @@ def run(cfg: TrainConfig, base: Path):
             if score < best:
                 best = score
                 save_cmm(out / "model.pt", model, params=params, train=cfg.to_dict(), epoch=ep, val_score=score)
-            log.append({"epoch": ep, "train_loss": tot / max(len(tr), 1), **{f"val_{k}": v for k, v in sv.items()}})
-            msg = ""
+            log.append({"epoch": ep, "train_loss": tot / max(len(tr), 1), **{f"val_{k}": v for k, v in sv.items()},
+                        "dropped": len(dropped), "dropped_force": len(dropped_f)})
+            msg = f" | negative gap: {len(dropped)} frames, {len(dropped_f)} force frames dropped" if (dropped or dropped_f) else ""
             if polar_tr:
                 with torch.no_grad():
                     ap_, ac_ = polar_loss(model, polar_tr + polar_te)

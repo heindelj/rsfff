@@ -506,6 +506,25 @@ def frontier_hole_field(pos_ang, species, tab: IonTable, idx):
 _OVL_K = None
 
 
+#: the k-grid (1/bohr) of the tabulated overlaps (``rsfff.ff.cmm.tabulate``): the trapezoid on kmax = 40 truncates the
+#: densities' transforms ((1 + k^2 / b^2)^-2 per 1s shell), an error of ~1e-9 absolute -- 3e-3 .. 4e-2 relative at the
+#: 1e-7 .. 1e-6 overlaps where the overlap windows start for the sharp shells (Li+ b 4.8, Na+ 3.9, F- 2.8 per bohr),
+#: rippling with period 2 pi / kmax. kmax = 200 brings it below 1e-6 relative there (the tables are built once)
+TABLE_OVL_KMAX, TABLE_OVL_N = 200.0, 4000
+_TABLE_OVL_K = None
+
+
+def table_ovl_grid(dtype, device):
+    """(k, w): the trapezoid of :data:`TABLE_OVL_KMAX`, :data:`TABLE_OVL_N` for tabulated overlaps."""
+    global _TABLE_OVL_K
+    if _TABLE_OVL_K is None or _TABLE_OVL_K[0].dtype != dtype or _TABLE_OVL_K[0].device != device:
+        k = torch.linspace(TABLE_OVL_KMAX / TABLE_OVL_N, TABLE_OVL_KMAX, TABLE_OVL_N, dtype=dtype, device=device)
+        w = torch.full_like(k, TABLE_OVL_KMAX / TABLE_OVL_N)
+        w[-1] *= 0.5
+        _TABLE_OVL_K = (k, w)
+    return _TABLE_OVL_K
+
+
 def _ovl_grid(dtype, device, kmax: float = 40.0, n: int = 1000):
     global _OVL_K
     if _OVL_K is None or _OVL_K[0].dtype != dtype or _OVL_K[0].device != device:

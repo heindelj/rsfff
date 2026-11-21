@@ -53,6 +53,10 @@ O_ON, O_FULL = 1e-7, 1e-6
 SWITCHES = ("cubic", "quintic", "smooth")
 
 
+#: the "smooth" step is exactly 0 for t <= SMOOTH_EDGE and 1 for t >= 1 - SMOOTH_EDGE (|s| < 1e-100 cut off)
+SMOOTH_EDGE = 1.0 / 230.0
+
+
 def switch_step(t, kind="cubic"):
     """The step from 0 at t <= 0 to 1 at t >= 1.
 
@@ -69,7 +73,11 @@ def switch_step(t, kind="cubic"):
         return t * t * (3 - 2 * t)
     if kind == "quintic":
         return t * t * t * (10 - 15 * t + 6 * t * t)
-    eps = 1e-3                                             # exp(-1 / eps) = 0 in double precision: exact ends
+    # exact ends where the step is below 1e-100 (t <= 1/230: exp(-1/t) < 1e-100): its far tail would otherwise run
+    # through 1e-300 .. 1e-160, where anything dividing by a sum of switched weights has a reciprocal whose square
+    # underflows, and its gradient is 0 / 0 (a non-finite force at the edge of an overlap window). The step changes
+    # by less than 1e-100 there.
+    eps = SMOOTH_EDGE
     mid = (t > eps) & (t < 1 - eps)
     ts = torch.where(mid, t, torch.full_like(t, 0.5))      # the unselected branch stays finite (and so its gradient)
     s = torch.sigmoid((2 * ts - 1) / (ts * (1 - ts)))
@@ -169,13 +177,16 @@ def stacked_harmonics(rhat, lmax=LMAX):
     return m @ C
 
 
-def channels_from_pairs(n, i, dr, w, s, lmax=LMAX, eps=1e-300):
+def channels_from_pairs(n, i, dr, w, s, lmax=LMAX, eps=1e-100):
     """(n, 2 + 3 (lmax + 1)) channels for atoms 0..n-1 from directed pairs (i <- j): centre index i (P,), bond vectors
     dr = X_j - X_i (P, 3, any length unit), weights w, s (P,). Atoms without pairs get zeros.
 
     Vectorized: every per-pair quantity (w, s, the products D^ab and the weighted harmonics a y_LM of all degrees) goes
     through one index_add; the C^a_L . C^b_L contractions are one block-sum matmul. :func:`_channels_from_pairs_ref`
-    is the per-L loop it replaces."""
+    is the per-L loop it replaces.
+
+    An atom whose total weight is at most ``eps`` gets zero T (its T is O(weight) there): above ~1e-154 the reciprocal's
+    gradient -1 / Sw^2 is representable; below it, it underflows to 0 / 0."""
     if lmax < 1:
         return _channels_from_pairs_ref(n, i, dr, w, s, lmax, eps)
     _, _, Bsum = _harmonics_plan(lmax, dr.dtype, dr.device)
@@ -197,7 +208,7 @@ def channels_from_pairs(n, i, dr, w, s, lmax=LMAX, eps=1e-300):
     return torch.cat([S, T.flatten(1)], 1)
 
 
-def _channels_from_pairs_ref(n, i, dr, w, s, lmax=LMAX, eps=1e-300):
+def _channels_from_pairs_ref(n, i, dr, w, s, lmax=LMAX, eps=1e-100):
     """Reference (per-L, per-weight loop) form of :func:`channels_from_pairs`, kept for tests.
 
     (n, 2 + 3 (lmax + 1)) channels for atoms 0..n-1 from directed pairs (i <- j): centre index i (P,), bond vectors

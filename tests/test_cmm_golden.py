@@ -46,8 +46,20 @@ def _run(ck):
     return u, out, F, alpha
 
 
+@pytest.fixture
+def legacy_ovl_grid(monkeypatch):
+    """The references were made with the tabulated overlaps on the runtime k-grid (kmax 40, 1000 points); the tables
+    now use a finer one (rsfff.ff.cmm.kernels.TABLE_OVL_KMAX), which moves the energies by ~1e-7 Hartree."""
+    from rsfff.ff.cmm import kernels as K
+    monkeypatch.setattr(K, "TABLE_OVL_KMAX", 40.0)
+    monkeypatch.setattr(K, "TABLE_OVL_N", 1000)
+    monkeypatch.setattr(K, "_TABLE_OVL_K", None)
+    yield
+    K._TABLE_OVL_K = None
+
+
 @pytest.mark.parametrize("name", ["golden_nofilm.pt", "golden_film.pt"])
-def test_cmm_reproduces_complete(name):
+def test_cmm_reproduces_complete(name, legacy_ovl_grid):
     ck = _case(name)
     if ck["film"]:
         try:

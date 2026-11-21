@@ -51,6 +51,20 @@ frontier exponents and the channel cutoff / taper.
   >= -E0_ij / theta_i for every z, so E0_ij + both sides >= E0_ij (1 - 1 / theta_i - 1 / theta_j) >= 0
   (:meth:`xpol_ratio`, :meth:`xpol_fraction`; theory/response_functional.tex). "scalar": one W1 per atom.
 
+  ``config.xpol_form = "site"`` (with ``pauli_form = "site"``) perturbs the site-potential energy itself instead of
+  an overlap ratio: each ion's response is a change of its amplitude phi_i = sqrt(n_i), dphi_i = dn_i / (2 phi_i), in
+  the partner's potential,
+      e^{u_i + u_j} <(phi_i + dphi_i)^2 | v_j> = E0_(i in j) + g z + z G z,
+      g_a = <dn_a | v_j>,   G_ab = int dn_a dn_b v_j / (4 n_i)
+  (``bt["xs_g"]``, ``bt["xs_Gi"]``, ``bt["xs_Gj"]``: per slot of the potential, one quadrature for both, so the square
+  is complete on the discrete measure). With the weights, g_i = K_i sum_j g and H_i = theta_i sum_j 2 K_i G K_i,
+  theta_i = 1 + e^{ln W2 + u} >= 1: an ion's response removes at most 1 / theta_i of its own half of the pair's energy
+  (W1 = theta = 1 is the functional without parameters). No density overlap enters; the potential's exponent scale
+  is fixed at the table's (:meth:`_exchange_site`). ``ct_gap_overlap = "site"`` puts the gap model's acceptor shift on
+  the same potentials, kappa[s_j] sum_k e^{u_j + u_k} <A_j | v_k> (the transferred electron in j's acceptor shape;
+  ``ct_gap_kov_fixed`` holds kappa at 1), and ``ct_gap_donor`` subtracts sum_k e^{u_i + u_k} <D_i | v_k> from the gap
+  (the electron that leaves i's donor shape): no density overlap is then left in the energy.
+
   Two optional terms stiffen the flows that move no net charge (ring currents: G q = 0, invisible to H_Q and to the
   induction, so held by b_c alone, which vanishes as |e_c| grows):
       + sum_c 1/2 b_min q_c^2                       ``config.ct_floor``: b_c -> b_c + b_min, every channel
@@ -154,11 +168,14 @@ FLUX_V0_INIT = 0.025
 HYPER_F_INIT = 0.25
 XPOL_BOUND_W1_INIT = 0.6
 XPOL_BOUND_THETA_INIT = 3.0
+#: ``xpol_form = "site"``: the perturbed site-potential energy itself is W1 = 1, theta = 1 (a complete square)
+XPOL_SITE_W1_INIT = 1.0
+XPOL_SITE_THETA_INIT = 1.5
 #: gap model: start values of the acceptors' overlap strength ("probe": Hartree per unit probe overlap, about what
 #: cancels the pair's penetration at contact; "pauli": dimensionless, on the pair Pauli energy per density overlap) and of the CT charges (W of a few 0.01 Hartree at contact), and the channel stiffness
 #: k_c - h_c below which a channel is solved explicitly instead of being eliminated onto the atomic charges
-GAP_KOV_INIT = {"probe": 10.0, "pauli": 1.5}
-GAP_KOV_REF = {"probe": 10.0, "pauli": 1.0}     # the overlap strength stays within a factor GAP_KOV_CAP of this
+GAP_KOV_INIT = {"probe": 10.0, "pauli": 1.5, "site": 1.0}
+GAP_KOV_REF = {"probe": 10.0, "pauli": 1.0, "site": 1.0}     # the overlap strength stays within a factor GAP_KOV_CAP of this
 GAP_KOV_CAP = 5.0
 GAP_Q0_INIT = 0.5
 FRONTIER_Q0_INIT = 0.1          # Hartree: W = sqrt(qD qA) S starts as 0.1 S (the size of the trained slater couplings)
@@ -251,10 +268,17 @@ class CmmModel(nn.Module):
         # -- exchange polarization: W1 per species and rank (dipole, quadrupole, breathing), W2 per species
         self.ln_w1 = nn.Parameter(torch.zeros(S, 3, **f64))          # W1 = 1 at start (the overlap model)
         self.ln_w2 = nn.Parameter(torch.zeros(S, **f64))
-        if cfg.xpol_bound != "off":                                  # ln_w2 is then ln(theta / 2 - 1): :meth:`w2`
+        self.xpol_site = cfg.xpol_form == "site"
+        self.ct_site = cfg.ct_model == "gap" and (cfg.ct_gap_overlap == "site" or cfg.ct_gap_donor)
+        self.theta_min = 1.0 if self.xpol_site else 2.0
+        if self.xpol_site or self.ct_site:  # the tabulated site integrals are at the table's exponent scale
+            self.pauli_ln_bscale.requires_grad_(False)
+        if cfg.xpol_bound != "off":                                  # ln_w2 is then ln(theta / theta_min - 1): :meth:`w2`
             with torch.no_grad():
-                self.ln_w1.fill_(math.log(XPOL_BOUND_W1_INIT))
-                self.ln_w2.fill_(math.log(XPOL_BOUND_THETA_INIT / 2 - 1))
+                w1_0, th_0 = ((XPOL_SITE_W1_INIT, XPOL_SITE_THETA_INIT) if self.xpol_site
+                              else (XPOL_BOUND_W1_INIT, XPOL_BOUND_THETA_INIT))
+                self.ln_w1.fill_(math.log(w1_0))
+                self.ln_w2.fill_(math.log(th_0 / self.theta_min - 1))
         self.hyper_sat = cfg.hyperpol == "saturating"
         if self.hyper_sat:
             u1 = dipole_self_coulomb(tab).to(tab.alpha)
@@ -300,6 +324,8 @@ class CmmModel(nn.Module):
                 self.ct_ln_q0.fill_(math.log(FRONTIER_Q0_INIT if self.frontier else GAP_Q0_INIT))
             c, u0 = math.log(GAP_KOV_CAP), math.log(GAP_KOV_INIT[cfg.ct_gap_overlap] / GAP_KOV_REF[cfg.ct_gap_overlap])
             self.ct_ln_kov = nn.Parameter(torch.full((S,), c * math.atanh(u0 / c), **f64))   # per acceptor species, raw
+            if cfg.ct_gap_kov_fixed:
+                self.ct_ln_kov.requires_grad_(False)
             A = torch.where(torch.isnan(tab.A_acceptor), tab.I_donor - GAP_ANION_J * js, tab.A_acceptor)
             self.register_buffer("ct_gap_I", tab.I_donor.to(torch.float64).clone(), persistent=False)
             self.register_buffer("ct_gap_A", A.to(torch.float64), persistent=False)
@@ -320,6 +346,10 @@ class CmmModel(nn.Module):
         self._table = None
         self.table_store = {}            # pair key -> coefficients: shipped with the checkpoint (io.load_cmm)
         self._u = None
+        #: training switch, not part of the model: frames whose polarized gap (the frozen gap plus the CT-free
+        #: potentials) is negative on some channel are not iterated (the trainer drops them from the loss); the
+        #: forward always reports that gap per frame (``ct_gap_min``) and which frames were skipped (``ct_gap_dropped``)
+        self.skip_negative_gap = False
         self.double()
 
     # -- geometry ----------------------------------------------------------------------------------------------
@@ -340,7 +370,7 @@ class CmmModel(nn.Module):
         use from :attr:`table_store` (the pairs shipped with the checkpoint), the disk cache, or built; each pair is
         keyed by the two ions' parameter values (:meth:`rsfff.ff.cmm.tabulate.RadialTable.pair_key`)."""
         if self._table is None:
-            self._table = cmm_table(self.tab.to("cpu"), store=self.table_store)
+            self._table = cmm_table(self.tab.to("cpu"), store=self.table_store, site=self.xpol_site or self.ct_site)
         if device is not None and self._table.device != torch.device(device):
             self._table.to(device)
         return self._table
@@ -474,13 +504,16 @@ class CmmModel(nn.Module):
 
     def w2(self, sp):
         """(N,) the Gram weight: W2 = e^{ln_w2 + cap(u)}, or with ``config.xpol_bound`` the stiffness ratio
-        theta = 2 (1 + e^{ln_w2 + cap(u)}) >= 2 that multiplies K Gt K (:meth:`exchange`)."""
+        theta = 2 (1 + e^{ln_w2 + cap(u)}) >= 2 that multiplies K Gt K (:meth:`exchange`); with
+        ``xpol_form = "site"`` theta = 1 + e^{ln_w2 + cap(u)} >= 1."""
         w = torch.exp(self.ln_w2[sp] + self.cap(self._u["w2"]))
-        return 2 * (1 + w) if self.config.xpol_bound != "off" else w
+        return self.theta_min * (1 + w) if self.config.xpol_bound != "off" else w
 
     def xpol_ratio(self, sp):
         """(N,) with ``config.xpol_bound``: 1 / theta = 1/2 sigmoid(-(ln_w2 + cap(u))) <= 1/2, the largest fraction
-        of a pair's Pauli energy that this ion's response can remove (W1^2 / W2 of a rank-independent W1)."""
+        of a pair's Pauli energy that this ion's response can remove (W1^2 / W2 of a rank-independent W1).
+        ``xpol_form = "site"``: 1 / theta <= 1, of the ion's own half of the pair's energy (its electrons in the
+        partner's potential)."""
         if self.config.xpol_bound == "off":
             raise ValueError("xpol_ratio: the model has no bound (config.xpol_bound = 'off'); see xpol_fraction")
         return 1.0 / self.w2(sp)
@@ -500,7 +533,10 @@ class CmmModel(nn.Module):
             env = torch.exp(self.cap(self._u["pauli"]))
             kij = site_pauli_kernel(bn[i][:, :, None], b[j][:, None, :], rb[:, None, None])      # i's shells in v_j
             kji = site_pauli_kernel(bn[j][:, :, None], b[i][:, None, :], rb[:, None, None])
-            e_p = env[i] * torch.einsum("pt,ptu,pu->p", n[i], kij, w[j]) + env[j] * torch.einsum("pt,ptu,pu->p", n[j], kji, w[i])
+            h_i = env[i] * torch.einsum("pt,ptu,pu->p", n[i], kij, w[j])
+            h_j = env[j] * torch.einsum("pt,ptu,pu->p", n[j], kji, w[i])
+            e_p = h_i + h_j
+            self._pauli_half = (h_i, h_j)         # i's electrons in v_j, j's in v_i
         else:
             f = slater_two_center_damp_unequal(b[i][:, :, None], b[j][:, None, :], rb[:, None, None], 0)[0]
             e_p = torch.einsum("pt,ptu,pu->p", w[i], f, w[j]) / rb
@@ -586,6 +622,8 @@ class CmmModel(nn.Module):
         g_i = sum_j 2 E0_ij W1_i d ln O_ij / dz_i over the pairs within R_XPOL, E0_ij the pair's Pauli energy and
         A_ij = E0_ij / O_ij (switched on above the overlap noise). With ``config.xpol_bound`` the blocks are
         theta_i 2 A_ij K_i Gt(i <- j) K_i, K = diag(W1): the rank weights on both orders. Returns (i, j), g, Gi, Gj."""
+        if self.xpol_site:
+            return self._exchange_site(bt, sp)
         xs = bt["x_sel"]
         i, j = bt["pairs"][:, xs]
         e0 = self._pauli_pairs[1][xs]
@@ -603,6 +641,35 @@ class CmmModel(nn.Module):
             Gj = k[j][:, :, None] * Gj * k[j][:, None, :]
         return (i, j), g, w2[i][:, None, None] * Gi, w2[j][:, None, None] * Gj
 
+    def _site_amplitudes(self, sp, i, j):
+        """(P, T), (P, T): e^{u_i + u_j} a_jt (i's electrons in v_j) and e^{u_i + u_j} a_it for pairs (i, j)."""
+        w = self.frozen_params(sp)[0]                                # a_t e^{u} of the potential's owner
+        env = torch.exp(self.cap(self._u["pauli"]))
+        return env[i][:, None] * w[j], env[j][:, None] * w[i]
+
+    def _exchange_site(self, bt, sp):
+        """``xpol_form = "site"``: the pair's site-potential energy with the perturbed amplitudes,
+        e^{u_i + u_j} [<(phi_i + dphi_i)^2 | v_j> + <(phi_j + dphi_j)^2 | v_i>], dphi = dn / (2 phi), to second order
+        in the responses: the drive g_i = K_i sum_j <dn_i | v_j> and the on-site blocks
+        theta_i 2 K_i [int dphi_i dphi_i v_j] K_i (``bt["xs_g"]``, ``bt["xs_Gi"]``, ``bt["xs_Gj"]`` per slot of the
+        potential, times its amplitude). Same return as :meth:`exchange`."""
+        if bt.get("xs_g") is None:
+            raise ValueError("xpol_form = 'site': the batch has no site maps (precompute it with this model's table)")
+        xs = bt["x_sel"]
+        i, j = bt["pairs"][:, xs]
+        P = xs.shape[0]
+        k, th = self.w1(sp), self.w2(sp)
+        ci, cj = self._site_amplitudes(sp, i, j)                     # (P, T)
+        gi = k[i] * torch.einsum("pt,ptd->pd", ci, bt["xs_g"][:P])
+        gj = k[j] * torch.einsum("pt,ptd->pd", cj, bt["xs_g"][P:])
+        g = gi.new_zeros(sp.shape[0], k.shape[1]).index_add(0, i, gi).index_add(0, j, gj)
+        Gi = 2 * torch.einsum("pt,ptab->pab", ci, bt["xs_Gi"])
+        Gj = 2 * torch.einsum("pt,ptab->pab", cj, bt["xs_Gj"])
+        if self.config.xpol_bound != "off":
+            Gi = k[i][:, :, None] * Gi * k[i][:, None, :]
+            Gj = k[j][:, :, None] * Gj * k[j][:, None, :]
+        return (i, j), g, th[i][:, None, None] * Gi, th[j][:, None, None] * Gj
+
     def xpol_fraction(self, bt):
         """(2P,) for every exchange pair, sides i then j: the largest fraction of the pair's frozen Pauli energy that
         the side's exchange drive and Gram block can remove, rho = 1/2 g_p^T H_p^+ g_p / E0 with g_p, H_p the pair's
@@ -618,6 +685,21 @@ class CmmModel(nn.Module):
         e0 = self._pauli_pairs[1][xs]
         P = xs.shape[0]
         k, w2 = self.w1(sp), self.w2(sp)
+        if self.xpol_site:               # per side, of its own half of the pair's energy (i's electrons in v_j)
+            ci, cj = self._site_amplitudes(sp, i, j)
+            out = []
+            for a, c, gr, G, h in ((i, ci, bt["xs_g"][:P], bt["xs_Gi"], self._pauli_half[0][xs]),
+                                   (j, cj, bt["xs_g"][P:], bt["xs_Gj"], self._pauli_half[1][xs])):
+                g = k[a] * torch.einsum("pt,ptd->pd", c, gr)
+                H = 2 * torch.einsum("pt,ptab->pab", c, G)
+                if self.config.xpol_bound != "off":
+                    H = k[a][:, :, None] * H * k[a][:, None, :]
+                H = w2[a][:, None, None] * H
+                x = torch.einsum("pab,pb->pa", torch.linalg.pinv(H, hermitian=True), g)
+                ok = h > 1e-14
+                out.append(torch.where(ok, 0.5 * (g * x).sum(1) / torch.where(ok, h, torch.ones_like(h)),
+                                       torch.zeros_like(h)))
+            return torch.cat(out)
         rel = bt["x_rel"]
         w = (2 * e0 * bt["x_swO"])[:, None, None]
         out = []
@@ -793,16 +875,38 @@ class CmmModel(nn.Module):
         E0 / O is that pair's Pauli energy per unit overlap (the xpol anchoring, with its overlap switch) and the
         shift is the Pauli energy the pair would have with one electron in j's acceptor shape in place of j's
         density, times c. :meth:`frozen_terms` comes first.
-        ``"probe"``: kappa[s_j] S_A(j), the probe's overlap with all neighbours (Hartree per unit overlap)."""
+        ``"probe"``: kappa[s_j] S_A(j), the probe's overlap with all neighbours (Hartree per unit overlap).
+        ``"site"``: kappa[s_j] sum_k e^{u_j + u_k} <A_j | v_k>, the transferred electron in the neighbours' site
+        potentials (:meth:`_site_frontier`); no density overlap, kappa = 1 its own Pauli energy."""
         k = self.overlap_strength()[sp]
         if self.config.ct_gap_overlap == "probe":
             return k * bt["S0_atom"][:, 1]
+        if self.config.ct_gap_overlap == "site":
+            return k * self._site_frontier(bt, sp, "xs_A")
         xs = bt["x_sel"]
         pi, pj = bt["pairs"][:, xs]
         ratio = self._pauli_pairs[1][xs] * bt["x_swO"]
         Px = xs.shape[0]
         Sa = bt["x_Sa"]
         return k * ratio.new_zeros(sp.shape[0]).index_add(0, pi, ratio * Sa[:Px]).index_add(0, pj, ratio * Sa[Px:])
+
+    def _site_frontier(self, bt, sp, key):
+        """(N,) sum_k e^{u_i + u_k} <f_i | v_k> over the exchange pairs: one electron in each atom's normalized
+        frontier shape (``key`` "xs_A" acceptor, "xs_D" donor) in its neighbours' site potentials -- the frozen Pauli
+        energy's own potentials, amplitudes and environment factors."""
+        if bt.get(key) is None:
+            raise ValueError("the batch has no site maps (precompute it with this model's table)")
+        xs = bt["x_sel"]
+        i, j = bt["pairs"][:, xs]
+        P = xs.shape[0]
+        ci, cj = self._site_amplitudes(sp, i, j)
+        y = bt[key]
+        return y.new_zeros(sp.shape[0]).index_add(0, i, (ci * y[:P]).sum(1)).index_add(0, j, (cj * y[P:]).sum(1))
+
+    def donor_relief(self, bt, sp):
+        """(N,) ``ct_gap_donor``: sum_k e^{u_i + u_k} <D_i | v_k>, the Pauli energy of one electron in i's donor shape
+        with i's neighbours, which a channel out of i gives up (the gap is lowered by it)."""
+        return self._site_frontier(bt, sp, "xs_D")
 
     def overlap_strength(self):
         """(S,) the acceptor shift's strength per acceptor species: GAP_KOV_REF exp(c tanh(ct_ln_kov / c)),
@@ -839,6 +943,8 @@ class CmmModel(nn.Module):
         phi = bt["phi_front"]
         Delta = (self.ct_gap_I[sp[i]] - self.ct_gap_A[sp[j]] + phi[i, 0] - phi[j, 1] - bt["ch_J"]
                  + self.acceptor_shift(bt, sp)[j])
+        if self.config.ct_gap_donor:
+            Delta = Delta - self.donor_relief(bt, sp)[i]
         h = self.channel_curvature(bt, sp)
         return {"W2": W2, "Delta": Delta, "h": h, **self.two_state(W2, Delta, h)}
 
@@ -892,6 +998,12 @@ class CmmModel(nn.Module):
             return Hq.new_zeros(B, N).index_put((cf, li), q, accumulate=True).index_put((cf, lj), -q, accumulate=True)
 
         g = self.gap_channels(bt, sp)
+        with torch.no_grad():               # the polarized gap of the first electron: frozen gap + the CT-free potentials
+            pg = g["Delta"] + psi0[cf, li] - psi0[cf, lj]
+            pg = torch.where(g["W2"] > 1e-24, pg, torch.full_like(pg, float("inf")))
+            gap_min = pg.new_full((B,), float("inf")).scatter_reduce(0, cf, pg, "amin")
+        drop = (gap_min < 0) if self.skip_negative_gap else torch.zeros_like(gap_min, dtype=torch.bool)
+        self._gap_frames = {"gap_min": gap_min, "dropped": drop}
         delta = torch.zeros_like(g["Delta"])
         nconv = self.config.ct_gap_converge
         if self.config.ct_gap_predict:
@@ -947,9 +1059,9 @@ class CmmModel(nn.Module):
 
         self._gap_info = None
         if self.config.ct_exclusion and cf.numel():
-            return self._flux_excl(g, B, N, cf, li, lj, psi0, S, dpsi, z_pol, W)
+            return self._flux_excl(g, B, N, cf, li, lj, psi0, S, dpsi, z_pol, W, drop)
         if nconv and cf.numel():
-            delta = self._converge_gap(g, delta.detach(), step, newton, energy, B, cf)
+            delta = self._converge_gap(g, delta.detach(), step, newton, energy, B, cf, drop)
             g0 = {k: v for k, v in g.items() if k not in ("delta", "Delta0")} | {"Delta": g.get("Delta0", g["Delta"])}
             gx = self.expand_at(g0, delta)
             nd = -newton(gx, step(gx))                    # one differentiable Newton step: the implicit derivative
@@ -1061,44 +1173,15 @@ class CmmModel(nn.Module):
         nneg = (ev < 0).sum(1) + torch.zeros(B, dtype=torch.long, device=X.device).index_add(0, cf, (live & (Ar < 0)).long())
         return (nneg == N2) & fin
 
-    def _flux_excl(self, g, B, N, cf, li, lj, psi0, S, dpsi, z_pol, W):
-        """The joint minimum with the exclusion functional (``config.ct_exclusion``) in place of the independent
-        two-state channels: every channel c = i -> j has the capacity its site-mates leave,
-
-            F_c = Delta_c q_c - 2 W_b sqrt(q_c n_c),     n_c = lam_c (1 - b_c) - q_c,
-            b_c = (the charge of the other channels out of i) + (that of the other channels into j),
-
-        so a site gives at most one electron and takes at most one. sum_c F_c is jointly convex on its polytope and
-        its minimizer is interior; for the channels of one site alone it is the exact ground-state energy of the
-        configurations {no transfer, transfer c} (the lowest eigenvalue of the arrowhead matrix with diagonal
-        (0, Delta_c) and border W_c). The electrostatics of the transferred charges is unchanged (mean field,
-        1/2 Q^T S Q - 1/2 sum_c h_c q_c^2 + Q^T psi0).
-
-        The functional is not separable, but its Hessian is a diagonal plus terms that act through the sites,
-        kappa V^T V with V = diag(n + q) + diag(q lam) (U U^T - 2) and kappa = W_b / (2 (q n)^(3/2)), so every solve
-        is 4N site unknowns per frame (:meth:`_excl_solve`) and everything else is sums over the channels. Newton
-        from the two-state charges of the predicted gaps scaled into the polytope: in the amplitudes x = sqrt(q)
-        where that Hessian is positive definite (there a weakly filled channel is quadratic, Delta x^2 - 2 W sqrt(n)
-        x; in q it is a square root that Newton climbs only threefold per step), else in q with the convex part of
-        the Hessian (no -h; a channel whose gap the potentials have closed has a maximum at x = 0), each step cut
-        to stay inside and to lower the energy. One differentiable Newton step from the converged charges carries
-        their dependence on positions and parameters (exact first to third derivatives: forces, polarizabilities,
-        the losses on both). Returns as :meth:`charge_flux_gap`; ``self._gap`` has the converged charges (``qs``),
-        the two-state gap they satisfy (``Delta`` = s - r: the frozen gap + the potential difference + the
-        blocking by the site-mates) and the capacity left (``left``)."""
-        cfg = self.config
-        dt = S.dtype
+    def _excl_ops(self, cf, li, lj, live, B, N, dt):
+        """The channel-structure operations of the exclusion functional (:meth:`_flux_excl`) for channels with frame
+        ``cf`` (in 0..B-1), local donor / acceptor ``li``, ``lj``: site sums, site-mate sums, per-frame sums / min /
+        max, the functional's terms, its Hessian in site form and the solve. A subset of frames is a new set of
+        operations on its own channels (the frames are independent)."""
+        from types import SimpleNamespace
         p, r = li, N + lj
-        # the global site of each channel's donor and acceptor (frame * N + local)
         gi, gj = cf * N + li, cf * N + lj
-        W2, D0, h = g["W2"], g.get("Delta0", g["Delta"]), g["h"]
-        w02 = cfg.ct_gap_w0 ** 2
-        Wb = torch.sqrt(W2 + w02)
-        lam = W2 / (W2 + w02) if w02 > 0 else torch.ones_like(W2)
-        live = W2.detach() > 1e-24
         lv = live.to(dt)
-        gp = psi0[cf, li] - psi0[cf, lj]
-        S2 = torch.cat([torch.cat([S, -S], 2), torch.cat([-S, S], 2)], 1)
         big = torch.full_like(lv, float("inf"))
 
         def site(v):                            # (B N,) the sums over the channels out of / into every site
@@ -1114,6 +1197,9 @@ class CmmModel(nn.Module):
 
         def fmin(v):
             return v.new_full((B,), float("inf")).scatter_reduce(0, cf, torch.where(live, v, big), "amin")
+
+        def amax(v):
+            return v.new_zeros(B).scatter_reduce(0, cf, v, "amax", include_self=True)
 
         def terms(q, Wb_, lam_, D0_, h_, S_, gp_):
             nn = lam_ * (1 - mates(q)) - q
@@ -1143,62 +1229,130 @@ class CmmModel(nn.Module):
             A = torch.where(live, A, torch.ones_like(A))
             return self._excl_solve(A, c * lv, X, rhs * lv[:, None], live, cf, p, r, B, N)
 
+        def inertia(A, c, X):
+            return self._excl_inertia(A, c * lv, X, live, cf, p, r, B, N)
+
+        return SimpleNamespace(cf=cf, live=live, lv=lv, p=p, r=r, gi=gi, gj=gj, B=B, site=site, mates=mates, per=per,
+                               fmin=fmin, amax=amax, terms=terms, hess=hess, solve=solve, inertia=inertia)
+
+    @staticmethod
+    def _excl_newton(O, q, nn, gr, E, Pd, S2d):
+        """One damped Newton iteration of the exclusion functional for the frames of ``O`` (all still iterating):
+        the new charges and which frames moved (a frame that did not cannot: its state and so its next step are
+        unchanged)."""
+        cf, live, lv = O.cf, O.live, O.lv
+        a, c, X, dU = O.hess(q, nn, Pd[0], Pd[1], Pd[3], S2d)
+        # Newton in x = sqrt(q): (D H D + 2 diag(g)) dx = -D g with D = 2x, i.e. u = D dx solves
+        # (H + diag(g / 2q)) u = -g
+        qs = torch.where(live, q, torch.ones_like(q))
+        Ax = torch.where(live, a - Pd[3] + gr / (2 * qs), torch.ones_like(a))
+        u, info = O.solve(Ax, c, X, -gr[:, None])
+        u = u[:, 0]
+        x = torch.sqrt(qs)
+        dx = u / (2 * x)
+        slope = O.per(gr * u)
+        newt = O.inertia(Ax, c, X) & (info == 0) & (slope < 0) & torch.isfinite(slope)
+        dx = torch.where(newt[cf], dx, torch.zeros_like(dx))
+        d = torch.zeros_like(q)
+        if not bool(newt.all()):                 # elsewhere: in q, the convex part of the Hessian (no -h)
+            d, info2 = O.solve(a, c, X, -gr[:, None])
+            d = d[:, 0]
+            sl2 = O.per(gr * d)
+            conv = (info2 == 0) & (sl2 < 0) & torch.isfinite(sl2)
+            d = torch.where(conv[cf], d, -gr / dU.clamp(min=1e-300))
+            slope = torch.where(newt, slope, torch.where(conv, sl2, O.per(-gr * gr / dU.clamp(min=1e-300))))
+        t = torch.ones_like(E)
+        done, moved, q_new = torch.zeros_like(newt), torch.zeros_like(newt), q
+        for _ in range(60):
+            tc = t[cf]
+            qt = torch.where(newt[cf], (x + tc * dx) ** 2 * lv, q + tc * d)
+            nt, _, _, et, _ = O.terms(qt, *Pd)
+            inside = (O.fmin(torch.minimum(nt - 0.1 * nn, qt - 0.01 * q)) > 0) & (O.fmin(x + tc * dx) > 0)
+            ok = inside & (O.per(et) <= E + 1e-4 * t * slope + 1e-13 * (1 + E.abs())) & ~done
+            q_new = torch.where(ok[cf], qt, q_new)
+            done, moved = done | ok, moved | ok
+            if bool(done.all()):
+                break
+            t = torch.where(done, t, 0.5 * t)
+        return q_new, moved
+
+    def _flux_excl(self, g, B, N, cf, li, lj, psi0, S, dpsi, z_pol, W, drop=None):
+        """The joint minimum with the exclusion functional (``config.ct_exclusion``) in place of the independent
+        two-state channels: every channel c = i -> j has the capacity its site-mates leave,
+
+            F_c = Delta_c q_c - 2 W_b sqrt(q_c n_c),     n_c = lam_c (1 - b_c) - q_c,
+            b_c = (the charge of the other channels out of i) + (that of the other channels into j),
+
+        so a site gives at most one electron and takes at most one. sum_c F_c is jointly convex on its polytope and
+        its minimizer is interior; for the channels of one site alone it is the exact ground-state energy of the
+        configurations {no transfer, transfer c} (the lowest eigenvalue of the arrowhead matrix with diagonal
+        (0, Delta_c) and border W_c). The electrostatics of the transferred charges is unchanged (mean field,
+        1/2 Q^T S Q - 1/2 sum_c h_c q_c^2 + Q^T psi0).
+
+        The functional is not separable, but its Hessian is a diagonal plus terms that act through the sites,
+        kappa V^T V with V = diag(n + q) + diag(q lam) (U U^T - 2) and kappa = W_b / (2 (q n)^(3/2)), so every solve
+        is 4N site unknowns per frame (:meth:`_excl_solve`) and everything else is sums over the channels. Newton
+        from the two-state charges of the predicted gaps scaled into the polytope: in the amplitudes x = sqrt(q)
+        where that Hessian is positive definite (there a weakly filled channel is quadratic, Delta x^2 - 2 W sqrt(n)
+        x; in q it is a square root that Newton climbs only threefold per step), else in q with the convex part of
+        the Hessian (no -h; a channel whose gap the potentials have closed has a maximum at x = 0), each step cut
+        to stay inside and to lower the energy. One differentiable Newton step from the converged charges carries
+        their dependence on positions and parameters (exact first to third derivatives: forces, polarizabilities,
+        the losses on both). Returns as :meth:`charge_flux_gap`; ``self._gap`` has the converged charges (``qs``),
+        the two-state gap they satisfy (``Delta`` = s - r: the frozen gap + the potential difference + the
+        blocking by the site-mates) and the capacity left (``left``). Each iteration solves only the frames still
+        iterating (not converged, not stalled, not in ``drop`` (B,): those keep their start charges and get no
+        Newton step)."""
+        cfg = self.config
+        dt = S.dtype
+        W2, D0, h = g["W2"], g.get("Delta0", g["Delta"]), g["h"]
+        w02 = cfg.ct_gap_w0 ** 2
+        Wb = torch.sqrt(W2 + w02)
+        lam = W2 / (W2 + w02) if w02 > 0 else torch.ones_like(W2)
+        live = W2.detach() > 1e-24
+        gp = psi0[cf, li] - psi0[cf, lj]
+        S2 = torch.cat([torch.cat([S, -S], 2), torch.cat([-S, S], 2)], 1)
+        O = self._excl_ops(cf, li, lj, live, B, N, dt)
+        lv, site, terms, hess, solve = O.lv, O.site, O.terms, O.hess, O.solve
+        gi, gj = O.gi, O.gj
+
         det = lambda *v: tuple(t.detach() for t in v)                                      # noqa: E731
         Pd = det(Wb, lam, D0, h, S, gp)
         S2d = S2.detach()
         with torch.no_grad():
             q = g["qs"].detach() * lv
-            crowd = (torch.where(live, q / Pd[1].clamp(min=1e-300), torch.zeros_like(q)) + mates(q)) * lv
+            crowd = (torch.where(live, q / Pd[1].clamp(min=1e-300), torch.zeros_like(q)) + O.mates(q)) * lv
             q = q * (0.8 / q.new_zeros(B).scatter_reduce(0, cf, crowd, "amax", include_self=True).clamp(min=0.8))[cf]
             nn, rr, ss, e, gr = terms(q, *Pd)
-            E = per(e)
+            E, res = O.per(e), O.amax(gr.abs())
+            # frames finished: converged, stalled (no step lowers their energy: the next would be the same), or
+            # dropped (``drop``: a negative polarized gap, not iterated). Each iteration solves only the others.
+            fin = res <= cfg.ct_gap_tol
+            if drop is not None:
+                fin = fin | drop
             it = 0
-            amax = lambda v: v.new_zeros(B).scatter_reduce(0, cf, v, "amax", include_self=True)     # noqa: E731
-            res = amax(gr.abs())
-            while it < cfg.ct_gap_converge:
-                active = res > cfg.ct_gap_tol
-                if not bool(active.any()):
-                    break
+            while it < cfg.ct_gap_converge and not bool(fin.all()):
                 it += 1
-                a, c, X, dU = hess(q, nn, Pd[0], Pd[1], Pd[3], S2d)
-                # Newton in x = sqrt(q): (D H D + 2 diag(g)) dx = -D g with D = 2x, i.e. u = D dx solves
-                # (H + diag(g / 2q)) u = -g
-                qs = torch.where(live, q, torch.ones_like(q))
-                Ax = torch.where(live, a - Pd[3] + gr / (2 * qs), torch.ones_like(a))
-                u, info = solve(Ax, c, X, -gr[:, None])
-                u = u[:, 0]
-                x = torch.sqrt(qs)
-                dx = u / (2 * x)
-                slope = per(gr * u)
-                newt = (self._excl_inertia(Ax, c * lv, X, live, cf, p, r, B, N) & (info == 0) & (slope < 0)
-                        & torch.isfinite(slope))
-                dx = torch.where(newt[cf], dx, torch.zeros_like(dx))
-                d = torch.zeros_like(q)
-                if not bool((newt | ~active).all()):     # elsewhere: in q, the convex part of the Hessian (no -h)
-                    d, info2 = solve(a, c, X, -gr[:, None])
-                    d = d[:, 0]
-                    sl2 = per(gr * d)
-                    conv = (info2 == 0) & (sl2 < 0) & torch.isfinite(sl2)
-                    d = torch.where(conv[cf], d, -gr / dU.clamp(min=1e-300))
-                    slope = torch.where(newt, slope, torch.where(conv, sl2, per(-gr * gr / dU.clamp(min=1e-300))))
-                t = torch.ones_like(E)
-                done, moved, q_new = ~active, torch.zeros_like(active), q
-                for _ in range(60):
-                    tc = t[cf]
-                    qt = torch.where(newt[cf], (x + tc * dx) ** 2 * lv, q + tc * d)
-                    nt, _, _, et, _ = terms(qt, *Pd)
-                    inside = (fmin(torch.minimum(nt - 0.1 * nn, qt - 0.01 * q)) > 0) & (fmin(x + tc * dx) > 0)
-                    ok = inside & (per(et) <= E + 1e-4 * t * slope + 1e-13 * (1 + E.abs())) & ~done
-                    q_new = torch.where(ok[cf], qt, q_new)
-                    done, moved = done | ok, moved | ok
-                    if bool(done.all()):
-                        break
-                    t = torch.where(done, t, 0.5 * t)
-                if not bool(moved.any()):
-                    break
-                q = q_new
-                nn, rr, ss, e, gr = terms(q, *Pd)
-                E, res = per(e), amax(gr.abs())
+                if bool(fin.any()):
+                    fa = (~fin).nonzero().squeeze(1)
+                    mc = (~fin)[cf]
+                    remap = torch.full((B,), -1, dtype=torch.long, device=cf.device)
+                    remap[fa] = torch.arange(fa.shape[0], device=cf.device)
+                    Os = self._excl_ops(remap[cf[mc]], li[mc], lj[mc], live[mc], fa.shape[0], N, dt)
+                    Ps = (Pd[0][mc], Pd[1][mc], Pd[2][mc], Pd[3][mc], Pd[4][fa], Pd[5][mc])
+                    q_s, moved = self._excl_newton(Os, q[mc], nn[mc], gr[mc], E[fa], Ps, S2d[fa])
+                    q = q.index_put((mc.nonzero().squeeze(1),), q_s)
+                    nn_s, _, _, e_s, gr_s = Os.terms(q_s, *Ps)
+                    ix = mc.nonzero().squeeze(1)
+                    nn, gr = nn.index_put((ix,), nn_s), gr.index_put((ix,), gr_s)
+                    E, res = E.index_put((fa,), Os.per(e_s)), res.index_put((fa,), Os.amax(gr_s.abs()))
+                    stalled = torch.zeros_like(fin).index_put((fa,), ~moved)
+                else:
+                    q, moved = self._excl_newton(O, q, nn, gr, E, Pd, S2d)
+                    nn, _, _, e, gr = terms(q, *Pd)
+                    E, res = O.per(e), O.amax(gr.abs())
+                    stalled = ~moved
+                fin = fin | (res <= cfg.ct_gap_tol) | stalled
         self._gap_info = {"iters": it, "resid": res, "converged": res <= cfg.ct_gap_tol}
         # one differentiable Newton step from the converged charges (its value added as zero)
         nn, rr, ss, e, gr = terms(q, Wb, lam, D0, h, S, gp)
@@ -1218,9 +1372,9 @@ class CmmModel(nn.Module):
         gap = s1 - r1
         self._gap = {"W2": W2, "h": h, "Delta0": D0, "Delta": gap, "delta": gap - D0, "qs": q1.detach(), "left": n1}
         a0 = self.two_state(W2, D0, h)["a"]
-        return per(e1), e1, q1, z, Q, -a0, dQ
+        return O.per(e1), e1, q1, z, Q, -a0, dQ
 
-    def _converge_gap(self, g, delta, step, newton, energy, B, cf):
+    def _converge_gap(self, g, delta, step, newton, energy, B, cf, drop=None):
         """The self-consistent gap shifts (C,), no graph: Newton on the gap equation V_c(delta) = 0 in the variable
         delta (so every channel's charge q*(Delta + delta) stays a two-state charge, inside (0, lam)), from the start
         ``delta``. One coupled solve per iteration (``step``); the update -k d (``newton``) is taken per frame with
@@ -1228,7 +1382,8 @@ class CmmModel(nn.Module):
         where it is not a descent direction (a channel softer than its coupling: k - h + G^T S G indefinite) the plain
         update delta <- (psi_i - psi_j) - h q is taken instead, which always is one. Stops when every coupled
         channel's |V_c| is below ``ct_gap_tol``, after ``ct_gap_converge`` iterations, or when no frame can lower its
-        energy further; ``self._gap_info`` = {iters, resid (B,), converged (B,)}."""
+        energy further; ``self._gap_info`` = {iters, resid (B,), converged (B,)}. Frames in ``drop`` (B,) are not
+        iterated (they keep the start)."""
         cfg = self.config
         g0 = {k: v.detach() for k, v in g.items() if k not in ("delta", "Delta0")} | {"Delta": g.get("Delta0", g["Delta"]).detach()}
         live = g0["W2"] > 0
@@ -1245,6 +1400,8 @@ class CmmModel(nn.Module):
                 V = st["V"]
                 r = delta.new_zeros(B).scatter_reduce(0, cf, torch.where(live, V.abs(), zc), "amax", include_self=True)
                 active = r > cfg.ct_gap_tol
+                if drop is not None:
+                    active = active & ~drop
                 if not bool(active.any()):
                     break
                 it += 1
@@ -1401,6 +1558,7 @@ class CmmModel(nn.Module):
             out.update(ct_gap=self._gap["Delta"], q_star=self._gap["qs"])
             if self._gap_info is not None:
                 out.update(ct_gap_iters=self._gap_info["iters"], ct_gap_resid=self._gap_info["resid"])
+            out.update(ct_gap_min=self._gap_frames["gap_min"], ct_gap_dropped=self._gap_frames["dropped"])
         return out
 
     def _forward_pbc(self, bt: dict) -> dict:
@@ -1827,7 +1985,7 @@ class CmmModel(nn.Module):
         sym = self.tab.symbols
         w1 = self.ln_w1.exp()
         bound = self.config.xpol_bound != "off"
-        g2 = [f"theta {2 * (1 + self.ln_w2[k].exp()):.3f}" if bound else f"W2 {self.ln_w2[k].exp():.3f}"
+        g2 = [f"theta {self.theta_min * (1 + self.ln_w2[k].exp()):.3f}" if bound else f"W2 {self.ln_w2[k].exp():.3f}"
               for k in range(len(sym))]
         rows = [f"{x:>3}: W1 {w1[k, 0]:.3f}/{w1[k, 1]:.3f}/{w1[k, 2]:.3f}  {g2[k]}  "
                 f"qD0 {self.ct_ln_q0[k, 0].exp():.3f} qA0 {self.ct_ln_q0[k, 1].exp():.3f}  "

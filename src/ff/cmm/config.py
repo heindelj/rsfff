@@ -43,6 +43,16 @@ class CmmConfig:
                                       # v_j(r) = sum_t a_jt e^{-beta r} (1 / r + beta / 2), beta = s_j b_jt (table:
                                       # pauli_site). One-body in the partner's density: the form a QM region can take
                                       # (claude/qm_embedding_pauli.md)
+    xpol_form: str = "overlap"        # what exchange polarization perturbs. "overlap": the pair's Pauli energy per
+                                      # density overlap times the overlap of the perturbed densities (drive
+                                      # A_ij <dn_i | rho_j>, Gram A_ij int dphi_i^2 rho_j, A_ij = E0_ij / O_ij).
+                                      # "site" (needs pauli_form = "site"): the site-potential energy itself with the
+                                      # perturbed amplitude, e^{u_i + u_j} <(phi_i + dphi_i)^2 | v_j>: drive
+                                      # <dn_i | v_j>, Gram int dphi_i^2 v_j, no overlap ratio. With unit weights a
+                                      # complete square, so with xpol_bound theta = 1 + e^{ln W2 + u} >= 1 (each
+                                      # ion's response can remove at most 1 / theta of its own half of the pair's
+                                      # Pauli energy). The potential's exponent scale is then fixed at the table's
+                                      # (the tabulated integrals depend on it). claude/qm_embedding_xpol_site.md
     xpol_bound: str = "off"           # exchange polarization, the bound that keeps a pair's Pauli wall
                                       # (theory/response_functional.tex, the Pauli-wall proposition). "off": W1 per
                                       # rank on the drive, W2 on the Gram blocks, independent. "rank": the rank
@@ -74,7 +84,14 @@ class CmmConfig:
     ct_model: str = "flux"            # "flux": the pair-calibrated charge flux; "gap": two-state channels with an explicit gap
     ct_gap_overlap: str = "pauli"     # gap model, the acceptor level's overlap shift: "pauli" (c x the acceptor probe's
                                       # overlap with each neighbour x that pair's Pauli energy per unit density
-                                      # overlap) or "probe" (kappa x the acceptor probe's total overlap)
+                                      # overlap) or "probe" (kappa x the acceptor probe's total overlap) or "site"
+                                      # (needs pauli_form = "site"): kappa x the transferred electron in the
+                                      # neighbours' site potentials, sum_k e^{u_j + u_k} <A_j | v_k>, A_j the
+                                      # normalized acceptor shape; kappa = 1 is the electron's own Pauli energy
+    ct_gap_kov_fixed: bool = False    # gap model: kappa held at its start value (1 for "site") instead of learned
+    ct_gap_donor: bool = False        # gap model (needs pauli_form = "site"): the donor's relief, the gap minus
+                                      # sum_k e^{u_i + u_k} <D_i | v_k>: the electron that leaves i's donor shape no
+                                      # longer sits in the neighbours' site potentials. No parameter
     ct_gap_w0: float = 0.005          # gap model, the least width W0 (Hartree) of a channel's crossing: the two-state form
                                       # with W_b^2 = W^2 + W0^2 and amplitude W^2 / W_b^2 (same W^2 / Delta at a large
                                       # gap; response <= W^2 / (4 W_b^3), transfer <= W^2 / W_b^2). 0: the exact form
@@ -146,10 +163,16 @@ class CmmConfig:
             raise ValueError(f"env_gate {self.env_gate}: needs 0 < on < full")
         if self.ct_model not in ("flux", "gap"):
             raise ValueError(f"ct_model {self.ct_model!r}: 'flux' or 'gap'")
-        if self.ct_gap_overlap not in ("probe", "pauli"):
-            raise ValueError(f"ct_gap_overlap {self.ct_gap_overlap!r}: 'probe' or 'pauli'")
+        if self.ct_gap_overlap not in ("probe", "pauli", "site"):
+            raise ValueError(f"ct_gap_overlap {self.ct_gap_overlap!r}: 'probe', 'pauli' or 'site'")
+        if (self.ct_gap_overlap == "site" or self.ct_gap_donor) and self.pauli_form != "site":
+            raise ValueError("ct_gap_overlap = 'site' and ct_gap_donor need pauli_form = 'site'")
         if self.pauli_form not in ("shells", "site"):
             raise ValueError(f"pauli_form {self.pauli_form!r}: 'shells' or 'site'")
+        if self.xpol_form not in ("overlap", "site"):
+            raise ValueError(f"xpol_form {self.xpol_form!r}: 'overlap' or 'site'")
+        if self.xpol_form == "site" and self.pauli_form != "site":
+            raise ValueError("xpol_form = 'site' needs pauli_form = 'site'")
         if self.xpol_bound not in ("off", "rank", "scalar"):
             raise ValueError(f"xpol_bound {self.xpol_bound!r}: 'off', 'rank' or 'scalar'")
         if self.disp_model not in ("emitted", "response"):

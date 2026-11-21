@@ -99,14 +99,22 @@ def _j0_derivs(x):
     return j0, j1, j2
 
 
-def shaped_overlap_derivs(bD, wD, bA, wA, R):
+def shaped_overlap_derivs(bD, wD, bA, wA, R, grid=None, chunk=1024):
     """Overlap S(R) = int rho_D(r) rho_A(r - R) d^3r of two normalized shaped densities (bohr^-3) and its first two
-    derivatives in R (bohr), each (C,): S = (1 / 2 pi^2) int fD fA j0(kR) k^2 dk, S' with k j0', S'' with k^2 j0''."""
-    k, wk = K._ovl_grid(R.dtype, R.device)
+    derivatives in R (bohr), each (C,): S = (1 / 2 pi^2) int fD fA j0(kR) k^2 dk, S' with k j0', S'' with k^2 j0''.
+    ``grid``: (k, w) of the quadrature (default :func:`rsfff.ff.cmm.kernels._ovl_grid`; the tables use the finer
+    :func:`rsfff.ff.cmm.kernels.table_ovl_grid`), evaluated ``chunk`` values of R at a time."""
+    k, wk = grid if grid is not None else K._ovl_grid(R.dtype, R.device)
     f = K.shaped_density_ft(bD, wD, k) * K.shaped_density_ft(bA, wA, k) * (k * k)[None, :] * wk[None, :]
-    j0, j1, j2 = _j0_derivs(k[None, :] * R[:, None])
     c = 1.0 / (2 * torch.pi ** 2)
-    return (f * j0).sum(1) * c, (f * j1 * k[None, :]).sum(1) * c, (f * j2 * (k * k)[None, :]).sum(1) * c
+    out = [], [], []
+    for a in range(0, R.shape[0], chunk):
+        fa = f[a:a + chunk] if f.shape[0] > 1 else f
+        j0, j1, j2 = _j0_derivs(k[None, :] * R[a:a + chunk, None])
+        out[0].append((fa * j0).sum(1))
+        out[1].append((fa * j1 * k[None, :]).sum(1))
+        out[2].append((fa * j2 * (k * k)[None, :]).sum(1))
+    return tuple(torch.cat(o) * c for o in out)
 
 
 class DensityEnvironment:

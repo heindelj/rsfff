@@ -37,7 +37,7 @@ from . import kernels as K
 from ..multipole import spherical_to_cartesian_quadrupole
 from .tabulate import RadialTable, _monomials
 
-__all__ = ["GramTable", "gram_blocks", "gram_blocks_from_rows", "GRAM_TERMS", "gram_layout"]
+__all__ = ["GramTable", "gram_blocks", "gram_blocks_from_rows", "site_drive_from_rows", "GRAM_TERMS", "gram_layout"]
 
 BOHR = K.BOHR_ANG
 #: (type a, type b, L) of the ten radial functions; types d (dipole), q (quadrupole), b (breathing)
@@ -187,10 +187,13 @@ class GramTable(RadialTable):
     def _names(self):
         return self._gram_names()
 
-    def _rho_partial(self, sj):
-        """(5, G + 4, Nr): rho_j^(L)(r; R) for L = 0..4 on the padded R grid (two extra points each side)."""
-        if sj in self._rhoL:
-            return self._rhoL[sj]
+    def _rho_partial(self, sj, partner=None):
+        """(5, G + 4, Nr): rho_j^(L)(r; R) for L = 0..4 on the padded R grid (two extra points each side).
+        ``partner = ("site", beta)``: the unit site potential e^{-beta s} (1 / s + beta / 2) in place of j's density
+        (zero for beta <= 0; its 1 / s is integrable in the partial waves)."""
+        ck = sj if partner is None else partner
+        if ck in self._rhoL:
+            return self._rhoL[ck]
         h = self.h
         Rg = torch.cat([self.r[0] - h * torch.arange(2, 0, -1, dtype=self.r.dtype), self.r,
                         self.r[-1] + h * torch.arange(1, 3, dtype=self.r.dtype)]) / BOHR           # bohr
@@ -202,23 +205,46 @@ class GramTable(RadialTable):
             s = 0.5 * (hi + lo) + 0.5 * (hi - lo) * self._xs[None, None, :]                    # (c, Nr, Ns)
             ws = 0.5 * (hi - lo) * self._ws[None, None, :]
             x = ((r[None, :, None] ** 2 + R * R - s * s) / (2 * r[None, :, None] * R)).clamp(-1.0, 1.0)
-            rho = _shell_density(self.tab, sj, s)
+            if partner is None:
+                rho = _shell_density(self.tab, sj, s)
+            else:
+                beta = float(partner[1])
+                rho = torch.exp(-beta * s) * (1.0 / s + 0.5 * beta) if beta > 0 else torch.zeros_like(s)
             base = ws * rho * s * (2 * math.pi) / (r[None, :, None] * R)
             for L in range(5):
                 out[L, c0:c0 + 16] = (base * _legendre(L, x)).sum(-1)
-        self._rhoL[sj] = out
+        self._rhoL[ck] = out
         return out
 
     def _functions(self, si, sj):
         return self._gram_rows(si, sj)
 
     @torch.no_grad()
-    def _gram_rows(self, si, sj):
+    def _drive_rows(self, si, sj, partner):
+        """{d1, q2, b0, ovl}: int dr r^2 u_t(r) v^(L)(r; R) of i's response radials (rank L their own) and of i's
+        density (ovl, L = 0) with the partner function, on the Gram rows' own quadrature: with them the pair's
+        second-order energy is a complete square on one discrete measure."""
+        r = self._rq
+        u = response_radials(self.tab, si, r, self.breath)
+        wr = GRAM_R_STEP * r * r
+        RL = self._rho_partial(sj, partner)
+        h = self.h
+        res = {}
+        for name, f_r, L in (("d1", u["d"], 1), ("q2", u["q"], 2), ("b0", u["b"], 0),
+                             ("ovl", _shell_density(self.tab, si, r), 0)):
+            f = RL[L] @ (wr * f_r)
+            d1 = (f[:-4] - 8 * f[1:-3] + 8 * f[3:-1] - f[4:]) / (12 * h)
+            d2 = (-f[:-4] + 16 * f[1:-3] - 30 * f[2:-2] + 16 * f[3:-1] - f[4:]) / (12 * h * h)
+            res[name] = torch.stack([f[2:-2], d1, d2], -1)
+        return res
+
+    @torch.no_grad()
+    def _gram_rows(self, si, sj, partner=None):
         r = self._rq
         rho_i = _shell_density(self.tab, si, r)
         u = response_radials(self.tab, si, r, self.breath)
         wr = GRAM_R_STEP * r * r / (4 * rho_i.clamp(min=1e-300))
-        RL = self._rho_partial(sj)
+        RL = self._rho_partial(sj, partner)
         h = self.h
         res = {}
         for a, b, L in self.terms:
@@ -228,6 +254,13 @@ class GramTable(RadialTable):
             d2 = (-f[:-4] + 16 * f[1:-3] - 30 * f[2:-2] + 16 * f[3:-1] - f[4:]) / (12 * h * h)
             res[f"gram:{a}{b}{L}"] = torch.stack([f0, d1, d2], -1)
         return res
+
+
+def site_drive_from_rows(yd, dr):
+    """(P, 9) int dn_a v from the pairs' drive rows ``yd`` (P, 3) = [d1, q2, b0] (:meth:`GramTable._drive_rows`) and
+    dr = X_j - X_i (bohr): the radial integrals times the response components' own angular factors at R^."""
+    p = _angular_polys(dr / dr.norm(dim=-1)[:, None], 1)
+    return torch.cat([yd[:, :1] * p[:, :3], yd[:, 1:2] * p[:, 3:8], yd[:, 2:3] * p[:, 8:]], 1)
 
 
 def gram_blocks(table: GramTable, s, dp, dr):

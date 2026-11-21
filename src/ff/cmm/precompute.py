@@ -38,7 +38,7 @@ from . import kernels as K
 from .batch import channel_types
 from .channels import channels_from_pairs, overlap_switch, pair_electrostatics, switch_step
 from .elst import permanent_electrostatics
-from .gram import gram_blocks_from_rows, gram_layout
+from .gram import gram_blocks_from_rows, gram_layout, site_drive_from_rows
 from .params import ChannelTable, IonTable, channel_taper
 from .periodic import (dispersion_tail_integral, erfc_screening, ewald_alpha, make_ewald_frames, periodic_pairs,
                        recip_apply, smooth_switch)
@@ -386,6 +386,24 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     gcols = table.cols(tuple(f"gram:{a}{b}{L}" for a, b, L in gram_layout("shape")[1]), dev)
     x_Gi = gram_blocks_from_rows(yx[:Px, gcols], dr[xs])[:, :D, :D]
     x_Gj = gram_blocks_from_rows(yx[Px:, gcols], -dr[xs])[:, :D, :D]
+    xs_g = xs_Gi = xs_Gj = xs_D = xs_A = None
+    if getattr(table, "site", False):
+        # the site-potential form (CmmConfig.xpol_form = "site"), per slot t of the potential's owner and unit
+        # amplitude: xs_g (2Px, T, D) the derivative of <n_i | y_jt> in i's response ([:Px]; [Px:] of <n_j | y_it> in
+        # j's), xs_Gi / xs_Gj (Px, T, D, D) the Gram blocks of i's response in y_jt / j's in y_it; all times the
+        # overlap switch
+        g_t, G_t = [], []
+        for t in range(table.site_T):
+            yd = yx[:, table.cols(tuple(f"xs:{k}:{t}" for k in ("d1", "q2", "b0")), dev)]
+            g_t.append(site_drive_from_rows(yd, dr[dsel])[:, :D] * sw[:, None])
+            gc = table.cols(tuple(f"gs:{a}{b}{L}:{t}" for a, b, L in gram_layout("shape")[1]), dev)
+            G_t.append((gram_blocks_from_rows(yx[:Px, gc], dr[xs])[:, :D, :D] * sw[:Px, None, None],
+                        gram_blocks_from_rows(yx[Px:, gc], -dr[xs])[:, :D, :D] * sw[:Px, None, None]))
+        # one electron in the frontier shapes: xs_D / xs_A (2Px, T), [:Px] i's donor / acceptor shape in y_jt
+        xs_D = yx[:, table.cols(tuple(f"xs:don:{t}" for t in range(table.site_T)), dev)] * sw[:, None]
+        xs_A = yx[:, table.cols(tuple(f"xs:acc:{t}" for t in range(table.site_T)), dev)] * sw[:, None]
+        xs_g = torch.stack(g_t, 1)
+        xs_Gi, xs_Gj = torch.stack([a for a, _ in G_t], 1), torch.stack([b for _, b in G_t], 1)
     w = sw * O.clamp(min=0.0)
     E = pair_electrostatics(s[i[dsel]], s[j[dsel]], r[dsel], tab)
     chan_raw = channels_from_pairs(N, i[dsel], dr[dsel], w, E * w)
@@ -421,6 +439,7 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
           # with its own hyperpolarization form replaces (CmmConfig.hyperpol = "saturating")
           "hyp_L": Lflat, "hyp_ainv": ainv, "hyp_h": hyp_h, "hyp_c": hyp_c,
           "x_sel": pn[xs], "x_rel": x_rel, "x_swO": swO[:Px], "x_Gi": x_Gi, "x_Gj": x_Gj,
+          "xs_g": xs_g, "xs_Gi": xs_Gi, "xs_Gj": xs_Gj, "xs_D": xs_D, "xs_A": xs_A,
           # the exchange pairs' acceptor-probe overlaps: [:Px] i's probe with j, [Px:] j's probe with i
           "x_Sa": S0p[dsel, PROBES.index("acceptor")],
           "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]], "ch_rev": ch_rev,
@@ -430,7 +449,8 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
           # S0_atom[j, 1] - ch_Sa (acceptor side)
           "ch_Sd": S0p[kk, PROBES.index("donor")], "ch_Sa": S0p[(kk + nP) % max(2 * nP, 1), PROBES.index("acceptor")],
           "S0_atom": S0[:, [PROBES.index("donor"), PROBES.index("acceptor")]], "phi_front": phi_front,
-          "ch_ltaper": torch.log(channel_taper(ch_r, chan.cutoff, chan.taper).clamp(min=1e-300)), "labels": lab}
+          # (clamped at 1e-100: below, the log's second derivative -1 / x^2 underflows)
+          "ch_ltaper": torch.log(channel_taper(ch_r, chan.cutoff, chan.taper).clamp(min=1e-100)), "labels": lab}
     if periodic:
         bt.update(A=None, Ca=None, Jq=None, pbc={
             "cell": cell_ang, "volume": torch.linalg.det(Cb).abs(), "cutoff": rc, "switch_width": switch_width,
