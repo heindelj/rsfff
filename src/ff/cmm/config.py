@@ -43,6 +43,23 @@ class CmmConfig:
                                       # v_j(r) = sum_t a_jt e^{-beta r} (1 / r + beta / 2), beta = s_j b_jt (table:
                                       # pauli_site). One-body in the partner's density: the form a QM region can take
                                       # (claude/qm_embedding_pauli.md)
+    pauli_env: str = "product"        # pauli_form = "site": how the environment factors scale a pair. "product":
+                                      # e^{u_i} e^{u_j} (the cross term of i's and j's environments is a 4-body energy).
+                                      # "mean": (e^{u_i} + e^{u_j}) / 2, each term one centre's environment (the same
+                                      # factor in the site xpol and the site CT shifts). "linear": (f_i + f_j) / 2 with
+                                      # f_i = 1 + sum_k c[s_i, s_k] sw O_ik / O_REF over i's exchange pairs, c learned
+                                      # per species pair (start 0, |c| < PAULI_LIN_CAP): the Pauli energy is exactly
+                                      # 2- plus 3-body (the encoder's Pauli readout is not used). A smooth floor keeps
+                                      # the factor above 0.05. claude/cmm_manybody_partition.md. "global": the
+                                      # linear form with one learned constant on the normalized overlap,
+                                      # f_i = 1 + c sum_k sw O_ik / (sqrt(O_ii O_kk) S_REF), O_ii the ion's density
+                                      # self-overlap (no species-pair parameter). "ion": the linear form with one
+                                      # constant per centre species, f_i = 1 + c_{s_i} sum_k sw O_ik / O_REF. "edge": the product
+                                      # form with edge-additive log-factors, f_ij = e^{u_i + u_j},
+                                      # u_i = sum_k u(s_i, s_k; s_ik), s_ik = sw O_ik / O_REF: a shared network on
+                                      # species embeddings emits for each ordered species pair a bounded, monotone
+                                      # function of the overlap (PauliEdge): a neighbour adds to the log-factor, so the
+                                      # 4-body Pauli is the exponential's second order, a product of two edges
     xpol_form: str = "overlap"        # what exchange polarization perturbs. "overlap": the pair's Pauli energy per
                                       # density overlap times the overlap of the perturbed densities (drive
                                       # A_ij <dn_i | rho_j>, Gram A_ij int dphi_i^2 rho_j, A_ij = E0_ij / O_ij).
@@ -92,6 +109,43 @@ class CmmConfig:
     ct_gap_donor: bool = False        # gap model (needs pauli_form = "site"): the donor's relief, the gap minus
                                       # sum_k e^{u_i + u_k} <D_i | v_k>: the electron that leaves i's donor shape no
                                       # longer sits in the neighbours' site potentials. No parameter
+    ct_gap_centred: str = "off"       # gap model: the donor and acceptor levels evaluated at points moved along the
+                                      # channel (n donor -> acceptor), X_i + s_D n and X_j - s_A n; the partner's own
+                                      # field is left out, so a dimer's gap is unchanged. "species": first order,
+                                      # gap + s_D n.grad phi3(i) + s_A n.grad phi3(j), s per species and role learned
+                                      # in (0, CENTRE_DMAX). "overlap": s_D = lam t_D, s_A = lam (R - t_D), t_D the
+                                      # distance of the donor-acceptor density overlap's centroid from the donor (the
+                                      # CT kernel's exponents), lam in (0, 1) one learned constant; the other ions'
+                                      # full frozen potentials (nucleus plus shells) averaged over the donor's /
+                                      # acceptor's frontier shape at the moved point, in closed form; periodic: what
+                                      # lies beyond the pair list (Ewald reciprocal) to first order. lam = 1 puts
+                                      # both levels at the centroid (only the shapes' difference is left in the
+                                      # gap). Only at contact (ct_centre_window) and for opposite-charge channels
+                                      # (X > X: second neighbours, often bridged by a cation the centroid would sit
+                                      # on). True / False read as "species" / "off"
+    ct_centre_window: tuple = (0.7, 0.5)  # ct_gap_centred = "overlap": the displacement is full while the channel's
+                                      # frontier overlap |S| is above 0.7 of the pair's largest and off below 0.5
+                                      # (C-infinity step; the ct_overlap_table curves): contacts only, not channels
+                                      # through a bridging ion
+    ct_alpha_radical: str = "off"     # gap model: a site's dipole polarizability moves with its transferred charge
+                                      # toward its CT radical's, alpha_i = alpha_ion + Q_i^D dalpha_D + Q_i^A dalpha_A
+                                      # (Q^D / Q^A the charge i gives / takes), inside the joint minimum: outer passes
+                                      # rebuild the on-site blocks from the previous charges and add d E / d alpha
+                                      # dalpha (= -1/2 dalpha |F|^2 for a linear site) to each channel's gap, to a
+                                      # fixed point (claude/ct_gap_dipole.md). dalpha_D: halogen radical - anion;
+                                      # dalpha_A: alkali atom - cation, capped at CT_ALPHA_ROOM of the cation parent's
+                                      # room 1 / u1 - alpha. "fixed": those values; "learned": times lam in (0, 1) per
+                                      # species and role. Clusters, saturating hyperpolarization only
+    ct_alpha_solve: str = "joint"     # ct_alpha_radical: "joint": first order in the step about the ion model, one
+                                      # factorization: the ion model's joint minimum, then t_c from its dipoles (in
+                                      # the graph) added to the gaps and a second CT solve; E = min E_ion + sum q t.
+                                      # Within 0.01 kJ/mol rms of "outer" on the trained nocd (capped acceptor steps).
+                                      # The polarizability is the field Hessian by autograd. "outer": the rigorous
+                                      # fixed point (refactorizes every pass, ~10x slower)
+    ct_alpha_outer: int = 10          # ct_alpha_solve = "outer": at most this many passes (stop at |dQ| < 1e-8)
+    ct_cation_donor: bool = True      # CT channels out of cations (M>X, M>M). Their donor levels (the cations' second
+                                      # ionization, 23 - 76 eV) leave them inert; False drops them (about half the
+                                      # channels, the same energies)
     ct_gap_w0: float = 0.005          # gap model, the least width W0 (Hartree) of a channel's crossing: the two-state form
                                       # with W_b^2 = W^2 + W0^2 and amplitude W^2 / W_b^2 (same W^2 / Delta at a large
                                       # gap; response <= W^2 / (4 W_b^3), transfer <= W^2 / W_b^2). 0: the exact form
@@ -122,7 +176,10 @@ class CmmConfig:
                                       # one exponential per site, the cation's acceptor exponent learned, the channel
                                       # table's taper. "frontier": W^2 = qD qA [S(R) g(R)]^2, S the overlap of the free
                                       # ions' frontier orbitals from ``ct_overlap_table``, g each pair's own cutoff
-                                      # (rsfff.ff.cmm.ct_overlap); no learned exponent, no taper
+                                      # (rsfff.ff.cmm.ct_overlap); no learned exponent, no taper. "table":
+                                      # W^2 = 2 [W_ab(R) g(R)]^2, W_ab the tabulated one-electron coupling of the free
+                                      # ions' frontier orbitals in the frozen dimer (``ct_coupling_table``), g the
+                                      # same cutoff: no CT charges, no exponent, nothing learned or emitted
     ct_cut: str = "taper"             # where the channels end (gap model). "taper": the channel table's cutoff and
                                       # taper, one distance for all pairs. "overlap": each pair's own C-infinity switch
                                       # between the distances at which the overlap of the free ions' frontier orbitals
@@ -132,6 +189,19 @@ class CmmConfig:
     ct_overlap_table: str = "ct_overlap_wb97mv_tzvpd.json"   # the overlap table (scripts/cmm_frontier_shapes.py
                                       # --table; params/) of ct_kernel "frontier" / ct_cut "overlap". A checkpoint
                                       # carries its own
+    ct_coupling_table: str = "ct_coupling_wb97mv_tzvpd.json"   # the coupling table of ct_kernel "table"
+                                      # (scripts/cmm_ct_coupling.py; params/). A checkpoint carries its own
+    ct_breath: bool = False           # ct_kernel "table": the coupling follows the ions' breathing,
+                                      # W = W_ab + dW_donor z_i + dW_acceptor z_j, z the ions' CT-free breathing
+                                      # amplitudes and dW the table's derivatives along the same breathing
+                                      # functions (scripts/cmm_ct_coupling.py --breath; no parameter). Clusters only
+    ct_closed: str = "off"            # the closed-channel (core relaxation) part of short-range CT. "pair": each
+                                      # ion's electrons in a neighbour's site potential, the halves of the site
+                                      # Pauli energy, times -f[neighbour species], f = ct_closed_max sigmoid(raw)
+                                      # learned per species: an attractive, charge-free fraction of the Pauli
+                                      # energy, reported with CT (claude/ct_closed_channel_form.md). Needs
+                                      # pauli_form = "site". Clusters only
+    ct_closed_max: float = 0.5        # the largest fraction f
     ct_overlap_window: tuple = (0.06, 0.02)   # a pair's coupling is switched off between the outermost distances at
                                       # which its |S| is the first and the second value
     ct_q_headroom: float = 0.0        # one-sided CT charges (the gap model; ct_q_onesided): 0 clips the ln factor at
@@ -152,6 +222,19 @@ class CmmConfig:
 
     def __post_init__(self):
         self.pairs = tuple(self.pairs)
+        if self.ct_alpha_radical not in ("off", "fixed", "learned"):
+            raise ValueError(f"ct_alpha_radical {self.ct_alpha_radical!r}: 'off', 'fixed' or 'learned'")
+        if self.ct_alpha_solve not in ("joint", "outer"):
+            raise ValueError(f"ct_alpha_solve {self.ct_alpha_solve!r}: 'joint' or 'outer'")
+        if self.ct_alpha_radical != "off" and (self.ct_model != "gap" or self.hyperpol != "saturating"):
+            raise ValueError("ct_alpha_radical needs ct_model = 'gap' and hyperpol = 'saturating'")
+        if isinstance(self.ct_gap_centred, bool):
+            self.ct_gap_centred = "species" if self.ct_gap_centred else "off"
+        if self.ct_gap_centred not in ("off", "species", "overlap"):
+            raise ValueError(f"ct_gap_centred {self.ct_gap_centred!r}: 'off', 'species' or 'overlap'")
+        self.ct_centre_window = tuple(float(x) for x in self.ct_centre_window)
+        if len(self.ct_centre_window) != 2 or not 0 < self.ct_centre_window[1] < self.ct_centre_window[0] <= 1:
+            raise ValueError(f"ct_centre_window {self.ct_centre_window}: needs 0 < off < on <= 1")
         self.env_gate = tuple(float(x) for x in self.env_gate)
         self.env_overlap = tuple(float(x) for x in self.env_overlap)
         if len(self.env_overlap) != 2 or not 1e-7 <= self.env_overlap[0] < self.env_overlap[1]:
@@ -169,6 +252,10 @@ class CmmConfig:
             raise ValueError("ct_gap_overlap = 'site' and ct_gap_donor need pauli_form = 'site'")
         if self.pauli_form not in ("shells", "site"):
             raise ValueError(f"pauli_form {self.pauli_form!r}: 'shells' or 'site'")
+        if self.pauli_env not in ("product", "mean", "linear", "global", "ion", "edge"):
+            raise ValueError(f"pauli_env {self.pauli_env!r}: 'product', 'mean', 'linear', 'global', 'ion' or 'edge'")
+        if self.pauli_env != "product" and self.pauli_form != "site":
+            raise ValueError(f"pauli_env = {self.pauli_env!r} needs pauli_form = 'site'")
         if self.xpol_form not in ("overlap", "site"):
             raise ValueError(f"xpol_form {self.xpol_form!r}: 'overlap' or 'site'")
         if self.xpol_form == "site" and self.pauli_form != "site":
@@ -183,10 +270,18 @@ class CmmConfig:
             raise ValueError("ct_gap_converge: a number of iterations >= 0")
         if self.ct_exclusion and not (self.ct_model == "gap" and self.ct_gap_converge > 0):
             raise ValueError("ct_exclusion needs ct_model = 'gap' and ct_gap_converge > 0 (it has no one-step form)")
-        if self.ct_kernel not in ("slater", "frontier"):
-            raise ValueError(f"ct_kernel {self.ct_kernel!r}: 'slater' or 'frontier'")
-        if self.ct_kernel == "frontier" and self.ct_model != "gap":
-            raise ValueError("ct_kernel = 'frontier' needs ct_model = 'gap'")
+        if self.ct_kernel not in ("slater", "frontier", "table"):
+            raise ValueError(f"ct_kernel {self.ct_kernel!r}: 'slater', 'frontier' or 'table'")
+        if self.ct_kernel in ("frontier", "table") and self.ct_model != "gap":
+            raise ValueError(f"ct_kernel = {self.ct_kernel!r} needs ct_model = 'gap'")
+        if self.ct_breath and self.ct_kernel != "table":
+            raise ValueError("ct_breath needs ct_kernel = 'table'")
+        if self.ct_closed not in ("off", "pair"):
+            raise ValueError(f"ct_closed {self.ct_closed!r}: 'off' or 'pair'")
+        if self.ct_closed != "off" and self.pauli_form != "site":
+            raise ValueError("ct_closed needs pauli_form = 'site'")
+        if not 0 < float(self.ct_closed_max) < 1:
+            raise ValueError(f"ct_closed_max {self.ct_closed_max}: a fraction in (0, 1)")
         if self.ct_cut not in ("taper", "overlap"):
             raise ValueError(f"ct_cut {self.ct_cut!r}: 'taper' or 'overlap'")
         if self.ct_cut == "overlap" and self.ct_model != "gap":

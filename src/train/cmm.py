@@ -7,10 +7,11 @@ The config has four tables, every key optional (the defaults are the complete.de
     [model]   CmmConfig: hidden, depth, latent, pairs, probes, film, species_dim, env_cap, ct_q_cap, xpol_bound,
               disp_model, disp_confine, disp_table, hyperpol, hyper_ceiling, ct_model, ct_gap_overlap, ct_gap_w0,
               ct_gap_predict, ct_gap_converge, ct_gap_tol, ct_exclusion, ct_q_onesided, ct_q_headroom, ct_floor,
-              ct_relay, env_gate, env_overlap, env_switch, ct_kernel, ct_cut, ct_overlap_table, ct_overlap_window
+              ct_relay, env_gate, env_overlap, env_switch, ct_kernel, ct_cut, ct_overlap_table, ct_coupling_table,
+              ct_breath, ct_closed, ct_closed_max, ct_overlap_window
     [data]    params (species table), ct_sets, walk_eda, salts, extra_sets, force_sets, force_data, force_test,
               polar_sets, polar_test, polar_almo, exclude_names, ct_max_pair, max_ho_ratio, ct_dimers, ct_min_gap,
-              pair_weight, dipole_charged, dip_min_gap,
+              pair_weight, pair_gap, dipole_charged, dip_min_gap,
               test
     [loss]    w_pol, w_ct, w_pauli, w_disp, w_frz, w_int, frz_elst, w_alpha, w_alpha_ct, w_force, w_fe, w_smooth, w_curv,
               w_env_mid, w_dip
@@ -106,6 +107,10 @@ class DataConfig:
                                       # counts fully while its pair's overlap is above pair_weight x s_on and not at
                                       # all from where the pair's switch starts
                                       # (cmm_data.set_pair_weights); 0: every frame counts
+    pair_gap: tuple = ()              # (g_on, g_off) Hartree: a two-ion frame with an anion counts fully while its
+                                      # vacuum gap is at least g_on and not at all at g_off and below (the radical
+                                      # state mixes into the gas-phase pair there; cmm_data.set_pair_gap_weights).
+                                      # Empty: off. E.g. [0.10, 0.08]
     test: tuple = D.DEFAULT_TEST      # test parents (the salts' 6_03, 8_07, 9_09 clusters are added)
 
 
@@ -156,7 +161,10 @@ class RunConfig:
     drop_negative_gap: bool = True    # gap model: a training frame whose polarized gap (the model's frozen gap plus the
                                       # CT-free potentials, on any channel) is negative is out of the model's scope (a
                                       # reaction): not iterated and left out of every loss for this epoch (energy,
-                                      # forces, alpha); re-tested the next epoch, as training may reopen its gap
+                                      # forces, alpha); re-tested the next epoch, as training may reopen its gap.
+                                      # The same for a frame whose solve converges with a negative gap on some channel
+                                      # (the transferred branch of the gap equation), and for both kinds in the
+                                      # held-out force metric (its n_dropped)
     dump_bad: bool = True             # a step with a non-finite loss or gradient writes out/bad_steps/ep{E}_step{S}.pt:
                                       # the model and optimizer state before the step, the batch's frames and the RNG
                                       # states at its start (the step's force / curvature samples follow from them)
@@ -361,27 +369,41 @@ def force_terms(model, frames):
 
 def force_metrics(model, frames, bs=16):
     """Held-out energy and force errors: E/ion MAE and rms (kJ/mol), force rms, MAE and max per component
-    (kJ/mol/A), and per file."""
+    (kJ/mol/A), and per file. Gap model: frames out of the model's scope (a negative polarized gap, or a solve that
+    converged with a negative gap on some channel) are left out, as in training; ``n_dropped`` and ``dropped`` (their
+    files) say which."""
     if not frames:
         return {}
     model.eval()
-    es, fs, per = [], [], {}
+    skip = getattr(model, "skip_negative_gap", False)
+    if hasattr(model, "skip_negative_gap"):
+        model.skip_negative_gap = True
+    es, fs, per, out_of_scope = [], [], {}, []
     for k in range(0, len(frames), bs):
         chunk = frames[k:k + bs]
-        e, f, _ = force_terms(model, chunk)
+        e, f, o = force_terms(model, chunk)
         e, f = e.detach().cpu(), f.detach().cpu()
-        es.append(e)
-        fs.append(f)
+        drop = o["ct_gap_dropped"].tolist() if "ct_gap_dropped" in o else [False] * len(chunk)
         off = 0
-        for fk, ek in zip(chunk, e):
+        for fk, ek, dk in zip(chunk, e, drop):
             n = fk.n
-            d = per.setdefault(fk.meta["file"], {"e": [], "f": []})
-            d["e"].append(abs(float(ek)))
-            d["f"].append(float((f[off:off + n] ** 2).mean().sqrt()))
+            if dk:
+                out_of_scope.append(fk.meta["file"])
+            else:
+                es.append(ek.reshape(1))
+                fs.append(f[off:off + n])
+                d = per.setdefault(fk.meta["file"], {"e": [], "f": []})
+                d["e"].append(abs(float(ek)))
+                d["f"].append(float((f[off:off + n] ** 2).mean().sqrt()))
             off += n
+    if hasattr(model, "skip_negative_gap"):
+        model.skip_negative_gap = skip
     model.train()
+    if not es:
+        return {"n": 0, "n_dropped": len(out_of_scope), "dropped": sorted(out_of_scope)}
     e, f = torch.cat(es), torch.cat(fs)
-    out = {"n": len(frames), "e_mae": float(e.abs().mean()), "e_rms": float((e ** 2).mean().sqrt()),
+    out = {"n": len(es), "n_dropped": len(out_of_scope), "dropped": sorted(out_of_scope),
+           "e_mae": float(e.abs().mean()), "e_rms": float((e ** 2).mean().sqrt()),
            "f_rms": float((f ** 2).mean().sqrt()), "f_mae": float(f.abs().mean()), "f_max": float(f.abs().max())}
     out["per_file"] = {k: {"e_mae": float(np.mean(v["e"])), "f_rms": float(np.sqrt(np.mean(np.square(v["f"]))))}
                        for k, v in sorted(per.items())}
@@ -624,6 +646,10 @@ def run(cfg: TrainConfig, base: Path):
         pw = D.set_pair_weights(model, allf, dc.pair_weight)
         print(f"pair weights: {pw['pairs']} two-ion frames, {pw['reduced']} with a reduced weight, {pw['dropped']} "
               f"beyond their pair's switch (weight 0)", flush=True)
+    if len(dc.pair_gap):
+        pg = D.set_pair_gap_weights(allf, dc.pair_gap)
+        print(f"pair gap weights ({dc.pair_gap[0]:g} -> {dc.pair_gap[1]:g} Ha): {pg['pairs']} two-ion frames, "
+              f"{pg['reduced']} with a reduced weight, {pg['dropped']} at weight 0", flush=True)
     opt = torch.optim.Adam(model.parameters(), lr=rc.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(rc.epochs, 1), eta_min=rc.lr * 0.02)
     best, log, curv_log, n_bad = math.inf, [], [], 0
@@ -715,7 +741,9 @@ def run(cfg: TrainConfig, base: Path):
                 msg += f" | dipole MAE {sv['dip_mae']:.3f} D"
             if force_te:
                 fm = force_metrics(model, force_te)
-                msg += f" | held-out forces: E/ion MAE {fm['e_mae']:.2f} kJ/mol, F rms {fm['f_rms']:.1f} kJ/mol/A"
+                if fm.get("n"):
+                    msg += (f" | held-out forces: E/ion MAE {fm['e_mae']:.2f} kJ/mol, F rms {fm['f_rms']:.1f} kJ/mol/A"
+                            + (f" ({fm['n_dropped']} out of scope)" if fm.get("n_dropped") else ""))
                 log[-1].update({f"force_{k}": v for k, v in fm.items()})
             if va and (force_tr or lc.w_curv > 0):
                 st = torch.random.get_rng_state()

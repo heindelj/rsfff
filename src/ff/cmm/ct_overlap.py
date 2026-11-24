@@ -25,7 +25,7 @@ import torch
 
 from .channels import switch_step
 
-__all__ = ["load_ct_overlap", "overlap_kernel", "switch_radii"]
+__all__ = ["load_ct_overlap", "overlap_kernel", "switch_radii", "load_ct_coupling", "coupling_kernel"]
 
 
 def _spline(y, h):
@@ -84,6 +84,66 @@ def load_ct_overlap(path, symbols, window=(0.06, 0.02), dtype=torch.float64) -> 
             on[a, b], off[a, b] = switch_radii(y, r, s_on, s_off)
     t = lambda x: torch.as_tensor(x, dtype=dtype)                    # noqa: E731
     return {"coef": t(coef), "grid": t([r0, h]), "r_on": t(on), "r_off": t(off), "level": d.get("level", "")}
+
+
+def load_ct_coupling(path, symbols, dtype=torch.float64) -> dict:
+    """The coupling table (``scripts/cmm_ct_coupling.py``) for a species list: {"coef": (S, S, n - 1, 4) spline
+    coefficients of W_ab(R) in Hartree [donor, acceptor], "grid": (2,) r0 and h in Angstrom, "has": (S, S) bool, the
+    ordered pairs the table holds (the others are zero), "level"}."""
+    d = json.load(open(path))
+    r0, h, n = float(d["r0"]), float(d["h"]), int(d["n"])
+    S = len(symbols)
+    coef, has = np.zeros((S, S, n - 1, 4)), np.zeros((S, S), dtype=bool)
+    for a, sa in enumerate(symbols):
+        for b, sb in enumerate(symbols):
+            y = d["W"].get(f"{sa}>{sb}")
+            if y is None:
+                continue
+            y = np.asarray(y, dtype=float)
+            if len(y) != n:
+                raise ValueError(f"{path}: {sa}>{sb} has {len(y)} values, the grid {n}")
+            coef[a, b], has[a, b] = _spline(y, h), True
+    out = {"coef": torch.as_tensor(coef, dtype=dtype), "grid": torch.as_tensor([r0, h], dtype=dtype),
+           "has": torch.as_tensor(has), "level": d.get("level", "")}
+    if "dW_donor" in d:                 # the breathing derivatives, on every breath_every-th grid point
+        kb = int(d.get("breath_every", 1))
+        nb = len(range(0, n, kb))
+        dco = np.zeros((2, S, S, nb - 1, 4))
+        hasd = np.zeros((S, S), dtype=bool)
+        for a, sa in enumerate(symbols):
+            for b, sb in enumerate(symbols):
+                key = f"{sa}>{sb}"
+                if key in d["dW_donor"]:
+                    for q, name in enumerate(("dW_donor", "dW_acceptor")):
+                        y = np.asarray(d[name][key], dtype=float)
+                        if len(y) != nb:
+                            raise ValueError(f"{path}: {name} {key} has {len(y)} values, its grid {nb}")
+                        dco[q, a, b] = _spline(y, h * kb)
+                    hasd[a, b] = True
+        out.update(dcoef=torch.as_tensor(dco, dtype=dtype), dgrid=torch.as_tensor([r0, h * kb], dtype=dtype),
+                   has_d=torch.as_tensor(hasd), breath_params=d.get("breath_params", ""))
+    return out
+
+
+def _eval(coef, grid, r_ang):
+    r0, h = grid[0], grid[1]
+    n = coef.shape[1]
+    k = ((r_ang - r0) / h).detach().floor().clamp(0, n - 1).long()
+    t = r_ang - (r0 + h * k)
+    c = coef[torch.arange(coef.shape[0], device=coef.device), k]
+    return c[:, 0] + t * (c[:, 1] + t * (c[:, 2] + t * c[:, 3]))
+
+
+def coupling_kernel(coef, grid, r_on, r_off, si, sj, r_ang, dcoef=None, dgrid=None, dlam_i=None, dlam_j=None):
+    """2 [W_ab g]^2 (Hartree^2) of the channels donor species ``si`` -> acceptor species ``sj`` at ``r_ang``
+    (Angstrom): the spline of the tabulated frontier coupling times the pair's C-infinity switch, with the factor 2 of
+    a closed-shell donor pair (the two-state channel's W^2). Exactly 0 at and beyond R_off, with every derivative.
+    With ``dcoef`` (2, S, S, m - 1, 4), ``dgrid`` and the breathing amplitudes ``dlam_i`` of the donors and ``dlam_j``
+    of the acceptors (per channel; electrons, > 0 an expansion): W = W_ab + dW_donor dlam_i + dW_acceptor dlam_j."""
+    W = _eval(coef[si, sj], grid, r_ang)
+    if dcoef is not None:
+        W = W + _eval(dcoef[0, si, sj], dgrid, r_ang) * dlam_i + _eval(dcoef[1, si, sj], dgrid, r_ang) * dlam_j
+    return 2.0 * (W * pair_switch(r_on, r_off, si, sj, r_ang)) ** 2
 
 
 def overlap_kernel(coef, grid, r_on, r_off, si, sj, r_ang):

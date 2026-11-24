@@ -423,6 +423,13 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
     pos_of = torch.full((2 * nP,), -1, dtype=torch.long, device=dev).index_put((kk,), torch.arange(kk.shape[0], device=dev))
     ch_rev = pos_of[(kk + nP) % max(2 * nP, 1)]                     # the reverse channel j -> i (same image), or -1
     ch_J = (1 - y[ck, table.index["aoff:dd:0"]]) / r[ck]             # the slots' Coulomb at the channel's distance
+    # the third ions' frozen dipole drive (-field) at donor and acceptor along the channel (donor -> acceptor): the
+    # frozen drive of the atom minus its partner's pair row (CmmConfig.ct_gap_centred). Periodic: the partner's
+    # reciprocal-space share stays in.
+    rev_p = (kk + nP) % max(2 * nP, 1)
+    rh = dr[ck] / r[ck][:, None]
+    ch_L3 = torch.stack([((Lflat[dp[0, ck], :3] - Rp[0, kk, :3]) * rh).sum(1),
+                         ((Lflat[dp[1, ck], :3] - Rp[0, rev_p, :3]) * rh).sum(1)], 1)
     sh = torch.cat([shifts[pn], -shifts[pn]]) if periodic else torch.zeros(2 * nP, 3, dtype=dt, device=dev)
     code = ((sh[ck] + 64).long() * torch.tensor([16384, 128, 1], device=dev)).sum(1)
     ch_key = (ch_index[0] * N + ch_index[1]) * (1 << 21) + code       # the channel's identity across MD steps
@@ -433,17 +440,20 @@ def batched_precompute(pos_ang, atomic_numbers, batch_idx, tab: IonTable, table:
         lab.setdefault(key, torch.full((B,), float("nan"), dtype=dt, device=dev))
     mask = torch.zeros(B, nmax, dtype=torch.bool, device=dev).index_put((b_idx, loc), torch.ones(N, dtype=torch.bool, device=dev))
     bt = {"B": B, "nmax": nmax, "D": D, "mask": mask, "species": s, "frame": b_idx, "pos": pos_ang, "pairs": pairs,
-          "pair_dr": dr_u * BOHR, "Lz": Lz, "e_hyp": e_hyp, "chan": chan_raw, "gated": gated, "gate": tuple(gate),
+          "pair_dr": dr_u * BOHR,
+          # the pairs' smooth cutoff weight (periodic; 1 for clusters): ct_gap_centred = "overlap"
+          "pair_sw": smooth_switch(r_u * BOHR, rc - switch_width, rc) if periodic else torch.ones_like(r_u), "Lz": Lz, "e_hyp": e_hyp, "chan": chan_raw, "gated": gated, "gate": tuple(gate),
           "switch": switch, "overlap": tuple(float(v) for v in overlap),
           # the Legendre step's inputs and outputs per atom (permanent drive (N, 8), alpha(E)^-1, h, c): what a model
           # with its own hyperpolarization form replaces (CmmConfig.hyperpol = "saturating")
           "hyp_L": Lflat, "hyp_ainv": ainv, "hyp_h": hyp_h, "hyp_c": hyp_c,
           "x_sel": pn[xs], "x_rel": x_rel, "x_swO": swO[:Px], "x_Gi": x_Gi, "x_Gj": x_Gj,
           "xs_g": xs_g, "xs_Gi": xs_Gi, "xs_Gj": xs_Gj, "xs_D": xs_D, "xs_A": xs_A,
+          "x_w": (sw * O.clamp(min=0.0))[:Px],     # the exchange pairs' switched density overlap (pauli_env "linear")
           # the exchange pairs' acceptor-probe overlaps: [:Px] i's probe with j, [Px:] j's probe with i
           "x_Sa": S0p[dsel, PROBES.index("acceptor")],
           "ch_index": ch_index, "ch_type": ct[ck], "ch_r": ch_r, "ch_frame": b_idx[ch_index[0]], "ch_rev": ch_rev,
-          "ch_J": ch_J, "ch_key": ch_key, "ch_rhat": dr[ck] / r[ck][:, None],     # unit vector donor -> acceptor
+          "ch_J": ch_J, "ch_L3": ch_L3, "ch_pair": pn[kk % max(nP, 1)] if nP else kk, "ch_key": ch_key, "ch_rhat": dr[ck] / r[ck][:, None],     # unit vector donor -> acceptor
           # the channel partner's share of the donor (i) / acceptor (j) probe overlaps, and the atoms' totals: the
           # confinement of a channel by everything but its own partner is S0_atom[i, 0] - ch_Sd (donor side) and
           # S0_atom[j, 1] - ch_Sa (acceptor side)

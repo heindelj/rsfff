@@ -494,6 +494,30 @@ def set_pair_weights(model, frames, ratio=1.5) -> dict:
     return out
 
 
+def set_pair_gap_weights(frames, window, anions=("F", "Cl", "Br", "I")) -> dict:
+    """Loss weights of the two-ion frames by their vacuum gap (``meta["vacuum_gap"]``, Hartree), in place: full weight
+    at ``window[0]`` and above, none at ``window[1]`` and below, a C-infinity step in between; multiplies the weight
+    the frame has. Towards the ionic / radical crossing the gas-phase reference of a pair mixes in the radical state
+    (a long charge-transfer tail that the model's frontier coupling does not have and the condensed phase does not
+    show); those frames are left out so that no fitted quantity stands in for it. Only pairs with an anion; frames of
+    more than two ions are left alone. Returns {"pairs", "reduced", "dropped"} counts."""
+    from ..ff.cmm.channels import switch_step
+    out = {"pairs": 0, "reduced": 0, "dropped": 0}
+    g_on, g_off = (float(v) for v in window)
+    if not g_on > g_off >= 0:
+        raise ValueError(f"pair gap window {tuple(window)}: needs g_on > g_off >= 0 (Hartree)")
+    for f in frames:
+        g = f.meta.get("vacuum_gap")
+        if f.n != 2 or g is None or not np.isfinite(g) or not set(f.symbols) & set(anions):
+            continue
+        w = 1.0 if g >= g_on else 0.0 if g <= g_off else float(switch_step(torch.tensor((g - g_off) / (g_on - g_off)), "smooth"))
+        f.labels["weight"] = w * float(f.labels.get("weight", 1.0))
+        out["pairs"] += 1
+        out["reduced"] += 0 < w < 1
+        out["dropped"] += w == 0
+    return out
+
+
 def monomer_energies(eda_dirs):
     """{symbol: isolated-ion SCF energy (Hartree)} from the ``fragment_energies`` of EDA extxyz files."""
     from ase.io import read

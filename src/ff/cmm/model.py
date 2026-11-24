@@ -128,7 +128,10 @@ cutoff with the uniform tail added. A cluster in a large cell reproduces the clu
 """
 from __future__ import annotations
 
+import json
 import math
+
+import numpy as np
 
 import torch
 from torch import nn
@@ -147,7 +150,8 @@ from .precompute import (CmmTable, batched_precompute, cmm_table, dipole_self_co
 from .species import SpeciesEmbedding
 from .tabulate import PROBES, shape_self_coulomb
 from .config import PAIR_GROUPS, CmmConfig
-from .ct_overlap import load_ct_overlap, overlap_kernel, pair_switch
+from .ct_overlap import (coupling_kernel, load_ct_coupling, load_ct_overlap, overlap_kernel, pair_switch,
+                         switch_radii)
 from .disp_table import load_disp_table, pair_scale
 from .encoder import READOUTS, Encoder
 
@@ -168,6 +172,156 @@ FLUX_V0_INIT = 0.025
 HYPER_F_INIT = 0.25
 XPOL_BOUND_W1_INIT = 0.6
 XPOL_BOUND_THETA_INIT = 3.0
+#: ``pauli_env = "linear"``: f_i = 1 + sum_k c[s_i, s_k] sw O_ik / PAULI_LIN_OREF (a contact overlap of the salts is
+#: 1.5 - 2.5e-3), |c| < PAULI_LIN_CAP; the pair factor (f_i + f_j) / 2 is kept above PAULI_LIN_FLOOR by a softplus of
+#: sharpness PAULI_LIN_BETA (it differs from the linear form by < 1e-7 once the factor is 0.25 above the floor)
+PAULI_LIN_OREF = 2e-3
+PAULI_LIN_CAP = 0.2
+PAULI_LIN_FLOOR = 0.05
+PAULI_LIN_BETA = 80.0
+#: ``pauli_env = "global"``: the reference normalized overlap S_REF (contacts of the salts: O_ik / sqrt(O_ii O_kk) is
+#: 2 - 6e-4) and the cap on the one constant
+PAULI_GLOB_SREF = 3e-4
+PAULI_GLOB_CAP = 0.5
+#: ``ct_gap_centred``: the displacements (bohr) are CENTRE_DMAX sigmoid(raw); start values per role (donor, acceptor)
+#: for cations and anions: a cation's acceptor s orbital leans toward the donor, an anion's donor p shell less so
+CENTRE_DMAX = 3.0
+CENTRE_INIT = {"cation": (0.2, 1.0), "anion": (0.5, 0.2)}
+#: ``ct_gap_centred = "overlap"``: lam = sigmoid(raw) starts here
+CENTRE_LAM_INIT = 0.5
+_GL_X, _GL_W = (torch.tensor(a, dtype=torch.float64) for a in np.polynomial.legendre.leggauss(32))
+
+
+def overlap_centroid(a, b, R):
+    """Distance from centre A of the centroid of exp(-a r_A - b r_B) (two Slater 1s densities' product), centres R
+    apart: prolate spheroidal coordinates mu = (r_A + r_B) / R, nu = (r_A - r_B) / R, z = R mu nu / 2 from the
+    midpoint, so z_c = (R / 2) (A3 B1 - A1 B3) / (A2 B0 - A0 B2) with A_n = int_1^inf mu^n e^{-p mu} (closed form,
+    the common e^{-p} dropped), B_n = int_-1^1 nu^n e^{-q nu} (32-point Gauss-Legendre), p = R (a + b) / 2,
+    q = R (a - b) / 2. Smooth in a, b, R; in (0, R)."""
+    p, q = R * (a + b) / 2, R * (a - b) / 2
+    ip = 1.0 / p
+    A0, A1 = ip, ip + ip ** 2
+    A2, A3 = ip + 2 * ip ** 2 + 2 * ip ** 3, ip + 3 * ip ** 2 + 6 * ip ** 3 + 6 * ip ** 4
+    x, w = _GL_X.to(R), _GL_W.to(R)
+    E = torch.exp(-q[..., None] * x - q.abs()[..., None]) * w        # scaled: the ratio is unchanged
+    B0, B1, B2, B3 = E.sum(-1), (E * x).sum(-1), (E * x * x).sum(-1), (E * x ** 3).sum(-1)
+    return R / 2 * (1 + (A3 * B1 - A1 * B3) / (A2 * B0 - A0 * B2))
+
+
+#: ``ct_alpha_radical``: the CT radicals' dipole polarizabilities (bohr^3): halogen atoms (a donor anion's radical) and
+#: alkali atoms (an acceptor cation's), finite field, wB97M-V/def2-TZVPD (UKS), scripts/cmm_radical_alpha.py; the ions
+#: at the same level reproduce the species table's alpha
+RADICAL_ALPHA = {"Li": 119.92, "Na": 119.44, "K": 251.03, "Cs": 464.92, "F": 3.42, "Cl": 13.92, "Br": 19.55, "I": 30.04}
+#: ``ct_alpha_radical``: an acceptor cation's step is capped at this fraction of its parent's room 1 / u1 - alpha;
+#: lam (learned) starts here
+CT_ALPHA_ROOM = 0.9
+CT_ALPHA_LAM_INIT = 0.95
+CT_ALPHA_TOL = 1e-8
+CT_ALPHA_MIX = 1.0
+#: ``pauli_env = "edge"``: the largest |u| one edge adds to its centre's log-factor; embedding / hidden widths and the
+#: number of softplus terms in the monotone overlap function
+EDGE_AMAX = 0.5
+EDGE_EMB, EDGE_HIDDEN, EDGE_TERMS = 8, 32, 4
+
+
+class PauliEdge(nn.Module):
+    """``pauli_env = "edge"``: the log-factor one neighbour k adds to centre i's Pauli factor,
+        u(a, b; s) = EDGE_AMAX tanh(o_0) tanh(m(s)),  m(s) = sum_h w_h [softplus(v_h s + c_h) - softplus(c_h)],
+    a = s_i, b = s_k, s the switched overlap per O_REF (1 near contact). w_h, v_h = softplus(o) >= 0, so m is 0 at
+    s = 0, non-decreasing and smooth: u has one sign per species pair, vanishes with the overlap, grows
+    monotonically with it (never turns over) and is bounded by EDGE_AMAX. (o_0, o) come from one MLP shared by all
+    species pairs, on the ordered pair's embeddings [e_a, e_b]; e_s = Linear(descriptor_s) + a learned residual,
+    the descriptors the species' charge, ln alpha, ln of the outer shell's exponent and ln of its electron count
+    (standardized over the table). The last layer starts at 0: u = 0, the bare site Pauli."""
+
+    def __init__(self, tab):
+        super().__init__()
+        n, b = tab.shell_n.to(torch.float64), tab.shell_b.to(torch.float64)
+        occ = n > 0
+        b_out = torch.where(occ, b, torch.full_like(b, float("inf"))).min(1).values
+        n_tot = n.sum(1)
+        d = torch.stack([tab.charge.to(torch.float64), tab.alpha.to(torch.float64).log(), b_out.log(),
+                         n_tot.clamp(min=1e-3).log()], 1)
+        sd = d.std(0, unbiased=False)
+        d = (d - d.mean(0)) / torch.where(sd > 0, sd, torch.ones_like(sd))
+        self.register_buffer("desc", d, persistent=False)
+        S, H = d.shape[0], EDGE_TERMS
+        self.embed = nn.Linear(d.shape[1], EDGE_EMB).double()
+        self.resid = nn.Parameter(torch.zeros(S, EDGE_EMB, dtype=torch.float64))
+        self.mlp = nn.Sequential(nn.Linear(2 * EDGE_EMB, EDGE_HIDDEN), nn.SiLU(), nn.Linear(EDGE_HIDDEN, EDGE_HIDDEN),
+                                 nn.SiLU(), nn.Linear(EDGE_HIDDEN, 1 + 3 * H)).double()
+        with torch.no_grad():
+            self.mlp[-1].weight.zero_()
+            self.mlp[-1].bias.zero_()
+
+    def pair_outputs(self):
+        """(S, S, 1 + 3 H): the MLP's outputs for every ordered species pair [centre, neighbour]."""
+        e = self.embed(self.desc) + self.resid
+        S = e.shape[0]
+        x = torch.cat([e[:, None, :].expand(S, S, -1), e[None, :, :].expand(S, S, -1)], -1)
+        return self.mlp(x)
+
+    def forward(self, a, b, s, out=None):
+        """(P,) u(a, b; s) for centre species ``a``, neighbour species ``b`` and overlaps ``s`` (P,)."""
+        o = (self.pair_outputs() if out is None else out)[a, b]
+        H = EDGE_TERMS
+        sig = torch.tanh(o[:, 0])
+        w = torch.nn.functional.softplus(o[:, 1:1 + H])
+        v = torch.nn.functional.softplus(o[:, 1 + H:1 + 2 * H])
+        c = o[:, 1 + 2 * H:]
+        sp = torch.nn.functional.softplus
+        m = (w * (sp(v * s[:, None] + c) - sp(c))).sum(-1)
+        return EDGE_AMAX * sig * torch.tanh(m)
+
+
+def centre_neighbours(bt):
+    """The third ions of each channel's donor and acceptor (``ct_gap_centred = "overlap"``): every pair of the atom on
+    the batch's pair list but the channel's own. Returns (channel, role 0 donor / 1 acceptor, third ion, pair, sign)
+    with the vector channel atom -> third ion = sign x pair_dr[pair]. Indices only (no graph), cached per batch."""
+    pairs = bt["pairs"]
+    P, N = pairs.shape[1], bt["species"].shape[0]
+    dev = pairs.device
+    da, db = torch.cat([pairs[0], pairs[1]]), torch.cat([pairs[1], pairs[0]])
+    dpid = torch.arange(P, device=dev).repeat(2)
+    dsg = torch.cat([torch.ones(P, device=dev), -torch.ones(P, device=dev)])
+    order = torch.argsort(da, stable=True)
+    da, db, dpid, dsg = da[order], db[order], dpid[order], dsg[order]
+    cnt = torch.bincount(da, minlength=N)
+    start = torch.cumsum(cnt, 0) - cnt
+    i, j = bt["ch_index"]
+    C = i.shape[0]
+    ctr = torch.cat([i, j])
+    role = torch.cat([torch.zeros(C, dtype=torch.long, device=dev), torch.ones(C, dtype=torch.long, device=dev)])
+    cid = torch.arange(C, device=dev).repeat(2)
+    deg = cnt[ctr]
+    rep = torch.repeat_interleave(torch.arange(2 * C, device=dev), deg)
+    off = torch.arange(rep.numel(), device=dev) - torch.repeat_interleave(torch.cumsum(deg, 0) - deg, deg)
+    q = start[ctr][rep] + off
+    keep = dpid[q] != bt["ch_pair"][cid[rep]]
+    return cid[rep][keep], role[rep][keep], db[q][keep], dpid[q][keep], dsg[q][keep]
+
+
+def shaped_ion_potential(q, n, b, beta, r):
+    """The frozen potential of a spherical ion averaged over a normalized Slater density of exponent beta centred at
+    distance r (bohr): nucleus Z = q + sum n_t with the shape, (Z / r) (1 - (1 + beta r / 2) e^{-beta r}); each shell
+    with the shape, -n_t (1 - f0(b_t, beta; r)) / r (f0 the two-centre complement of
+    :func:`rsfff.ff.multipole.slater_two_center_damp_unequal`). Finite at r = 0. q, beta, r (M,); n, b (M, T)."""
+    M, T = n.shape
+    Z = q + n.sum(-1)
+    f0 = slater_two_center_damp_unequal(b.reshape(-1), beta[:, None].expand(M, T).reshape(-1),
+                                        r[:, None].expand(M, T).reshape(-1), 0)[0].view(M, T)
+    return (q - Z * (1 + beta * r / 2) * torch.exp(-beta * r) + (n * f0).sum(-1)) / r
+
+
+def frozen_ion_potential(q, n, b, r):
+    """The frozen potential of a spherical ion at distance r (bohr) and its radial derivative: net charge q, shells of
+    n_t electrons in normalized 1s densities b^3 / (8 pi) e^{-b r}: phi = q / r + sum_t n_t e^{-b_t r} (1 / r + b_t / 2).
+    q, r (...,); n, b (..., T)."""
+    rr = r[..., None]
+    e = n * torch.exp(-b * rr)
+    phi = q / r + (e * (1.0 / rr + b / 2)).sum(-1)
+    dphi = -q / r ** 2 - (e * (b / rr + b * b / 2 + 1.0 / rr ** 2)).sum(-1)
+    return phi, dphi
 #: ``xpol_form = "site"``: the perturbed site-potential energy itself is W1 = 1, theta = 1 (a complete square)
 XPOL_SITE_W1_INIT = 1.0
 XPOL_SITE_THETA_INIT = 1.5
@@ -208,6 +362,10 @@ class CmmModel(nn.Module):
     def __init__(self, tab: IonTable, chan: ChannelTable, config: CmmConfig | None = None):
         super().__init__()
         cfg = config or CmmConfig()
+        if not cfg.ct_cation_donor:          # only anion donors: channels X>M and X>X
+            don = {x for x, q in zip(tab.symbols, tab.charge.tolist()) if q < 0}
+            chan = ChannelTable(types={k: v for k, v in chan.types.items() if k.split(">")[0] in don},
+                                cutoff=chan.cutoff, taper=chan.taper, meta={**chan.meta, "cation_donor": False})
         self.config, self.tab, self.chan = cfg, tab, chan
         f64 = dict(dtype=torch.float64)
         S, T = len(tab.symbols), tab.shell_n.shape[1]
@@ -269,6 +427,37 @@ class CmmModel(nn.Module):
         self.ln_w1 = nn.Parameter(torch.zeros(S, 3, **f64))          # W1 = 1 at start (the overlap model)
         self.ln_w2 = nn.Parameter(torch.zeros(S, **f64))
         self.xpol_site = cfg.xpol_form == "site"
+        if cfg.pauli_env == "linear":       # raw per species pair (symmetric in use: c[a, b] and c[b, a] both learned)
+            self.pauli_lin_c = nn.Parameter(torch.zeros(S, S, **f64))
+        if cfg.pauli_env == "ion":          # raw per centre species
+            self.pauli_ion_c = nn.Parameter(torch.zeros(S, **f64))
+        if cfg.pauli_env == "edge":
+            self.pauli_edge = PauliEdge(tab)
+        self._gap_tshift = None
+        if cfg.pauli_env == "global":       # one constant; sqrt(O_ss), O_ss = sum_tu n_t n_u b_t^3 b_u^3 / (8 pi (b_t + b_u)^3)
+            self.pauli_glob_c = nn.Parameter(torch.zeros((), **f64))
+            nb, bb = tab.shell_n.to(torch.float64), tab.shell_b.to(torch.float64)
+            nn_ = nb[:, :, None] * nb[:, None, :]
+            oss = (nn_ * bb[:, :, None] ** 3 * bb[:, None, :] ** 3 / (8 * math.pi * (bb[:, :, None] + bb[:, None, :]) ** 3)).sum((1, 2))
+            self.register_buffer("pauli_self_rt", oss.sqrt(), persistent=False)
+        if cfg.ct_model == "gap" and cfg.ct_gap_centred == "overlap":
+            self.ct_centre_lam = nn.Parameter(torch.tensor(math.log(CENTRE_LAM_INIT / (1 - CENTRE_LAM_INIT)), **f64))
+            from .io import resolve_params      # the contact window: |S| relative to the pair's largest
+            d = json.load(open(resolve_params(cfg.ct_overlap_table)))
+            rg = float(d["r0"]) + float(d["h"]) * np.arange(int(d["n"]))
+            won, woff = cfg.ct_centre_window
+            on, off = np.zeros((S, S)), np.zeros((S, S))
+            for a_, sa in enumerate(sym):
+                for b_, sb in enumerate(sym):
+                    y = np.abs(np.asarray(d["S"][f"{sa}>{sb}"], dtype=float))
+                    if y.max() > 0:
+                        on[a_, b_], off[a_, b_] = switch_radii(y / y.max(), rg, won, woff)
+            self.register_buffer("ctc_ron", torch.tensor(on, **f64), persistent=False)
+            self.register_buffer("ctc_roff", torch.tensor(off, **f64), persistent=False)
+        if cfg.ct_model == "gap" and cfg.ct_gap_centred == "species":     # (S, 2) raw displacements (donor, acceptor)
+            d0 = torch.tensor([CENTRE_INIT["cation" if float(q) > 0 else "anion"] for q in tab.charge], **f64)
+            self.ct_centre_raw = nn.Parameter(torch.log(d0 / (CENTRE_DMAX - d0)))
+        self._pauli_f = None
         self.ct_site = cfg.ct_model == "gap" and (cfg.ct_gap_overlap == "site" or cfg.ct_gap_donor)
         self.theta_min = 1.0 if self.xpol_site else 2.0
         if self.xpol_site or self.ct_site:  # the tabulated site integrals are at the table's exponent scale
@@ -290,6 +479,17 @@ class CmmModel(nn.Module):
                                                           tab.hyper_b.to(torch.float64)], 1), persistent=False)
             self.hyper_raw = nn.Parameter(torch.full((S if cfg.hyper_ceiling == "species" else 1,),
                                                      math.log(HYPER_F_INIT / (1 - HYPER_F_INIT)), **f64))
+        if cfg.ct_alpha_radical != "off":         # (S, 2) dalpha per species [as donor, as acceptor]
+            ion, room = self.hyper_alpha, self.hyper_room
+            rad = torch.tensor([RADICAL_ALPHA.get(x, float("nan")) for x in sym], **f64)
+            qs = tab.charge.to(torch.float64)
+            ok = torch.isfinite(rad)
+            dD = torch.where((qs < 0) & ok, rad - ion, torch.zeros_like(ion))
+            dA = torch.where((qs > 0) & ok, torch.minimum(torch.nan_to_num(rad) - ion, CT_ALPHA_ROOM * room),
+                             torch.zeros_like(ion))
+            self.register_buffer("ct_alpha_step", torch.stack([dD, dA], 1), persistent=False)
+            if cfg.ct_alpha_radical == "learned":
+                self.ct_alpha_raw = nn.Parameter(torch.full((S, 2), math.log(CT_ALPHA_LAM_INIT / (1 - CT_ALPHA_LAM_INIT)), **f64))
         self.breath = bool((tab.a0 > 0).any())
         self.n_b = 1 if self.breath else 0
         self.register_buffer("breath_mask", (tab.a0 > 0).to(torch.float64), persistent=False)
@@ -309,7 +509,8 @@ class CmmModel(nn.Module):
         self.ct_eta_raw = nn.Parameter(torch.log(torch.expm1(eta0)).to(**f64))  # softplus: on-site hardness
         self.gap = cfg.ct_model == "gap"
         self.frontier = cfg.ct_kernel == "frontier"
-        self.overlap_cut = self.frontier or cfg.ct_cut == "overlap"      # each pair's own switch (ct_overlap.py)
+        self.table_kernel = cfg.ct_kernel == "table"                     # the tabulated frontier coupling: no CT charges
+        self.overlap_cut = self.frontier or self.table_kernel or cfg.ct_cut == "overlap"   # each pair's own switch
         if self.overlap_cut:
             from .io import resolve_params
             ov = load_ct_overlap(resolve_params(cfg.ct_overlap_table), sym, cfg.ct_overlap_window)
@@ -319,6 +520,28 @@ class CmmModel(nn.Module):
             self.register_buffer("ctk_roff", ov["r_off"])
             self._chan0 = chan
             self.sync_channels()
+        if self.table_kernel:
+            from .io import resolve_params
+            cw = load_ct_coupling(resolve_params(cfg.ct_coupling_table), sym)
+            miss = [t for t in self.chan.types if not cw["has"][sym.index(t.split(">")[0]), sym.index(t.split(">")[1])]]
+            if miss:
+                raise ValueError(f"{cfg.ct_coupling_table}: no coupling for the channels {miss} (the table holds anion "
+                                 "donors unless built otherwise: ct_cation_donor = false, or scripts/cmm_ct_coupling.py "
+                                 "--donors ...)")
+            self.register_buffer("ctw_coef", cw["coef"])            # persistent: a checkpoint carries its table
+            self.register_buffer("ctw_grid", cw["grid"])
+            if cfg.ct_breath:
+                if "dcoef" not in cw or any(not cw["has_d"][sym.index(t.split(">")[0]), sym.index(t.split(">")[1])]
+                                            for t in self.chan.types):
+                    raise ValueError(f"{cfg.ct_coupling_table}: ct_breath needs the breathing derivatives of every "
+                                     "channel (scripts/cmm_ct_coupling.py --breath)")
+                self.register_buffer("ctw_dcoef", cw["dcoef"])
+                self.register_buffer("ctw_dgrid", cw["dgrid"])
+        self.ct_breath = bool(cfg.ct_breath)
+        self._dlam = None
+        self.ct_closed = cfg.ct_closed != "off"
+        if self.ct_closed:
+            self.ct_cc_raw = nn.Parameter(torch.full((S,), -2.0, **f64))    # f = ct_closed_max sigmoid(raw): starts at 0.12 max
         if self.gap:
             with torch.no_grad():
                 self.ct_ln_q0.fill_(math.log(FRONTIER_Q0_INIT if self.frontier else GAP_Q0_INIT))
@@ -348,7 +571,10 @@ class CmmModel(nn.Module):
         self._u = None
         #: training switch, not part of the model: frames whose polarized gap (the frozen gap plus the CT-free
         #: potentials) is negative on some channel are not iterated (the trainer drops them from the loss); the
-        #: forward always reports that gap per frame (``ct_gap_min``) and which frames were skipped (``ct_gap_dropped``)
+        #: forward always reports that gap per frame (``ct_gap_min``) and which frames were skipped (``ct_gap_dropped``).
+        #: With the switch on, ``ct_gap_dropped`` also flags the frames whose solve converged with a negative gap on
+        #: some channel (``ct_gap_closed``, always reported): the other solution of the gap equation, a transferred
+        #: electron; they are iterated but out of scope all the same
         self.skip_negative_gap = False
         self.double()
 
@@ -449,14 +675,45 @@ class CmmModel(nn.Module):
         uses (``config.hyper_ceiling``: one value for all species or one each)."""
         return torch.sigmoid(self.hyper_raw).expand(self.hyper_room.shape[0])
 
-    def hyperpolarized(self, bt, sp):
+    def ct_alpha_steps(self):
+        """(S, 2) ``ct_alpha_radical``: the polarizability step per unit charge given / taken (bohr^3)."""
+        st = self.ct_alpha_step
+        if self.config.ct_alpha_radical == "learned":
+            st = st * torch.sigmoid(self.ct_alpha_raw)
+        return st
+
+    def _hyper_terms(self, bt, sp, dalpha=None):
+        a = self.hyper_alpha[sp]
+        kap = (self.hyper_fraction() * self.hyper_room)[sp]
+        if dalpha is not None:          # the room above shrinks by what the step used (kept >= 0 by the cap)
+            kap = (self.hyper_fraction()[sp] * (self.hyper_room[sp] - dalpha)).clamp(min=0.0)
+            a = a + dalpha
+        gb = self.hyper_gb[sp]
+        return saturating_hyperpolarization(bt["hyp_L"], a, kap, gb[:, 0], gb[:, 1])
+
+    def _onsite_alpha_derivative(self, bt, sp, dalpha, mu):
+        """(N,) d/d alpha_i of the on-site dipole energy 1/2 mu A_ii(alpha) mu - h(alpha) mu + c(alpha) at fixed mu
+        (the saturating hyperpolarization with base polarizability alpha + dalpha): the gap shift per unit step."""
+        with torch.enable_grad():
+            x = dalpha.detach().clone().requires_grad_(True)
+            ainv, h, c = self._hyper_terms(bt, sp, x)
+            e = 0.5 * torch.einsum("na,nab,nb->n", mu, ainv, mu) - (h * mu).sum(-1) + c
+            return torch.autograd.grad(e.sum(), x)[0].detach()
+
+    def _onsite_alpha_t(self, bt, sp, mu):
+        """(N,) as :meth:`_onsite_alpha_derivative` at the ion polarizabilities, in the graph (dipoles, fields)."""
+        with torch.enable_grad():
+            x = mu.new_zeros(sp.shape[0]).requires_grad_(True)
+            ainv, h, c = self._hyper_terms(bt, sp, x)
+            e = 0.5 * torch.einsum("na,nab,nb->n", mu, ainv, mu) - (h * mu).sum(-1) + c
+            return torch.autograd.grad(e.sum(), x, create_graph=True)[0]
+
+    def hyperpolarized(self, bt, sp, dalpha=None):
         """The batch with the saturating hyperpolarization in place of the precompute's Legendre step
         (``config.hyperpol = "saturating"``): the on-site dipole blocks alpha(E_p)^-1, the drive's offset h and the
         constants e_hyp, from the permanent field and gradient at every atom and the learned ceiling
         alpha + f (1 / u1 - alpha)."""
-        kap = (self.hyper_fraction() * self.hyper_room)[sp]
-        gb = self.hyper_gb[sp]
-        ainv, h, c = saturating_hyperpolarization(bt["hyp_L"], self.hyper_alpha[sp], kap, gb[:, 0], gb[:, 1])
+        ainv, h, c = self._hyper_terms(bt, sp, dalpha)
         d = ainv - bt["hyp_ainv"]
         B, D = bt["B"], bt["D"]
         fr, loc = self._local(bt)
@@ -528,13 +785,17 @@ class CmmModel(nn.Module):
         (i, j), dr = bt["pairs"], bt["pair_dr"]
         r_ang = dr.norm(dim=-1)
         rb = r_ang / K.BOHR_ANG
-        if self.pauli_site:           # e^{u_i + u_j} [<n_i | v_j> + <n_j | v_i>]: w carries a e^{u} of the potential's owner
+        if self.pauli_site:           # f_ij [<n_i | v_j> + <n_j | v_i>], f_ij the pair's environment factor
+            if self.config.pauli_env in ("linear", "global", "ion"):
+                self._pauli_f = self._pauli_linear_f(bt, sp)
+            elif self.config.pauli_env == "edge":
+                self._pauli_f = self._pauli_edge_u(bt, sp)
             n, bn = self.tab.shell_n[sp], self.tab.shell_b[sp]
-            env = torch.exp(self.cap(self._u["pauli"]))
+            a, fij = self._site_bare(sp), self._pauli_pair_factor(i, j)
             kij = site_pauli_kernel(bn[i][:, :, None], b[j][:, None, :], rb[:, None, None])      # i's shells in v_j
             kji = site_pauli_kernel(bn[j][:, :, None], b[i][:, None, :], rb[:, None, None])
-            h_i = env[i] * torch.einsum("pt,ptu,pu->p", n[i], kij, w[j])
-            h_j = env[j] * torch.einsum("pt,ptu,pu->p", n[j], kji, w[i])
+            h_i = fij * torch.einsum("pt,ptu,pu->p", n[i], kij, a[j])
+            h_j = fij * torch.einsum("pt,ptu,pu->p", n[j], kji, a[i])
             e_p = h_i + h_j
             self._pauli_half = (h_i, h_j)         # i's electrons in v_j, j's in v_i
         else:
@@ -553,6 +814,22 @@ class CmmModel(nn.Module):
             sq = r_ang.new_zeros(B).index_add(0, bt["frame"], torch.sqrt(C6))
             E_d = E_d - 2 * math.pi / pbc["volume"] * sq * sq * pbc["disp_tail"]
         return r_ang.new_zeros(B).index_add(0, fr, e_p), E_d, (w, b, C6, b6)
+
+    def closed_fraction(self):
+        """(S,) ``ct_closed``: the fraction f of an ion's electrons' Pauli energy in a neighbour of each species that
+        the closed channel returns, ct_closed_max sigmoid(raw)."""
+        return self.config.ct_closed_max * torch.sigmoid(self.ct_cc_raw)
+
+    def closed_channel(self, bt, sp):
+        """(B,) ``ct_closed = "pair"``: -sum over pairs of f[s_j] <n_i | v_j> + f[s_i] <n_j | v_i>, the site Pauli
+        halves of :meth:`frozen_terms` (their environment factors included). The response of each ion's electrons
+        to the neighbour's core beyond the frozen product, summed over the high virtual states: attractive, moves no
+        charge, bounded by the fraction."""
+        (i, j), _ = self._pauli_pairs
+        h_i, h_j = self._pauli_half
+        f = self.closed_fraction()
+        e = -(f[sp[j]] * h_i + f[sp[i]] * h_j)
+        return e.new_zeros(bt["B"]).index_add(0, bt["frame"][i], e)
 
     def confinement(self, sp, gram=None, onsite=None):
         """(N, 2) rho_1, rho_2: each ion's confined dipole and quadrupole polarizability over the free ion's,
@@ -641,11 +918,54 @@ class CmmModel(nn.Module):
             Gj = k[j][:, :, None] * Gj * k[j][:, None, :]
         return (i, j), g, w2[i][:, None, None] * Gi, w2[j][:, None, None] * Gj
 
+    def _site_bare(self, sp):
+        """(N, T) the site potentials' amplitudes a_it without the environment factor."""
+        return torch.exp(self.pauli_ln_w[sp]) * self.shell_mask[sp]
+
+    def _pauli_linear_f(self, bt, sp):
+        """(N,) ``pauli_env = "linear"``: f_i = 1 + sum_k c[s_i, s_k] sw O_ik / O_REF over i's exchange pairs."""
+        xs = bt["x_sel"]
+        i, j = bt["pairs"][:, xs]
+        f = bt["x_w"].new_ones(sp.shape[0])
+        if self.config.pauli_env == "global":   # f_i = 1 + c sum_k sw O_ik / (sqrt(O_ii O_kk) S_REF)
+            c = PAULI_GLOB_CAP * torch.tanh(self.pauli_glob_c / PAULI_GLOB_CAP)
+            w = c * bt["x_w"] / (self.pauli_self_rt[sp[i]] * self.pauli_self_rt[sp[j]] * PAULI_GLOB_SREF)
+            return f.index_add(0, i, w).index_add(0, j, w)
+        w = bt["x_w"] / PAULI_LIN_OREF
+        if self.config.pauli_env == "ion":      # f_i = 1 + c_{s_i} sum_k sw O_ik / O_REF
+            c = PAULI_LIN_CAP * torch.tanh(self.pauli_ion_c / PAULI_LIN_CAP)
+            return f.index_add(0, i, c[sp[i]] * w).index_add(0, j, c[sp[j]] * w)
+        c = PAULI_LIN_CAP * torch.tanh(self.pauli_lin_c / PAULI_LIN_CAP)
+        return f.index_add(0, i, c[sp[i], sp[j]] * w).index_add(0, j, c[sp[j], sp[i]] * w)
+
+    def _pauli_edge_u(self, bt, sp):
+        """(N,) ``pauli_env = "edge"``: u_i = sum_k u(s_i, s_k; sw O_ik / O_REF) over i's exchange pairs (PauliEdge)."""
+        xs = bt["x_sel"]
+        i, j = bt["pairs"][:, xs]
+        s = bt["x_w"] / PAULI_LIN_OREF
+        out = self.pauli_edge.pair_outputs()
+        u = s.new_zeros(sp.shape[0])
+        return u.index_add(0, i, self.pauli_edge(sp[i], sp[j], s, out)).index_add(0, j, self.pauli_edge(sp[j], sp[i], s, out))
+
+    def _pauli_pair_factor(self, i, j):
+        """(P,) the environment factor of the pairs (i, j) in the site form: e^{u_i} e^{u_j} (``pauli_env =
+        "product"``), (e^{u_i} + e^{u_j}) / 2 (``"mean"``), e^{u} = e^{cap(u_pauli)}; or (f_i + f_j) / 2 with the
+        linear f of :meth:`_pauli_linear_f` (``"linear"``, set by :meth:`frozen_terms`), floored smoothly."""
+        mode = self.config.pauli_env
+        if mode in ("linear", "global", "ion"):
+            f = 0.5 * (self._pauli_f[i] + self._pauli_f[j]) - PAULI_LIN_FLOOR
+            return PAULI_LIN_FLOOR + torch.nn.functional.softplus(f, beta=PAULI_LIN_BETA)
+        if mode == "edge":                  # e^{cap(u_i)} e^{cap(u_j)}, u edge-additive
+            e = torch.exp(self.cap(self._pauli_f))
+            return e[i] * e[j]
+        e = torch.exp(self.cap(self._u["pauli"]))
+        return e[i] * e[j] if mode == "product" else 0.5 * (e[i] + e[j])
+
     def _site_amplitudes(self, sp, i, j):
-        """(P, T), (P, T): e^{u_i + u_j} a_jt (i's electrons in v_j) and e^{u_i + u_j} a_it for pairs (i, j)."""
-        w = self.frozen_params(sp)[0]                                # a_t e^{u} of the potential's owner
-        env = torch.exp(self.cap(self._u["pauli"]))
-        return env[i][:, None] * w[j], env[j][:, None] * w[i]
+        """(P, T), (P, T): f_ij a_jt (i's electrons in v_j) and f_ij a_it for pairs (i, j), f_ij
+        :meth:`_pauli_pair_factor`."""
+        a, f = self._site_bare(sp), self._pauli_pair_factor(i, j)[:, None]
+        return f * a[j], f * a[i]
 
     def _exchange_site(self, bt, sp):
         """``xpol_form = "site"``: the pair's site-potential energy with the perturbed amplitudes,
@@ -927,7 +1247,16 @@ class CmmModel(nn.Module):
         and responds with at most W^2 / (4 W_b^3), so one whose gap closes where W is small stays inert."""
         i, j = bt["ch_index"]
         q = self._q
-        if self.frontier:                # the frontier orbitals' overlap with the pair's own cutoff (ct_overlap.py)
+        if self.table_kernel:            # the tabulated frontier coupling: fixed, no charges (ct_overlap.py)
+            if self.ct_breath:           # ... at the ions' CT-free breathing amplitudes
+                if self._dlam is None:
+                    raise NotImplementedError("ct_breath: the CT-free breathing amplitudes are not available on this "
+                                              "path (clusters only)")
+                W2 = coupling_kernel(self.ctw_coef, self.ctw_grid, self.ctk_ron, self.ctk_roff, sp[i], sp[j], bt["ch_r"],
+                                     self.ctw_dcoef, self.ctw_dgrid, self._dlam[i], self._dlam[j])
+            else:
+                W2 = coupling_kernel(self.ctw_coef, self.ctw_grid, self.ctk_ron, self.ctk_roff, sp[i], sp[j], bt["ch_r"])
+        elif self.frontier:              # the frontier orbitals' overlap with the pair's own cutoff (ct_overlap.py)
             W2 = q[i, 0] * q[j, 1] * overlap_kernel(self.ctk_coef, self.ctk_grid, self.ctk_ron, self.ctk_roff,
                                                     sp[i], sp[j], bt["ch_r"])
         else:
@@ -945,8 +1274,64 @@ class CmmModel(nn.Module):
                  + self.acceptor_shift(bt, sp)[j])
         if self.config.ct_gap_donor:
             Delta = Delta - self.donor_relief(bt, sp)[i]
+        if self.config.ct_gap_centred == "species":   # phi_D(X_i + d_D n) - phi_A(X_j - d_A n), first order
+            d = self.ct_centre()
+            Delta = Delta + d[sp[i], 0] * bt["ch_L3"][:, 0] + d[sp[j], 1] * bt["ch_L3"][:, 1]
+        elif self.config.ct_gap_centred == "overlap":
+            dphi = self.centre_overlap_shift(bt, sp)
+            Delta = Delta + dphi[:, 0] - dphi[:, 1]
+        if self._gap_tshift is not None:    # ct_alpha_radical: d E / d q of the on-site polarizabilities (constant)
+            Delta = Delta + self._gap_tshift
         h = self.channel_curvature(bt, sp)
         return {"W2": W2, "Delta": Delta, "h": h, **self.two_state(W2, Delta, h)}
+
+    def centre_overlap_shift(self, bt, sp):
+        """(C, 2) ``ct_gap_centred = "overlap"``: the change of the third ions' frozen potential on the donor's
+        frontier shape moved from X_i to X_i + s_D n, and on the acceptor's moved from X_j to X_j - s_A n
+        (:func:`shaped_ion_potential`, shapes of the CT kernel's exponents; every ion on the atom's pair list but the
+        partner, each weighted by its pair's cutoff switch). s_D = lam g t_D, s_A = lam g (R - t_D), t_D from
+        :func:`overlap_centroid`, g the contact switch (``ct_centre_window``), 0 for like-charge channels. Periodic: the field of what lies beyond the pair list (ch_L3 less the listed ions'
+        point fields) enters to first order."""
+        i, j = bt["ch_index"]
+        R = bt["ch_r"] / K.BOHR_ANG
+        bD, bA = self.ct_exponents()
+        tD = overlap_centroid(bD[sp[i]], bA[sp[j]], R)
+        lam = torch.sigmoid(self.ct_centre_lam)
+        # the displacements (bohr) at contact only (ct_centre_window): a channel through a bridging ion, whose overlap
+        # centroid would sit on that ion, keeps its spherical levels; so do like-charge channels (X > X, M > M)
+        gc = pair_switch(self.ctc_ron, self.ctc_roff, sp[i], sp[j], bt["ch_r"])
+        q0 = self.tab.charge.to(R.dtype)
+        gc = gc * (q0[sp[i]] * q0[sp[j]] < 0).to(R.dtype)
+        s = torch.stack([lam * tD, lam * (R - tD)], 1) * gc[:, None]       # (C, 2)
+        beta = torch.stack([bD[sp[i]], bA[sp[j]]], 1)                       # (C, 2) the shapes' exponents
+        nb = bt.get("_centre_nb")
+        if nb is None:
+            nb = bt["_centre_nb"] = centre_neighbours(bt)
+        c, role, k, pid, sg = nb
+        v = sg[:, None].to(R.dtype) * bt["pair_dr"][pid] / K.BOHR_ANG       # channel atom -> third ion, bohr
+        w = bt["pair_sw"][pid]
+        n = bt["ch_rhat"]
+        sc = (1.0 - 2.0 * role.to(s.dtype)) * s[c, role]                    # donor +n, acceptor -n
+        tab = self.tab
+        qk, nk, bk = tab.charge[sp[k]].to(s.dtype), tab.shell_n[sp[k]].to(s.dtype), tab.shell_b[sp[k]].to(s.dtype)
+        bk = torch.where(nk > 0, bk, torch.ones_like(bk))
+        r0 = v.norm(dim=-1)
+        r1 = (v - sc[:, None] * n[c]).norm(dim=-1)
+        be = beta[c, role]
+        dV = shaped_ion_potential(qk, nk, bk, be, r1) - shaped_ion_potential(qk, nk, bk, be, r0)
+        C = i.shape[0]
+        flat = c * 2 + role
+        out = s.new_zeros(2 * C).index_add(0, flat, w * dV).view(C, 2)
+        if bt.get("pbc") is not None:   # beyond the pair list: first order in what the listed ions' fields leave
+            _, dp0 = frozen_ion_potential(qk, nk, bk, r0)
+            g = -dp0 * (v * n[c]).sum(-1) / r0                              # n . grad phi_k at the atom
+            near = s.new_zeros(2 * C).index_add(0, flat, w * g).view(C, 2)
+            out = out + torch.stack([s[:, 0], -s[:, 1]], 1) * (bt["ch_L3"] - near)
+        return out
+
+    def ct_centre(self):
+        """(S, 2) ``ct_gap_centred``: the displacements (bohr) of the donor and acceptor evaluation points."""
+        return CENTRE_DMAX * torch.sigmoid(self.ct_centre_raw)
 
     def two_state(self, W2, Delta, h):
         """The broadened two-state forms of :meth:`gap_channels` at the gap ``Delta``: {a, qs, den}."""
@@ -1479,9 +1864,97 @@ class CmmModel(nn.Module):
         Returns the energy terms (B,) (Hartree) and the solution; with ``alpha`` also the polarizability per frame
         (B, 3, 3) [induced dipole, field] (bohr^3) of the joint minimum (``alpha``) and of the CT-free one
         (``alpha_pol``): the energy is quadratic in the field, so these are exact (extra right-hand sides of the
-        same factorizations)."""
+        same factorizations). ``config.ct_alpha_radical``: :meth:`_forward_radical`."""
+        if self.config.ct_alpha_radical != "off":
+            if bt.get("pbc") is not None:
+                raise NotImplementedError("ct_alpha_radical: clusters only")
+            if self.config.ct_alpha_solve == "outer":
+                return self._forward_radical(bt, field, alpha)
+            return self._forward_joint(bt, field, alpha)
+        return self._forward_core(bt, field, alpha)
+
+    def _forward_joint(self, bt, field, alpha):
+        """``ct_alpha_solve = "joint"``: the CT-radical polarizabilities to first order in the step about the ion
+        model's joint minimum (:meth:`_forward_core` with ``radical_joint``): E = min_{z, q} E_ion(z, q) +
+        sum_c q_c t_c, t_c from the ion model's joint dipoles (an explicit function of the geometry and the field,
+        through its differentiable Newton step), so forces are exact. The polarizability: the field Hessian of that
+        energy by autograd (``alpha``; ``alpha_pol`` stays the analytic CT-free one); exact up to the second field
+        derivative of the ion model's charges inside t."""
+        if not alpha:
+            return self._forward_core(bt, field, False, radical_joint=True)
+        with torch.enable_grad():
+            F0 = field if field is not None else torch.zeros(bt["B"], 3, dtype=torch.float64,
+                                                              device=bt["species"].device)
+            F = F0.detach().clone().requires_grad_(True)
+            out = self._forward_core(bt, F, True, radical_joint=True)
+            g = torch.autograd.grad(out["e_int"].sum(), F, create_graph=True)[0]
+            out["alpha"] = -torch.stack([torch.autograd.grad(g[:, a].sum(), F, create_graph=True)[0]
+                                         for a in range(3)], 1)
+        return out
+
+    def _forward_radical(self, bt, field, alpha):
+        """``ct_alpha_radical``: the joint minimum with the on-site dipole polarizabilities alpha_i(Q) = alpha_ion +
+        Q_i^D dalpha_D + Q_i^A dalpha_A. Pass 0 is the ion model (its CT-free polarization is E_pol, its dispersion
+        is kept: the confinement stays the ion's, so E_disp does not depend on the charges). Then outer passes: from
+        the previous solution's charges (Q) and dipoles (mu), the blocks are rebuilt with alpha(Q) and each channel's
+        gap gets t_c = dE_i/dalpha dalpha_D(s_i) + dE_j/dalpha dalpha_A(s_j) (:meth:`_onsite_alpha_derivative`, both
+        held constant), until Q stops moving. At the fixed point (z, q) is a stationary point of the full energy
+        E(z, q; alpha(Q(q))) (the t_c q_c terms supply its q-derivative), so its value E_joint - sum_c t_c q_c, with
+        Q and t detached, has exact forces and parameter gradients. The polarizability is that of the last pass
+        (alpha(Q) frozen): it misses the cross terms between the charges' field response and the step."""
+        sp = bt["species"]
+        out0 = self._forward_core(bt, field, alpha)
+        if not bt["ch_index"].shape[1]:
+            return out0
+        i, j = bt["ch_index"]
+        cf = bt["ch_frame"]
+        fr, loc = self._local(bt)
+        N = sp.shape[0]
+        steps = self.ct_alpha_steps()
+        sD, sA = steps[sp, 0], steps[sp, 1]
+
+        def setup(out):
+            q = out["q_ch"].detach()
+            QD = q.new_zeros(N).index_add(0, i, q)
+            QA = q.new_zeros(N).index_add(0, j, q)
+            mu = out["x"][fr, loc, :3].detach()
+            da = (sD * QD + sA * QA).detach()
+            t = self._onsite_alpha_derivative(bt, sp, da, mu)
+            return QD, QA, (t[i] * sD[i] + t[j] * sA[j]).detach()
+
+        QD, QA, tsh = setup(out0)
+        it = 0
+        with torch.no_grad():
+            while it < self.config.ct_alpha_outer - 1:
+                out = self._forward_core(bt, field, alpha, dalpha=(sD * QD + sA * QA), tshift=tsh)
+                QD1, QA1, tsh = setup(out)
+                it += 1
+                dq = torch.maximum((QD1 - QD).abs().max(), (QA1 - QA).abs().max())
+                bm = CT_ALPHA_MIX
+                QD, QA = QD + bm * (QD1 - QD), QA + bm * (QA1 - QA)
+                if float(dq) < CT_ALPHA_TOL:
+                    break
+        da = sD * QD + sA * QA                          # Q detached; lam in the graph (learned)
+        out = self._forward_core(bt, field, alpha, dalpha=da, tshift=tsh)
+        qf = out["q_ch"].detach()
+        corr = qf * tsh
+        B = bt["B"]
+        joint = out["e_pol"] + out["e_ct"] - corr.new_zeros(B).index_add(0, cf, corr)
+        res = dict(out)
+        e_ch = out["e_ch"] - corr
+        res.update(e_ch=e_ch, e_disp=out0["e_disp"], e_pol=out0["e_pol"], e_xpol=out0["e_xpol"],
+                   x_pol=out0["x_pol"], z_pol=out0["z_pol"], e_ct=joint - out0["e_pol"],
+                   e_int=out0["e_elst"] + out0["e_pauli"] + out0["e_disp"] + joint,
+                   e_type=e_ch.new_zeros(B * self.nT).index_add(0, cf * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT),
+                   ct_alpha_passes=it + 1, ct_dalpha=da.detach())
+        if alpha:
+            res["alpha_pol"] = out0["alpha_pol"]
+        return res
+
+    def _forward_core(self, bt: dict, field=None, alpha: bool = False, dalpha=None, tshift=None,
+                      radical_joint=False) -> dict:
         if self.hyper_sat:
-            bt = self.hyperpolarized(bt, bt["species"])
+            bt = self.hyperpolarized(bt, bt["species"], dalpha)
         if bt.get("pbc") is not None:
             if field is not None or alpha:
                 raise NotImplementedError("cmm under PBC: no uniform field / polarizability (tin-foil cells)")
@@ -1516,6 +1989,8 @@ class CmmModel(nn.Module):
             e_disp = self.response_dispersion(bt, sp, self.confinement(sp, self._gram, self._onsite[fr, loc]))
         W = Yx[..., :nmax]
         e_pol = e_el + e_x + bt["e_hyp"]
+        # ct_breath: the ions' CT-free breathing amplitudes (in the graph: the forces see dW / dz_b dz_b / dR)
+        self._dlam = None if not self.ct_breath else (z_pol[fr, loc][:, 8] if self.n_b else z_pol.new_zeros(n))
         Q = torch.zeros(n, dtype=dt, device=dev)
         x = z_pol[..., :8]
         out = {}
@@ -1535,8 +2010,21 @@ class CmmModel(nn.Module):
                     Oinv = torch.linalg.inv(self._onsite)
                     z_perm = -torch.einsum("bnac,bnc->bna", Oinv, Lz_free + self._gz.reshape(B, nmax, D))
                     pred = (Oinv, z_perm)
-                e_ct, e_ch, qc, zj, Qd, e_c, dQ = self.charge_flux_gap(bt, sp, Ca, Hq, z_pol.reshape(B, -1), W, phi_ext,
-                                                                       dpsi, pred=pred)
+                self._gap_tshift = tshift
+                try:
+                    e_ct, e_ch, qc, zj, Qd, e_c, dQ = self.charge_flux_gap(bt, sp, Ca, Hq, z_pol.reshape(B, -1), W,
+                                                                           phi_ext, dpsi, pred=pred)
+                    if radical_joint:   # t_c from the ion model's joint dipoles, then the CT solve again (same factors)
+                        mu = zj.reshape(B, nmax, -1)[..., :3][fr, loc]
+                        ts = self._onsite_alpha_t(bt, sp, mu)
+                        st = self.ct_alpha_steps()
+                        ci, cj = bt["ch_index"]
+                        self._gap_tshift = ts[ci] * st[sp[ci], 0] + ts[cj] * st[sp[cj], 1]
+                        out["ct_alpha_t"] = self._gap_tshift
+                        e_ct, e_ch, qc, zj, Qd, e_c, dQ = self.charge_flux_gap(bt, sp, Ca, Hq, z_pol.reshape(B, -1),
+                                                                               W, phi_ext, dpsi, pred=pred)
+                finally:
+                    self._gap_tshift = None
             else:
                 e_ct, e_ch, qc, zj, Qd, e_c, dQ = self.charge_flux(bt, sp, Ca, Hq, z_pol.reshape(B, -1), W, phi_ext, dpsi)
             e_type = e_ch.new_zeros(B * self.nT).index_add(0, bt["ch_frame"] * self.nT + bt["ch_type"], e_ch).reshape(B, self.nT)
@@ -1550,6 +2038,13 @@ class CmmModel(nn.Module):
                                    torch.zeros(0, dtype=dt, device=dev), torch.zeros(0, dtype=dt, device=dev))
             e_type = torch.zeros(B, self.nT, dtype=dt, device=dev)
         e_elst = bt["e_elst"]
+        if self.ct_closed:              # the closed-channel part: no charge, a fraction of the site Pauli halves
+            e_cc = self.closed_channel(bt, sp)
+            e_ct = e_ct + e_cc
+            out["e_cc"] = e_cc
+        if self._dlam is not None:
+            out["ct_zb"] = self._dlam
+        self._dlam = None
         out.update({"e_elst": e_elst, "e_pauli": e_pauli, "e_disp": e_disp, "e_pol": e_pol, "e_xpol": e_x,
                     "e_ct": e_ct, "e_int": e_elst + e_pauli + e_disp + e_pol + e_ct, "e_ch": e_ch, "e_type": e_type,
                     "q_ch": qc, "e_kernel": e_c, "x": x, "x_pol": z_pol[..., :8], "z_pol": z_pol, "dq": Q,
@@ -1558,7 +2053,13 @@ class CmmModel(nn.Module):
             out.update(ct_gap=self._gap["Delta"], q_star=self._gap["qs"])
             if self._gap_info is not None:
                 out.update(ct_gap_iters=self._gap_info["iters"], ct_gap_resid=self._gap_info["resid"])
-            out.update(ct_gap_min=self._gap_frames["gap_min"], ct_gap_dropped=self._gap_frames["dropped"])
+            with torch.no_grad():           # a channel whose converged gap is negative: the solve left the ionic branch
+                cg = torch.where(self._gap["W2"] > 1e-24, self._gap["Delta"], torch.full_like(self._gap["Delta"], float("inf")))
+                closed = cg.new_full((B,), float("inf")).scatter_reduce(0, bt["ch_frame"], cg, "amin") < 0
+            drop = self._gap_frames["dropped"]
+            if self.skip_negative_gap:      # out of scope either way (the trainer gives such frames no weight)
+                drop = drop | closed
+            out.update(ct_gap_min=self._gap_frames["gap_min"], ct_gap_closed=closed, ct_gap_dropped=drop)
         return out
 
     def _forward_pbc(self, bt: dict) -> dict:
@@ -1577,6 +2078,8 @@ class CmmModel(nn.Module):
             raise ValueError(f"the batch's response layout D = {D} is not the model's {8 + self.n_b}")
         pb = bt["pbc"]
         n = sp.shape[0]
+        if self.ct_closed or self.ct_breath:
+            raise NotImplementedError("ct_closed / ct_breath: clusters only")
         e_pauli, e_disp, frz = self.frozen_terms(bt, sp)
         self._q = self.ct_charges(sp)
         (i, j), g, Gi, Gj = self.exchange(bt, sp)
@@ -1999,9 +2502,41 @@ class CmmModel(nn.Module):
                 for k, x in enumerate(sym)]
         if self.overlap_cut:
             so, sf = self.config.ct_overlap_window
-            rows.append(f"CT kernel: {'frontier overlap' if self.frontier else 'slater, overlap switch'}, "
+            rows.append(f"CT kernel: {'tabulated coupling (no CT charges)' if self.table_kernel else 'frontier overlap' if self.frontier else 'slater, overlap switch'}, "
                         f"|S| {so:g} -> {sf:g}; anion -> cation cutoffs (A) "
                         + ", ".join(f"{sym[a]}>{sym[b]} {self.ctk_ron[a, b]:.1f}-{self.ctk_roff[a, b]:.1f}"
                                     for a in range(len(sym)) for b in range(len(sym))
                                     if self.ct_anion[a] and not self.ct_anion[b]))
+        if self.config.pauli_env == "global":
+            c = PAULI_GLOB_CAP * torch.tanh(self.pauli_glob_c.detach() / PAULI_GLOB_CAP)
+            rows.append(f"Pauli global factor c (per S_REF of normalized switched overlap): {float(c):+.4f}")
+        if getattr(self, "ct_centre_lam", None) is not None:
+            rows.append(f"CT centring lam (share of the way to the overlap centroid): "
+                        f"{float(torch.sigmoid(self.ct_centre_lam.detach())):.3f}")
+        if getattr(self, "ct_centre_raw", None) is not None:
+            d = self.ct_centre().detach()
+            rows.append("CT centring (bohr, donor/acceptor): " + ", ".join(
+                f"{sym[a]} {float(d[a, 0]):.2f}/{float(d[a, 1]):.2f}" for a in range(len(sym))))
+        if self.config.ct_alpha_radical != "off":
+            st = self.ct_alpha_steps().detach()
+            rows.append("CT radical polarizability step per unit charge (bohr^3, as donor / as acceptor): " + ", ".join(
+                f"{sym[a]} {float(st[a, 0]):+.2f}/{float(st[a, 1]):+.2f}" for a in range(len(sym))))
+        if self.config.pauli_env == "edge":
+            with torch.no_grad():
+                out = self.pauli_edge.pair_outputs()
+                S = len(sym)
+                a, b = torch.meshgrid(torch.arange(S), torch.arange(S), indexing="ij")
+                u1 = self.pauli_edge(a.reshape(-1), b.reshape(-1), torch.ones(S * S, dtype=out.dtype), out).view(S, S)
+            rows.append("Pauli edge log-factor at s = 1 (contact), centre / neighbour:")
+            for x in range(S):
+                rows.append(f"  {sym[x]:>2} " + " ".join(f"{sym[y]}:{float(u1[x, y]):+.3f}" for y in range(S)))
+        if self.config.pauli_env == "ion":
+            c = PAULI_LIN_CAP * torch.tanh(self.pauli_ion_c.detach() / PAULI_LIN_CAP)
+            rows.append("Pauli factor c per centre species (per O_REF of switched overlap): " + ", ".join(
+                f"{sym[a]} {float(c[a]):+.3f}" for a in range(len(sym))))
+        if self.config.pauli_env == "linear":
+            c = PAULI_LIN_CAP * torch.tanh(self.pauli_lin_c.detach() / PAULI_LIN_CAP)
+            rows.append("Pauli linear factor c[i <- k] (per O_REF of switched overlap): "
+                        + ", ".join(f"{sym[a]}<{sym[b]} {float(c[a, b]):+.3f}" for a in range(len(sym))
+                                    for b in range(len(sym))))
         return "\n".join(rows)

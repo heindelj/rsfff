@@ -82,7 +82,7 @@ def test_environment_factors_multiply_the_pair(pair):
     finally:
         with torch.no_grad():
             m.encoder.readout.weight.zero_()
-    assert abs(float(u.sum())) > 1e-3 and float(u.abs().max()) < m.config.env_cap
+    assert float(u.abs().min()) > 1e-3 and float(u.abs().max()) < m.config.env_cap
     assert e1 == pytest.approx(e0 * math.exp(float(u.sum())), rel=1e-10)
 
 
